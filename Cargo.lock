@@ -2424,6 +2424,7 @@ dependencies = [
  "image",
  "libc",
  "libloading",
+ "memmap2",
  "mondrian-assets",
  "mondrian-audio",
  "mondrian-broadcast",

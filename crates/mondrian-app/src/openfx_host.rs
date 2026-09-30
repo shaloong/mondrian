@@ -9,6 +9,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use memmap2::MmapOptions;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::openfx_adapter::{
@@ -144,8 +145,7 @@ struct RenderRequest {
     height: u32,
     timing: OpenFxRenderTiming,
     parameters: BTreeMap<String, OpenFxScalarValue>,
-    input_path: PathBuf,
-    output_path: PathBuf,
+    shared_path: PathBuf,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -235,8 +235,9 @@ unsafe extern "C" {
         binary: *const c_char,
         bundle: *const c_char,
         identifier: *const c_char,
-        input: *const c_char,
-        output: *const c_char,
+        input: *const c_void,
+        output: *mut c_void,
+        frame_bytes: usize,
         frame_info: *const NativeFrameInfo,
         parameters: *const NativeParameter,
         parameter_count: c_int,
@@ -301,16 +302,23 @@ pub fn render_openfx_filter_frame(
     let bundle = verified_selection(inspection, plugin_identifier)?;
     let staging = tempfile::tempdir()
         .map_err(|error| unavailable(format!("render staging failed: {error}")))?;
-    let input_path = staging.path().join("input.rgba32f");
-    let output_path = staging.path().join("output.rgba32f");
-    let mut input = Vec::with_capacity(frame_bytes);
-    for pixel in &frame.pixels {
-        for channel in pixel {
-            input.extend_from_slice(&channel.to_le_bytes());
-        }
+    let shared_file = tempfile::NamedTempFile::new_in(staging.path())
+        .map_err(|error| unavailable(format!("shared frame creation failed: {error}")))?;
+    shared_file
+        .as_file()
+        .set_len((frame_bytes * 2) as u64)
+        .map_err(|error| unavailable(format!("shared frame allocation failed: {error}")))?;
+    // SAFETY: this newly sized file is retained until the supervised child has
+    // exited and been reaped. The immutable layout contains two disjoint frames.
+    // Parent accesses pixels only before launch and after worker completion.
+    let mut shared =
+        unsafe { MmapOptions::new().len(frame_bytes * 2).map_mut(shared_file.as_file()) }
+            .map_err(|error| unavailable(format!("shared frame mapping failed: {error}")))?;
+    for (bytes, channel) in
+        shared[..frame_bytes].chunks_exact_mut(4).zip(frame.pixels.iter().flatten())
+    {
+        bytes.copy_from_slice(&channel.to_ne_bytes());
     }
-    fs::write(&input_path, input)
-        .map_err(|error| unavailable(format!("input staging failed: {error}")))?;
     let request = RenderRequest {
         binary_path: inspection.binary_path.clone(),
         bundle_path: bundle,
@@ -320,8 +328,7 @@ pub fn render_openfx_filter_frame(
         height: frame.height,
         timing: timing.clone(),
         parameters: parameters.clone(),
-        input_path,
-        output_path: output_path.clone(),
+        shared_path: shared_file.path().to_path_buf(),
     };
     let response: RenderResponse = invoke_worker(
         helper_executable,
@@ -337,21 +344,12 @@ pub fn render_openfx_filter_frame(
     if sha256_file(&inspection.binary_path)? != inspection.binary_sha256 {
         return Err(invalid("OpenFX binary changed during render"));
     }
-    let metadata = fs::metadata(&output_path)
-        .map_err(|error| unavailable(format!("render output is unavailable: {error}")))?;
-    if !metadata.is_file() || metadata.len() != frame_bytes as u64 {
-        return Err(unavailable("render output has an invalid size"));
-    }
-    let bytes = fs::read(&output_path)
-        .map_err(|error| unavailable(format!("render output cannot be read: {error}")))?;
-    if bytes.len() != frame_bytes {
-        return Err(unavailable("render output changed size while reading"));
-    }
+    let bytes = &shared[frame_bytes..];
     let pixels: Vec<[f32; 4]> = bytes
         .chunks_exact(16)
         .map(|pixel| {
             let channel = |index| {
-                f32::from_le_bytes([
+                f32::from_ne_bytes([
                     pixel[index],
                     pixel[index + 1],
                     pixel[index + 2],
@@ -640,11 +638,22 @@ fn render_in_worker(request: &RenderRequest) -> Result<i32, OpenFxHostError> {
         .checked_mul(request.height as usize)
         .ok_or_else(|| invalid("frame dimensions overflow"))?;
     let frame_bytes = validate_frame(request.width, request.height, pixels)?;
-    let input_metadata = fs::metadata(&request.input_path)
-        .map_err(|error| unavailable(format!("render input is unavailable: {error}")))?;
-    if !input_metadata.is_file() || input_metadata.len() != frame_bytes as u64 {
-        return Err(invalid("render input has an invalid size"));
+    let shared_file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&request.shared_path)
+        .map_err(|error| unavailable(format!("shared frame open failed: {error}")))?;
+    let metadata = shared_file
+        .metadata()
+        .map_err(|error| unavailable(format!("shared frame metadata failed: {error}")))?;
+    if !metadata.is_file() || metadata.len() != (frame_bytes * 2) as u64 {
+        return Err(invalid("shared frame has an invalid size"));
     }
+    // SAFETY: the parent retains this exact-sized file and does not access its
+    // frames while this child executes. Native code copies the input and writes
+    // at most frame_bytes to the disjoint output range during the synchronous call.
+    let mut shared = unsafe { MmapOptions::new().len(frame_bytes * 2).map_mut(&shared_file) }
+        .map_err(|error| unavailable(format!("shared frame mapping failed: {error}")))?;
     validate_parameters(&request.parameters)?;
     validate_timing(&request.timing)?;
     verify_worker_binary(
@@ -656,8 +665,7 @@ fn render_in_worker(request: &RenderRequest) -> Result<i32, OpenFxHostError> {
     let bundle = native_string(&request.bundle_path)?;
     let identifier = CString::new(request.plugin_identifier.as_str())
         .map_err(|_| invalid("plugin identifier contains a null byte"))?;
-    let input = native_string(&request.input_path)?;
-    let output = native_string(&request.output_path)?;
+    let (input, output) = shared.split_at_mut(frame_bytes);
     let names = request
         .parameters
         .keys()
@@ -696,8 +704,9 @@ fn render_in_worker(request: &RenderRequest) -> Result<i32, OpenFxHostError> {
             binary.as_ptr(),
             bundle.as_ptr(),
             identifier.as_ptr(),
-            input.as_ptr(),
-            output.as_ptr(),
+            input.as_ptr().cast(),
+            output.as_mut_ptr().cast(),
+            frame_bytes,
             &frame_info,
             native_parameters.as_ptr(),
             native_parameters.len() as c_int,
@@ -899,4 +908,37 @@ fn invalid(reason: impl Into<String>) -> OpenFxHostError {
 
 fn unavailable(reason: impl Into<String>) -> OpenFxHostError {
     OpenFxHostError::Unavailable(reason.into())
+}
+
+#[cfg(test)]
+mod shared_frame_tests {
+    use super::*;
+
+    #[test]
+    fn worker_rejects_truncated_and_oversized_shared_frames_before_native_loading() {
+        for size in [0, 16, 31, 33, 64] {
+            let file = tempfile::NamedTempFile::new().expect("shared file");
+            file.as_file().set_len(size).expect("set malformed extent");
+            let request = RenderRequest {
+                binary_path: PathBuf::from("never-loaded.ofx"),
+                bundle_path: PathBuf::from("never-loaded.ofx.bundle"),
+                binary_sha256: String::new(),
+                plugin_identifier: "test".to_owned(),
+                width: 1,
+                height: 1,
+                timing: OpenFxRenderTiming {
+                    frame: 0.0,
+                    frame_rate: 24.0,
+                    first_frame: 0.0,
+                    last_frame: 1.0,
+                    pixel_aspect_ratio: 1.0,
+                },
+                parameters: BTreeMap::new(),
+                shared_path: file.path().to_path_buf(),
+            };
+            assert!(
+                matches!(render_in_worker(&request), Err(OpenFxHostError::Invalid(reason)) if reason == "shared frame has an invalid size")
+            );
+        }
+    }
 }

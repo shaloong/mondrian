@@ -176,6 +176,7 @@ serde     = { workspace = true }
 serde_json = { workspace = true }
 libloading = { workspace = true }
 tempfile = { workspace = true }
+memmap2 = { workspace = true }
 fluent-bundle = { workspace = true }
 unic-langid = { workspace = true }
 sys-locale = { workspace = true }

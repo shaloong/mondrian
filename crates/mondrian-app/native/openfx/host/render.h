@@ -64,8 +64,9 @@ int mondrian_openfx_render(
     const char* binary,
     const char* bundle,
     const char* identifier,
-    const char* input,
-    const char* output,
+    const void* input,
+    void* output,
+    size_t frame_bytes,
     const struct MondrianOpenFxFrameInfo* frame_info,
     const struct MondrianOpenFxParameter* parameters,
     int parameter_count)

@@ -74,7 +74,15 @@ binary inspection, explicit frame time/rate/range/PAR, RGBA Float32
 straight-alpha working-frame pixels, and
 Double/Boolean parameter values. The parent checks binary identity, bounded
 request/output sizes, finite input and output pixels, and a render deadline;
-a native crash remains in the child. The host advertises only the Filter context and RGBA,
+a native crash remains in the child. Frame transfer uses one exact-sized,
+file-backed shared memory mapping with disjoint input/output ranges in native
+Float32 byte order. The parent retains the backing file until child termination
+and reaping, and reads output only after successful completion. The child
+validates the complete mapping extent before native loading; the synchronous
+native ABI receives bounded memory buffers instead of pixel file paths. This
+removes explicit full-frame file writes/reads and the intermediate encoded input
+vector, but remains a per-render process with OS-backed mapping allocation.
+Resident instances and a reused transport still require lifecycle work. The host advertises only the Filter context and RGBA,
 does not advertise tiles or temporal clip access, rejects unsupported
 parameter types and authored Double values outside the plugin's hard range,
 rejects parameter access at a different frame instead of returning the current

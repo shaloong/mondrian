@@ -102,9 +102,9 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
     }
 
     let component_input = OpenFxFloatFrame {
-        width: 4,
-        height: 4,
-        pixels: (0..16)
+        width: 3,
+        height: 5,
+        pixels: (0..15)
             .map(|index| {
                 let index = index as f32;
                 [

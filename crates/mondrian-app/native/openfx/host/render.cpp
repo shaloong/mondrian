@@ -3,9 +3,7 @@
 
 
 #include <iostream>
-#include <fstream>
 #include <cmath>
-#include <filesystem>
 #include <set>
 #include <memory>
 #include <cstring>
@@ -55,7 +53,7 @@ static OFX::Host::ImageEffect::ImageEffectPlugin* selectFilter(
 }
 
 static int run(const char* binary, const char* bundle, const char* identifier,
-               const char* inputPath, const char* outputPath,
+               const void* input, void* output, size_t frameBytes,
                const MondrianOpenFxFrameInfo& info,
                const MondrianOpenFxParameter* parameters, int parameterCount)
 {
@@ -77,15 +75,9 @@ static int run(const char* binary, const char* bundle, const char* identifier,
   MondrianOpenFx::gPixelAspectRatio = info.pixel_aspect_ratio;
   const double frame = info.frame;
   const size_t pixels = size_t(MondrianOpenFx::gWidth) * size_t(MondrianOpenFx::gHeight);
+  if (frameBytes != pixels * sizeof(OfxRGBAColourF) || frameBytes > 128u * 1024u * 1024u) { return 2; }
   MondrianOpenFx::gInput.resize(pixels);
-  std::ifstream input(std::filesystem::u8path(inputPath), std::ios::binary | std::ios::ate);
-  if (!input || input.tellg() != std::streamoff(pixels * sizeof(OfxRGBAColourF))) {
-    std::cerr << "invalid input size" << std::endl;
-    return 2;
-  }
-  input.seekg(0);
-  input.read(reinterpret_cast<char*>(MondrianOpenFx::gInput.data()), pixels * sizeof(OfxRGBAColourF));
-  if (!input) { return 2; }
+  std::memcpy(MondrianOpenFx::gInput.data(), input, frameBytes);
   for (const auto& pixel : MondrianOpenFx::gInput) {
     if (!std::isfinite(pixel.r) || !std::isfinite(pixel.g) ||
         !std::isfinite(pixel.b) || !std::isfinite(pixel.a)) { return 2; }
@@ -163,10 +155,8 @@ static int run(const char* binary, const char* bundle, const char* identifier,
   bool outputWritten = false;
   if (status == kOfxStatOK) {
     if (auto* image = outputClip->getOutputImage()) {
-      std::ofstream output(std::filesystem::u8path(outputPath), std::ios::binary);
-      output.write(reinterpret_cast<const char*>(image->rawData()),
-                   pixels * sizeof(OfxRGBAColourF));
-      outputWritten = static_cast<bool>(output);
+      std::memcpy(output, image->rawData(), frameBytes);
+      outputWritten = true;
     }
   }
   const OfxStatus endStatus = instance->endRenderAction(frame, frame, 1.0,
@@ -281,15 +271,16 @@ extern "C" int mondrian_openfx_render(
   const char* binary,
   const char* bundle,
   const char* identifier,
-  const char* input,
-  const char* output,
+  const void* input,
+  void* output,
+  size_t frameBytes,
   const MondrianOpenFxFrameInfo* frameInfo,
   const MondrianOpenFxParameter* parameters,
   int parameterCount) noexcept
 {
   try {
     if (!binary || !bundle || !identifier || !input || !output || !frameInfo) { return 2; }
-    return run(binary, bundle, identifier, input, output, *frameInfo,
+    return run(binary, bundle, identifier, input, output, frameBytes, *frameInfo,
                parameters, parameterCount);
   } catch (const std::exception& error) {
     std::cerr << "OpenFX host exception: " << error.what() << std::endl;
