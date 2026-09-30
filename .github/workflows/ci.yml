@@ -181,8 +181,14 @@ jobs:
       - name: 安装 FFmpeg (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install ffmpeg@8 pkg-config
-          ffmpeg_prefix="$(brew --prefix ffmpeg@8)"
+          brew install pkg-config x264 x265 aom dav1d freetype harfbuzz fontconfig libass openssl@3 zlib
+          brew_prefix="$(brew --prefix)"
+          openssl_prefix="$(brew --prefix openssl@3)"
+          zlib_prefix="$(brew --prefix zlib)"
+          export PKG_CONFIG_PATH="$openssl_prefix/lib/pkgconfig:$zlib_prefix/lib/pkgconfig:$brew_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          export LDFLAGS="-L$brew_prefix/lib -Wl,-rpath,$brew_prefix/lib -L$openssl_prefix/lib -Wl,-rpath,$openssl_prefix/lib -L$zlib_prefix/lib -Wl,-rpath,$zlib_prefix/lib"
+          ffmpeg_prefix="$RUNNER_TEMP/mondrian-ffmpeg"
+          bash scripts/build-macos-ffmpeg.sh "$RUNNER_TEMP/mondrian-ffmpeg-build" "$ffmpeg_prefix" 2
           echo "$ffmpeg_prefix/bin" >> "$GITHUB_PATH"
           echo "PKG_CONFIG_PATH=$ffmpeg_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
           PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig" pkg-config --modversion libavcodec | grep -E '^62\.'

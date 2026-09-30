@@ -185,8 +185,15 @@ jobs:
       - name: 安装 FFmpeg 与系统依赖 (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install ffmpeg@8 pkg-config dylibbundler
-          ffmpeg_prefix="$(brew --prefix ffmpeg@8)"
+          brew install pkg-config x264 x265 aom dav1d freetype harfbuzz fontconfig libass openssl@3 zlib dylibbundler
+          brew_prefix="$(brew --prefix)"
+          openssl_prefix="$(brew --prefix openssl@3)"
+          zlib_prefix="$(brew --prefix zlib)"
+          export PKG_CONFIG_PATH="$openssl_prefix/lib/pkgconfig:$zlib_prefix/lib/pkgconfig:$brew_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          export LDFLAGS="-L$brew_prefix/lib -Wl,-rpath,$brew_prefix/lib -L$openssl_prefix/lib -Wl,-rpath,$openssl_prefix/lib -L$zlib_prefix/lib -Wl,-rpath,$zlib_prefix/lib"
+          ffmpeg_prefix="$RUNNER_TEMP/mondrian-ffmpeg"
+          bash scripts/build-macos-ffmpeg.sh "$RUNNER_TEMP/mondrian-ffmpeg-build" "$ffmpeg_prefix" 2
+          echo "MONDRIAN_FFMPEG_SOURCE_DIR=$ffmpeg_prefix/share/mondrian-ffmpeg-source" >> "$GITHUB_ENV"
           echo "$ffmpeg_prefix/bin" >> "$GITHUB_PATH"
           echo "PKG_CONFIG_PATH=$ffmpeg_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
           PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig" pkg-config --modversion libavcodec | grep -E '^62\.'
@@ -506,6 +513,7 @@ jobs:
           cp LICENSE "$stage_dir/LICENSE"
           cp -R LICENSES "$stage_dir/LICENSES"
           cp RELEASE_PROVENANCE.json "$stage_dir/RELEASE_PROVENANCE.json"
+          cp -R "$MONDRIAN_FFMPEG_SOURCE_DIR" "$stage_dir/FFMPEG_SOURCE"
           # One invocation is required: `-od` recreates the destination, so
           # invoking it once per executable would leave only the final tool's
           # dependency closure. Multiple `-x` inputs produce the union closure.

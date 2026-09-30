@@ -1,0 +1,22 @@
+--- a/libavcodec/proresdec.c
++++ b/libavcodec/proresdec.c
+@@ -134,7 +134,7 @@
+ {
+     ProresContext *ctx = avctx->priv_data;
+ 
+-    avctx->bits_per_raw_sample = 10;
++    avctx->bits_per_raw_sample = 12;
+ 
+     switch (avctx->codec_tag) {
+     case MKTAG('a','p','c','o'):
+--- a/libavcodec/proresdsp.c
++++ b/libavcodec/proresdsp.c
+@@ -93,7 +93,7 @@
+             if (bits_per_raw_sample == 10) {
+                 dst[x] = CLIP_10(in[src_offset]);
+             } else {//12b
+-                dst[x] = CLIP_12(in[src_offset]);
++                dst[x] = av_clip(in[src_offset], 0, (1 << 12) - 1);
+             }
+         }
+     }

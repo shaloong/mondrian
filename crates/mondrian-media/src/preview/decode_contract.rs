@@ -1163,12 +1163,20 @@ fn native_surface_hint_from_stream(
             {
                 Some(surface)
             }
+            // Probe describes software reconstruction precision. The native
+            // adapter separately validates the actual CVPixelBuffer format.
             VideoCodec::ProRes(
                 mondrian_core::ProResVariant::Proxy
                 | mondrian_core::ProResVariant::Lt
                 | mondrian_core::ProResVariant::Standard
                 | mondrian_core::ProResVariant::Hq,
-            ) if surface == PreviewNativeSurfaceHint::Yuv422p10 => Some(surface),
+            ) if matches!(
+                surface,
+                PreviewNativeSurfaceHint::Yuv422p10 | PreviewNativeSurfaceHint::Yuv422p12
+            ) =>
+            {
+                Some(surface)
+            }
             VideoCodec::Av1 | VideoCodec::Vp9 => Some(surface),
             _ => None,
         },
@@ -1320,7 +1328,7 @@ mod tests {
     }
 
     #[test]
-    fn prores_422_native_hint_requires_matching_variant_and_ten_bit_surface() {
+    fn prores_422_native_hint_requires_matching_variant_and_reconstruction_surface() {
         use mondrian_core::ProResVariant;
         for variant in [
             ProResVariant::Proxy,
@@ -1332,6 +1340,8 @@ mod tests {
         ] {
             for pixel_format in [
                 PixelFormat::Yuv422p10le,
+                PixelFormat::Yuv422p12le,
+                PixelFormat::Yuv422p16le,
                 PixelFormat::Yuv420p10le,
                 PixelFormat::Yuv444p12le,
             ] {
@@ -1344,11 +1354,23 @@ mod tests {
                     &stream,
                 )
                 .expect("valid probed ProRes source");
-                let eligible = pixel_format == PixelFormat::Yuv422p10le
-                    && !matches!(variant, ProResVariant::R4444 | ProResVariant::R4444Xq);
+                let eligible =
+                    matches!(
+                        pixel_format,
+                        PixelFormat::Yuv422p10le | PixelFormat::Yuv422p12le
+                    ) && !matches!(variant, ProResVariant::R4444 | ProResVariant::R4444Xq);
+                let expected = match pixel_format {
+                    PixelFormat::Yuv422p10le if eligible => {
+                        Some(PreviewNativeSurfaceHint::Yuv422p10)
+                    }
+                    PixelFormat::Yuv422p12le if eligible => {
+                        Some(PreviewNativeSurfaceHint::Yuv422p12)
+                    }
+                    _ => None,
+                };
                 assert_eq!(
                     source.native_surface_hint(),
-                    eligible.then_some(PreviewNativeSurfaceHint::Yuv422p10),
+                    expected,
                     "{variant:?} {pixel_format:?}",
                 );
             }
