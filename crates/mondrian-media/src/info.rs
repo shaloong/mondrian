@@ -682,7 +682,18 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                 let mut sample_rate = 0u32;
                 let mut channels = 0u8;
                 let mut channel_layout = ChannelLayout::Unspecified(0);
-                let mut bit_depth = 16u16;
+                // SAFETY: `params` owns the stream's live AVCodecParameters.
+                // Valid source precision takes precedence over the decoder's
+                // storage format (for example PCM24 stored in an S32 sample).
+                let bit_depth = unsafe {
+                    let raw_bits = (*params.as_ptr()).bits_per_raw_sample;
+                    let bits = if raw_bits > 0 {
+                        raw_bits
+                    } else {
+                        ffmpeg::ffi::av_get_bits_per_sample((*params.as_ptr()).codec_id)
+                    };
+                    u16::try_from(bits).unwrap_or(0)
+                };
 
                 if let Ok(context) =
                     ffmpeg::codec::context::Context::from_parameters(params.clone())
@@ -691,7 +702,6 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                     sample_rate = decoder.rate();
                     channels = decoder.channels() as u8;
                     channel_layout = map_channel_layout(decoder.channel_layout(), channels);
-                    bit_depth = 16;
                 }
 
                 let metadata = stream.metadata();
@@ -4431,35 +4441,46 @@ mod tests {
     fn pcm_wave_without_a_channel_mask_remains_explicitly_unspecified() {
         use std::io::Write;
 
-        let mut file = tempfile::NamedTempFile::new().expect("temporary wave");
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"RIFF");
-        bytes.extend_from_slice(&36u32.to_le_bytes());
-        bytes.extend_from_slice(b"WAVEfmt ");
-        bytes.extend_from_slice(&16u32.to_le_bytes());
-        bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&8_000u32.to_le_bytes());
-        bytes.extend_from_slice(&16_000u32.to_le_bytes());
-        bytes.extend_from_slice(&2u16.to_le_bytes());
-        bytes.extend_from_slice(&16u16.to_le_bytes());
-        bytes.extend_from_slice(b"data");
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        file.write_all(&bytes).expect("write wave");
-        file.flush().expect("flush wave");
-        crate::ffmpeg_runtime::ensure_ffmpeg_initialized(file.path()).expect("ffmpeg init");
-        let input = ffmpeg::format::input(file.path()).expect("open wave");
-        let stream = input.streams().next().expect("audio stream");
-        let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
-            .expect("audio context");
-        let decoder = context.decoder().audio().expect("audio decoder");
+        for bit_depth in [16u16, 24, 32] {
+            let mut file =
+                tempfile::Builder::new().suffix(".wav").tempfile().expect("temporary wave");
+            let block_align = bit_depth / 8;
+            let data_size = u32::from(block_align) * 80;
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(b"RIFF");
+            bytes.extend_from_slice(&(36 + data_size).to_le_bytes());
+            bytes.extend_from_slice(b"WAVEfmt ");
+            bytes.extend_from_slice(&16u32.to_le_bytes());
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&8_000u32.to_le_bytes());
+            bytes.extend_from_slice(&(8_000 * u32::from(block_align)).to_le_bytes());
+            bytes.extend_from_slice(&block_align.to_le_bytes());
+            bytes.extend_from_slice(&bit_depth.to_le_bytes());
+            bytes.extend_from_slice(b"data");
+            bytes.extend_from_slice(&data_size.to_le_bytes());
+            bytes.resize(bytes.len() + data_size as usize, 0);
+            file.write_all(&bytes).expect("write wave");
+            file.flush().expect("flush wave");
+            crate::ffmpeg_runtime::ensure_ffmpeg_initialized(file.path()).expect("ffmpeg init");
+            let input = ffmpeg::format::input(file.path()).expect("open wave");
+            let stream = input.streams().next().expect("audio stream");
+            let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+                .expect("audio context");
+            let decoder = context.decoder().audio().expect("audio decoder");
 
-        let layout = decoder.channel_layout();
-        assert!(layout.is_empty());
-        assert_eq!(
-            map_channel_layout(layout, decoder.channels() as u8),
-            ChannelLayout::Unspecified(1)
-        );
+            let layout = decoder.channel_layout();
+            assert!(layout.is_empty());
+            assert_eq!(
+                map_channel_layout(layout, decoder.channels() as u8),
+                ChannelLayout::Unspecified(1)
+            );
+            let probe = probe_media_info(file.path()).expect("probe wave");
+            let audio = probe.primary_audio().expect("audio stream");
+            assert_eq!(audio.codec, AudioCodec::Pcm { bit_depth: bit_depth as u8 });
+            assert_eq!(audio.bit_depth, bit_depth);
+            assert_eq!(audio.channel_layout, ChannelLayout::Unspecified(1));
+        }
     }
 
     #[test]

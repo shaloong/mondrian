@@ -1518,7 +1518,7 @@ pub struct AudioStreamInfo {
     pub channels: u8,
     /// Native semantic channel layout evidence.
     pub channel_layout: ChannelLayout,
-    /// Nominal encoded sample bit depth.
+    /// Nominal encoded sample bit depth; zero when the codec does not report it.
     pub bit_depth: u16,
     /// Average encoded bitrate in bits per second.
     pub avg_bitrate: u64,
