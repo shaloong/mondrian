@@ -318,6 +318,7 @@ pub(crate) fn apply_custom_render_op_f32(
     op: &EffectRenderOp,
     frame_seed: i64,
     mut session: Option<&mut crate::EffectExecutionSession>,
+    control: &mut crate::EffectProcessorControl<'_>,
 ) -> Result<(), EffectExecutionError> {
     let EffectRenderOp::Custom { key, params, processor, .. } = op else {
         return Err(EffectExecutionError::InvalidRenderParameter {
@@ -328,6 +329,9 @@ pub(crate) fn apply_custom_render_op_f32(
     let Some(processor) = processor else {
         return Err(EffectExecutionError::CustomProcessorUnavailable { key: key.clone() });
     };
+    control.check().map_err(|_| EffectExecutionError::CustomProcessorStopped {
+        reason: control.stop_reason().unwrap_or(crate::EffectProcessorStopReason::Canceled),
+    })?;
     let mut staged = working.clone();
     let result = catch_unwind(AssertUnwindSafe(|| {
         if let Some(callback) = processor.float32_processor() {
@@ -348,6 +352,7 @@ pub(crate) fn apply_custom_render_op_f32(
                 &mut staged,
                 params,
                 frame_seed,
+                control,
             )
         } else {
             Err(mondrian_core::MondrianError::WorkflowStepFailed {
@@ -358,6 +363,14 @@ pub(crate) fn apply_custom_render_op_f32(
             })
         }
     }));
+    if control.check().is_err() {
+        if let (Some(owner), Some(effect_id)) = (session, processor.occurrence_id()) {
+            owner.processors.retire_occurrence(effect_id);
+        }
+        return Err(EffectExecutionError::CustomProcessorStopped {
+            reason: control.stop_reason().unwrap_or(crate::EffectProcessorStopReason::Canceled),
+        });
+    }
     match result {
         Ok(Ok(())) if staged.len() == working.len() => {
             *working = staged;

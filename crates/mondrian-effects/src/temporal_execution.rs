@@ -1645,32 +1645,48 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                     )?;
                                 self.working.ensure_transient(scratch_bytes)?;
                                 let cancellation = self.request.cancellation.clone();
-                                let execution =
-                                    if matches!(op, crate::EffectRenderOp::Custom { .. }) {
-                                        if !self.raster_region.is_full_frame() {
-                                            Ok(false)
-                                        } else {
-                                            temporal_cancellation_checkpoint(&cancellation)?;
-                                            apply_custom_render_op_f32(
-                                                &mut output,
-                                                self.raster_region.frame_width(),
-                                                self.raster_region.frame_height(),
-                                                &op,
-                                                frame_seed,
-                                                Some(session),
-                                            )?;
-                                            temporal_cancellation_checkpoint(&cancellation)?;
-                                            Ok(true)
-                                        }
+                                let execution = if matches!(
+                                    op,
+                                    crate::EffectRenderOp::Custom { .. }
+                                ) {
+                                    if !self.raster_region.is_full_frame() {
+                                        Ok(false)
                                     } else {
-                                        apply_render_op_f32_region_controlled(
+                                        temporal_cancellation_checkpoint(&cancellation)?;
+                                        let mut checkpoint = || {
+                                            cancellation.is_canceled().then_some(
+                                                crate::EffectProcessorStopReason::Canceled,
+                                            )
+                                        };
+                                        let mut control =
+                                            crate::EffectProcessorControl::new(&mut checkpoint);
+                                        apply_custom_render_op_f32(
                                             &mut output,
-                                            self.raster_region,
+                                            self.raster_region.frame_width(),
+                                            self.raster_region.frame_height(),
                                             &op,
                                             frame_seed,
-                                            &mut || temporal_cancellation_checkpoint(&cancellation),
+                                            Some(session),
+                                            &mut control,
                                         )
-                                    };
+                                        .map_err(|error| match error {
+                                            crate::EffectExecutionError::CustomProcessorStopped {
+                                                reason: crate::EffectProcessorStopReason::Canceled,
+                                            } => EffectTemporalExecutionError::Canceled,
+                                            other => EffectTemporalExecutionError::CustomProcessor(other),
+                                        })?;
+                                        temporal_cancellation_checkpoint(&cancellation)?;
+                                        Ok(true)
+                                    }
+                                } else {
+                                    apply_render_op_f32_region_controlled(
+                                        &mut output,
+                                        self.raster_region,
+                                        &op,
+                                        frame_seed,
+                                        &mut || temporal_cancellation_checkpoint(&cancellation),
+                                    )
+                                };
                                 match execution {
                                     Ok(true) => {}
                                     Ok(false) => {

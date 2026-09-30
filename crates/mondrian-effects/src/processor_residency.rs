@@ -4,6 +4,54 @@ use mondrian_core::{EffectId, MondrianError, Result};
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+/// Authoritative reason the owning scheduler stopped a processor invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectProcessorStopReason {
+    /// The execution generation was canceled or superseded.
+    Canceled,
+    /// The owning scheduler's deadline expired.
+    DeadlineExpired,
+}
+
+/// Borrowed cooperative control for processor preparation and processing.
+///
+/// The scheduler remains the authority for cancellation and deadlines. A stop
+/// is sticky for this invocation and must be returned as MondrianError::Cancelled;
+/// it is not a plugin fault and must not enter runtime quarantine.
+pub struct EffectProcessorControl<'a> {
+    checkpoint: Option<&'a mut dyn FnMut() -> Option<EffectProcessorStopReason>>,
+    stopped: Option<EffectProcessorStopReason>,
+}
+
+impl<'a> EffectProcessorControl<'a> {
+    /// Bind the owning scheduler's cooperative checkpoint.
+    pub fn new(checkpoint: &'a mut dyn FnMut() -> Option<EffectProcessorStopReason>) -> Self {
+        Self { checkpoint: Some(checkpoint), stopped: None }
+    }
+
+    /// Control for explicitly uncancelled scalar/offline references.
+    pub const fn uncancelled() -> Self {
+        Self { checkpoint: None, stopped: None }
+    }
+
+    /// Poll before allocation, during bounded native waits and before publication.
+    pub fn check(&mut self) -> Result<()> {
+        if self.stopped.is_none() {
+            self.stopped = self.checkpoint.as_mut().and_then(|checkpoint| checkpoint());
+        }
+        if self.stopped.is_some() {
+            Err(MondrianError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Exact scheduler reason observed by this invocation, when stopped.
+    pub const fn stop_reason(&self) -> Option<EffectProcessorStopReason> {
+        self.stopped
+    }
+}
+
 /// Identity and frame extent for one reusable processor occurrence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EffectFloatProcessorPreparation {
@@ -27,6 +75,7 @@ pub trait EffectFloatProcessorInstance: std::fmt::Debug + Send {
         pixels: &mut Vec<[f32; 4]>,
         params: &serde_json::Value,
         frame_seed: i64,
+        control: &mut EffectProcessorControl<'_>,
     ) -> Result<()>;
 }
 
@@ -40,6 +89,7 @@ pub trait EffectFloatProcessorFactory: std::fmt::Debug + Send + Sync {
     fn prepare(
         &self,
         request: EffectFloatProcessorPreparation,
+        control: &mut EffectProcessorControl<'_>,
     ) -> Result<Box<dyn EffectFloatProcessorInstance>>;
 }
 
@@ -59,6 +109,19 @@ impl FloatProcessorResidency {
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.bytes = 0;
+    }
+
+    pub(crate) fn retire_occurrence(&mut self, effect_id: EffectId) {
+        let mut index = 0;
+        while index < self.entries.len() {
+            if self.entries[index].0.request.effect_id == effect_id {
+                if let Some((_, bytes, _)) = self.entries.remove(index) {
+                    self.bytes -= bytes;
+                }
+            } else {
+                index += 1;
+            }
+        }
     }
 
     pub(crate) fn trim(&mut self, max_instances: usize, max_bytes: usize) {
@@ -89,7 +152,9 @@ impl FloatProcessorResidency {
         pixels: &mut Vec<[f32; 4]>,
         params: &serde_json::Value,
         frame_seed: i64,
+        control: &mut EffectProcessorControl<'_>,
     ) -> Result<()> {
+        control.check()?;
         let count = (request.width as usize).checked_mul(request.height as usize);
         if request.width == 0 || request.height == 0 || count != Some(pixels.len()) {
             return Err(MondrianError::WorkflowStepFailed {
@@ -134,7 +199,7 @@ impl FloatProcessorResidency {
             {
                 self.evict_oldest();
             }
-            (charge, factory.prepare(request)?)
+            (charge, factory.prepare(request, control)?)
         };
         // An error or unwind drops the removed instance; damaged state cannot
         // survive into the next call. The caller stages pixels atomically.
@@ -145,7 +210,9 @@ impl FloatProcessorResidency {
             });
         }
         let pixel_count = pixels.len();
-        instance.process(pixels, params, frame_seed)?;
+        control.check()?;
+        instance.process(pixels, params, frame_seed, control)?;
+        control.check()?;
         if pixels.len() != pixel_count {
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "effect_processor_frame".to_owned(),
@@ -165,16 +232,20 @@ mod tests {
     use super::*;
     use crate::*;
     use mondrian_core::{automation::PropertyBag, TimelineTime, WorkingColorSpace};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[derive(Debug, Default)]
     struct ProbeFactory {
         created: Arc<AtomicUsize>,
         dropped: Arc<AtomicUsize>,
+        reached: Arc<AtomicBool>,
+        cancellation: Option<mondrian_core::ExecutionCancellationToken>,
     }
     #[derive(Debug)]
     struct ProbeInstance {
         dropped: Arc<AtomicUsize>,
+        reached: Arc<AtomicBool>,
+        cancellation: Option<mondrian_core::ExecutionCancellationToken>,
     }
     impl Drop for ProbeInstance {
         fn drop(&mut self) {
@@ -188,10 +259,14 @@ mod tests {
         fn prepare(
             &self,
             _: EffectFloatProcessorPreparation,
+            control: &mut EffectProcessorControl<'_>,
         ) -> Result<Box<dyn EffectFloatProcessorInstance>> {
+            control.check()?;
             self.created.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(ProbeInstance {
                 dropped: Arc::clone(&self.dropped),
+                reached: Arc::clone(&self.reached),
+                cancellation: self.cancellation.clone(),
             }))
         }
     }
@@ -201,7 +276,9 @@ mod tests {
             pixels: &mut Vec<[f32; 4]>,
             params: &serde_json::Value,
             _: i64,
+            control: &mut EffectProcessorControl<'_>,
         ) -> Result<()> {
+            control.check()?;
             if params["panic"].as_bool() == Some(true) {
                 panic!("intentional processor panic");
             }
@@ -212,6 +289,10 @@ mod tests {
                     reason: "intentional failure".to_owned(),
                 });
             }
+            if params["cancel_without_owner"].as_bool() == Some(true) {
+                pixels[0][0] = 999.0;
+                return Err(MondrianError::Cancelled);
+            }
             if params["resize"].as_bool() == Some(true) {
                 pixels.clear();
                 return Ok(());
@@ -219,6 +300,11 @@ mod tests {
             for pixel in pixels {
                 pixel[0] *= 2.0;
             }
+            self.reached.store(true, Ordering::SeqCst);
+            if let Some(cancellation) = &self.cancellation {
+                cancellation.cancel();
+            }
+            control.check()?;
             Ok(())
         }
     }
@@ -241,6 +327,10 @@ mod tests {
             roi_propagation: crate::EffectRoiPropagation::UnknownRequiresFullFrame,
             ..EffectExecutionContract::IDENTITY
         })
+        .with_plugin_contract(
+            EffectPluginContract::new("1.0.0")
+                .with_runtime_failure_policy(EffectPluginRuntimeFailurePolicy::DisableDefinition),
+        )
         .with_custom_float_processor_factory(
             Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
             None,
@@ -313,7 +403,7 @@ mod tests {
             .expect("compiled factory operation");
         let mut session = EffectExecutionSession::default();
         let original = vec![[0.25, 0.5, 0.75, 1.0]];
-        for key in ["fail", "resize", "panic"] {
+        for key in ["fail", "resize", "panic", "cancel_without_owner"] {
             if let EffectRenderOp::Custom { params, .. } = &mut op {
                 *params = serde_json::json!({key: true});
             }
@@ -324,14 +414,94 @@ mod tests {
                 1,
                 &op,
                 0,
-                Some(&mut session)
+                Some(&mut session),
+                &mut EffectProcessorControl::uncancelled(),
             )
             .is_err());
             assert_eq!(working, original);
             assert_eq!(session.diagnostics().processor_instances, 0);
         }
-        assert_eq!(factory.created.load(Ordering::SeqCst), 3);
-        assert_eq!(factory.dropped.load(Ordering::SeqCst), 3);
+        assert_eq!(factory.created.load(Ordering::SeqCst), 4);
+        assert_eq!(factory.dropped.load(Ordering::SeqCst), 4);
+        let EffectRenderOp::Custom { key, .. } = &op else {
+            unreachable!()
+        };
+        assert!(effect_plugin_runtime_status(key).expect("plugin status").disabled);
+    }
+
+    #[test]
+    fn stopped_processors_preserve_pixels_retire_instances_and_do_not_quarantine() {
+        for reason in [
+            EffectProcessorStopReason::Canceled,
+            EffectProcessorStopReason::DeadlineExpired,
+        ] {
+            // Stop at preparation, during processing, and immediately before publication.
+            for stop_at in [3, 6, 8] {
+                let factory = Arc::new(ProbeFactory::default());
+                let graph = graph(Arc::clone(&factory));
+                let op = graph
+                    .graph()
+                    .nodes
+                    .iter()
+                    .find_map(|node| match &node.kind {
+                        EffectGraphNodeKind::UnaryEffect {
+                            op: op @ EffectRenderOp::Custom { .. },
+                            ..
+                        } => Some(op),
+                        _ => None,
+                    })
+                    .expect("compiled operation");
+                let EffectRenderOp::Custom { key, .. } = op else {
+                    unreachable!()
+                };
+                let original = vec![[0.25, 0.5, 0.75, 1.0]];
+                let mut working = original.clone();
+                let mut session = EffectExecutionSession::default();
+                let mut polls = 0;
+                let mut checkpoint = || {
+                    polls += 1;
+                    (polls == stop_at).then_some(reason)
+                };
+                let mut control = EffectProcessorControl::new(&mut checkpoint);
+                let result = crate::adjustment::apply_custom_render_op_f32(
+                    &mut working,
+                    1,
+                    1,
+                    op,
+                    0,
+                    Some(&mut session),
+                    &mut control,
+                );
+                assert_eq!(
+                    result,
+                    Err(EffectExecutionError::CustomProcessorStopped { reason })
+                );
+                assert_eq!(working, original);
+                assert_eq!(session.diagnostics().processor_instances, 0);
+                assert_eq!(
+                    factory.created.load(Ordering::SeqCst),
+                    factory.dropped.load(Ordering::SeqCst)
+                );
+                // A later checkpoint cannot resume a stopped invocation.
+                assert!(control.check().is_err());
+                assert_eq!(control.stop_reason(), Some(reason));
+                let status = effect_plugin_runtime_status(key).expect("plugin status");
+                assert!(!status.disabled);
+                assert_eq!(status.last_error, None);
+                crate::adjustment::apply_custom_render_op_f32(
+                    &mut working,
+                    1,
+                    1,
+                    op,
+                    0,
+                    Some(&mut session),
+                    &mut EffectProcessorControl::uncancelled(),
+                )
+                .expect("fresh invocation after cancel");
+                assert_eq!(working, [[0.5, 0.5, 0.75, 1.0]]);
+                assert_eq!(session.diagnostics().processor_instances, 1);
+            }
+        }
     }
 
     #[test]
@@ -400,6 +570,73 @@ mod tests {
         }
         assert_eq!(factory.created.load(Ordering::SeqCst), 2);
         assert_eq!(session.diagnostics().processor_instances, 2);
+        for reason in [
+            HeterogeneousCpuExecutionStopReason::Canceled,
+            HeterogeneousCpuExecutionStopReason::DeadlineExpired,
+        ] {
+            factory.reached.store(false, Ordering::SeqCst);
+            let mut stopped_session = EffectExecutionSession::default();
+            stopped_session.bind_generation(42);
+            let input = [[0.25, 0.5, 0.75, 1.0]];
+            let result = work.execute_cpu_prefix_with_checkpoint(
+                &mut stopped_session,
+                42,
+                &input,
+                0,
+                WorkingColorSpace::LinearRec709,
+                || factory.reached.load(Ordering::SeqCst).then_some(reason),
+            );
+            assert!(matches!(result,
+                Err(PreparedHeterogeneousEffectWorkError::ExecutionStopped { generation: 42, reason: observed }) if observed == reason));
+            assert_eq!(input, [[0.25, 0.5, 0.75, 1.0]]);
+            assert_eq!(stopped_session.diagnostics().processor_instances, 0);
+        }
+        // Canceled prefixes leave the definition available for a fresh generation.
+        work.execute_cpu_prefix_uncancelled(
+            &mut session,
+            1,
+            &[[0.25, 0.5, 0.75, 1.0]],
+            0,
+            WorkingColorSpace::LinearRec709,
+        )
+        .expect("fresh prefix after stops");
+    }
+
+    #[test]
+    fn temporal_processor_cancellation_preserves_owner_result_and_plugin_availability() {
+        let cancellation = mondrian_core::ExecutionCancellationToken::new();
+        let factory = Arc::new(ProbeFactory {
+            cancellation: Some(cancellation.clone()),
+            ..ProbeFactory::default()
+        });
+        let graph = graph(Arc::clone(&factory));
+        let mut session = EffectExecutionSession::default();
+        let request = EffectTemporalExecutionRequest::new(
+            42,
+            EffectExecutionContinuity::Continuous,
+            TimelineTime::ZERO,
+            EffectFrameExtent::new(1, 1),
+            EffectPixelRoi::new(0, 0, 1, 1),
+            cancellation,
+        );
+        assert!(matches!(
+            session.execute_temporal_f32(&graph, &request, &mut ConstantProvider),
+            Err(EffectTemporalExecutionError::Canceled)
+        ));
+        assert!(factory.reached.load(Ordering::SeqCst));
+        assert_eq!(session.diagnostics().processor_instances, 0);
+        assert_eq!(factory.created.load(Ordering::SeqCst), 1);
+        assert_eq!(factory.dropped.load(Ordering::SeqCst), 1);
+        for node in &graph.graph().nodes {
+            if let EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Custom { key, .. }, ..
+            } = &node.kind
+            {
+                let status = effect_plugin_runtime_status(key).expect("plugin status");
+                assert!(!status.disabled);
+                assert_eq!(status.last_error, None);
+            }
+        }
     }
 
     struct ConstantProvider;
@@ -479,6 +716,7 @@ mod tests {
                 &mut vec![[0.25; 4]],
                 &serde_json::json!({}),
                 0,
+                &mut EffectProcessorControl::uncancelled(),
             )
             .expect("bounded processor");
         };
@@ -523,7 +761,8 @@ mod tests {
                 1024,
                 &mut pixels,
                 &serde_json::json!({}),
-                0
+                0,
+                &mut EffectProcessorControl::uncancelled(),
             )
             .is_err());
         assert_eq!(concrete.created.load(Ordering::SeqCst), 0);
@@ -537,6 +776,7 @@ mod tests {
             &mut pixels,
             &serde_json::json!({}),
             0,
+            &mut EffectProcessorControl::uncancelled(),
         )
         .expect("admit");
         assert!(bank
@@ -549,7 +789,8 @@ mod tests {
                 1024,
                 &mut pixels,
                 &serde_json::json!({"fail": true}),
-                0
+                0,
+                &mut EffectProcessorControl::uncancelled(),
             )
             .is_err());
         assert_eq!(bank.counts(), (0, 0));
@@ -565,7 +806,8 @@ mod tests {
                 1024,
                 &mut pixels,
                 &serde_json::json!({"resize": true}),
-                0
+                0,
+                &mut EffectProcessorControl::uncancelled(),
             )
             .is_err());
         assert_eq!(bank.counts(), (0, 0));
@@ -580,6 +822,7 @@ mod tests {
             &mut pixels,
             &serde_json::json!({}),
             0,
+            &mut EffectProcessorControl::uncancelled(),
         )
         .expect("recreate");
         pixels = vec![[1.0; 4]; 2];
@@ -594,6 +837,7 @@ mod tests {
             &mut pixels,
             &serde_json::json!({}),
             0,
+            &mut EffectProcessorControl::uncancelled(),
         )
         .expect("changed extent");
         assert_eq!(bank.counts(), (1, 64));

@@ -91,6 +91,12 @@ pub enum EffectExecutionError {
     /// A custom processor returned an error or panicked without committing its staged pixels.
     #[error("custom effect processor `{key}` failed: {reason}")]
     CustomProcessorFailed { key: String, reason: String },
+    /// The owning scheduler stopped a custom invocation without quarantining it.
+    #[error("custom effect processor invocation stopped: {reason:?}")]
+    CustomProcessorStopped {
+        /// Authoritative scheduler cancellation/deadline reason.
+        reason: crate::EffectProcessorStopReason,
+    },
     /// A finite temporal operation entered an executor that owns only one
     /// current frame.
     #[error("effect operation requires an exact temporal frame provider")]
@@ -833,6 +839,7 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                         op,
                         frame_seed,
                         Some(session),
+                        &mut crate::EffectProcessorControl::uncancelled(),
                     )
                     .map_err(EffectFloatExecutionError::CustomProcessor)?;
                     true
@@ -2769,7 +2776,15 @@ mod tests {
         };
         let mut pixels = vec![[2.0, -0.25, 0.5, 1.0]];
         assert!(matches!(
-            apply_custom_render_op_f32(&mut pixels, 1, 1, &op, 0, None),
+            apply_custom_render_op_f32(
+                &mut pixels,
+                1,
+                1,
+                &op,
+                0,
+                None,
+                &mut crate::EffectProcessorControl::uncancelled()
+            ),
             Err(EffectExecutionError::CustomProcessorFailed { .. })
         ));
         assert_eq!(pixels, vec![[2.0, -0.25, 0.5, 1.0]]);
@@ -2792,7 +2807,15 @@ mod tests {
         };
         let mut pixels = vec![[2.0, -0.25, 0.5, 1.0]];
         assert!(matches!(
-            apply_custom_render_op_f32(&mut pixels, 1, 1, &op, 0, None),
+            apply_custom_render_op_f32(
+                &mut pixels,
+                1,
+                1,
+                &op,
+                0,
+                None,
+                &mut crate::EffectProcessorControl::uncancelled()
+            ),
             Err(EffectExecutionError::CustomProcessorFailed { .. })
         ));
         assert_eq!(pixels, vec![[2.0, -0.25, 0.5, 1.0]]);

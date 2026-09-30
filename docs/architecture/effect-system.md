@@ -1163,3 +1163,14 @@ These reusable instances must preserve independently evaluable frame semantics.
 Continuity/stateful effects still need ordered execution admission. Ordinary
 Float32, finite temporal full-frame, and heterogeneous CPU-prefix routes use the
 same bank; prepared graphs/definitions never retain consumer-owned workers.
+
+Processor preparation and processing receive a borrowed EffectProcessorControl
+from the owning executor. Blocking adapters must poll it during bounded waits;
+no adapter-owned cancellation thread or alternate generation authority is needed.
+The control retains the exact cancellation/deadline reason once observed. A stop
+before publication preserves the original frame and retires the occurrence,
+including an instance just returned to residency. Scheduler stops bypass plugin
+runtime quarantine. The temporal executor returns its typed canceled result;
+the heterogeneous executor preserves the owner's stop reason and generation.
+An unsolicited processor `MondrianError::Cancelled` without an observed scheduler
+stop remains a processor failure rather than inventing a cancellation decision.

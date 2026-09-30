@@ -2917,14 +2917,37 @@ fn execute_cpu_dag_prefix(
             | EffectGraphNodeKind::DomainEffect { op, .. } => {
                 let mut output = take_single_cpu_input(&mut inputs, dispatch.node)?;
                 let supported = if matches!(op, crate::EffectRenderOp::Custom { .. }) {
-                    apply_custom_render_op_f32(
-                        &mut output,
-                        extent.width(),
-                        extent.height(),
-                        &op,
-                        frame_seed,
-                        Some(session),
-                    )?;
+                    let mut scheduler_error = None;
+                    let result = {
+                        let mut poll = || match checkpoint() {
+                            Ok(()) => None,
+                            Err(error) => {
+                                let reason = match &error {
+                                    PreparedHeterogeneousEffectWorkError::ExecutionStopped {
+                                        reason: HeterogeneousCpuExecutionStopReason::DeadlineExpired,
+                                        ..
+                                    } => crate::EffectProcessorStopReason::DeadlineExpired,
+                                    _ => crate::EffectProcessorStopReason::Canceled,
+                                };
+                                scheduler_error = Some(error);
+                                Some(reason)
+                            }
+                        };
+                        let mut control = crate::EffectProcessorControl::new(&mut poll);
+                        apply_custom_render_op_f32(
+                            &mut output,
+                            extent.width(),
+                            extent.height(),
+                            &op,
+                            frame_seed,
+                            Some(session),
+                            &mut control,
+                        )
+                    };
+                    if let Some(error) = scheduler_error {
+                        return Err(error);
+                    }
+                    result?;
                     checkpoint()?;
                     true
                 } else {

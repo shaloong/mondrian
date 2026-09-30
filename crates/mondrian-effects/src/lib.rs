@@ -27,6 +27,7 @@ pub mod primary_grade;
 mod processor_residency;
 pub use processor_residency::{
     EffectFloatProcessorFactory, EffectFloatProcessorInstance, EffectFloatProcessorPreparation,
+    EffectProcessorControl, EffectProcessorStopReason,
 };
 pub mod qualifier;
 pub mod temporal_execution;
