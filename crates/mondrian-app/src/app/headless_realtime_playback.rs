@@ -415,6 +415,8 @@ impl HeadlessRealtimeStageTiming {
 struct HeadlessRealtimeIntervalTiming {
     /// Engine-derived budget for this interval; absent before any observation.
     frame_period_ns: Option<u128>,
+    /// Time outside the coordinator since the preceding interval returned.
+    caller_gap: HeadlessRealtimeStageTiming,
     total: HeadlessRealtimeStageTiming,
     audio_pump: HeadlessRealtimeStageTiming,
     clock_advance: HeadlessRealtimeStageTiming,
@@ -450,6 +452,7 @@ pub(crate) struct HeadlessRealtimeCoordinatorTiming {
     stale_candidate_status: HeadlessRealtimeCandidateStatusCounts,
     #[serde(skip)]
     current_consecutive_stale: u64,
+    caller_gap: HeadlessRealtimeStageTiming,
     total: HeadlessRealtimeStageTiming,
     audio_pump: HeadlessRealtimeStageTiming,
     clock_advance: HeadlessRealtimeStageTiming,
@@ -501,6 +504,7 @@ impl HeadlessRealtimeCoordinatorTiming {
             self.stale_candidate_status.record(candidate_status);
         }
         self.total.merge(interval.total);
+        self.caller_gap.merge(interval.caller_gap);
         self.audio_pump.merge(interval.audio_pump);
         self.clock_advance.merge(interval.clock_advance);
         self.preview_pump.merge(interval.preview_pump);
@@ -563,6 +567,7 @@ impl HeadlessRealtimeCandidateStatusCounts {
 #[derive(Debug)]
 struct HeadlessRealtimePlaybackDriver {
     absolute_deadline: Option<Instant>,
+    last_interval_finished_at: Option<Instant>,
     thread_scheduling: PlaybackThreadScheduling,
     candidate_binding: Option<HeadlessGpuCandidateBinding>,
     candidate_output_binding: Option<HeadlessGpuCandidateOutputBinding>,
@@ -600,6 +605,7 @@ impl HeadlessRealtimePlaybackDriver {
         let _ = scheduling_status;
         Ok(Self {
             absolute_deadline,
+            last_interval_finished_at: None,
             thread_scheduling,
             candidate_binding: None,
             candidate_output_binding: None,
@@ -2343,6 +2349,12 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
 ) -> anyhow::Result<HeadlessRealtimeIntervalOutcome> {
     let interval_started = Instant::now();
     let mut interval_timing = HeadlessRealtimeIntervalTiming::for_engine(&state.playback_engine)?;
+    if let Some(finished_at) = driver.last_interval_finished_at {
+        interval_timing.caller_gap.observe(
+            interval_started.saturating_duration_since(finished_at),
+            interval_timing.frame_period_ns,
+        );
+    }
     let work_watch = preview_service.work_watch();
     let interval_deadline = Instant::now()
         .checked_add(gpu_completion_timeout)
@@ -2730,6 +2742,7 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
                 advanced_frames,
                 interval_timing,
             );
+            driver.last_interval_finished_at = Some(Instant::now());
             return Ok(HeadlessRealtimeIntervalOutcome::Advanced {
                 epoch: sampled_epoch,
                 frame: sampled_frame,
@@ -3380,6 +3393,7 @@ mod tests {
     fn test_realtime_driver() -> HeadlessRealtimePlaybackDriver {
         HeadlessRealtimePlaybackDriver {
             absolute_deadline: None,
+            last_interval_finished_at: None,
             thread_scheduling: PlaybackThreadScheduling::default(),
             candidate_binding: None,
             candidate_output_binding: None,
