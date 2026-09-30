@@ -1246,7 +1246,7 @@ impl EffectExecutionSession {
             provider,
             working_budget,
         )?;
-        let output = evaluator.execute()?;
+        let output = evaluator.execute(self)?;
         if request.cancellation.is_canceled() {
             return Err(EffectTemporalExecutionError::Canceled);
         }
@@ -1593,7 +1593,10 @@ impl<'a> ScalarTemporalEvaluator<'a> {
         })
     }
 
-    fn execute(&mut self) -> Result<Vec<[f32; 4]>, EffectTemporalExecutionError> {
+    fn execute(
+        &mut self,
+        session: &mut EffectExecutionSession,
+    ) -> Result<Vec<[f32; 4]>, EffectTemporalExecutionError> {
         let schedule = self.temporal_program.ordered_values().to_vec();
         for address in schedule {
             temporal_cancellation_checkpoint(&self.request.cancellation)?;
@@ -1654,6 +1657,7 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                                 self.raster_region.frame_height(),
                                                 &op,
                                                 frame_seed,
+                                                Some(session),
                                             )?;
                                             temporal_cancellation_checkpoint(&cancellation)?;
                                             Ok(true)
@@ -2572,6 +2576,8 @@ mod tests {
         let extent = EffectFrameExtent::new(4, 2);
         let mut provider = GradientProvider::new(extent);
         let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 4,
             max_cache_bytes: 1024 * 1024,
             max_working_bytes: 1024 * 1024,
@@ -3296,6 +3302,8 @@ mod tests {
         )
         .with_output_frame_seed(frame_seed);
         let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes: exact_peak,
@@ -3311,6 +3319,8 @@ mod tests {
         assert_eq!(output.peak_working_bytes(), exact_peak);
 
         let mut rejected = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes: exact_peak - 1,
@@ -3373,6 +3383,8 @@ mod tests {
         let tiled_budget = source_coverage_bytes + full_output_bytes + 3_504;
         assert!(tiled_budget < source_coverage_bytes + full_output_bytes * 3);
         let mut tiled_session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes: tiled_budget,
@@ -3393,6 +3405,8 @@ mod tests {
         );
 
         let mut cached_session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 16,
             max_cache_bytes: 1024 * 1024,
             max_working_bytes: tiled_budget,
@@ -3414,6 +3428,8 @@ mod tests {
 
         let publication_budget = source_coverage_bytes + full_output_bytes - 1;
         let mut publication_rejected = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes: publication_budget,
@@ -3489,6 +3505,8 @@ mod tests {
             cancel_after: 3,
         };
         let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 16,
             max_cache_bytes: 4 * 1024 * 1024,
             max_working_bytes: budget,
@@ -3528,6 +3546,8 @@ mod tests {
         );
         let mut provider = GradientProvider::new(extent);
         let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes: output_bytes + 2 * std::mem::size_of::<[f32; 4]>(),
@@ -3678,6 +3698,8 @@ mod tests {
         let mut tiled_provider = GradientProvider::new(extent);
         let mut full_provider = GradientProvider::new(extent);
         let mut tiled_session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes: 8 * 1024 * 1024,
@@ -3685,6 +3707,8 @@ mod tests {
             max_gpu_plan_bytes: 0,
         });
         let mut full_session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes: 8 * 1024 * 1024,
@@ -3823,6 +3847,8 @@ mod tests {
         );
 
         let mut admitted = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes: exact_peak,
@@ -3843,6 +3869,8 @@ mod tests {
         );
 
         let mut rejected = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes: exact_peak - 1,
@@ -3882,6 +3910,8 @@ mod tests {
             ExecutionCancellationToken::new(),
         );
         let config = |max_working_bytes| EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes,

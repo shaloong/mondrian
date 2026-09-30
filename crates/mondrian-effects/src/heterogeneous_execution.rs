@@ -2729,7 +2729,7 @@ impl PreparedHeterogeneousEffectWork {
     /// [`Self::execute_cpu_prefix_with_checkpoint`].
     pub fn execute_cpu_prefix_uncancelled(
         &self,
-        session: &EffectExecutionSession,
+        session: &mut EffectExecutionSession,
         generation: u64,
         input: &[[f32; 4]],
         frame_seed: i64,
@@ -2758,7 +2758,7 @@ impl PreparedHeterogeneousEffectWork {
     /// catches a suffix failure and reinterprets the complete graph on CPU.
     pub fn execute_cpu_prefix_with_checkpoint(
         &self,
-        session: &EffectExecutionSession,
+        session: &mut EffectExecutionSession,
         generation: u64,
         input: &[[f32; 4]],
         frame_seed: i64,
@@ -2823,6 +2823,7 @@ impl PreparedHeterogeneousEffectWork {
         }
         checkpoint_result()?;
         let boundary_pixels = execute_cpu_dag_prefix(
+            session,
             &self.compiled,
             &self.cpu_dispatches,
             &self.cpu_use_counts,
@@ -2870,6 +2871,7 @@ fn map_controlled_mask_error(
 
 #[allow(clippy::too_many_arguments)]
 fn execute_cpu_dag_prefix(
+    session: &mut EffectExecutionSession,
     compiled: &CompiledEffectGraph,
     dispatches: &[PreparedCpuGraphDispatch],
     use_counts: &HashMap<EffectMaterializationId, usize>,
@@ -2921,6 +2923,7 @@ fn execute_cpu_dag_prefix(
                         extent.height(),
                         &op,
                         frame_seed,
+                        Some(session),
                     )?;
                     checkpoint()?;
                     true
@@ -4475,7 +4478,7 @@ mod tests {
         session.bind_generation(7);
         let completion = work
             .execute_cpu_prefix_uncancelled(
-                &session,
+                &mut session,
                 7,
                 &input,
                 19,
@@ -4503,7 +4506,7 @@ mod tests {
         undersized_session.bind_generation(7);
         assert!(matches!(
             work.execute_cpu_prefix_uncancelled(
-                &undersized_session,
+                &mut undersized_session,
                 7,
                 &input,
                 19,
@@ -4576,7 +4579,7 @@ mod tests {
 
         let immediate = work
             .execute_cpu_prefix_with_checkpoint(
-                &session,
+                &mut session,
                 41,
                 &input,
                 3,
@@ -4595,7 +4598,7 @@ mod tests {
         let mut checkpoints = 0_u32;
         let expired = work
             .execute_cpu_prefix_with_checkpoint(
-                &session,
+                &mut session,
                 41,
                 &input,
                 3,
@@ -4986,7 +4989,7 @@ mod tests {
         session.bind_generation(11);
         let completion = work
             .execute_cpu_prefix_uncancelled(
-                &session,
+                &mut session,
                 11,
                 &input,
                 23,
@@ -5031,7 +5034,7 @@ mod tests {
         session.bind_generation(71);
         let completion = work
             .execute_cpu_prefix_uncancelled(
-                &session,
+                &mut session,
                 71,
                 &input,
                 5,
@@ -5046,7 +5049,7 @@ mod tests {
         let mut checkpoints = 0_u32;
         let stopped = work
             .execute_cpu_prefix_with_checkpoint(
-                &session,
+                &mut session,
                 71,
                 &input,
                 5,
@@ -5097,7 +5100,7 @@ mod tests {
         session.bind_generation(73);
         let completion = work
             .execute_cpu_prefix_uncancelled(
-                &session,
+                &mut session,
                 73,
                 &input,
                 5,
@@ -5339,7 +5342,7 @@ mod tests {
         session.bind_generation(83);
         let completion = work
             .execute_cpu_prefix_uncancelled(
-                &session,
+                &mut session,
                 83,
                 &input,
                 31,

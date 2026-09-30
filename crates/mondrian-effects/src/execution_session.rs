@@ -41,6 +41,10 @@ pub struct EffectExecutionSessionConfig {
     pub max_gpu_plan_entries: usize,
     /// Maximum conservatively estimated bytes retained by GPU planning.
     pub max_gpu_plan_bytes: usize,
+    /// Maximum reusable Float32 processor instances retained by this owner.
+    pub max_processor_instances: usize,
+    /// Conservative native/buffer byte grant for reusable processors.
+    pub max_processor_bytes: usize,
 }
 
 impl EffectExecutionSessionConfig {
@@ -53,6 +57,8 @@ impl EffectExecutionSessionConfig {
             max_working_bytes,
             max_gpu_plan_entries: 0,
             max_gpu_plan_bytes: 0,
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
         }
     }
 }
@@ -65,6 +71,8 @@ impl Default for EffectExecutionSessionConfig {
             max_working_bytes: 384 * 1024 * 1024,
             max_gpu_plan_entries: 64,
             max_gpu_plan_bytes: 4 * 1024 * 1024,
+            max_processor_instances: 8,
+            max_processor_bytes: 256 * 1024 * 1024,
         }
     }
 }
@@ -102,6 +110,10 @@ pub struct EffectExecutionSessionDiagnostics {
     pub max_gpu_plan_entries: usize,
     /// Configured GPU-plan byte budget.
     pub max_gpu_plan_bytes: usize,
+    /// Number of execution-owned reusable processor instances.
+    pub processor_instances: usize,
+    /// Conservative bytes charged to reusable processor residency.
+    pub processor_bytes: usize,
 }
 
 /// Exclusive, instance-owned Effect execution state.
@@ -120,6 +132,7 @@ pub struct EffectExecutionSession {
     temporal_outputs: BoundedLru<[u8; 32], EffectTemporalCachedOutput>,
     topologies: EffectTopologyCache,
     gpu_plans: EffectGpuPlanCache,
+    pub(crate) processors: crate::processor_residency::FloatProcessorResidency,
 }
 
 impl Default for EffectExecutionSession {
@@ -135,6 +148,7 @@ impl EffectExecutionSession {
         Self {
             config,
             generation: None,
+            processors: Default::default(),
             encoded_outputs: BoundedLru::new(
                 partitions.encoded_output_entries,
                 partitions.encoded_output_bytes,
@@ -171,6 +185,7 @@ impl EffectExecutionSession {
     /// The working-set limit affects the next execution only; already-returned
     /// frames are caller-owned and cannot be revoked.
     pub fn reconfigure(&mut self, config: EffectExecutionSessionConfig) {
+        self.processors.trim(config.max_processor_instances, config.max_processor_bytes);
         self.config = config;
         let partitions = EffectCachePartitions::from_config(config);
         self.encoded_outputs.reconfigure(
@@ -211,6 +226,7 @@ impl EffectExecutionSession {
     pub fn bind_generation(&mut self, generation: u64) {
         if self.generation != Some(generation) {
             self.clear_pixel_caches();
+            self.processors.clear();
             self.generation = Some(generation);
         }
     }
@@ -228,6 +244,8 @@ impl EffectExecutionSession {
     pub fn diagnostics(&self) -> EffectExecutionSessionDiagnostics {
         EffectExecutionSessionDiagnostics {
             generation: self.generation,
+            processor_instances: self.processors.counts().0,
+            processor_bytes: self.processors.counts().1,
             cache_entries: self
                 .encoded_outputs
                 .entries()
@@ -276,6 +294,14 @@ impl EffectExecutionSession {
 
     pub(crate) fn retain_effect_topology(&mut self, topology: Arc<PreparedEffectGraphTopology>) {
         self.topologies.insert(topology);
+    }
+
+    pub(crate) const fn processor_grant(&self) -> (usize, usize, usize) {
+        (
+            self.config.max_processor_instances,
+            self.config.max_processor_bytes,
+            self.config.max_working_bytes,
+        )
     }
 
     pub(crate) const fn max_working_bytes(&self) -> usize {
@@ -563,6 +589,8 @@ mod tests {
     #[test]
     fn generation_rotation_and_reconfigure_trim_synchronously() {
         let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 4,
             max_cache_bytes: 160,
             max_working_bytes: 128,
@@ -581,6 +609,8 @@ mod tests {
             EffectTemporalCachedOutput { pixels: Arc::new(vec![[0.0; 4]; 2]), frame_seed: 0 },
         );
         session.reconfigure(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes: 128,

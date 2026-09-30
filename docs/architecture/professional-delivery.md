@@ -432,3 +432,7 @@ generation and cancellation token. Canceling the old terminal identity cannot
 cancel the retry. This queue-level executor test is not media-artifact or physical
 delivery qualification; create-only publication and independent full decode/hash
 verification remain separate production boundaries.
+
+Export forwards reusable custom processors through its exclusive Effect Session.
+The frozen resource adapter explicitly grants zero processor residency pending
+coordinated native-worker grants; no definition-global plugin instance is used.

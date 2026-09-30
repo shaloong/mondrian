@@ -791,3 +791,12 @@ unreaped child regression checks this distinction and then reaps its fixture.
 A terminal group leader is excluded only when its task count is one. A zombie
 leader with surviving sibling threads cannot prove an exited address space;
 missing counters remain unavailable rather than becoming an invented zero sample.
+
+Reusable Float32 processor resources have explicit Effect Session instance and
+conservative resident-byte caps separate from pixel/topology/GPU-plan grants.
+Factory charge is checked before allocation and residency trims synchronously.
+Preview and frozen Export adapters currently grant zero retained instances until
+native plugin resource policy is integrated; their existing cache budgets are
+not silently doubled. Uncached execution can prepare a frame-local instance
+within the working-byte grant. Native-worker cancellation and combined physical
+working-set qualification remain required for the OpenFX integration.

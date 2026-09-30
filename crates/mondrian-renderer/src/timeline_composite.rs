@@ -362,7 +362,7 @@ impl TimelineCompositeScratch {
         checkpoint: impl FnMut() -> Option<HeterogeneousCpuExecutionStopReason>,
     ) -> Result<PreparedHeterogeneousCpuCompletion, PreparedHeterogeneousEffectWorkError> {
         prepared.execute_cpu_prefix_with_checkpoint(
-            &self.effect_execution,
+            &mut self.effect_execution,
             generation,
             input,
             frame_seed,
@@ -404,7 +404,7 @@ impl TimelineCompositeScratch {
         self.solid_fill_f32.resize(pixel_count, pixel);
         self.solid_fill_f32.fill(pixel);
         prepared.execute_cpu_prefix_with_checkpoint(
-            &self.effect_execution,
+            &mut self.effect_execution,
             generation,
             &self.solid_fill_f32,
             frame_seed,

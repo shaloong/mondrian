@@ -24,6 +24,10 @@ pub mod plugin_contract;
 pub mod plugin_sdk;
 pub mod prepared;
 pub mod primary_grade;
+mod processor_residency;
+pub use processor_residency::{
+    EffectFloatProcessorFactory, EffectFloatProcessorInstance, EffectFloatProcessorPreparation,
+};
 pub mod qualifier;
 pub mod temporal_execution;
 pub mod tracking;

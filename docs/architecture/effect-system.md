@@ -1146,3 +1146,20 @@ and the final Headless float-linear raster must be byte-identical before and
 after reopen. This is a regression and integration contract, not an
 independent numerical or visual reference. Product qualification still needs
 such references before either effect can satisfy the complete operator DoD.
+
+### Reusable Float32 processor resources
+
+Prepared definitions can retain an immutable EffectFloatProcessorFactory recipe.
+The compiler binds its custom operation to the exact typed author EffectId;
+execution creates separate mutable instances for each occurrence in each
+EffectExecutionSession. Revision and raster extent are part of residency keys.
+The bank has explicit instance/byte grants, checks its conservative charge
+before creation, evicts least-recently-used instances before allocation, and
+retires obsolete extents/revisions. Generation barriers and Session drop retire
+all instances. Errors, panics, and changed pixel counts retire the affected
+instance; frame staging preserves the caller's pixels.
+
+These reusable instances must preserve independently evaluable frame semantics.
+Continuity/stateful effects still need ordered execution admission. Ordinary
+Float32, finite temporal full-frame, and heterogeneous CPU-prefix routes use the
+same bank; prepared graphs/definitions never retain consumer-owned workers.

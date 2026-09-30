@@ -1167,6 +1167,7 @@ impl EffectGraphBuilderState {
         &mut self,
         checkpoint: EffectGraphBuilderCheckpoint,
         effect_key: &str,
+        occurrence_id: mondrian_core::EffectId,
         definition_registry_revision: u64,
         contract: Option<&crate::EffectPluginContract>,
     ) {
@@ -1183,8 +1184,12 @@ impl EffectGraphBuilderState {
                 continue;
             };
             if let Some(binding) = processor {
-                *binding =
-                    binding.with_runtime_owner(effect_key, definition_registry_revision, contract);
+                *binding = binding.with_runtime_owner(
+                    effect_key,
+                    occurrence_id,
+                    definition_registry_revision,
+                    contract,
+                );
             }
         }
     }

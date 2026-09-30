@@ -833,12 +833,14 @@ pub struct CustomEffectProcessorBinding {
     revision: u64,
     processor: CustomEffectProcessor,
     runtime_owner: Option<CustomEffectRuntimeOwner>,
+    occurrence_id: Option<EffectId>,
 }
 
 #[derive(Clone)]
 enum CustomEffectProcessor {
     Rgba8(CustomEffectRenderProcessor),
     Float32(CustomEffectFloatRenderProcessor),
+    Float32Factory(Arc<dyn crate::EffectFloatProcessorFactory>),
 }
 
 static NEXT_CUSTOM_PROCESSOR_REVISION: AtomicU64 = AtomicU64::new(1);
@@ -856,6 +858,7 @@ impl CustomEffectProcessorBinding {
             revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
             processor: CustomEffectProcessor::Rgba8(processor),
             runtime_owner: None,
+            occurrence_id: None,
         }
     }
 
@@ -864,6 +867,7 @@ impl CustomEffectProcessorBinding {
             revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
             processor: CustomEffectProcessor::Float32(processor),
             runtime_owner: None,
+            occurrence_id: None,
         }
     }
 
@@ -875,33 +879,54 @@ impl CustomEffectProcessorBinding {
     pub(crate) fn rgba8_processor(&self) -> Option<&CustomEffectRenderProcessor> {
         match &self.processor {
             CustomEffectProcessor::Rgba8(processor) => Some(processor),
-            CustomEffectProcessor::Float32(_) => None,
+            CustomEffectProcessor::Float32(_) | CustomEffectProcessor::Float32Factory(_) => None,
         }
     }
 
     pub(crate) fn float32_processor(&self) -> Option<&CustomEffectFloatRenderProcessor> {
         match &self.processor {
-            CustomEffectProcessor::Rgba8(_) => None,
+            CustomEffectProcessor::Rgba8(_) | CustomEffectProcessor::Float32Factory(_) => None,
             CustomEffectProcessor::Float32(processor) => Some(processor),
         }
+    }
+
+    /// Author identity of the exact compiled occurrence, when compiler-bound.
+    pub const fn occurrence_id(&self) -> Option<EffectId> {
+        self.occurrence_id
+    }
+
+    pub(crate) fn float32_factory(&self) -> Option<&Arc<dyn crate::EffectFloatProcessorFactory>> {
+        if let CustomEffectProcessor::Float32Factory(factory) = &self.processor {
+            Some(factory)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn supports_float32(&self) -> bool {
+        !matches!(self.processor, CustomEffectProcessor::Rgba8(_))
     }
 
     pub(crate) fn execution_modes(&self) -> crate::EffectExecutionModes {
         match self.processor {
             CustomEffectProcessor::Rgba8(_) => crate::EffectExecutionModes::CPU_U8,
-            CustomEffectProcessor::Float32(_) => crate::EffectExecutionModes::CPU_F32,
+            CustomEffectProcessor::Float32(_) | CustomEffectProcessor::Float32Factory(_) => {
+                crate::EffectExecutionModes::CPU_F32
+            }
         }
     }
 
     pub(crate) fn with_runtime_owner(
         &self,
         effect_key: &str,
+        occurrence_id: EffectId,
         definition_registry_revision: u64,
         contract: Option<&EffectPluginContract>,
     ) -> Self {
         Self {
             revision: self.revision,
             processor: self.processor.clone(),
+            occurrence_id: Some(occurrence_id),
             runtime_owner: contract.cloned().map(|contract| CustomEffectRuntimeOwner {
                 effect_key: effect_key.to_owned(),
                 definition_registry_revision,
@@ -1355,6 +1380,28 @@ impl EffectDefinition {
             cache_key_builder,
             cache_policy,
             CustomEffectProcessorBinding::new_f32(processor),
+        )
+    }
+
+    /// Bind execution-owned reusable Float32 instances. The factory is
+    /// immutable; its instances never belong to the global definition registry.
+    pub fn with_custom_float_processor_factory(
+        self,
+        params_builder: EffectRenderParamsBuilder,
+        cache_key_builder: Option<EffectCacheKeyBuilder>,
+        cache_policy: EffectCachePolicy,
+        factory: Arc<dyn crate::EffectFloatProcessorFactory>,
+    ) -> Self {
+        self.with_custom_processor_binding(
+            params_builder,
+            cache_key_builder,
+            cache_policy,
+            CustomEffectProcessorBinding {
+                revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
+                processor: CustomEffectProcessor::Float32Factory(factory),
+                runtime_owner: None,
+                occurrence_id: None,
+            },
         )
     }
 

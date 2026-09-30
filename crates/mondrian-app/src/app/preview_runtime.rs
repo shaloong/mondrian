@@ -2823,6 +2823,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 max_working_bytes: decision.effect_cache.max_working_bytes,
                 max_gpu_plan_entries: decision.effect_cache.max_gpu_plan_entries,
                 max_gpu_plan_bytes: decision.effect_cache.max_gpu_plan_bytes,
+                max_processor_instances: 0,
+                max_processor_bytes: 0,
             });
             scratch.reconfigure_cpu_working_set(decision.cpu_composite_working_set);
             scratch.reconfigure_color_execution(decision.cpu_color_processor_capacity);

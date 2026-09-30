@@ -2870,7 +2870,13 @@ mod tests {
             EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(8 * 1024 * 1024));
         session.bind_generation(GENERATION);
         prepared
-            .execute_cpu_prefix_uncancelled(&session, GENERATION, input, FRAME_SEED, WORKING_SPACE)
+            .execute_cpu_prefix_uncancelled(
+                &mut session,
+                GENERATION,
+                input,
+                FRAME_SEED,
+                WORKING_SPACE,
+            )
             .expect("execute CPU prefix")
     }
 
@@ -2999,7 +3005,13 @@ mod tests {
             EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(8 * 1024 * 1024));
         session.bind_generation(GENERATION);
         let completion = prepared
-            .execute_cpu_prefix_uncancelled(&session, GENERATION, &input, FRAME_SEED, WORKING_SPACE)
+            .execute_cpu_prefix_uncancelled(
+                &mut session,
+                GENERATION,
+                &input,
+                FRAME_SEED,
+                WORKING_SPACE,
+            )
             .expect("execute DAG CPU prefix");
         let abstract_peak_bytes = completion.execution_plan().peak_device_bytes();
         let abstract_peak_materializations =
@@ -3136,7 +3148,13 @@ mod tests {
             EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(8 * 1024 * 1024));
         session.bind_generation(GENERATION);
         let completion = prepared
-            .execute_cpu_prefix_uncancelled(&session, GENERATION, &input, FRAME_SEED, WORKING_SPACE)
+            .execute_cpu_prefix_uncancelled(
+                &mut session,
+                GENERATION,
+                &input,
+                FRAME_SEED,
+                WORKING_SPACE,
+            )
             .expect("execute DAG CPU prefix");
         let pool = Arc::new(GpuColorFrameWgpuResourcePool::new(
             GpuColorFrameWgpuResourcePoolOptions::default(),
@@ -3230,7 +3248,13 @@ mod tests {
             EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(8 * 1024 * 1024));
         session.bind_generation(GENERATION);
         let completion = prepared
-            .execute_cpu_prefix_uncancelled(&session, GENERATION, &input, FRAME_SEED, WORKING_SPACE)
+            .execute_cpu_prefix_uncancelled(
+                &mut session,
+                GENERATION,
+                &input,
+                FRAME_SEED,
+                WORKING_SPACE,
+            )
             .expect("execute MultiInput CPU prefix");
         let pool = Arc::new(GpuColorFrameWgpuResourcePool::new(
             GpuColorFrameWgpuResourcePoolOptions::default(),
@@ -3312,7 +3336,13 @@ mod tests {
             EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(8 * 1024 * 1024));
         session.bind_generation(GENERATION);
         let completion = prepared
-            .execute_cpu_prefix_uncancelled(&session, GENERATION, &input, FRAME_SEED, WORKING_SPACE)
+            .execute_cpu_prefix_uncancelled(
+                &mut session,
+                GENERATION,
+                &input,
+                FRAME_SEED,
+                WORKING_SPACE,
+            )
             .expect("execute identity-copy CPU prefix");
         let mut runtime = HeterogeneousGpuContinuationRuntime::new(
             context,
@@ -3392,7 +3422,13 @@ mod tests {
             EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(8 * 1024 * 1024));
         session.bind_generation(GENERATION);
         let completion = prepared
-            .execute_cpu_prefix_uncancelled(&session, GENERATION, &input, FRAME_SEED, WORKING_SPACE)
+            .execute_cpu_prefix_uncancelled(
+                &mut session,
+                GENERATION,
+                &input,
+                FRAME_SEED,
+                WORKING_SPACE,
+            )
             .expect("execute two-value CPU frontier");
         assert_eq!(completion.boundary_values().len(), 2);
         let mut runtime = HeterogeneousGpuContinuationRuntime::new(
@@ -3509,7 +3545,7 @@ mod tests {
                 session.bind_generation(GENERATION);
                 let completion = prepared
                     .execute_cpu_prefix_uncancelled(
-                        &session,
+                        &mut session,
                         GENERATION,
                         &input,
                         FRAME_SEED,
@@ -3665,7 +3701,13 @@ mod tests {
             EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(8 * 1024 * 1024));
         session.bind_generation(GENERATION);
         let completion = prepared
-            .execute_cpu_prefix_uncancelled(&session, GENERATION, &input, FRAME_SEED, WORKING_SPACE)
+            .execute_cpu_prefix_uncancelled(
+                &mut session,
+                GENERATION,
+                &input,
+                FRAME_SEED,
+                WORKING_SPACE,
+            )
             .expect("execute Power Window CPU frontier");
         assert_eq!(completion.evidence().transfers().len(), 3);
         assert_eq!(
@@ -3819,7 +3861,7 @@ mod tests {
             session.bind_generation(GENERATION);
             let completion = prepared
                 .execute_cpu_prefix_uncancelled(
-                    &session,
+                    &mut session,
                     GENERATION,
                     &input,
                     FRAME_SEED,

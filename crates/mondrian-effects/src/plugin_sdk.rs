@@ -258,6 +258,23 @@ impl EffectPluginDefinitionBuilder {
         self
     }
 
+    /// Prepare reusable Float32 instances in the owning execution session.
+    pub fn with_custom_float_processor_factory(
+        mut self,
+        params_builder: EffectRenderParamsBuilder,
+        cache_key_builder: Option<EffectCacheKeyBuilder>,
+        cache_policy: EffectCachePolicy,
+        factory: std::sync::Arc<dyn crate::EffectFloatProcessorFactory>,
+    ) -> Self {
+        self.definition = self.definition.with_custom_float_processor_factory(
+            params_builder,
+            cache_key_builder,
+            cache_policy,
+            factory,
+        );
+        self
+    }
+
     pub fn with_plugin_contract(mut self, contract: EffectPluginContract) -> Self {
         self.definition = self.definition.with_plugin_contract(contract);
         self

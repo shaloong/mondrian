@@ -460,6 +460,7 @@ fn evaluate_instance_into_builder(
             staged.bind_custom_runtime_owner_since(
                 checkpoint,
                 instance.definition.key(),
+                instance.effect.id,
                 instance.definition.definition_registry_revision(),
                 instance.definition.plugin_contract(),
             );
@@ -1674,6 +1675,8 @@ mod tests {
             max_working_bytes: 1024 * 1024,
             max_gpu_plan_entries: 0,
             max_gpu_plan_bytes: 0,
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
         }
     }
 

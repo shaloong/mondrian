@@ -3384,3 +3384,9 @@ with chroma dimensions derived from the admitted subsampling contract. Decoder
 allocation padding is never part of the image, including scaled edge pixels.
 NV12/P010 storage-buffer and texture fetch parity tests use distinct poisoned
 allocation padding, odd visible extents, full/limited range and chroma siting.
+
+Reusable custom Float32 processors execute through the mutable Effect execution
+Session, including heterogeneous CPU prefixes and finite temporal full-frame
+execution. Preview and Export do not share processor instances. Frame dimensions
+and definition implementation revisions retire incompatible resources. Existing
+ROI/custom-operation admission and cooperative outer checkpoints are preserved.

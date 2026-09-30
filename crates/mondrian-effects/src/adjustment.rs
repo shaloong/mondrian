@@ -317,6 +317,7 @@ pub(crate) fn apply_custom_render_op_f32(
     height: u32,
     op: &EffectRenderOp,
     frame_seed: i64,
+    mut session: Option<&mut crate::EffectExecutionSession>,
 ) -> Result<(), EffectExecutionError> {
     let EffectRenderOp::Custom { key, params, processor, .. } = op else {
         return Err(EffectExecutionError::InvalidRenderParameter {
@@ -327,12 +328,35 @@ pub(crate) fn apply_custom_render_op_f32(
     let Some(processor) = processor else {
         return Err(EffectExecutionError::CustomProcessorUnavailable { key: key.clone() });
     };
-    let Some(callback) = processor.float32_processor() else {
-        return Err(EffectExecutionError::CustomProcessorUnavailable { key: key.clone() });
-    };
     let mut staged = working.clone();
     let result = catch_unwind(AssertUnwindSafe(|| {
-        callback(&mut staged, width, height, params, frame_seed)
+        if let Some(callback) = processor.float32_processor() {
+            callback(&mut staged, width, height, params, frame_seed)
+        } else if let (Some(factory), Some(owner), Some(effect_id)) = (
+            processor.float32_factory(),
+            session.as_deref_mut(),
+            processor.occurrence_id(),
+        ) {
+            let (instances, bytes, working_bytes) = owner.processor_grant();
+            owner.processors.process(
+                factory,
+                crate::EffectFloatProcessorPreparation { effect_id, width, height },
+                processor.revision(),
+                instances,
+                bytes,
+                working_bytes,
+                &mut staged,
+                params,
+                frame_seed,
+            )
+        } else {
+            Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "effect_processor_owner".to_owned(),
+                reason:
+                    "reusable processor requires a compiler-bound occurrence and execution session"
+                        .to_owned(),
+            })
+        }
     }));
     match result {
         Ok(Ok(())) if staged.len() == working.len() => {

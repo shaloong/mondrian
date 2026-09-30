@@ -826,8 +826,15 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                     &mut processor,
                 )?;
                 let supported = if matches!(op, EffectRenderOp::Custom { .. }) {
-                    apply_custom_render_op_f32(&mut source, width, height, op, frame_seed)
-                        .map_err(EffectFloatExecutionError::CustomProcessor)?;
+                    apply_custom_render_op_f32(
+                        &mut source,
+                        width,
+                        height,
+                        op,
+                        frame_seed,
+                        Some(session),
+                    )
+                    .map_err(EffectFloatExecutionError::CustomProcessor)?;
                     true
                 } else {
                     apply_render_op_f32(&mut source, width, height, op, frame_seed)
@@ -1603,7 +1610,7 @@ fn admit_single_frame_execution(
 fn effect_render_op_supports_rgba_f32(op: &EffectRenderOp) -> bool {
     match op {
         EffectRenderOp::Custom { processor, .. } => {
-            processor.as_ref().is_some_and(|binding| binding.float32_processor().is_some())
+            processor.as_ref().is_some_and(|binding| binding.supports_float32())
         }
         EffectRenderOp::TemporalFrameBlend { .. } => false,
         _ => true,
@@ -2762,7 +2769,7 @@ mod tests {
         };
         let mut pixels = vec![[2.0, -0.25, 0.5, 1.0]];
         assert!(matches!(
-            apply_custom_render_op_f32(&mut pixels, 1, 1, &op, 0),
+            apply_custom_render_op_f32(&mut pixels, 1, 1, &op, 0, None),
             Err(EffectExecutionError::CustomProcessorFailed { .. })
         ));
         assert_eq!(pixels, vec![[2.0, -0.25, 0.5, 1.0]]);
@@ -2785,7 +2792,7 @@ mod tests {
         };
         let mut pixels = vec![[2.0, -0.25, 0.5, 1.0]];
         assert!(matches!(
-            apply_custom_render_op_f32(&mut pixels, 1, 1, &op, 0),
+            apply_custom_render_op_f32(&mut pixels, 1, 1, &op, 0, None),
             Err(EffectExecutionError::CustomProcessorFailed { .. })
         ));
         assert_eq!(pixels, vec![[2.0, -0.25, 0.5, 1.0]]);
