@@ -163,10 +163,16 @@ impl Default for PropertyPanelOptions {
 pub struct PropertyRow {
     label: Label,
     control: Box<dyn Widget>,
-    height: Option<f32>,
+    height: PropertyRowHeight,
     bounds: Rect,
     control_bounds: Rect,
     label_position: Point,
+}
+
+enum PropertyRowHeight {
+    Default,
+    Fixed(f32),
+    Content,
 }
 
 impl PropertyRow {
@@ -179,7 +185,7 @@ impl PropertyRow {
                 .with_font_size(visual.row_label_font_size)
                 .with_padding(0.0, 0.0),
             control,
-            height: None,
+            height: PropertyRowHeight::Default,
             bounds: Rect::ZERO,
             control_bounds: Rect::ZERO,
             label_position: Point::ZERO,
@@ -188,7 +194,13 @@ impl PropertyRow {
 
     /// Set an explicit row height for taller controls.
     pub fn with_height(mut self, height: f32) -> Self {
-        self.height = Some(height.max(1.0));
+        self.height = PropertyRowHeight::Fixed(height.max(1.0));
+        self
+    }
+
+    /// Grow this row to its control's measured height at the available width.
+    pub fn with_content_height(mut self) -> Self {
+        self.height = PropertyRowHeight::Content;
         self
     }
 
@@ -202,8 +214,18 @@ impl PropertyRow {
         self.bounds
     }
 
-    fn height(&self, fallback: f32) -> f32 {
-        self.height.unwrap_or(fallback).max(1.0)
+    fn measure_control(&self, form: &FormLayout, bounds: Rect, fallback: f32) -> (f32, Size) {
+        let limit = match self.height {
+            PropertyRowHeight::Default => fallback,
+            PropertyRowHeight::Fixed(height) => height,
+            PropertyRowHeight::Content => f32::MAX,
+        };
+        let measured = self.control.measure(form.control_constraint(bounds, limit));
+        let height = match self.height {
+            PropertyRowHeight::Content => measured.height.max(fallback),
+            _ => limit,
+        };
+        (height.max(1.0), measured)
     }
 }
 
@@ -445,21 +467,42 @@ impl Widget for PropertyPanel {
             );
             return constraint.constrain(preferred);
         }
+        // Content-height rows must measure wrapping at the same width the
+        // panel will occupy, including when hosted by a vertical ScrollView.
+        let fills_width = self
+            .sections
+            .iter()
+            .flat_map(|section| &section.rows)
+            .any(|row| matches!(row.height, PropertyRowHeight::Content));
+        let preferred_width = if fills_width && constraint.max.width < f32::MAX {
+            constraint.max.width
+        } else {
+            visual.preferred_width
+        };
+        let width = constraint.constrain(Size::new(preferred_width, 0.0)).width;
+        let content = Rect::new(0.0, 0.0, (width - self.options.margin * 2.0).max(0.0), 0.0);
+        let form = FormLayout::new(self.options.form_row_options());
         let rows_height: f32 = self
             .sections
             .iter()
             .flat_map(|section| section.rows.iter())
-            .map(|row| row.height(self.options.row_height))
+            .map(|row| match row.height {
+                PropertyRowHeight::Default => self.options.row_height.max(1.0),
+                PropertyRowHeight::Fixed(height) => height,
+                PropertyRowHeight::Content => {
+                    row.measure_control(&form, content, self.options.row_height).0
+                }
+            })
             .sum();
         let section_headers =
             self.sections.iter().filter(|section| !section.title().is_empty()).count();
         let section_gaps = self.sections.len().saturating_sub(1);
         let preferred = Size::new(
-            visual.preferred_width,
+            width,
             self.options.margin * 2.0
                 + self.header_height()
                 + rows_height
-                + section_headers as f32 * visual.header_without_subtitle_height
+                + section_headers as f32 * visual.section_header_height
                 + section_gaps as f32 * self.options.section_gap,
         );
         constraint.constrain(preferred)
@@ -548,8 +591,8 @@ impl Widget for PropertyPanel {
 
             let section_top = y;
             for row in &mut section.rows {
-                let row_h = row.height(self.options.row_height);
-                let measured = row.control.measure(form_layout.control_constraint(content, row_h));
+                let (row_h, measured) =
+                    row.measure_control(&form_layout, content, self.options.row_height);
                 let rects = form_layout.row_rects(
                     content,
                     y,
@@ -1002,6 +1045,51 @@ mod tests {
         assert_eq!(row.bounds.height, 118.0);
         assert_eq!(row.label_position.y, row.bounds.y + 4.0);
         assert!(measured.height >= 118.0 + panel.options.margin * 2.0);
+    }
+
+    #[test]
+    fn content_height_rows_keep_wrapped_details_and_following_rows_inside_measured_panel() {
+        use crate::{FlexChild, FlexContainer};
+
+        let details = "Export color health failed. Inspect the source color contract and GPU stage evidence. ".repeat(8);
+        let summary = FlexContainer::column(vec![
+            FlexChild::fixed(Box::new(
+                Label::new("Completed / 100%").with_padding(0.0, 0.0),
+            )),
+            FlexChild::fixed(Box::new(
+                Label::new(details).wrapped().with_padding(0.0, 0.0),
+            )),
+        ])
+        .with_gap(4.0);
+        let mut panel = PropertyPanel::new("Export").with_section(
+            PropertySection::new("Queue")
+                .with_row(PropertyRow::new("Job", Box::new(summary)).with_content_height())
+                .with_row(PropertyRow::new("Next", Box::new(Label::new("Pending")))),
+        );
+        let mut heights = Vec::new();
+        for width in [320.0, 640.0] {
+            let measured = panel
+                .measure(LayoutConstraint { min: Size::ZERO, max: Size::new(width, f32::MAX) });
+            assert_eq!(measured.width, width);
+            panel.layout(Rect::new(0.0, 0.0, width, measured.height));
+            let rows = &panel.sections[0].rows;
+            let intrinsic = rows[0].control.measure(LayoutConstraint {
+                min: Size::ZERO,
+                max: Size::new(rows[0].control_bounds.width, f32::MAX),
+            });
+            assert!((rows[0].control_bounds.height - intrinsic.height).abs() < 0.01);
+            assert!(rows[1].bounds.y >= rows[0].bounds.y + rows[0].bounds.height);
+            assert!(
+                (rows[1].bounds.y + rows[1].bounds.height + panel.options.margin - measured.height)
+                    .abs()
+                    < 0.01
+            );
+            heights.push(rows[0].bounds.height);
+        }
+        assert!(
+            heights[0] > heights[1],
+            "narrow details must occupy more lines"
+        );
     }
 
     #[test]
