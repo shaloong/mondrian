@@ -139,6 +139,12 @@ argument names, fallback coverage, and remaining literal user-facing strings.
 The Interpret Footage modal is now one complete localized slice: controls,
 auto-detection, RAW options, and evidence diagnostics use the same locale
 snapshot and Fluent catalogs. Its draft and Product Action stay locale-free.
+The Inspector's clip style, transform, timing, audio-component, Grade Graph,
+visual-effect controls, Power Window, and Mask tracking controls use this locale
+snapshot. The projected Mask shape is a typed rectangle/ellipse/path value;
+the path editing hint and shape actions never branch on a translated label.
+Tracking progress formats both counts through Fluent while native failure
+details remain diagnostic evidence attached to a localized status prefix.
 Inspector audio Component mapping follows the same boundary: the model's
 diagnostics and the widget's policy controls share the panel locale, while
 channel layout identities and edit addresses remain typed author data.

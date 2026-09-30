@@ -393,17 +393,19 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
     let anchor_y = model.anchor_y;
     let has_target = selected_clip.is_some();
     let can_edit = has_target && model.is_editable;
-    let subtitle = model.edit_disabled_reason.as_deref().unwrap_or(if has_target {
-        "Selected clip"
-    } else {
-        "No clip selected"
+    let subtitle = model.edit_disabled_reason.clone().unwrap_or_else(|| {
+        localizer.text(if has_target {
+            "inspector-selected-clip"
+        } else {
+            "inspector-no-clip-selected"
+        })
     });
     if let Some(message) = model.empty_message.as_deref().filter(|message| !message.is_empty()) {
         let (title, description) = message
             .split_once('\n')
             .map_or((message, ""), |(title, description)| (title, description));
         let mut panel = PropertyPanel::with_options(
-            "检查器",
+            localizer.text("inspector-title"),
             PropertyPanelOptions {
                 label_width: 0.0,
                 control_gap: 0.0,
@@ -442,17 +444,17 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
         ])
         .disabled()
     };
-    let mut style_section = PropertySection::new("剪辑样式")
+    let mut style_section = PropertySection::new(localizer.text("inspector-clip-style"))
         .with_row(PropertyRow::new(
-            "启用",
+            localizer.text("inspector-enabled"),
             Box::new(
-                Checkbox::new("启用效果", model.enabled)
+                Checkbox::new(localizer.text("inspector-enable-effect"), model.enabled)
                     .enabled(can_edit)
                     .on_change(move |value| inspector_bool_action(selected_clip, value)),
             ),
         ))
         .with_row(PropertyRow::new(
-            "不透明度",
+            localizer.text("inspector-opacity"),
             numeric_slider_input_control(
                 model.opacity,
                 0.0,
@@ -483,17 +485,17 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
         let mut tint = color_picker_trigger(model.tint).enabled(can_edit);
         tint.picker_mut().set_area_mode(model.tint_area_mode);
         style_section = style_section.with_row(PropertyRow::new(
-            "颜色",
+            localizer.text("inspector-color"),
             Box::new(tint.on_change(move |color| inspector_color_action(selected_clip, color))),
         ));
     }
-    let mut panel = PropertyPanel::new("检查器")
+    let mut panel = PropertyPanel::new(localizer.text("inspector-title"))
         .with_subtitle(subtitle)
         .with_embedded_panel_chrome()
         .with_section(style_section);
 
     if !model.clip_properties.is_empty() {
-        let mut section = PropertySection::new("基础标题");
+        let mut section = PropertySection::new(localizer.text("inspector-basic-title"));
         for property in &model.clip_properties {
             section = section.with_row(clip_property_row(property, can_edit, selected_clip));
         }
@@ -508,27 +510,31 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
             let pan_static_editable = can_edit
                 && component.pan_automation.as_ref().is_none_or(|curve| !curve.is_automated());
             let section_title = if model.audio_components.len() == 1 {
-                "音频 Component".to_owned()
+                localizer.text("inspector-audio-component")
             } else {
-                format!("音频 Component {}", index + 1)
+                localizer.format_text(
+                    "inspector-audio-component-numbered",
+                    "number",
+                    &(index + 1).to_string(),
+                )
             };
             let mut section = PropertySection::new(section_title)
                 .with_row(PropertyRow::new(
-                    "启用",
+                    localizer.text("inspector-enabled"),
                     Box::new(
-                        Checkbox::new("参与混音", component.enabled).enabled(can_edit).on_change(
-                            move |value| {
+                        Checkbox::new(localizer.text("inspector-audio-in-mix"), component.enabled)
+                            .enabled(can_edit)
+                            .on_change(move |value| {
                                 audio_component_mutation_action(
                                     selected_clip,
                                     edit_id,
                                     AudioComponentMutation::SetEnabled { value },
                                 )
-                            },
-                        ),
+                            }),
                     ),
                 ))
                 .with_row(PropertyRow::new(
-                    "音量 (dB)",
+                    localizer.text("inspector-audio-volume"),
                     numeric_slider_input_control_with_hard_range(
                         component.volume_db as f32,
                         -60.0,
@@ -548,7 +554,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                     ),
                 ))
                 .with_row(PropertyRow::new(
-                    "声像 / Balance",
+                    localizer.text("inspector-audio-pan"),
                     numeric_slider_input_control(
                         (component.pan * 100.0) as f32,
                         -100.0,
@@ -567,14 +573,20 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 ));
             if let Some(automation) = &component.volume_automation {
                 section = section.with_row(
-                    PropertyRow::new("音量曲线", audio_automation_curve_control(automation))
-                        .with_height(118.0),
+                    PropertyRow::new(
+                        localizer.text("inspector-audio-volume-curve"),
+                        audio_automation_curve_control(automation),
+                    )
+                    .with_height(118.0),
                 );
             }
             if let Some(automation) = &component.pan_automation {
                 section = section.with_row(
-                    PropertyRow::new("声像曲线", audio_automation_curve_control(automation))
-                        .with_height(118.0),
+                    PropertyRow::new(
+                        localizer.text("inspector-audio-pan-curve"),
+                        audio_automation_curve_control(automation),
+                    )
+                    .with_height(118.0),
                 );
             }
             let source_items = component
@@ -598,7 +610,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 .collect::<Vec<_>>();
             let source_enabled = can_edit && !source_items.is_empty();
             section = section.with_row(PropertyRow::new(
-                "逻辑源",
+                localizer.text("inspector-audio-logical-source"),
                 Box::new(
                     Dropdown::new(component.source_label.clone(), source_items)
                         .with_max_visible_items(8)
@@ -609,7 +621,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
             if let Some(binding) = &component.binding {
                 let mut binding_items = vec![
                     MenuItem::new(
-                        "重新探测当前文件…",
+                        localizer.text("inspector-audio-reprobe-file"),
                         inspector_audio_refresh_action(binding.asset_id),
                     ),
                     MenuItem::separator(),
@@ -627,7 +639,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 }));
                 let binding_enabled = can_edit;
                 section = section.with_row(PropertyRow::new(
-                    "资产流映射",
+                    localizer.text("inspector-audio-stream-binding"),
                     Box::new(
                         Dropdown::new(binding.label.clone(), binding_items)
                             .with_max_visible_items(8)
@@ -654,7 +666,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 component.fade_out.map(|fade| fade.duration.to_f64() as f32).unwrap_or(0.0);
             section = section
                 .with_row(PropertyRow::new(
-                    "淡入 (s)",
+                    localizer.text("inspector-audio-fade-in"),
                     numeric_slider_input_control(
                         fade_in_seconds,
                         0.0,
@@ -674,17 +686,23 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                     ),
                 ))
                 .with_row(PropertyRow::new(
-                    "淡入曲线",
+                    localizer.text("inspector-audio-fade-in-curve"),
                     Box::new(
                         Dropdown::new(
-                            audio_fade_curve_label(fade_in_curve),
-                            audio_fade_curve_items(selected_clip, edit_id, true, component.fade_in),
+                            audio_fade_curve_label(fade_in_curve, localizer),
+                            audio_fade_curve_items(
+                                selected_clip,
+                                edit_id,
+                                true,
+                                component.fade_in,
+                                localizer,
+                            ),
                         )
                         .enabled(can_edit && component.fade_in.is_some()),
                     ),
                 ))
                 .with_row(PropertyRow::new(
-                    "淡出 (s)",
+                    localizer.text("inspector-audio-fade-out"),
                     numeric_slider_input_control(
                         fade_out_seconds,
                         0.0,
@@ -704,15 +722,16 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                     ),
                 ))
                 .with_row(PropertyRow::new(
-                    "淡出曲线",
+                    localizer.text("inspector-audio-fade-out-curve"),
                     Box::new(
                         Dropdown::new(
-                            audio_fade_curve_label(fade_out_curve),
+                            audio_fade_curve_label(fade_out_curve, localizer),
                             audio_fade_curve_items(
                                 selected_clip,
                                 edit_id,
                                 false,
                                 component.fade_out,
+                                localizer,
                             ),
                         )
                         .enabled(can_edit && component.fade_out.is_some()),
@@ -730,9 +749,9 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
     );
 
     panel = panel.with_section(
-        PropertySection::new("变换")
+        PropertySection::new(localizer.text("inspector-transform"))
             .with_row(PropertyRow::new(
-                "位置 X (px)",
+                localizer.text("inspector-position-x"),
                 numeric_slider_input_control_with_hard_range(
                     model.position_x,
                     -4096.0,
@@ -752,7 +771,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 ),
             ))
             .with_row(PropertyRow::new(
-                "位置 Y (px)",
+                localizer.text("inspector-position-y"),
                 numeric_slider_input_control_with_hard_range(
                     model.position_y,
                     -4096.0,
@@ -772,7 +791,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 ),
             ))
             .with_row(PropertyRow::new(
-                "缩放 X (%)",
+                localizer.text("inspector-scale-x"),
                 numeric_slider_input_control_with_hard_range(
                     model.scale_x_percent,
                     -400.0,
@@ -792,7 +811,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 ),
             ))
             .with_row(PropertyRow::new(
-                "缩放 Y (%)",
+                localizer.text("inspector-scale-y"),
                 numeric_slider_input_control_with_hard_range(
                     model.scale_y_percent,
                     -400.0,
@@ -812,7 +831,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 ),
             ))
             .with_row(PropertyRow::new(
-                "锚点 X (px)",
+                localizer.text("inspector-anchor-x"),
                 numeric_slider_input_control_with_hard_range(
                     model.anchor_x,
                     -4096.0,
@@ -832,7 +851,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 ),
             ))
             .with_row(PropertyRow::new(
-                "锚点 Y (px)",
+                localizer.text("inspector-anchor-y"),
                 numeric_slider_input_control_with_hard_range(
                     model.anchor_y,
                     -4096.0,
@@ -852,7 +871,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 ),
             ))
             .with_row(PropertyRow::new(
-                "旋转 (°)",
+                localizer.text("inspector-rotation"),
                 numeric_slider_input_control(
                     model.rotation_degrees,
                     -180.0,
@@ -872,7 +891,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
     );
 
     let timeline_time_base = model.timeline_time_base;
-    let mut timing_section = PropertySection::new("时间")
+    let mut timing_section = PropertySection::new(localizer.text("inspector-timing"))
         .with_row(PropertyRow::new(
             "In",
             numeric_slider_input_control(
@@ -916,7 +935,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
             InspectorSourceTimingMode::Rate { rate_percent } => {
                 let rate_enabled = can_edit && source_timing.can_set_rate;
                 timing_section = timing_section.with_row(PropertyRow::new(
-                    "速度 (%)",
+                    localizer.text("inspector-speed"),
                     numeric_slider_input_control_with_hard_range(
                         rate_percent,
                         -400.0,
@@ -932,12 +951,12 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
             }
             InspectorSourceTimingMode::Hold => {
                 timing_section = timing_section.with_row(PropertyRow::new(
-                    "源时间",
-                    Box::new(Label::new("定格").muted()),
+                    localizer.text("inspector-source-time"),
+                    Box::new(Label::new(localizer.text("inspector-hold")).muted()),
                 ));
                 let rate_enabled = can_edit && source_timing.can_set_rate;
                 timing_section = timing_section.with_row(PropertyRow::new(
-                    "恢复速度 (%)",
+                    localizer.text("inspector-resume-speed"),
                     numeric_slider_input_control_with_hard_range(
                         100.0,
                         1.0,
@@ -955,14 +974,14 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
         if source_timing.supports_picture_hold {
             let freeze_target = source_timing.freeze_at_playhead;
             let label = match (source_timing.mode, freeze_target) {
-                (_, None) => "先将播放头移入片段",
-                (InspectorSourceTimingMode::Hold, Some(_)) => "更新为播放头画面",
-                _ => "在播放头创建定格",
+                (_, None) => "inspector-place-playhead-in-clip",
+                (InspectorSourceTimingMode::Hold, Some(_)) => "inspector-update-hold-frame",
+                _ => "inspector-create-hold-frame",
             };
             timing_section = timing_section.with_row(PropertyRow::new(
-                "定格帧",
+                localizer.text("inspector-freeze-frame"),
                 Box::new(
-                    Button::new(label)
+                    Button::new(localizer.text(label))
                         .enabled(can_edit && freeze_target.is_some())
                         .on_click(inspector_hold_action(selected_clip, freeze_target)),
                 ),
@@ -973,35 +992,44 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
 
     if selected_clip.is_some_and(|selection| selection.is_video_track) {
         panel = panel.with_section(
-            PropertySection::new("Power Window（窗口）").with_row(PropertyRow::new(
-                "添加",
+            PropertySection::new(localizer.text("mask-section")).with_row(PropertyRow::new(
+                localizer.text("mask-add"),
                 Box::new(
                     FlexContainer::row(vec![
                         FlexChild::flex(
-                            Box::new(Button::new("矩形").enabled(can_edit).on_click(
-                                inspector_add_mask_action(selected_clip, MaskShape::default()),
-                            )),
+                            Box::new(
+                                Button::new(localizer.text("mask-shape-rectangle"))
+                                    .enabled(can_edit)
+                                    .on_click(inspector_add_mask_action(
+                                        selected_clip,
+                                        MaskShape::default(),
+                                    )),
+                            ),
                             1.0,
                         ),
                         FlexChild::flex(
-                            Box::new(Button::new("椭圆").enabled(can_edit).on_click(
-                                inspector_add_mask_action(
-                                    selected_clip,
-                                    MaskShape::Ellipse {
-                                        center: glam::Vec2::splat(0.5),
-                                        radii: glam::Vec2::splat(0.35),
-                                    },
-                                ),
-                            )),
+                            Box::new(
+                                Button::new(localizer.text("mask-shape-ellipse"))
+                                    .enabled(can_edit)
+                                    .on_click(inspector_add_mask_action(
+                                        selected_clip,
+                                        MaskShape::Ellipse {
+                                            center: glam::Vec2::splat(0.5),
+                                            radii: glam::Vec2::splat(0.35),
+                                        },
+                                    )),
+                            ),
                             1.0,
                         ),
                         FlexChild::flex(
-                            Box::new(Button::new("Bezier").enabled(can_edit).on_click(
-                                inspector_add_mask_action(
-                                    selected_clip,
-                                    default_bezier_power_window(),
-                                ),
-                            )),
+                            Box::new(
+                                Button::new(localizer.text("mask-shape-bezier"))
+                                    .enabled(can_edit)
+                                    .on_click(inspector_add_mask_action(
+                                        selected_clip,
+                                        default_bezier_power_window(),
+                                    )),
+                            ),
                             1.0,
                         ),
                     ])
@@ -1018,11 +1046,11 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
         let can_move_down = mask_can_edit && index + 1 < model.masks.len();
         let shape_items = vec![
             MenuItem::new(
-                "矩形",
+                localizer.text("mask-shape-rectangle"),
                 inspector_mask_shape_action(selected_clip, mask_id, MaskShape::default()),
             ),
             MenuItem::new(
-                "椭圆",
+                localizer.text("mask-shape-ellipse"),
                 inspector_mask_shape_action(
                     selected_clip,
                     mask_id,
@@ -1033,7 +1061,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 ),
             ),
             MenuItem::new(
-                "Bezier",
+                localizer.text("mask-shape-bezier"),
                 inspector_mask_shape_action(selected_clip, mask_id, default_bezier_power_window()),
             ),
         ];
@@ -1041,27 +1069,27 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
             .selected(model.selected_mask_id == Some(mask_id))
             .on_select(inspector_mask_select_action(selected_clip, mask_id))
             .with_row(PropertyRow::new(
-                "控制",
+                localizer.text("mask-controls"),
                 Box::new(
                     FlexContainer::row(vec![
                         FlexChild::flex(
                             Box::new(
-                                Checkbox::new("启用", mask.enabled).enabled(can_edit).on_change(
-                                    move |enabled| {
+                                Checkbox::new(localizer.text("mask-enabled"), mask.enabled)
+                                    .enabled(can_edit)
+                                    .on_change(move |enabled| {
                                         inspector_mask_enabled_action(
                                             selected_clip,
                                             mask_id,
                                             enabled,
                                         )
-                                    },
-                                ),
+                                    }),
                             ),
                             1.0,
                         ),
                         FlexChild::fixed(effect_icon_button(
                             AppIcon::CaretUp,
-                            "Up",
-                            "Move Mask up",
+                            localizer.text("mask-move-up"),
+                            localizer.text("mask-move-up-tooltip"),
                             can_move_up,
                             can_move_up
                                 .then(|| {
@@ -1077,8 +1105,8 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                         )),
                         FlexChild::fixed(effect_icon_button(
                             AppIcon::CaretDown,
-                            "Down",
-                            "Move Mask down",
+                            localizer.text("mask-move-down"),
+                            localizer.text("mask-move-down-tooltip"),
                             can_move_down,
                             can_move_down
                                 .then(|| {
@@ -1094,8 +1122,8 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                         )),
                         FlexChild::fixed(effect_icon_button(
                             AppIcon::Trash,
-                            "Remove",
-                            "Remove Mask",
+                            localizer.text("mask-remove"),
+                            localizer.text("mask-remove-tooltip"),
                             mask_can_edit,
                             inspector_remove_mask_action(selected_clip, mask_id),
                         )),
@@ -1104,33 +1132,41 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 ),
             ))
             .with_row(PropertyRow::new(
-                "锁定",
+                localizer.text("mask-lock"),
                 Box::new(
-                    Checkbox::new("锁定编辑", mask.locked).enabled(can_edit).on_change(
-                        move |locked| inspector_mask_locked_action(selected_clip, mask_id, locked),
-                    ),
-                ),
-            ))
-            .with_row(PropertyRow::new(
-                "形状",
-                Box::new(
-                    Dropdown::new(mask.shape_label.clone(), shape_items).enabled(mask_can_edit),
-                ),
-            ))
-            .with_row(PropertyRow::new(
-                "形状动画",
-                Box::new(
-                    Checkbox::new("关键帧", mask.shape_animation_enabled)
-                        .enabled(mask_can_edit)
-                        .on_change(move |enabled| {
-                            inspector_mask_shape_animation_action(selected_clip, mask_id, enabled)
+                    Checkbox::new(localizer.text("mask-lock-editing"), mask.locked)
+                        .enabled(can_edit)
+                        .on_change(move |locked| {
+                            inspector_mask_locked_action(selected_clip, mask_id, locked)
                         }),
                 ),
+            ))
+            .with_row(PropertyRow::new(
+                localizer.text("mask-shape"),
+                Box::new(
+                    Dropdown::new(localizer.text(mask.shape_kind.message_id()), shape_items)
+                        .enabled(mask_can_edit),
+                ),
+            ))
+            .with_row(PropertyRow::new(
+                localizer.text("mask-shape-animation"),
+                Box::new(
+                    Checkbox::new(
+                        localizer.text("mask-keyframes"),
+                        mask.shape_animation_enabled,
+                    )
+                    .enabled(mask_can_edit)
+                    .on_change(move |enabled| {
+                        inspector_mask_shape_animation_action(selected_clip, mask_id, enabled)
+                    }),
+                ),
             ));
-        if mask.shape_label == "路径" && model.selected_mask_id == Some(mask_id) {
+        if mask.shape_kind == InspectorMaskShapeKind::Path
+            && model.selected_mask_id == Some(mask_id)
+        {
             section = section.with_row(PropertyRow::new(
                 "Viewer",
-                Box::new(Label::new("Alt+单击曲线：插入控制点").muted()),
+                Box::new(Label::new(localizer.text("mask-insert-point-hint")).muted()),
             ));
         }
         let tracking_active = mask.tracking_status.as_ref().is_some_and(|status| {
@@ -1143,40 +1179,40 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
         });
         let tracking_items = [
             (
-                "目标 · 向前",
+                "mask-track-object-forward",
                 MaskTrackingModel::ObjectTranslation,
                 MaskTrackingDirection::Forward,
             ),
             (
-                "目标 · 向后",
+                "mask-track-object-backward",
                 MaskTrackingModel::ObjectTranslation,
                 MaskTrackingDirection::Backward,
             ),
             (
-                "目标 · 双向",
+                "mask-track-object-both",
                 MaskTrackingModel::ObjectTranslation,
                 MaskTrackingDirection::Both,
             ),
             (
-                "平面 · 向前",
+                "mask-track-planar-forward",
                 MaskTrackingModel::PlanarHomography,
                 MaskTrackingDirection::Forward,
             ),
             (
-                "平面 · 向后",
+                "mask-track-planar-backward",
                 MaskTrackingModel::PlanarHomography,
                 MaskTrackingDirection::Backward,
             ),
             (
-                "平面 · 双向",
+                "mask-track-planar-both",
                 MaskTrackingModel::PlanarHomography,
                 MaskTrackingDirection::Both,
             ),
         ]
         .into_iter()
-        .map(|(label, tracking_model, direction)| {
+        .map(|(message_id, tracking_model, direction)| {
             MenuItem::new(
-                label,
+                localizer.text(message_id),
                 inspector_mask_start_tracking_action(
                     selected_clip,
                     mask_id,
@@ -1188,29 +1224,34 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
         .collect();
         section = section
             .with_row(PropertyRow::new(
-                "跟踪",
+                localizer.text("mask-tracking"),
                 Box::new(
-                    Dropdown::new("选择模型与方向…", tracking_items)
+                    Dropdown::new(localizer.text("mask-select-tracking"), tracking_items)
                         .enabled(mask_can_edit && !tracking_active),
                 ),
             ))
             .with_row(PropertyRow::new(
-                "跟踪状态",
-                Box::new(Label::new(inspector_tracking_status_label(mask)).muted()),
+                localizer.text("mask-tracking-status"),
+                Box::new(Label::new(inspector_tracking_status_label(mask, localizer)).muted()),
             ))
             .with_row(PropertyRow::new(
-                "跟踪控制",
+                localizer.text("mask-tracking-controls"),
                 Box::new(
                     FlexContainer::row(vec![
                         FlexChild::flex(
-                            Box::new(Button::new("取消").enabled(tracking_active).on_click(
-                                inspector_mask_cancel_tracking_action(selected_clip, mask_id),
-                            )),
+                            Box::new(
+                                Button::new(localizer.text("mask-cancel"))
+                                    .enabled(tracking_active)
+                                    .on_click(inspector_mask_cancel_tracking_action(
+                                        selected_clip,
+                                        mask_id,
+                                    )),
+                            ),
                             1.0,
                         ),
                         FlexChild::flex(
                             Box::new(
-                                Button::new("重算")
+                                Button::new(localizer.text("mask-recompute"))
                                     .enabled(
                                         mask_can_edit
                                             && mask.has_tracking_recipe
@@ -1239,28 +1280,35 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
     }
 
     let grade = &model.grade;
-    let mut grade_section = PropertySection::new("Grade Graph").with_row(PropertyRow::new(
-        "Clip",
-        Box::new(
-            Button::new(grade.clip_grade.as_deref().unwrap_or("创建 Clip Grade"))
+    let mut grade_section =
+        PropertySection::new(localizer.text("inspector-grade-graph")).with_row(PropertyRow::new(
+            localizer.text("inspector-grade-clip"),
+            Box::new(
+                Button::new(
+                    grade
+                        .clip_grade
+                        .clone()
+                        .unwrap_or_else(|| localizer.text("inspector-grade-create")),
+                )
                 .enabled(grade.create_clip_grade_action.is_some())
                 .on_click(grade.create_clip_grade_action.clone()),
-        ),
-    ));
+            ),
+        ));
     if let Some(group) = &grade.group {
         grade_section = grade_section.with_row(PropertyRow::new(
-            "Group",
+            localizer.text("inspector-grade-group"),
             Box::new(Label::new(group.clone()).muted()),
         ));
     }
     if grade.group_pre_grade.is_some() || grade.group_post_grade.is_some() {
+        let identity = localizer.text("inspector-grade-identity");
         grade_section = grade_section.with_row(PropertyRow::new(
-            "Group Pre/Post",
+            localizer.text("inspector-grade-pre-post"),
             Box::new(
                 Label::new(format!(
                     "{} → {}",
-                    grade.group_pre_grade.as_deref().unwrap_or("Identity"),
-                    grade.group_post_grade.as_deref().unwrap_or("Identity")
+                    grade.group_pre_grade.as_deref().unwrap_or(&identity),
+                    grade.group_post_grade.as_deref().unwrap_or(&identity)
                 ))
                 .muted(),
             ),
@@ -1268,17 +1316,23 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
     }
     if let Some(timeline_grade) = &grade.timeline_grade {
         grade_section = grade_section.with_row(PropertyRow::new(
-            "Timeline",
+            localizer.text("inspector-grade-timeline"),
             Box::new(Label::new(timeline_grade.clone()).muted()),
         ));
     }
     if let Some(version) = &grade.active_version {
         grade_section = grade_section.with_row(PropertyRow::new(
-            "Version / Nodes",
+            localizer.text("inspector-grade-version-nodes"),
             Box::new(
-                Label::new(format!(
-                    "{} · {} versions · {} nodes",
-                    version, grade.version_count, grade.node_count
+                Label::new(localizer.format(
+                    "inspector-grade-summary",
+                    Some(&{
+                        let mut args = fluent_bundle::FluentArgs::new();
+                        args.set("version", version.as_str());
+                        args.set("versions", grade.version_count as i64);
+                        args.set("nodes", grade.node_count as i64);
+                        args
+                    }),
                 ))
                 .muted(),
             ),
@@ -1292,8 +1346,14 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
             .collect();
         let enabled = !grade.add_node_actions.is_empty();
         grade_section = grade_section.with_row(PropertyRow::new(
-            "Add Node",
-            Box::new(Dropdown::new("添加调色节点…", items).enabled(enabled)),
+            localizer.text("inspector-grade-add-node"),
+            Box::new(
+                Dropdown::new(
+                    localizer.text("inspector-grade-add-node-placeholder"),
+                    items,
+                )
+                .enabled(enabled),
+            ),
         ));
     }
     panel = panel.with_section(grade_section);
@@ -1307,27 +1367,32 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 .selected(model.selected_effect_id == Some(effect_id))
                 .on_select(inspector_effect_select_action(selected_clip, effect_id))
                 .with_row(PropertyRow::new(
-                    "控制",
+                    localizer.text("inspector-effect-controls"),
                     Box::new(
                         FlexContainer::row(vec![
                             FlexChild::flex(
                                 Box::new(
-                                    Checkbox::new("启用", effect.enabled)
-                                        .enabled(can_edit)
-                                        .on_change(move |enabled| {
+                                    Checkbox::new(
+                                        localizer.text("inspector-enabled"),
+                                        effect.enabled,
+                                    )
+                                    .enabled(can_edit)
+                                    .on_change(
+                                        move |enabled| {
                                             inspector_effect_enabled_action(
                                                 selected_clip,
                                                 effect_id,
                                                 enabled,
                                             )
-                                        }),
+                                        },
+                                    ),
                                 ),
                                 1.0,
                             ),
                             FlexChild::fixed(effect_icon_button(
                                 AppIcon::CaretUp,
-                                "Up",
-                                "Move effect up",
+                                localizer.text("inspector-effect-move-up"),
+                                localizer.text("inspector-effect-move-up-tooltip"),
                                 can_move_up,
                                 can_move_up
                                     .then(|| {
@@ -1343,8 +1408,8 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                             )),
                             FlexChild::fixed(effect_icon_button(
                                 AppIcon::CaretDown,
-                                "Down",
-                                "Move effect down",
+                                localizer.text("inspector-effect-move-down"),
+                                localizer.text("inspector-effect-move-down-tooltip"),
                                 can_move_down,
                                 can_move_down
                                     .then(|| {
@@ -1360,8 +1425,8 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                             )),
                             FlexChild::fixed(effect_icon_button(
                                 AppIcon::Trash,
-                                "Remove",
-                                "Remove effect",
+                                localizer.text("inspector-effect-remove"),
+                                localizer.text("inspector-effect-remove-tooltip"),
                                 can_edit,
                                 inspector_remove_effect_row_action(selected_clip, effect_id),
                             )),
@@ -1392,7 +1457,11 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                     let curve_model = curve.curve.clone();
                     section = section.with_row(
                         PropertyRow::new(
-                            format!("{} 曲线", property.label),
+                            localizer.format_text(
+                                "inspector-effect-curve",
+                                "name",
+                                &property.label,
+                            ),
                             Box::new(numeric_curve_editor(
                                 curve_model,
                                 can_edit,
@@ -1426,8 +1495,9 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
     }
 
     panel.with_section(
-        PropertySection::new("动画")
-            .with_row(PropertyRow::new("曲线", Box::new(curve)).with_height(118.0)),
+        PropertySection::new(localizer.text("inspector-animation")).with_row(
+            PropertyRow::new(localizer.text("inspector-curve"), Box::new(curve)).with_height(118.0),
+        ),
     )
 }
 
@@ -1857,6 +1927,7 @@ pub(super) fn audio_fade_curve_items(
     edit_id: AudioComponentEditId,
     fade_in: bool,
     fade: Option<AudioFade>,
+    localizer: &Localizer,
 ) -> Vec<MenuItem> {
     let Some(fade) = fade else {
         return Vec::new();
@@ -1871,7 +1942,7 @@ pub(super) fn audio_fade_curve_items(
                 AudioComponentMutation::SetFadeOut { value: updated }
             };
             MenuItem::new(
-                audio_fade_curve_label(curve),
+                audio_fade_curve_label(curve, localizer),
                 audio_component_mutation_action(selection, edit_id, mutation),
             )
             .checked(curve == fade.curve)
@@ -1879,11 +1950,11 @@ pub(super) fn audio_fade_curve_items(
         .collect()
 }
 
-pub(super) fn audio_fade_curve_label(curve: AudioFadeCurve) -> &'static str {
-    match curve {
-        AudioFadeCurve::ConstantGain => "Constant Gain",
-        AudioFadeCurve::EqualPower => "Equal Power",
-    }
+pub(super) fn audio_fade_curve_label(curve: AudioFadeCurve, localizer: &Localizer) -> String {
+    localizer.text(match curve {
+        AudioFadeCurve::ConstantGain => "inspector-audio-fade-constant-gain",
+        AudioFadeCurve::EqualPower => "inspector-audio-fade-equal-power",
+    })
 }
 
 pub(super) fn inspector_audio_rebind_action(
@@ -2147,32 +2218,38 @@ pub(super) fn inspector_mask_recompute_tracking_action(
     })
 }
 
-pub(super) fn inspector_tracking_status_label(mask: &InspectorMaskModel) -> String {
+pub(super) fn inspector_tracking_status_label(
+    mask: &InspectorMaskModel,
+    localizer: &Localizer,
+) -> String {
     let Some(status) = &mask.tracking_status else {
         return if mask.has_tracking_recipe {
-            "已生成 · 可重算".to_owned()
+            localizer.text("mask-status-generated")
         } else {
-            "未跟踪".to_owned()
+            localizer.text("mask-status-untracked")
         };
     };
     use crate::app::visual_tracking::VisualTrackingPhase;
     match status.phase {
-        VisualTrackingPhase::Queued => "排队中".to_owned(),
+        VisualTrackingPhase::Queued => localizer.text("mask-status-queued"),
         VisualTrackingPhase::Analyzing => {
-            format!("分析中 {}/{}", status.completed_pairs, status.total_pairs)
+            let mut args = fluent_bundle::FluentArgs::new();
+            args.set("completed", status.completed_pairs as i64);
+            args.set("total", status.total_pairs as i64);
+            localizer.format("mask-status-analyzing", Some(&args))
         }
-        VisualTrackingPhase::Canceling => "正在取消".to_owned(),
-        VisualTrackingPhase::Canceled => "已取消".to_owned(),
-        VisualTrackingPhase::Completed => "已完成 · 可重算".to_owned(),
-        VisualTrackingPhase::CacheHit => "缓存命中 · 已应用".to_owned(),
+        VisualTrackingPhase::Canceling => localizer.text("mask-status-canceling"),
+        VisualTrackingPhase::Canceled => localizer.text("mask-status-canceled"),
+        VisualTrackingPhase::Completed => localizer.text("mask-status-completed"),
+        VisualTrackingPhase::CacheHit => localizer.text("mask-status-cache-hit"),
         VisualTrackingPhase::Stale => status.detail.as_deref().map_or_else(
-            || "结果已过期".to_owned(),
-            |detail| format!("已过期 · {detail}"),
+            || localizer.text("mask-status-stale"),
+            |detail| localizer.format_text("mask-status-stale-detail", "detail", detail),
         ),
-        VisualTrackingPhase::Failed => status
-            .detail
-            .as_deref()
-            .map_or_else(|| "失败".to_owned(), |detail| format!("失败 · {detail}")),
+        VisualTrackingPhase::Failed => status.detail.as_deref().map_or_else(
+            || localizer.text("mask-status-failed"),
+            |detail| localizer.format_text("mask-status-failed-detail", "detail", detail),
+        ),
     }
 }
 

@@ -8,6 +8,45 @@ fn chinese_localizer() -> Localizer {
 }
 
 #[test]
+fn mask_shape_and_tracking_status_follow_locale_without_label_based_branching() {
+    let chinese = chinese_localizer();
+    let english = Localizer::new(AppUiLocale::EnUs).expect("bundled English catalog");
+    let mut mask = InspectorMaskModel {
+        mask_id: MaskId::new(),
+        label: "Mask 1".to_owned(),
+        enabled: true,
+        locked: false,
+        shape_animation_enabled: true,
+        shape_kind: InspectorMaskShapeKind::Path,
+        tracking_status: None,
+        has_tracking_recipe: false,
+        properties: Vec::new(),
+    };
+    assert_eq!(chinese.text(mask.shape_kind.message_id()), "路径");
+    assert_eq!(english.text(mask.shape_kind.message_id()), "Path");
+    assert_eq!(
+        inspector_tracking_status_label(&mask, &english),
+        "Not tracked"
+    );
+    mask.tracking_status = Some(crate::app::visual_tracking::VisualTrackingStatus {
+        tracking_id: mondrian_core::types::TrackingId::new(),
+        phase: crate::app::visual_tracking::VisualTrackingPhase::Analyzing,
+        completed_pairs: 2,
+        total_pairs: 5,
+        detail: None,
+    });
+    let visible = |text: String| text.replace(['\u{2068}', '\u{2069}'], "");
+    assert_eq!(
+        visible(inspector_tracking_status_label(&mask, &chinese)),
+        "分析中 2/5"
+    );
+    assert_eq!(
+        visible(inspector_tracking_status_label(&mask, &english)),
+        "Analyzing 2/5"
+    );
+}
+
+#[test]
 fn mixer_automation_and_meter_status_follow_locale() {
     let chinese = chinese_localizer();
     let english = Localizer::new(AppUiLocale::EnUs).expect("bundled English catalog");

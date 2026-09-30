@@ -2318,6 +2318,27 @@ pub struct InspectorGradeNodeActionModel {
     pub action: Action,
 }
 
+/// Display-independent primitive family of an evaluated Mask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InspectorMaskShapeKind {
+    /// Rectangular Power Window.
+    Rectangle,
+    /// Elliptical Power Window.
+    Ellipse,
+    /// Bezier path Power Window.
+    Path,
+}
+
+impl InspectorMaskShapeKind {
+    const fn message_id(self) -> &'static str {
+        match self {
+            Self::Rectangle => "mask-shape-rectangle",
+            Self::Ellipse => "mask-shape-ellipse",
+            Self::Path => "mask-shape-path",
+        }
+    }
+}
+
 /// One Clip-local visual Mask projected into the Inspector.
 #[derive(Debug, Clone)]
 pub struct InspectorMaskModel {
@@ -2331,8 +2352,8 @@ pub struct InspectorMaskModel {
     pub locked: bool,
     /// Whether complete geometry is stored as exact Clip-local shape keys.
     pub shape_animation_enabled: bool,
-    /// Current evaluated primitive family shown by the shape control.
-    pub shape_label: String,
+    /// Current evaluated primitive family, independent of display language.
+    pub shape_kind: InspectorMaskShapeKind,
     /// Latest background tracking state, when any request has run this Session.
     pub tracking_status: Option<crate::app::visual_tracking::VisualTrackingStatus>,
     /// Whether a completed recomputable recipe is persisted on the Mask.
@@ -2677,19 +2698,18 @@ impl InspectorPanelModel {
                 .iter()
                 .map(|mask| {
                     let evaluated = mask.evaluate_at(clip_author_time);
-                    let shape_label = match evaluated.shape {
-                        MaskShape::Rectangle { .. } => "矩形",
-                        MaskShape::Ellipse { .. } => "椭圆",
-                        MaskShape::Path { .. } => "路径",
-                    }
-                    .to_owned();
+                    let shape_kind = match evaluated.shape {
+                        MaskShape::Rectangle { .. } => InspectorMaskShapeKind::Rectangle,
+                        MaskShape::Ellipse { .. } => InspectorMaskShapeKind::Ellipse,
+                        MaskShape::Path { .. } => InspectorMaskShapeKind::Path,
+                    };
                     InspectorMaskModel {
                         mask_id: mask.id,
                         label: mask.name.clone(),
                         enabled: mask.enabled,
                         locked: mask.locked,
                         shape_animation_enabled: mask.shape_animation_enabled,
-                        shape_label,
+                        shape_kind,
                         tracking_status: state.visual_tracking_status(clip.id, mask.id).cloned(),
                         has_tracking_recipe: mask.tracking.is_some(),
                         properties: mask
