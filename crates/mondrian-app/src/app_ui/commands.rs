@@ -429,7 +429,7 @@ pub fn default_commands() -> Vec<AppUiCommandDescriptor> {
         command(
             "panel.export",
             "导出面板",
-            "导出",
+            "导出设置...",
             AppUiCommandCategory::Window,
             Some(ShortcutBinding::new(KeyCode::X, ctrl_alt())),
             action_focus_export,
