@@ -1456,8 +1456,14 @@ QC now passes one exact Instant through picture rescan and regulatory analysis.
 
 `cargo run --locked --profile validation -p mondrian-app --all-features
 --example local_media_smoke -j 2 -- "<fixture-root>" "<new-output-directory>"
-30 640x360 all 2` runs three bounded local production stages. Resolution, phase
-selection and layer count are explicit. `all` and focused `export`/`recovery` accept
+30 640x360 60 all 2` runs three bounded local production stages. Resolution,
+output cadence, phase selection and layer count are explicit. The same cadence
+binds the authored Sequence, Playback, two-second clips and frozen Export
+sampling; Export retains its existing 120-frame workload at every cadence.
+It never changes original source decode dimensions or cadence.
+Output supports 640x360, 1920x1080 and 3840x2160 at 24, 30 or 60 fps. This includes
+short 4K output diagnostics, not the complete sealed 4K60 matrix.
+`all` and focused `export`/`recovery` accept
 15–900 measured seconds per phase; `playback` accepts 15–1800 seconds for
 Preview/Audio stability. See the [local validation runbook](../dev/commercial-endurance-qualification.md#bounded-local-production-validation-not-col-047)
 for same-profile worker preparation and exact arguments. Preparation, recovery,

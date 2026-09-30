@@ -15,7 +15,7 @@ fn main() -> anyhow::Result<()> {
     let mut args = std::env::args_os().skip(1);
     let root = args.next().context("expected fixture root; use --help")?;
     if root == "--help" {
-        println!("local_media_smoke <fixture-root> <new-output-dir> <seconds> <640x360|1920x1080> <all|playback|export|recovery> <1|2>\n\nall: three production phases, 15–900 seconds each\nplayback: real Preview/Audio with seek/cache, 15–1800 seconds\nexport: continuous Export with Playback alone, 15–900 seconds\nrecovery: the same third phase alone, 15–900 seconds\nlayers: full-duration video source count, quality remains Full\nExport remains active until observation ends; 256-artifact/2-GiB phase budgets fail closed.\nNot a commercial/HDR/physical Viewer qualification.");
+        println!("local_media_smoke <fixture-root> <new-output-dir> <seconds> <640x360|1920x1080|3840x2160> <24|30|60> <all|playback|export|recovery> <1|2>\n\nall: three production phases, 15–900 seconds each\nplayback: real Preview/Audio with seek/cache, 15–1800 seconds\nexport: continuous Export with Playback alone, 15–900 seconds\nrecovery: the same third phase alone, 15–900 seconds\nOutput cadence is explicit; original source resolution and cadence remain unchanged.\nlayers: full-duration video source count, quality remains Full\nExport remains active until observation ends; 256-artifact/2-GiB phase budgets fail closed.\nNot a commercial/HDR/physical Viewer qualification.");
         return Ok(());
     }
     let root = PathBuf::from(root);
@@ -24,7 +24,14 @@ fn main() -> anyhow::Result<()> {
     let resolution = match args.next().context("expected output resolution")?.to_str() {
         Some("640x360") => mondrian_core::Resolution { width: 640, height: 360 },
         Some("1920x1080") => mondrian_core::Resolution { width: 1920, height: 1080 },
-        _ => anyhow::bail!("expected explicit 640x360 or 1920x1080"),
+        Some("3840x2160") => mondrian_core::Resolution { width: 3840, height: 2160 },
+        _ => anyhow::bail!("expected explicit 640x360, 1920x1080 or 3840x2160"),
+    };
+    let frame_rate = match args.next().context("expected output frame rate")?.to_str() {
+        Some("24") => mondrian_core::Rational::FPS_24,
+        Some("30") => mondrian_core::Rational::FPS_30,
+        Some("60") => mondrian_core::Rational::FPS_60,
+        _ => anyhow::bail!("expected explicit 24, 30 or 60 fps"),
     };
     use mondrian_app::app::golden_project_acceptance::{
         LocalMediaSmokePhases, LocalMediaSmokeSettings,
@@ -45,6 +52,7 @@ fn main() -> anyhow::Result<()> {
         LocalMediaSmokeSettings {
             phase_seconds: seconds,
             resolution,
+            frame_rate,
             phases,
             video_layers,
         },

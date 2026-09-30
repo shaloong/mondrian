@@ -79,6 +79,8 @@ pub struct LocalMediaSmokeSettings {
     pub phase_seconds: u64,
     /// Output resolution. Original source media remains fully decoded.
     pub resolution: Resolution,
+    /// Authored output cadence, independent of each original source cadence.
+    pub frame_rate: Rational,
     /// Production phases to execute.
     pub phases: LocalMediaSmokePhases,
     /// One video source, or that source plus a full-duration alpha overlay.
@@ -100,9 +102,16 @@ impl LocalMediaSmokeSettings {
         ensure!(
             matches!(
                 (self.resolution.width, self.resolution.height),
-                (640, 360) | (1920, 1080)
+                (640, 360) | (1920, 1080) | (3840, 2160)
             ),
-            "local profile requires explicit 640x360 or 1920x1080 output"
+            "local profile requires explicit 640x360, 1920x1080 or 3840x2160 output"
+        );
+        ensure!(
+            matches!(
+                self.frame_rate,
+                Rational::FPS_24 | Rational::FPS_30 | Rational::FPS_60
+            ),
+            "local profile requires explicit 24, 30 or 60 fps output"
         );
         ensure!(
             (1..=2).contains(&self.video_layers),
@@ -136,6 +145,7 @@ pub(super) fn run_proxy_control(
         LocalMediaSmokeSettings {
             phase_seconds,
             resolution: Resolution { width: 640, height: 360 },
+            frame_rate: Rational::FPS_24,
             phases: LocalMediaSmokePhases::All,
             video_layers: 2,
         },
@@ -185,11 +195,8 @@ fn run_profile(
         "local-media-production-profile-v2"
     };
     let mut report = json!({"schema_version":2,"profile":profile,"status":"NotRun","commercial_qualification":false,"duration_72h_qualified":false,"physical_surface_qualified":false,"physical_reference_output_qualified":false,"hdr_surface_qualified":false,"original_native_media_qualified":false,"proxy_control":proxy_control,"phase_seconds":phase_seconds,"hard_deadline_seconds":hard_deadline_seconds,"memory_stop_bytes":MEMORY_LIMIT,"maximum_artifacts_per_phase":MAXIMUM_ARTIFACTS,"maximum_retained_artifact_bytes_per_phase":MAXIMUM_RETAINED_ARTIFACT_BYTES,"program_resolution":settings.resolution,"video_layers":settings.video_layers,"selected_phases":settings.phases,"fixtures":[],"phases":[]});
-    report["program_frame_rate"] = if proxy_control {
-        json!({"numerator": 24, "denominator": 1})
-    } else {
-        json!({"numerator": 60, "denominator": 1})
-    };
+    report["program_frame_rate"] =
+        json!({"numerator": settings.frame_rate.num, "denominator": settings.frame_rate.den});
     let mut leases = Vec::new();
     let mut paths = Vec::new();
     let admission = (|| -> anyhow::Result<()> {
@@ -376,11 +383,7 @@ fn run_phase(
                     resolution_scale: 1.0,
                     ..Default::default()
                 },
-                frame_rate: if proxy_control {
-                    Rational::FPS_24
-                } else {
-                    Rational::FPS_60
-                },
+                frame_rate: settings.frame_rate,
                 ..SequenceSettings::default()
             };
             let project_settings = ProjectSettings {
@@ -396,11 +399,8 @@ fn run_phase(
                 project_settings,
             )?;
             runtime_cleanup.track(state.project_runtime_dir().map(Path::to_path_buf));
-            let (playback_rate, frames_per_second) = if proxy_control {
-                (Rational::FPS_24, 24_u64)
-            } else {
-                (Rational::FPS_60, 60_u64)
-            };
+            let playback_rate = settings.frame_rate;
+            let frames_per_second = u64::try_from(playback_rate.num)?;
             let export_grace_seconds = if settings.phases == LocalMediaSmokePhases::PlaybackOnly {
                 0
             } else if proxy_control {
@@ -903,6 +903,15 @@ fn author(
     composition: LocalSmokeComposition,
 ) -> anyhow::Result<()> {
     let LocalSmokeComposition { proxy_control, segment_count, video_layers } = composition;
+    let frame_rate = state.active_sequence().context("Sequence")?.settings.frame_rate;
+    ensure!(
+        frame_rate.den == 1 && frame_rate.num > 0,
+        "local Timeline requires integer fps"
+    );
+    let frames_per_segment = frame_rate
+        .num
+        .checked_mul(i64::try_from(TIMELINE_SEGMENT_SECONDS)?)
+        .context("Timeline segment extent overflow")?;
     let import_paths = if proxy_control {
         vec![
             paths[0].clone(),
@@ -1032,7 +1041,6 @@ fn author(
     // Repeat genuine two-second source contributions far enough to cover the
     // full observation plus independent-Export completion grace and recovery
     // seek displacement. The final segment is the terminal guard authority.
-    let frames_per_segment = if proxy_control { 48 } else { 120 };
     for ordinal in 0..segment_count {
         ensure!(
             Instant::now() < deadline,
@@ -1278,6 +1286,7 @@ mod tests {
         LocalMediaSmokeSettings {
             phase_seconds,
             resolution: Resolution { width: 1920, height: 1080 },
+            frame_rate: Rational::FPS_60,
             phases: LocalMediaSmokePhases::All,
             video_layers: 2,
         }
