@@ -91,6 +91,18 @@ pub enum EffectExecutionError {
     /// A custom processor returned an error or panicked without committing its staged pixels.
     #[error("custom effect processor `{key}` failed: {reason}")]
     CustomProcessorFailed { key: String, reason: String },
+    /// The invocation could not acquire its working grant; the plugin remains available.
+    #[error(
+        "custom effect processor `{key}` requires {required_bytes} bytes; grant is {budget_bytes}"
+    )]
+    CustomProcessorBudgetExceeded {
+        /// Exact compiled processor definition.
+        key: String,
+        /// Bytes required at the rejected working admission stage.
+        required_bytes: usize,
+        /// Applicable caller-owned byte grant for that admission stage.
+        budget_bytes: usize,
+    },
     /// The owning scheduler stopped a custom invocation without quarantining it.
     #[error("custom effect processor invocation stopped: {reason:?}")]
     CustomProcessorStopped {
@@ -832,6 +844,15 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                     &mut processor,
                 )?;
                 let supported = if matches!(op, EffectRenderOp::Custom { .. }) {
+                    let caller_owned_bytes = outputs
+                        .values()
+                        .chain(buffer_pool.iter())
+                        .chain(std::iter::once(&source))
+                        .fold(0usize, |bytes, buffer| {
+                            bytes.saturating_add(
+                                buffer.capacity().saturating_mul(std::mem::size_of::<[f32; 4]>()),
+                            )
+                        });
                     apply_custom_render_op_f32(
                         &mut source,
                         width,
@@ -839,6 +860,7 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                         op,
                         frame_seed,
                         Some(session),
+                        caller_owned_bytes,
                         &mut crate::EffectProcessorControl::uncancelled(),
                     )
                     .map_err(EffectFloatExecutionError::CustomProcessor)?;
@@ -2783,6 +2805,7 @@ mod tests {
                 &op,
                 0,
                 None,
+                16,
                 &mut crate::EffectProcessorControl::uncancelled()
             ),
             Err(EffectExecutionError::CustomProcessorFailed { .. })
@@ -2814,6 +2837,7 @@ mod tests {
                 &op,
                 0,
                 None,
+                16,
                 &mut crate::EffectProcessorControl::uncancelled()
             ),
             Err(EffectExecutionError::CustomProcessorFailed { .. })

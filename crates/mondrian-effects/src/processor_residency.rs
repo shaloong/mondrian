@@ -93,6 +93,18 @@ pub trait EffectFloatProcessorFactory: std::fmt::Debug + Send + Sync {
     ) -> Result<Box<dyn EffectFloatProcessorInstance>>;
 }
 
+/// Distinguish resource-policy denial from processor execution faults.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum FloatProcessorError {
+    #[error("processor requires {required_bytes} bytes; available grant is {budget_bytes}")]
+    Budget {
+        required_bytes: usize,
+        budget_bytes: usize,
+    },
+    #[error(transparent)]
+    Processor(#[from] MondrianError),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ResourceKey {
     request: EffectFloatProcessorPreparation,
@@ -130,6 +142,12 @@ impl FloatProcessorResidency {
         }
     }
 
+    pub(crate) fn trim_working(&mut self, available_bytes: usize) {
+        while self.bytes > available_bytes {
+            self.evict_oldest();
+        }
+    }
+
     fn evict_oldest(&mut self) {
         if let Some((_, bytes, _)) = self.entries.pop_front() {
             self.bytes -= bytes;
@@ -148,20 +166,22 @@ impl FloatProcessorResidency {
         revision: u64,
         max_instances: usize,
         max_bytes: usize,
-        max_working_bytes: usize,
+        available_working_bytes: usize,
         pixels: &mut Vec<[f32; 4]>,
         params: &serde_json::Value,
         frame_seed: i64,
         control: &mut EffectProcessorControl<'_>,
-    ) -> Result<()> {
+    ) -> std::result::Result<usize, FloatProcessorError> {
         control.check()?;
         let count = (request.width as usize).checked_mul(request.height as usize);
         if request.width == 0 || request.height == 0 || count != Some(pixels.len()) {
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "effect_processor_frame".to_owned(),
                 reason: "processor frame extent does not match its pixels".to_owned(),
-            });
+            }
+            .into());
         }
+        self.trim(max_instances, max_bytes);
         let key = ResourceKey { request, revision };
         // Dimension/revision changes retire this occurrence's obsolete worker.
         let mut index = 0;
@@ -181,34 +201,34 @@ impl FloatProcessorResidency {
             .iter()
             .position(|entry| entry.0 == key)
             .and_then(|index| self.entries.remove(index));
-        let (charge, mut instance) = if let Some((_, charge, instance)) = cached {
+        let (charge, cached_instance) = if let Some((_, charge, instance)) = cached {
             self.bytes -= charge;
-            (charge, instance)
+            (charge, Some(instance))
         } else {
-            let charge = factory.resident_bytes(request)?;
-            if charge > max_working_bytes || (max_instances > 0 && charge > max_bytes) {
-                return Err(MondrianError::WorkflowStepFailed {
-                    step_id: "effect_processor_budget".to_owned(),
-                    reason: "processor resident charge exceeds the execution grant".to_owned(),
-                });
-            }
-            // Retire old workers before allocating a replacement.
-            while !self.entries.is_empty()
-                && (self.entries.len() >= max_instances
-                    || charge > max_bytes.saturating_sub(self.bytes))
-            {
-                self.evict_oldest();
-            }
-            (charge, factory.prepare(request, control)?)
+            (factory.resident_bytes(request)?, None)
         };
-        // An error or unwind drops the removed instance; damaged state cannot
-        // survive into the next call. The caller stages pixels atomically.
-        if charge > max_working_bytes {
-            return Err(MondrianError::WorkflowStepFailed {
-                step_id: "effect_processor_budget".to_owned(),
-                reason: "processor resident charge exceeds the execution grant".to_owned(),
+        if charge > available_working_bytes {
+            return Err(FloatProcessorError::Budget {
+                required_bytes: charge,
+                budget_bytes: available_working_bytes,
             });
         }
+        // Optional residency cannot reject an otherwise admitted invocation.
+        let retain = max_instances > 0 && charge <= max_bytes;
+        while !self.entries.is_empty()
+            && (self.bytes > available_working_bytes - charge
+                || (retain
+                    && (self.entries.len() >= max_instances || self.bytes > max_bytes - charge)))
+        {
+            self.evict_oldest();
+        }
+        let peak_bytes = self.bytes + charge;
+        // Eviction precedes native allocation. Resident siblings and this active
+        // instance share the caller's exact remaining working grant.
+        let mut instance = match cached_instance {
+            Some(instance) => instance,
+            None => factory.prepare(request, control)?,
+        };
         let pixel_count = pixels.len();
         control.check()?;
         instance.process(pixels, params, frame_seed, control)?;
@@ -217,13 +237,14 @@ impl FloatProcessorResidency {
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "effect_processor_frame".to_owned(),
                 reason: "processor changed the pixel count".to_owned(),
-            });
+            }
+            .into());
         }
-        if max_instances > 0 {
+        if retain {
             self.bytes += charge;
             self.entries.push_back((key, charge, instance));
         }
-        Ok(())
+        Ok(peak_bytes)
     }
 }
 
@@ -415,6 +436,7 @@ mod tests {
                 &op,
                 0,
                 Some(&mut session),
+                16,
                 &mut EffectProcessorControl::uncancelled(),
             )
             .is_err());
@@ -470,6 +492,7 @@ mod tests {
                     op,
                     0,
                     Some(&mut session),
+                    16,
                     &mut control,
                 );
                 assert_eq!(
@@ -495,6 +518,7 @@ mod tests {
                     op,
                     0,
                     Some(&mut session),
+                    16,
                     &mut EffectProcessorControl::uncancelled(),
                 )
                 .expect("fresh invocation after cancel");
@@ -504,10 +528,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn heterogeneous_cpu_prefix_reuses_session_owned_factory_instances() {
-        let factory = Arc::new(ProbeFactory::default());
-        let graph = graph_with_tail(Arc::clone(&factory), true);
+    fn mixed_work(graph: Arc<CompiledEffectGraph>) -> PreparedHeterogeneousEffectWork {
         let cpu = EffectExecutionLaneId::new(0);
         let gpu = EffectExecutionLaneId::new(1);
         let environment = EffectExecutionEnvironment::new(
@@ -538,7 +559,7 @@ mod tests {
             EffectWorkingPrecision::Float32,
             EffectColorDomain::SceneLinearRgb,
         );
-        let work = PreparedHeterogeneousEffectWork::prepare(
+        PreparedHeterogeneousEffectWork::prepare(
             graph,
             &environment,
             EffectGraphExecutionRequest::new(
@@ -548,7 +569,14 @@ mod tests {
                 EffectGraphExecutionBudget::new(1024 * 1024, 1024 * 1024, 1024 * 1024, 128, 256),
             ),
         )
-        .expect("prepare mixed route");
+        .expect("prepare mixed route")
+    }
+
+    #[test]
+    fn heterogeneous_cpu_prefix_reuses_session_owned_factory_instances() {
+        let factory = Arc::new(ProbeFactory::default());
+        let graph = graph_with_tail(Arc::clone(&factory), true);
+        let work = mixed_work(graph);
         assert_eq!(work.cpu_nodes().len(), 2);
         assert_eq!(work.gpu_suffix().node_ids().len(), 1);
         let mut session = EffectExecutionSession::default();
@@ -660,10 +688,7 @@ mod tests {
                 return Err(EffectTemporalFrameProviderError::Canceled);
             }
             let roi = request.input_roi().region();
-            destination.resize(
-                (roi.width() * roi.height()) as usize,
-                [0.25, 0.5, 0.75, 1.0],
-            );
+            *destination = vec![[0.25, 0.5, 0.75, 1.0]; (roi.width() * roi.height()) as usize];
             Ok(())
         }
     }
@@ -694,6 +719,183 @@ mod tests {
             );
         }
         assert_eq!(factory.dropped.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn scalar_temporal_and_mixed_routes_share_pixel_and_processor_admission() {
+        for budget in [95, 96, 160] {
+            for route in ["scalar", "temporal", "mixed"] {
+                let factory = Arc::new(ProbeFactory::default());
+                let graph = graph_with_tail(Arc::clone(&factory), route == "mixed");
+                let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+                    max_working_bytes: budget,
+                    ..EffectExecutionSessionConfig::default()
+                });
+                session.bind_generation(1);
+                let input = [[0.25, 0.5, 0.75, 1.0]];
+                let result = match route {
+                    "scalar" => session
+                        .apply_compiled_rgba_f32(&input, 1, 1, &graph, 0)
+                        .map_err(|error| format!("{error:?}")),
+                    "temporal" => {
+                        let request = EffectTemporalExecutionRequest::new(
+                            1,
+                            EffectExecutionContinuity::Continuous,
+                            TimelineTime::ZERO,
+                            EffectFrameExtent::new(1, 1),
+                            EffectPixelRoi::new(0, 0, 1, 1),
+                            mondrian_core::ExecutionCancellationToken::new(),
+                        );
+                        session
+                            .execute_temporal_f32(&graph, &request, &mut ConstantProvider)
+                            .map(|output| {
+                                assert_eq!(output.peak_working_bytes(), budget);
+                                output.tile().pixels().to_vec()
+                            })
+                            .map_err(|error| format!("{error:?}"))
+                    }
+                    "mixed" => mixed_work(Arc::clone(&graph))
+                        .execute_cpu_prefix_uncancelled(
+                            &mut session,
+                            1,
+                            &input,
+                            0,
+                            WorkingColorSpace::LinearRec709,
+                        )
+                        .map(|output| output.boundary_values()[0].pixels().to_vec())
+                        .map_err(|error| format!("{error:?}")),
+                    _ => unreachable!(),
+                };
+                assert_eq!(input, [[0.25, 0.5, 0.75, 1.0]]);
+                if budget == 95 {
+                    assert!(result.is_err(), "{route}: {result:?}");
+                    assert_eq!(factory.created.load(Ordering::SeqCst), 0);
+                    for node in &graph.graph().nodes {
+                        if let EffectGraphNodeKind::UnaryEffect {
+                            op: EffectRenderOp::Custom { key, .. },
+                            ..
+                        } = &node.kind
+                        {
+                            assert!(!effect_plugin_runtime_status(key).expect("status").disabled);
+                        }
+                    }
+                } else {
+                    assert_eq!(result.expect(route), [[1.0, 0.5, 0.75, 1.0]]);
+                    let retained = if budget == 96 { 1 } else { 2 };
+                    assert_eq!(session.diagnostics().processor_instances, retained);
+                    assert_eq!(session.diagnostics().processor_bytes, retained * 64);
+                    assert_eq!(factory.created.load(Ordering::SeqCst), 2);
+                    assert_eq!(factory.dropped.load(Ordering::SeqCst), 2 - retained);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn working_budget_denial_preserves_definition_and_allows_reconfigured_retry() {
+        let factory = Arc::new(ProbeFactory::default());
+        let graph = graph(Arc::clone(&factory));
+        let op = graph
+            .graph()
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                EffectGraphNodeKind::UnaryEffect {
+                    op: op @ EffectRenderOp::Custom { .. }, ..
+                } => Some(op),
+                _ => None,
+            })
+            .expect("operation");
+        let EffectRenderOp::Custom { key, .. } = op else {
+            unreachable!()
+        };
+        let mut config = EffectExecutionSessionConfig {
+            max_working_bytes: 63,
+            ..EffectExecutionSessionConfig::default()
+        };
+        let mut session = EffectExecutionSession::new(config);
+        let original = vec![[0.25, 0.5, 0.75, 1.0]];
+        let mut pixels = original.clone();
+        assert_eq!(
+            crate::adjustment::apply_custom_render_op_f32(
+                &mut pixels,
+                1,
+                1,
+                op,
+                0,
+                Some(&mut session),
+                16,
+                &mut EffectProcessorControl::uncancelled(),
+            ),
+            Err(EffectExecutionError::CustomProcessorBudgetExceeded {
+                key: key.clone(),
+                required_bytes: 64,
+                budget_bytes: 31
+            })
+        );
+        assert_eq!(pixels, original);
+        assert_eq!(factory.created.load(Ordering::SeqCst), 0);
+        let status = effect_plugin_runtime_status(key).expect("runtime status");
+        assert!(!status.disabled);
+        assert_eq!(status.last_error, None);
+        config.max_working_bytes = 128;
+        session.reconfigure(config);
+        crate::adjustment::apply_custom_render_op_f32(
+            &mut pixels,
+            1,
+            1,
+            op,
+            0,
+            Some(&mut session),
+            16,
+            &mut EffectProcessorControl::uncancelled(),
+        )
+        .expect("retry with sufficient grant");
+        assert_eq!(pixels, [[0.5, 0.5, 0.75, 1.0]]);
+        assert_eq!(factory.created.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn oversized_optional_residency_bypasses_cache_and_active_charge_retires_siblings() {
+        let concrete = Arc::new(ProbeFactory::default());
+        let factory: Arc<dyn EffectFloatProcessorFactory> = concrete.clone();
+        let mut bank = FloatProcessorResidency::default();
+        let run = |bank: &mut FloatProcessorResidency, request, retention, working| {
+            bank.process(
+                &factory,
+                request,
+                1,
+                8,
+                retention,
+                working,
+                &mut vec![[0.25; 4]],
+                &serde_json::json!({}),
+                0,
+                &mut EffectProcessorControl::uncancelled(),
+            )
+            .expect("admitted process");
+        };
+        let first =
+            EffectFloatProcessorPreparation { effect_id: EffectId::new(), width: 1, height: 1 };
+        run(&mut bank, first, 63, 128);
+        assert_eq!(bank.counts(), (0, 0));
+        assert_eq!(concrete.created.load(Ordering::SeqCst), 1);
+        assert_eq!(concrete.dropped.load(Ordering::SeqCst), 1);
+        run(&mut bank, first, 256, 128);
+        let second = EffectFloatProcessorPreparation { effect_id: EffectId::new(), ..first };
+        run(&mut bank, second, 256, 128);
+        assert_eq!(bank.counts(), (2, 128));
+        let third = EffectFloatProcessorPreparation { effect_id: EffectId::new(), ..first };
+        run(&mut bank, third, 256, 128);
+        assert_eq!(bank.counts(), (2, 128));
+        assert_eq!(concrete.dropped.load(Ordering::SeqCst), 2);
+        assert!(!bank.entries.iter().any(|entry| entry.0.request == first));
+        // Reuse under a smaller active grant must evict the other resident
+        // before entering the cached instance, just like fresh preparation.
+        run(&mut bank, third, 256, 64);
+        assert_eq!(bank.counts(), (1, 64));
+        assert_eq!(concrete.created.load(Ordering::SeqCst), 4);
+        assert_eq!(concrete.dropped.load(Ordering::SeqCst), 3);
     }
 
     #[test]
@@ -757,8 +959,8 @@ mod tests {
                 request,
                 1,
                 1,
+                128,
                 63,
-                1024,
                 &mut pixels,
                 &serde_json::json!({}),
                 0,

@@ -311,6 +311,7 @@ pub(crate) fn apply_render_op(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_custom_render_op_f32(
     working: &mut Vec<[f32; 4]>,
     width: u32,
@@ -318,8 +319,9 @@ pub(crate) fn apply_custom_render_op_f32(
     op: &EffectRenderOp,
     frame_seed: i64,
     mut session: Option<&mut crate::EffectExecutionSession>,
+    caller_owned_bytes: usize,
     control: &mut crate::EffectProcessorControl<'_>,
-) -> Result<(), EffectExecutionError> {
+) -> Result<usize, EffectExecutionError> {
     let EffectRenderOp::Custom { key, params, processor, .. } = op else {
         return Err(EffectExecutionError::InvalidRenderParameter {
             op: "custom",
@@ -332,23 +334,47 @@ pub(crate) fn apply_custom_render_op_f32(
     control.check().map_err(|_| EffectExecutionError::CustomProcessorStopped {
         reason: control.stop_reason().unwrap_or(crate::EffectProcessorStopReason::Canceled),
     })?;
+    let available_working_bytes = if processor.float32_factory().is_some() {
+        if let Some(owner) = session.as_deref_mut() {
+            let staging_bytes = working.len().saturating_mul(std::mem::size_of::<[f32; 4]>());
+            let occupied = caller_owned_bytes.saturating_add(staging_bytes);
+            let limit = owner.max_working_bytes();
+            let available = limit.checked_sub(occupied).ok_or_else(|| {
+                EffectExecutionError::CustomProcessorBudgetExceeded {
+                    key: key.clone(),
+                    required_bytes: occupied,
+                    budget_bytes: limit,
+                }
+            })?;
+            // Make room before allocating atomic frame staging. The caller
+            // supplies every still-owned pixel/coverage allocation in its DAG.
+            owner.processors.trim_working(available);
+            available
+        } else {
+            0
+        }
+    } else {
+        usize::MAX
+    };
     let mut staged = working.clone();
     let result = catch_unwind(AssertUnwindSafe(|| {
         if let Some(callback) = processor.float32_processor() {
             callback(&mut staged, width, height, params, frame_seed)
+                .map(|()| 0)
+                .map_err(crate::processor_residency::FloatProcessorError::from)
         } else if let (Some(factory), Some(owner), Some(effect_id)) = (
             processor.float32_factory(),
             session.as_deref_mut(),
             processor.occurrence_id(),
         ) {
-            let (instances, bytes, working_bytes) = owner.processor_grant();
+            let (instances, bytes) = owner.processor_grant();
             owner.processors.process(
                 factory,
                 crate::EffectFloatProcessorPreparation { effect_id, width, height },
                 processor.revision(),
                 instances,
                 bytes,
-                working_bytes,
+                available_working_bytes,
                 &mut staged,
                 params,
                 frame_seed,
@@ -360,7 +386,8 @@ pub(crate) fn apply_custom_render_op_f32(
                 reason:
                     "reusable processor requires a compiler-bound occurrence and execution session"
                         .to_owned(),
-            })
+            }
+            .into())
         }
     }));
     if control.check().is_err() {
@@ -372,15 +399,23 @@ pub(crate) fn apply_custom_render_op_f32(
         });
     }
     match result {
-        Ok(Ok(())) if staged.len() == working.len() => {
+        Ok(Ok(processor_bytes)) if staged.len() == working.len() => {
             *working = staged;
-            Ok(())
+            Ok(processor_bytes)
         }
-        Ok(Ok(())) => {
+        Ok(Ok(_)) => {
             let reason = "custom render processor changed the pixel count".to_owned();
             processor.record_runtime_failure(reason.clone());
             Err(EffectExecutionError::CustomProcessorFailed { key: key.clone(), reason })
         }
+        Ok(Err(crate::processor_residency::FloatProcessorError::Budget {
+            required_bytes,
+            budget_bytes,
+        })) => Err(EffectExecutionError::CustomProcessorBudgetExceeded {
+            key: key.clone(),
+            required_bytes,
+            budget_bytes,
+        }),
         Ok(Err(error)) => {
             let reason = error.to_string();
             processor.record_runtime_failure(reason.clone());

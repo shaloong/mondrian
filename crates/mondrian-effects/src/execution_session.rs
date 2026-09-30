@@ -33,8 +33,9 @@ pub struct EffectExecutionSessionConfig {
     pub max_cache_entries: usize,
     /// Maximum aggregate pixel/topology logical bytes retained by the Session.
     pub max_cache_bytes: usize,
-    /// Maximum active bytes admitted by one temporal/ROI scalar execution,
-    /// including retained source coverage and final output residency.
+    /// Maximum active bytes admitted by temporal/ROI or reusable-processor
+    /// execution, including source coverage, owned rasters, atomic staging and
+    /// every resident/active processor during that invocation.
     pub max_working_bytes: usize,
     /// Maximum GPU lowering plans or deterministic blockers retained by the
     /// Session.
@@ -296,11 +297,10 @@ impl EffectExecutionSession {
         self.topologies.insert(topology);
     }
 
-    pub(crate) const fn processor_grant(&self) -> (usize, usize, usize) {
+    pub(crate) const fn processor_grant(&self) -> (usize, usize) {
         (
             self.config.max_processor_instances,
             self.config.max_processor_bytes,
-            self.config.max_working_bytes,
         )
     }
 

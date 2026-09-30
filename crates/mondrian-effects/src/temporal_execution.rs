@@ -1660,13 +1660,30 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                         };
                                         let mut control =
                                             crate::EffectProcessorControl::new(&mut checkpoint);
-                                        apply_custom_render_op_f32(
+                                        let owned_pixel_bytes = self
+                                            .outputs
+                                            .values()
+                                            .chain(std::iter::once(&output))
+                                            .fold(0usize, |bytes, buffer| {
+                                                bytes.saturating_add(
+                                                    buffer.capacity().saturating_mul(
+                                                        std::mem::size_of::<[f32; 4]>(),
+                                                    ),
+                                                )
+                                            });
+                                        let caller_owned_bytes = owned_pixel_bytes.saturating_add(
+                                            session
+                                                .max_working_bytes()
+                                                .saturating_sub(self.working.budget),
+                                        );
+                                        let processor_bytes = apply_custom_render_op_f32(
                                             &mut output,
                                             self.raster_region.frame_width(),
                                             self.raster_region.frame_height(),
                                             &op,
                                             frame_seed,
                                             Some(session),
+                                            caller_owned_bytes,
                                             &mut control,
                                         )
                                         .map_err(|error| match error {
@@ -1675,6 +1692,9 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                             } => EffectTemporalExecutionError::Canceled,
                                             other => EffectTemporalExecutionError::CustomProcessor(other),
                                         })?;
+                                        self.working.ensure_transient(
+                                            scratch_bytes.saturating_add(processor_bytes),
+                                        )?;
                                         temporal_cancellation_checkpoint(&cancellation)?;
                                         Ok(true)
                                     }

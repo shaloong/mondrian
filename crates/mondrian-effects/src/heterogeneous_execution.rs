@@ -2917,6 +2917,15 @@ fn execute_cpu_dag_prefix(
             | EffectGraphNodeKind::DomainEffect { op, .. } => {
                 let mut output = take_single_cpu_input(&mut inputs, dispatch.node)?;
                 let supported = if matches!(op, crate::EffectRenderOp::Custom { .. }) {
+                    let caller_owned_bytes = outputs
+                        .values()
+                        .chain(inputs.iter())
+                        .chain(std::iter::once(&output))
+                        .fold(0usize, |bytes, buffer| {
+                            bytes.saturating_add(
+                                buffer.capacity().saturating_mul(std::mem::size_of::<[f32; 4]>()),
+                            )
+                        });
                     let mut scheduler_error = None;
                     let result = {
                         let mut poll = || match checkpoint() {
@@ -2941,6 +2950,7 @@ fn execute_cpu_dag_prefix(
                             &op,
                             frame_seed,
                             Some(session),
+                            caller_owned_bytes,
                             &mut control,
                         )
                     };

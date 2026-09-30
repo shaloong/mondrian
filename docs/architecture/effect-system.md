@@ -1174,3 +1174,18 @@ runtime quarantine. The temporal executor returns its typed canceled result;
 the heterogeneous executor preserves the owner's stop reason and generation.
 An unsolicited processor `MondrianError::Cancelled` without an observed scheduler
 stop remains a processor failure rather than inventing a cancellation decision.
+
+Processor resource admission has a typed result separate from processor faults.
+Working-grant denial preserves pixels and definition availability, allowing
+retry after resource reconfiguration without quarantine. A processor larger
+than the optional residency cap executes once and is retired when it fits the
+active grant. Admission counts every resident sibling together with the active
+instance, evicts before preparation or cached-instance invocation, and never
+lets optional residency reduce supported execution. Scalar, temporal and
+heterogeneous executors provide still-owned raster bytes;
+the dispatcher subtracts them and its atomic staging frame before admission.
+Temporal dispatch also reserves coverage already deducted from its evaluator
+budget and reports the processor peak charge in its working-set evidence.
+Product retained-native grants remain closed until resource coordination and
+startup/whole-attempt admission are integrated; this per-dispatch contract alone
+does not claim a global process-memory cap.
