@@ -68,6 +68,7 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                 .with_message_id("menu-export"),
                 MenuItem::separator(),
                 command_menu_item("file.project_settings"),
+                command_menu_item("file.sequence_settings"),
                 MenuItem::separator(),
                 command_menu_item("file.close_project"),
             ],
