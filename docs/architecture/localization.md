@@ -145,6 +145,9 @@ snapshot. The projected Mask shape is a typed rectangle/ellipse/path value;
 the path editing hint and shape actions never branch on a translated label.
 Tracking progress formats both counts through Fluent while native failure
 details remain diagnostic evidence attached to a localized status prefix.
+The Node Graph projection receives the same locale snapshot for source/output
+nodes, built-in effect names, and its empty-state and selected-Clip summaries;
+node and Effect IDs remain independent of translated labels.
 Inspector audio Component mapping follows the same boundary: the model's
 diagnostics and the widget's policy controls share the panel locale, while
 channel layout identities and edit addresses remain typed author data.

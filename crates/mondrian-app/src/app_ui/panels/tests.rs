@@ -945,6 +945,14 @@ fn node_graph_without_clip_selection_uses_disabled_empty_state() {
     let panel = node_graph_panel(&model);
     assert!(!panel.is_enabled());
     assert!(!panel.can_focus());
+
+    let english = Localizer::new(AppUiLocale::EnUs).expect("bundled English catalog");
+    let english_model = NodeGraphPanelModel::from_app_state_with_localizer(&state, &english);
+    assert_eq!(english_model.title, "Node Graph");
+    assert_eq!(
+        english_model.subtitle,
+        "Select a clip to inspect its render chain"
+    );
 }
 
 #[test]

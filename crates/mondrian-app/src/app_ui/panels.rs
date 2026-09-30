@@ -413,7 +413,10 @@ impl AppUiPanelModels {
             inspector: InspectorPanelModel::from_app_state(state, inspector_localizer),
             mixer: AudioMixerPanelModel::from_app_state(state, inspector_localizer),
             export: ExportPanelModel::from_app_state(state),
-            node_graph: NodeGraphPanelModel::from_app_state(state),
+            node_graph: NodeGraphPanelModel::from_app_state_with_localizer(
+                state,
+                inspector_localizer,
+            ),
         }
     }
 
@@ -2908,24 +2911,32 @@ pub enum NodeGraphTarget {
 
 impl NodeGraphPanelModel {
     pub fn from_app_state(state: &AppState) -> Self {
+        let localizer =
+            Localizer::new(AppUiLocale::ZhCn).expect("bundled Chinese catalog must be valid");
+        Self::from_app_state_with_localizer(state, &localizer)
+    }
+
+    fn from_app_state_with_localizer(state: &AppState, localizer: &Localizer) -> Self {
         let Some(sequence) = state.active_sequence() else {
-            return Self::empty();
+            return Self::empty_with_localizer(localizer);
         };
         let Some(selection) = state.primary_selected_clip() else {
-            return Self::empty();
+            return Self::empty_with_localizer(localizer);
         };
         let Some((selected_clip, clip)) = clip_for_selection(sequence, &selection) else {
-            return Self::empty();
+            return Self::empty_with_localizer(localizer);
         };
 
         let clip_label = clip.label.clone().unwrap_or_else(|| default_clip_label(clip));
         let selected_effect_id = state.primary_selected_effect().and_then(|selection| {
             (selection.clip.clip_id == selected_clip.clip_id).then_some(selection.effect_id)
         });
-        let mut nodes = vec![NodeGraphNode::new("source", "源")
-            .with_subtitle(clip_source_subtitle(clip))
-            .with_accent(current_theme().colors.node_source)
-            .disabled(clip.is_disabled)];
+        let mut nodes = vec![
+            NodeGraphNode::new("source", localizer.text("node-graph-source"))
+                .with_subtitle(localizer.text(clip_source_message_id(clip)))
+                .with_accent(current_theme().colors.node_source)
+                .disabled(clip.is_disabled),
+        ];
         let mut node_targets = vec![NodeGraphNodeTarget {
             node_id: "source".to_owned(),
             target: NodeGraphTarget::Clip,
@@ -2936,14 +2947,17 @@ impl NodeGraphPanelModel {
         for (index, effect) in clip.effects.iter().enumerate() {
             let id = format!("effect:{}", effect.id);
             nodes.push(
-                NodeGraphNode::new(id.clone(), effect_display_name(&effect.effect_type))
-                    .with_subtitle(format!(
-                        "{} {}",
-                        effect_badge(&effect.effect_type),
-                        index + 1
-                    ))
-                    .with_accent(effect_node_accent(&effect.effect_type))
-                    .disabled(!effect.is_enabled),
+                NodeGraphNode::new(
+                    id.clone(),
+                    localized_effect_name(&effect.effect_type, Some(localizer)),
+                )
+                .with_subtitle(format!(
+                    "{} {}",
+                    effect_badge(&effect.effect_type),
+                    index + 1
+                ))
+                .with_accent(effect_node_accent(&effect.effect_type))
+                .disabled(!effect.is_enabled),
             );
             node_targets.push(NodeGraphNodeTarget {
                 node_id: id.clone(),
@@ -2954,8 +2968,8 @@ impl NodeGraphPanelModel {
         }
 
         nodes.push(
-            NodeGraphNode::new("output", "输出")
-                .with_subtitle("合成")
+            NodeGraphNode::new("output", localizer.text("node-graph-output"))
+                .with_subtitle(localizer.text("node-graph-composite"))
                 .with_accent(current_theme().colors.node_output),
         );
         node_targets.push(NodeGraphNodeTarget {
@@ -2965,8 +2979,16 @@ impl NodeGraphPanelModel {
         edges.push(NodeGraphEdge::new(previous_id, "output"));
 
         Self {
-            title: "节点图".to_owned(),
-            subtitle: format!("{clip_label} / {} 个效果", clip.effects.len()),
+            title: localizer.text("node-graph-title"),
+            subtitle: localizer.format(
+                "node-graph-clip-effects",
+                Some(&{
+                    let mut args = fluent_bundle::FluentArgs::new();
+                    args.set("clip", clip_label.as_str());
+                    args.set("count", clip.effects.len() as i64);
+                    args
+                }),
+            ),
             selected_clip: Some(selected_clip),
             nodes,
             edges,
@@ -2978,9 +3000,15 @@ impl NodeGraphPanelModel {
     }
 
     pub fn empty() -> Self {
+        let localizer =
+            Localizer::new(AppUiLocale::ZhCn).expect("bundled Chinese catalog must be valid");
+        Self::empty_with_localizer(&localizer)
+    }
+
+    fn empty_with_localizer(localizer: &Localizer) -> Self {
         Self {
-            title: "节点图".to_owned(),
-            subtitle: "选择剪辑以检查渲染链".to_owned(),
+            title: localizer.text("node-graph-title"),
+            subtitle: localizer.text("node-graph-select-clip"),
             selected_clip: None,
             nodes: Vec::new(),
             edges: Vec::new(),
@@ -4416,15 +4444,15 @@ fn effect_node_accent(effect_type: &EffectType) -> Color {
     }
 }
 
-fn clip_source_subtitle(clip: &Clip) -> &'static str {
+fn clip_source_message_id(clip: &Clip) -> &'static str {
     if clip.is_adjustment_layer() {
-        "Adjustment"
+        "node-graph-adjustment"
     } else if clip.is_nested_sequence() {
-        "Nested Sequence"
+        "node-graph-nested-sequence"
     } else if clip.is_solid_color() {
-        "Solid Color"
+        "node-graph-solid-color"
     } else {
-        "Media Clip"
+        "node-graph-media-clip"
     }
 }
 
