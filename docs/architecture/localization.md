@@ -148,6 +148,14 @@ details remain diagnostic evidence attached to a localized status prefix.
 The Node Graph projection receives the same locale snapshot for source/output
 nodes, built-in effect names, and its empty-state and selected-Clip summaries;
 node and Effect IDs remain independent of translated labels.
+The Export workspace now projects its main controls, queue state, readiness,
+Dynamic HDR intent, ANC/PSE guidance, and frame/packet summaries from the
+captured locale. The Export draft, Sequence delivery intent, and queued jobs
+retain typed values and diagnostic evidence; changing locale only rebuilds
+display text. Codec/profile names and exact regulatory identifiers stay as
+technical identities. The remaining option labels and raw provider diagnostics
+need the same projection before the Export workspace can be considered fully
+localized.
 Inspector audio Component mapping follows the same boundary: the model's
 diagnostics and the widget's policy controls share the panel locale, while
 channel layout identities and edit addresses remain typed author data.

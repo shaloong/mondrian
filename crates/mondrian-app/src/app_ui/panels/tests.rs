@@ -1098,6 +1098,29 @@ fn export_panel_model_reads_app_export_draft() {
 }
 
 #[test]
+fn export_projection_uses_locale_without_changing_authoring_state() {
+    let mut state = AppState::new();
+    let sequence = Sequence::new("Delivery");
+    let sequence_id = sequence.id;
+    state.test_set_sequence(Some(sequence));
+    state.set_export_draft_sequence_id(Some(sequence_id));
+    let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+    let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+
+    let en_model = ExportPanelModel::from_app_state_with_localizer(&state, &english);
+    let zh_model = ExportPanelModel::from_app_state_with_localizer(&state, &chinese);
+    assert_eq!(
+        en_model.readiness_status(),
+        "Choose an output path to add this job to the queue"
+    );
+    assert_eq!(zh_model.readiness_status(), "选择输出路径后即可加入队列");
+    assert_eq!(en_model.dynamic_hdr.intent_label, "Omit Dynamic HDR");
+    assert_eq!(zh_model.dynamic_hdr.intent_label, "省略 Dynamic HDR");
+    assert_eq!(en_model.selected_sequence_id, zh_model.selected_sequence_id);
+    assert_eq!(en_model.preset, zh_model.preset);
+}
+
+#[test]
 fn export_ancillary_import_freezes_selection_and_preflights_format_and_range() {
     let mut state = AppState::new();
     let mut sequence = Sequence::new("ANC delivery");
@@ -1535,10 +1558,12 @@ fn export_panel_formats_structured_queue_status_and_diagnostics() {
         fraction: 0.82,
         detail: ExportProgressDetail::None,
     };
+    let localizer = Localizer::new(AppUiLocale::EnUs).expect("bundled English catalog");
     assert_eq!(
         export_job_status_label(
             &JobStatus::Running { phase: ExportProgressPhase::Encoding },
             progress,
+            &localizer,
         ),
         "Encoding"
     );
@@ -1550,6 +1575,7 @@ fn export_panel_formats_structured_queue_status_and_diagnostics() {
                 fraction: 0.9,
                 detail: ExportProgressDetail::None,
             },
+            &localizer,
         ),
         "Packaging"
     );
@@ -1560,8 +1586,9 @@ fn export_panel_formats_structured_queue_status_and_diagnostics() {
                 detail: "disk full".to_owned(),
             }),
             progress,
+            &localizer,
         ),
-        "Failed: disk full"
+        "Failed: \u{2068}disk full\u{2069}"
     );
     let color_diagnostics =
         export_job_color_diagnostics_label(diagnostics).expect("encoding color diagnostics");
@@ -3707,10 +3734,7 @@ fn app_state_models_map_sequence_selection_and_basic_inspector_values() {
             },
         ]
     );
-    assert_eq!(
-        models.node_graph.nodes[1].title,
-        effect_display_name(&EffectType::GaussianBlur)
-    );
+    assert_eq!(models.node_graph.nodes[1].title, "高斯模糊");
     assert!(models.node_graph.nodes[1].disabled);
     assert_eq!(models.node_graph.nodes[2].id, "output");
     assert_eq!(models.node_graph.nodes[2].accent, Some(colors.node_output));

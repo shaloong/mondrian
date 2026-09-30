@@ -412,7 +412,7 @@ impl AppUiPanelModels {
             timeline: TimelinePanelModel::from_app_state(state),
             inspector: InspectorPanelModel::from_app_state(state, inspector_localizer),
             mixer: AudioMixerPanelModel::from_app_state(state, inspector_localizer),
-            export: ExportPanelModel::from_app_state(state),
+            export: ExportPanelModel::from_app_state_with_localizer(state, inspector_localizer),
             node_graph: NodeGraphPanelModel::from_app_state_with_localizer(
                 state,
                 inspector_localizer,
@@ -2807,6 +2807,7 @@ impl InspectorPanelModel {
 /// 导出 panel data independent from a concrete widget tree.
 #[derive(Debug, Clone)]
 pub struct ExportPanelModel {
+    locale: AppUiLocale,
     pub queue_count: usize,
     pub presets: Vec<ExportPresetOptionModel>,
     pub selected_preset_idx: usize,
@@ -3020,6 +3021,12 @@ impl NodeGraphPanelModel {
 
 impl ExportPanelModel {
     pub fn from_app_state(state: &AppState) -> Self {
+        let localizer =
+            Localizer::new(AppUiLocale::ZhCn).expect("bundled Chinese catalog must be valid");
+        Self::from_app_state_with_localizer(state, &localizer)
+    }
+
+    fn from_app_state_with_localizer(state: &AppState, localizer: &Localizer) -> Self {
         let presets = builtin_export_presets()
             .into_iter()
             .map(|option| ExportPresetOptionModel {
@@ -3057,12 +3064,12 @@ impl ExportPanelModel {
             .and_then(|id| sequence_snapshots.iter().find(|sequence| sequence.id == id));
         let dynamic_hdr = selected_sequence_snapshot.map_or_else(
             || ExportDynamicHdrModel {
-                intent_label: "没有序列".to_owned(),
-                readiness: "选择一个序列以配置 Dynamic HDR 交付".to_owned(),
+                intent_label: localizer.text("export-no-sequence"),
+                readiness: localizer.text("export-hdr-select-sequence"),
                 program_count: 0,
                 intent_actions: Vec::new(),
             },
-            |sequence| export_dynamic_hdr_model(state, sequence),
+            |sequence| export_dynamic_hdr_model(state, sequence, localizer),
         );
         let delivery_error = selected_sequence_id
             .and_then(|id| sequence_snapshots.iter().find(|sequence| sequence.id == id))
@@ -3078,7 +3085,7 @@ impl ExportPanelModel {
         let ancillary = state.export_draft.ancillary.clone();
         let ancillary_error = ancillary.as_ref().and_then(|item| {
             selected_sequence_snapshot.map_or_else(
-                || Some("选择序列后才能绑定 ANC 帧范围".to_owned()),
+                || Some(localizer.text("export-anc-select-sequence")),
                 |sequence| {
                     mondrian_export::queue::check_ancillary_export_selection(
                         &item.program,
@@ -3102,7 +3109,7 @@ impl ExportPanelModel {
             .map(|job| ExportJobModel {
                 id: job.id,
                 title: export_job_title(job.output_path.as_path()),
-                status: export_job_status_label(&job.status, job.progress),
+                status: export_job_status_label(&job.status, job.progress, localizer),
                 color_diagnostics: export_job_color_diagnostics_label(job.diagnostics.color),
                 broadcast_qc: export_job_broadcast_qc_label(job.diagnostics.broadcast_qc.as_ref()),
                 progress_percent: (job.progress.fraction.clamp(0.0, 1.0) * 100.0).round() as u8,
@@ -3112,6 +3119,7 @@ impl ExportPanelModel {
             .collect();
 
         Self {
+            locale: localizer.locale(),
             queue_count,
             presets,
             selected_preset_idx,
@@ -3153,22 +3161,23 @@ impl ExportPanelModel {
     }
 
     fn readiness_status(&self) -> String {
+        let localizer = Localizer::new(self.locale).expect("bundled UI catalogs must be valid");
         if self.selected_sequence_id.is_none() {
-            "导出前请打开或选择序列".to_owned()
+            localizer.text("export-status-select-sequence")
         } else if self.selected_preset().is_none() {
-            "没有可用导出预设".to_owned()
+            localizer.text("export-status-no-presets")
         } else if let Some(error) = &self.delivery_error {
-            format!("交付设置不兼容：{error}")
+            localizer.format_text("export-status-incompatible", "error", error)
         } else if let Some(error) = &self.ancillary_error {
-            format!("ANC 预检失败：{error}")
+            localizer.format_text("export-status-anc-failed", "error", error)
         } else if let Some((message, true)) = &self.status {
-            format!("错误：{message}")
+            localizer.format_text("export-status-error", "error", message)
         } else if self.output_path.trim().is_empty() {
-            "选择输出路径后即可加入队列".to_owned()
+            localizer.text("export-status-select-output")
         } else if let Some((message, false)) = &self.status {
             message.clone()
         } else {
-            "就绪".to_owned()
+            localizer.text("export-status-ready")
         }
     }
 
@@ -3203,52 +3212,54 @@ impl ExportPanelModel {
     }
 }
 
-fn export_dynamic_hdr_model(state: &AppState, sequence: &Sequence) -> ExportDynamicHdrModel {
+fn export_dynamic_hdr_model(
+    state: &AppState,
+    sequence: &Sequence,
+    localizer: &Localizer,
+) -> ExportDynamicHdrModel {
     let intent_label = match sequence.dynamic_hdr.delivery_intent() {
-        DynamicHdrDeliveryIntent::Omit => "省略 Dynamic HDR".to_owned(),
+        DynamicHdrDeliveryIntent::Omit => localizer.text("export-hdr-omit"),
         DynamicHdrDeliveryIntent::PreserveSourceExact { family } => {
-            format!("逐字节保留 {}", family.diagnostic_label())
+            localizer.format_text("export-hdr-preserve", "family", family.diagnostic_label())
         }
         DynamicHdrDeliveryIntent::Remake { program_id } => sequence
             .dynamic_hdr
             .program(*program_id)
-            .map(|program| format!("重制：{}", program.name))
-            .unwrap_or_else(|| "重制：缺失 Program".to_owned()),
+            .map(|program| localizer.format_text("export-hdr-remake", "program", &program.name))
+            .unwrap_or_else(|| localizer.text("export-hdr-missing-program")),
     };
     let active = state.active_sequence_id() == Some(sequence.id);
     let readiness = match sequence.dynamic_hdr.delivery_intent() {
-        DynamicHdrDeliveryIntent::Omit => {
-            "已明确省略动态元数据；静态 HDR 仍由序列交付策略独立控制".to_owned()
-        }
-        DynamicHdrDeliveryIntent::PreserveSourceExact { family } => format!(
-            "仅允许完整源文件逐字节复制并复探测 {}；剪辑、重封装或渲染均不回退",
-            family.diagnostic_label()
+        DynamicHdrDeliveryIntent::Omit => localizer.text("export-hdr-omit-readiness"),
+        DynamicHdrDeliveryIntent::PreserveSourceExact { family } => localizer.format_text(
+            "export-hdr-preserve-readiness",
+            "family",
+            family.diagnostic_label(),
         ),
         DynamicHdrDeliveryIntent::Remake { program_id } => sequence
             .dynamic_hdr
             .program(*program_id)
             .map(|program| {
-                format!(
-                    "{} / {} 个 shot；需合格且已授权的生成、独立验证和人工 HDR/SDR QC Adapter",
-                    program.standard.diagnostic_label(),
-                    program.shots.len()
-                )
+                let mut args = fluent_bundle::FluentArgs::new();
+                args.set("standard", program.standard.diagnostic_label());
+                args.set("shots", program.shots.len() as i64);
+                localizer.format("export-hdr-remake-readiness", Some(&args))
             })
-            .unwrap_or_else(|| "引用的 Dynamic HDR Program 已缺失，交付将阻断".to_owned()),
+            .unwrap_or_else(|| localizer.text("export-hdr-missing-readiness")),
     };
     let mut alternatives = vec![
         (
-            "省略 Dynamic HDR".to_owned(),
+            localizer.text("export-hdr-omit"),
             DynamicHdrDeliveryIntent::Omit,
         ),
         (
-            "逐字节保留 ST 2094-40 App #4".to_owned(),
+            localizer.text("export-hdr-preserve-st2094"),
             DynamicHdrDeliveryIntent::PreserveSourceExact {
                 family: DynamicHdrMetadataFamily::St2094_40Application4,
             },
         ),
         (
-            "逐字节保留 Dolby Vision 元数据".to_owned(),
+            localizer.text("export-hdr-preserve-dolby"),
             DynamicHdrDeliveryIntent::PreserveSourceExact {
                 family: DynamicHdrMetadataFamily::DolbyVision,
             },
@@ -3256,7 +3267,7 @@ fn export_dynamic_hdr_model(state: &AppState, sequence: &Sequence) -> ExportDyna
     ];
     alternatives.extend(sequence.dynamic_hdr.programs().iter().map(|program| {
         (
-            format!("重制：{}", program.name),
+            localizer.format_text("export-hdr-remake", "program", &program.name),
             DynamicHdrDeliveryIntent::Remake { program_id: program.id },
         )
     }));
@@ -3280,7 +3291,7 @@ fn export_dynamic_hdr_model(state: &AppState, sequence: &Sequence) -> ExportDyna
     let readiness = if active {
         readiness
     } else {
-        format!("{readiness}；先打开此序列才能修改交付意图")
+        localizer.format_text("export-hdr-open-sequence", "readiness", &readiness)
     };
     ExportDynamicHdrModel {
         intent_label,
@@ -3534,9 +3545,14 @@ fn panel_content_for_slot(kind: PanelKind, models: &AppUiPanelModels) -> Box<dyn
         PanelKind::Viewer => Box::new(viewer_panel(&models.viewer)),
         PanelKind::Scopes => Box::new(scopes_panel(&models.scopes)),
         PanelKind::Timeline => Box::new(timeline_panel(&models.timeline)),
-        PanelKind::Export => Box::new(ScrollView::new(Some(Box::new(export_panel(
-            &models.export,
-        ))))),
+        PanelKind::Export => {
+            let localizer =
+                Localizer::new(models.locale).expect("bundled UI catalogs must be valid");
+            Box::new(ScrollView::new(Some(Box::new(export_panel(
+                &models.export,
+                &localizer,
+            )))))
+        }
         PanelKind::Inspector => {
             let localizer =
                 Localizer::new(models.locale).expect("bundled UI catalogs must be valid");
@@ -6022,15 +6038,15 @@ fn export_professional_metadata_action(
     export_preset_update_action(preset)
 }
 
-fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
+fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPanel {
     let mut preset_label = model
         .presets
         .get(model.selected_preset_idx)
         .or_else(|| model.presets.first())
         .map(|option| option.label.clone())
-        .unwrap_or_else(|| "No presets".to_owned());
+        .unwrap_or_else(|| localizer.text("export-status-no-presets"));
     if model.preset_customized {
-        preset_label.push_str("（已修改）");
+        preset_label.push_str(&localizer.text("export-preset-modified"));
     }
     let preset_items = model
         .presets
@@ -6057,23 +6073,23 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
     });
     let container_dropdown = Dropdown::new(
         media
-            .map(|media| export_container_label(&media.container))
-            .or(professional_container_label)
-            .unwrap_or("图像序列目录"),
+            .map(|media| export_container_label(&media.container).to_owned())
+            .or_else(|| professional_container_label.map(str::to_owned))
+            .unwrap_or_else(|| localizer.text("export-image-sequence-directory")),
         export_container_items(&model.preset),
     )
     .with_max_visible_items(6)
     .enabled(media.is_some() && professional.is_none());
     let video_codec_dropdown = Dropdown::new(
         media
-            .map(|media| export_video_codec_label(&media.video))
-            .or(professional_video_label)
+            .map(|media| export_video_codec_label(&media.video).to_owned())
+            .or_else(|| professional_video_label.map(str::to_owned))
             .unwrap_or_else(|| {
                 model
                     .preset
                     .image_sequence_format()
-                    .map(export_image_sequence_format_label)
-                    .unwrap_or("无视频")
+                    .map(|format| export_image_sequence_format_label(format).to_owned())
+                    .unwrap_or_else(|| localizer.text("export-no-video"))
             }),
         export_video_codec_items(&model.preset),
     )
@@ -6105,7 +6121,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
     .with_max_visible_items(3)
     .enabled(professional.is_none());
     let color_target_space_label = match model.preset.color_target {
-        ExportColorTarget::FollowSequence => "由序列 Program Output 决定".to_owned(),
+        ExportColorTarget::FollowSequence => localizer.text("export-follow-sequence-output"),
         ExportColorTarget::RenderingView(color_space)
         | ExportColorTarget::Colorimetric(color_space) => color_space_label(color_space).to_owned(),
     };
@@ -6135,7 +6151,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
     .enabled(professional.is_none());
     let legalizer_preset = model.preset.clone();
     let legalizer_checkbox = Checkbox::new(
-        "限制到合法 RGB 信号范围",
+        localizer.text("export-legal-rgb-range"),
         model.preset.legalizer == SignalLegalizer::ClampRgb,
     )
     .enabled(
@@ -6156,9 +6172,9 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
     });
     let audio_codec_dropdown = Dropdown::new(
         media
-            .map(|media| export_audio_codec_label(&media.audio))
-            .or(professional.map(|_| "PCM 24-bit / 48 kHz / stereo"))
-            .unwrap_or("无音频（图像序列）"),
+            .map(|media| export_audio_codec_label(&media.audio).to_owned())
+            .or_else(|| professional.map(|_| "PCM 24-bit / 48 kHz / stereo".to_owned()))
+            .unwrap_or_else(|| localizer.text("export-no-audio-image-sequence")),
         export_audio_codec_items(&model.preset),
     )
     .with_max_visible_items(4)
@@ -6166,7 +6182,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
     let metadata = professional.map(|delivery| delivery.metadata.clone());
     let metadata_enabled = metadata.is_some();
     let title_preset = model.preset.clone();
-    let title_input = TextInput::new("交付标题")
+    let title_input = TextInput::new(localizer.text("export-delivery-title"))
         .with_text(metadata.as_ref().map(|value| value.title.clone()).unwrap_or_default())
         .enabled(metadata_enabled)
         .on_change(move |value| {
@@ -6177,7 +6193,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
             )
         });
     let issuer_preset = model.preset.clone();
-    let issuer_input = TextInput::new("发行方")
+    let issuer_input = TextInput::new(localizer.text("export-issuer"))
         .with_text(metadata.as_ref().map(|value| value.issuer.clone()).unwrap_or_default())
         .enabled(metadata_enabled)
         .on_change(move |value| {
@@ -6188,7 +6204,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
             )
         });
     let creator_preset = model.preset.clone();
-    let creator_input = TextInput::new("创建系统")
+    let creator_input = TextInput::new(localizer.text("export-creator-system"))
         .with_text(metadata.as_ref().map(|value| value.creator.clone()).unwrap_or_default())
         .enabled(metadata_enabled)
         .on_change(move |value| {
@@ -6199,7 +6215,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
             )
         });
     let language_preset = model.preset.clone();
-    let language_input = TextInput::new("RFC 5646 语言")
+    let language_input = TextInput::new(localizer.text("export-language"))
         .with_text(metadata.as_ref().map(|value| value.language.clone()).unwrap_or_default())
         .enabled(metadata_enabled)
         .on_change(move |value| {
@@ -6213,7 +6229,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
     let selected_sequence = model.selected_sequence();
     let sequence_label = selected_sequence
         .map(|sequence| sequence.name.clone())
-        .unwrap_or_else(|| "没有序列".to_owned());
+        .unwrap_or_else(|| localizer.text("export-no-sequence"));
     let sequence_items = model
         .sequences
         .iter()
@@ -6261,7 +6277,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
     let output_extension = selected_preset.map(export_preset_extension).unwrap_or("mp4").to_owned();
     let can_choose_output = model.can_choose_output();
     let output_browse = AppIcon::Folder
-        .text_button_or_label("Browse...")
+        .text_button_or_label(localizer.text("export-browse"))
         .on_click(app_shell_export_output_dialog_action(
             ExportOutputDialogPayload {
                 default_file_name: export_default_file_name(selected_preset),
@@ -6269,7 +6285,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
             },
         ))
         .enabled(can_choose_output);
-    let output_input = TextInput::new("输出路径")
+    let output_input = TextInput::new(localizer.text("export-output-path"))
         .with_text(model.output_path.clone())
         .enabled(can_choose_output)
         .on_change(|text| export_edit_draft_action(ExportDraftEdit::OutputPath(text.to_owned())));
@@ -6280,14 +6296,14 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
     .with_gap(8.0);
     let enqueue_action = crate::app::ui_actions::export_enqueue_draft_action();
     let enqueue_button = AppIcon::Export
-        .text_button_or_label("Add to queue")
+        .text_button_or_label(localizer.text("export-add-to-queue"))
         .enabled(model.can_enqueue())
         .on_click(enqueue_action);
     let ancillary_import = AppIcon::Folder
-        .text_button_or_label("导入 ANC / 字幕…")
+        .text_button_or_label(localizer.text("export-import-anc"))
         .on_click(crate::app::ui_actions::app_shell_import_export_ancillary_dialog_action());
     let ancillary_clear = AppIcon::Trash
-        .text_button_or_label("移除")
+        .text_button_or_label(localizer.text("export-remove"))
         .enabled(model.ancillary.is_some())
         .on_click(export_edit_draft_action(ExportDraftEdit::ClearAncillary));
     let ancillary_row = FlexContainer::row(vec![
@@ -6299,46 +6315,64 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         .ancillary
         .as_ref()
         .map(|item| item.path.display().to_string())
-        .unwrap_or_else(|| "未选择 ANC / 广播字幕".to_owned());
+        .unwrap_or_else(|| localizer.text("export-anc-none"));
     let ancillary_range = model
         .ancillary
         .as_ref()
         .map(|item| {
-            format!(
-                "0…{} · {} 帧 · 起点 {}",
-                item.program.frame_count() - 1,
-                item.program.frame_count(),
-                item.program.source_start()
-            )
+            let mut args = fluent_bundle::FluentArgs::new();
+            args.set("last", item.program.frame_count().saturating_sub(1) as i64);
+            args.set("count", item.program.frame_count() as i64);
+            args.set("start", item.program.source_start().to_string());
+            localizer.format("export-anc-frame-range", Some(&args))
         })
         .unwrap_or_else(|| "—".to_owned());
     let ancillary_cadence = model
         .ancillary
         .as_ref()
         .map(|item| {
-            format!(
-                "{}/{} fps · {} 个包",
-                item.program.output_frame_rate().num,
-                item.program.output_frame_rate().den,
-                item.packet_count
-            )
+            let mut args = fluent_bundle::FluentArgs::new();
+            args.set(
+                "rate",
+                format!(
+                    "{}/{}",
+                    item.program.output_frame_rate().num,
+                    item.program.output_frame_rate().den
+                ),
+            );
+            args.set("packets", item.packet_count as i64);
+            localizer.format("export-anc-cadence", Some(&args))
         })
         .unwrap_or_else(|| "—".to_owned());
     let ancillary_readiness = model.ancillary_error.clone().unwrap_or_else(|| {
-        if let Some(source)=model.ancillary.as_ref().and_then(|item|item.program.caption_source()) {
-            let format=match source.source_format {
-                mondrian_broadcast::CaptionSourceFormat::ScenaristSccV1=>"SCC V1.0 · 608 Field 1",
-                mondrian_broadcast::CaptionSourceFormat::RawCdpSt334_2_2015=>"原始 CDP · ST334-2:2015",
+        if let Some(source) =
+            model.ancillary.as_ref().and_then(|item| item.program.caption_source())
+        {
+            let format = match source.source_format {
+                mondrian_broadcast::CaptionSourceFormat::ScenaristSccV1 => {
+                    localizer.text("export-anc-source-scc")
+                }
+                mondrian_broadcast::CaptionSourceFormat::RawCdpSt334_2_2015 => {
+                    localizer.text("export-anc-source-cdp")
+                }
             };
-            format!("{format} · 导入器 v{} · 608 通道位图 {:04b} · 708 服务 {:?}。传输校验通过；成品复读后发布，未授予字幕显示或 SDI 硬件资格",source.importer_version,source.cea608_channels,source.cea708_services)
-        } else if model.ancillary.is_some() {"ST436 结构与导出范围已验证；成品复读通过后发布，未授予 SDI 硬件资格".to_owned()}
-        else {"AS-11：ANC JSON、SCC V1.0（29.97→59.94 / Field 1）、原始 CDP；≤8 MiB / 100000 字幕帧，VANC 第 20 行。按序列起始时码与导出范围对齐".to_owned()}
+            let mut args = fluent_bundle::FluentArgs::new();
+            args.set("format", format);
+            args.set("version", source.importer_version as i64);
+            args.set("channels", format!("{:04b}", source.cea608_channels));
+            args.set("services", format!("{:?}", source.cea708_services));
+            localizer.format("export-anc-caption-readiness", Some(&args))
+        } else if model.ancillary.is_some() {
+            localizer.text("export-anc-structure-readiness")
+        } else {
+            localizer.text("export-anc-guidance")
+        }
     });
     let pse_import = AppIcon::Folder
-        .text_button_or_label("导入 PSE 配置…")
+        .text_button_or_label(localizer.text("export-import-pse"))
         .on_click(crate::app::ui_actions::app_shell_import_export_pse_dialog_action());
     let pse_clear = AppIcon::Trash
-        .text_button_or_label("移除")
+        .text_button_or_label(localizer.text("export-remove"))
         .enabled(model.regulatory_pse.is_some())
         .on_click(export_edit_draft_action(
             ExportDraftEdit::ClearRegulatoryPse,
@@ -6357,32 +6391,44 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                 item.provider.approval.provider_id, item.provider.approval.provider_version
             )
         })
-        .unwrap_or_else(|| "未选择独立监管分析器".to_owned());
+        .unwrap_or_else(|| localizer.text("export-pse-none"));
     let pse_status = if model.regulatory_pse.is_some() {
-        "配置已冻结；入队核验分析器身份，成品复扫后判定监管结果"
+        localizer.text("export-pse-configured")
     } else {
-        "导入 provider 与广播 QC profile 的 JSON 配置"
+        localizer.text("export-pse-guidance")
     };
     let clear_terminal_button = AppIcon::Trash
-        .text_button_or_label("Clear finished")
+        .text_button_or_label(localizer.text("export-clear-finished"))
         .enabled(model.can_clear_terminal_history)
         .on_click(export_clear_terminal_history_action());
 
     let sequence_summary = selected_sequence
         .map(|sequence| {
-            format!(
-                "时间线渲染（V{} / A{}）",
-                sequence.video_clips, sequence.audio_clips
-            )
+            let mut args = fluent_bundle::FluentArgs::new();
+            args.set("video", sequence.video_clips as i64);
+            args.set("audio", sequence.audio_clips as i64);
+            localizer.format("export-sequence-summary", Some(&args))
         })
-        .unwrap_or_else(|| "No exportable sequence".to_owned());
+        .unwrap_or_else(|| localizer.text("export-no-exportable-sequence"));
     let status_text = model.readiness_status();
 
-    let mut format_section = PropertySection::new("格式")
-        .with_row(PropertyRow::new("容器", Box::new(container_dropdown)))
-        .with_row(PropertyRow::new("视频编码", Box::new(video_codec_dropdown)))
-        .with_row(PropertyRow::new("画幅", Box::new(resolution_dropdown)))
-        .with_row(PropertyRow::new("帧率", Box::new(frame_rate_dropdown)));
+    let mut format_section = PropertySection::new(localizer.text("export-format"))
+        .with_row(PropertyRow::new(
+            localizer.text("export-container"),
+            Box::new(container_dropdown),
+        ))
+        .with_row(PropertyRow::new(
+            localizer.text("export-video-codec"),
+            Box::new(video_codec_dropdown),
+        ))
+        .with_row(PropertyRow::new(
+            localizer.text("export-resolution"),
+            Box::new(resolution_dropdown),
+        ))
+        .with_row(PropertyRow::new(
+            localizer.text("export-frame-rate"),
+            Box::new(frame_rate_dropdown),
+        ));
     if let Some(resolution) = model.preset.resolution {
         let width_preset = model.preset.clone();
         let width_input = NumberInput::new(
@@ -6413,27 +6459,42 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
             export_preset_update_action(updated)
         });
         format_section = format_section
-            .with_row(PropertyRow::new("宽度", Box::new(width_input)))
-            .with_row(PropertyRow::new("高度", Box::new(height_input)));
+            .with_row(PropertyRow::new(
+                localizer.text("export-width"),
+                Box::new(width_input),
+            ))
+            .with_row(PropertyRow::new(
+                localizer.text("export-height"),
+                Box::new(height_input),
+            ));
     }
 
-    let signal_section = PropertySection::new("视频信号")
-        .with_row(PropertyRow::new("位深", Box::new(bit_depth_dropdown)))
-        .with_row(PropertyRow::new("范围", Box::new(video_range_dropdown)))
-        .with_row(PropertyRow::new("色度采样", Box::new(chroma_dropdown)))
-        .with_row(PropertyRow::new("Alpha", Box::new(alpha_dropdown)));
-    let color_section = PropertySection::new("色彩输出")
+    let signal_section = PropertySection::new(localizer.text("export-video-signal"))
         .with_row(PropertyRow::new(
-            "处理方式",
+            localizer.text("export-bit-depth"),
+            Box::new(bit_depth_dropdown),
+        ))
+        .with_row(PropertyRow::new(
+            localizer.text("export-range"),
+            Box::new(video_range_dropdown),
+        ))
+        .with_row(PropertyRow::new(
+            localizer.text("export-chroma"),
+            Box::new(chroma_dropdown),
+        ))
+        .with_row(PropertyRow::new("Alpha", Box::new(alpha_dropdown)));
+    let color_section = PropertySection::new(localizer.text("export-color-output"))
+        .with_row(PropertyRow::new(
+            localizer.text("export-processing-mode"),
             Box::new(color_target_mode_dropdown),
         ))
         .with_row(PropertyRow::new(
-            "目标空间",
+            localizer.text("export-target-space"),
             Box::new(color_target_space_dropdown),
         ))
         .with_row(PropertyRow::new("Legalizer", Box::new(legalizer_checkbox)));
 
-    let mut encoding_section = PropertySection::new("编码参数");
+    let mut encoding_section = PropertySection::new(localizer.text("export-encoding-parameters"));
     if let Some((rate_control, max_crf)) =
         media.and_then(|media| export_video_rate_control(&media.video))
     {
@@ -6477,7 +6538,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         encoding_section = encoding_section
             .with_row(PropertyRow::new("CRF", Box::new(crf_input)))
             .with_row(PropertyRow::new(
-                "最大码率 kbps",
+                localizer.text("export-max-bitrate"),
                 Box::new(max_bitrate_input),
             ))
             .with_row(PropertyRow::new("VBV buffer kbit", Box::new(buffer_input)));
@@ -6519,19 +6580,21 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                     });
                 let closed_preset = model.preset.clone();
                 let closed_checkbox =
-                    Checkbox::new("封闭 GOP", closed_gop).on_change(move |enabled| {
-                        let mut updated = closed_preset.clone();
-                        if let Some(media) = updated.media_file_mut()
-                            && let VideoCodingStructure::H26xLongGop { closed_gop, .. } =
-                                &mut media.video_coding
-                        {
-                            *closed_gop = enabled;
-                        }
-                        export_preset_update_action(updated)
-                    });
+                    Checkbox::new(localizer.text("export-closed-gop"), closed_gop).on_change(
+                        move |enabled| {
+                            let mut updated = closed_preset.clone();
+                            if let Some(media) = updated.media_file_mut()
+                                && let VideoCodingStructure::H26xLongGop { closed_gop, .. } =
+                                    &mut media.video_coding
+                            {
+                                *closed_gop = enabled;
+                            }
+                            export_preset_update_action(updated)
+                        },
+                    );
                 let scene_cut_preset = model.preset.clone();
                 let scene_cut_checkbox = Checkbox::new(
-                    "场景切换插入关键帧",
+                    localizer.text("export-scene-cut-keyframes"),
                     scene_cut == VideoSceneCutPolicy::Adaptive,
                 )
                 .on_change(move |enabled| {
@@ -6550,12 +6613,18 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                 });
                 encoding_section = encoding_section
                     .with_row(PropertyRow::new(
-                        "关键帧间隔（秒）",
+                        localizer.text("export-keyframe-interval"),
                         Box::new(keyframe_input),
                     ))
-                    .with_row(PropertyRow::new("最大连续 B 帧", Box::new(b_frame_input)))
+                    .with_row(PropertyRow::new(
+                        localizer.text("export-max-b-frames"),
+                        Box::new(b_frame_input),
+                    ))
                     .with_row(PropertyRow::new("GOP", Box::new(closed_checkbox)))
-                    .with_row(PropertyRow::new("场景切换", Box::new(scene_cut_checkbox)));
+                    .with_row(PropertyRow::new(
+                        localizer.text("export-scene-cut"),
+                        Box::new(scene_cut_checkbox),
+                    ));
             }
             Some(VideoCodingStructure::Av1RandomAccess {
                 keyframe_interval_seconds,
@@ -6592,10 +6661,13 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                     });
                 encoding_section = encoding_section
                     .with_row(PropertyRow::new(
-                        "关键帧间隔（秒）",
+                        localizer.text("export-keyframe-interval"),
                         Box::new(keyframe_input),
                     ))
-                    .with_row(PropertyRow::new("Lookahead 帧", Box::new(lookahead_input)));
+                    .with_row(PropertyRow::new(
+                        localizer.text("export-lookahead-frames"),
+                        Box::new(lookahead_input),
+                    ));
             }
             Some(VideoCodingStructure::IntraOnly) | None => {}
         }
@@ -6616,27 +6688,37 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                     export_preset_update_action(updated)
                 });
         let dither_preset = model.preset.clone();
-        let dither_checkbox = Checkbox::new("允许调色板抖动", dither).on_change(move |enabled| {
-            let mut updated = dither_preset.clone();
-            if let Some(media) = updated.media_file_mut()
-                && let VideoCodecConfig::Gif { dither, .. } = &mut media.video
-            {
-                *dither = enabled;
-            }
-            export_preset_update_action(updated)
-        });
+        let dither_checkbox = Checkbox::new(localizer.text("export-palette-dither"), dither)
+            .on_change(move |enabled| {
+                let mut updated = dither_preset.clone();
+                if let Some(media) = updated.media_file_mut()
+                    && let VideoCodecConfig::Gif { dither, .. } = &mut media.video
+                {
+                    *dither = enabled;
+                }
+                export_preset_update_action(updated)
+            });
         encoding_section = encoding_section
-            .with_row(PropertyRow::new("调色板颜色", Box::new(colors_input)))
-            .with_row(PropertyRow::new("抖动", Box::new(dither_checkbox)));
+            .with_row(PropertyRow::new(
+                localizer.text("export-palette-colors"),
+                Box::new(colors_input),
+            ))
+            .with_row(PropertyRow::new(
+                localizer.text("export-dither"),
+                Box::new(dither_checkbox),
+            ));
     } else {
         encoding_section = encoding_section.with_row(PropertyRow::new(
-            "控制",
-            Box::new(Label::new("由已验证的固定 Profile 决定").muted()),
+            localizer.text("export-controls"),
+            Box::new(Label::new(localizer.text("export-fixed-profile")).muted()),
         ));
     }
 
-    let mut audio_section = PropertySection::new("音频")
-        .with_row(PropertyRow::new("编码", Box::new(audio_codec_dropdown)));
+    let mut audio_section =
+        PropertySection::new(localizer.text("export-audio")).with_row(PropertyRow::new(
+            localizer.text("export-codec"),
+            Box::new(audio_codec_dropdown),
+        ));
     match media.map(|media| media.audio.clone()) {
         None | Some(AudioCodecConfig::Disabled) => {}
         Some(AudioCodecConfig::Aac { bitrate_kbps })
@@ -6657,8 +6739,10 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                     }
                     export_preset_update_action(updated)
                 });
-            audio_section =
-                audio_section.with_row(PropertyRow::new("码率 kbps", Box::new(bitrate_input)));
+            audio_section = audio_section.with_row(PropertyRow::new(
+                localizer.text("export-audio-bitrate"),
+                Box::new(bitrate_input),
+            ));
         }
         Some(AudioCodecConfig::Pcm { bit_depth }) => {
             let items = [16u8, 24, 32]
@@ -6675,7 +6759,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                 })
                 .collect();
             audio_section = audio_section.with_row(PropertyRow::new(
-                "采样位深",
+                localizer.text("export-sample-depth"),
                 Box::new(
                     Dropdown::new(format!("{bit_depth}-bit integer"), items)
                         .with_max_visible_items(3),
@@ -6684,28 +6768,35 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         }
     }
 
-    let mut queue_section = PropertySection::new("队列");
+    let mut queue_section = PropertySection::new(localizer.text("export-queue"));
     if model.jobs.is_empty() {
         queue_section = queue_section.with_row(PropertyRow::new(
-            "Jobs",
-            Box::new(Label::new("没有排队任务").muted()),
+            localizer.text("export-jobs"),
+            Box::new(Label::new(localizer.text("export-no-jobs")).muted()),
         ));
     } else {
         for job in &model.jobs {
-            queue_section = queue_section.with_row(export_job_row(job));
+            queue_section = queue_section.with_row(export_job_row(job, localizer));
         }
         queue_section =
             queue_section.with_row(PropertyRow::new("", Box::new(clear_terminal_button)));
     }
 
-    PropertyPanel::new("导出")
-        .with_subtitle(format!("{} queued job(s)", model.queue_count))
+    PropertyPanel::new(localizer.text("panel-export"))
+        .with_subtitle({
+            let mut args = fluent_bundle::FluentArgs::new();
+            args.set("count", model.queue_count as i64);
+            localizer.format("export-queued-jobs", Some(&args))
+        })
         .with_section(
-            PropertySection::new("预设")
-                .with_row(PropertyRow::new("预设", Box::new(preset_dropdown)))
+            PropertySection::new(localizer.text("export-preset"))
+                .with_row(PropertyRow::new(
+                    localizer.text("export-preset"),
+                    Box::new(preset_dropdown),
+                ))
                 .with_row(
                     PropertyRow::new(
-                        "Details",
+                        localizer.text("export-details"),
                         Box::new(
                             Label::new(export_preset_summary(selected_preset)).muted().wrapped(),
                         ),
@@ -6715,95 +6806,129 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         )
         .with_section(format_section)
         .with_section(
-            PropertySection::new("交付元数据")
-                .with_row(PropertyRow::new("标题", Box::new(title_input)))
-                .with_row(PropertyRow::new("发行方", Box::new(issuer_input)))
-                .with_row(PropertyRow::new("创建者", Box::new(creator_input)))
-                .with_row(PropertyRow::new("语言", Box::new(language_input))),
+            PropertySection::new(localizer.text("export-delivery-metadata"))
+                .with_row(PropertyRow::new(
+                    localizer.text("export-title"),
+                    Box::new(title_input),
+                ))
+                .with_row(PropertyRow::new(
+                    localizer.text("export-issuer"),
+                    Box::new(issuer_input),
+                ))
+                .with_row(PropertyRow::new(
+                    localizer.text("export-creator"),
+                    Box::new(creator_input),
+                ))
+                .with_row(PropertyRow::new(
+                    localizer.text("export-language-short"),
+                    Box::new(language_input),
+                )),
         )
         .with_section(color_section)
         .with_section(signal_section)
         .with_section(encoding_section)
         .with_section(audio_section)
         .with_section(
-            PropertySection::new("广播 ANC")
-                .with_row(PropertyRow::new("选择", Box::new(ancillary_row)))
+            PropertySection::new(localizer.text("export-broadcast-anc"))
+                .with_row(PropertyRow::new(
+                    localizer.text("export-select"),
+                    Box::new(ancillary_row),
+                ))
                 .with_row(
                     PropertyRow::new(
-                        "来源",
+                        localizer.text("export-source"),
                         Box::new(Label::new(ancillary_source).muted().wrapped()),
                     )
                     .with_height(current_theme().spacing.interact_height * 2.0),
                 )
                 .with_row(
                     PropertyRow::new(
-                        "帧范围",
+                        localizer.text("export-frame-range"),
                         Box::new(Label::new(ancillary_range).muted().wrapped()),
                     )
                     .with_height(current_theme().spacing.interact_height * 2.0),
                 )
                 .with_row(PropertyRow::new(
-                    "帧率 / 包数",
+                    localizer.text("export-frame-rate-packets"),
                     Box::new(Label::new(ancillary_cadence).muted()),
                 ))
                 .with_row(
                     PropertyRow::new(
-                        "资格",
+                        localizer.text("export-qualification"),
                         Box::new(Label::new(ancillary_readiness).muted().wrapped()),
                     )
                     .with_height(current_theme().spacing.interact_height * 5.0),
                 ),
         )
         .with_section(
-            PropertySection::new("监管 PSE")
-                .with_row(PropertyRow::new("选择", Box::new(pse_row)))
+            PropertySection::new(localizer.text("export-regulatory-pse"))
+                .with_row(PropertyRow::new(
+                    localizer.text("export-select"),
+                    Box::new(pse_row),
+                ))
                 .with_row(
                     PropertyRow::new(
-                        "分析器",
+                        localizer.text("export-analyzer"),
                         Box::new(Label::new(pse_identity).muted().wrapped()),
                     )
                     .with_height(current_theme().spacing.interact_height * 2.0),
                 )
                 .with_row(
-                    PropertyRow::new("状态", Box::new(Label::new(pse_status).muted().wrapped()))
-                        .with_height(current_theme().spacing.interact_height * 3.0),
+                    PropertyRow::new(
+                        localizer.text("export-status"),
+                        Box::new(Label::new(pse_status).muted().wrapped()),
+                    )
+                    .with_height(current_theme().spacing.interact_height * 3.0),
                 ),
         )
         .with_section(
-            PropertySection::new("Dynamic HDR 交付")
-                .with_row(PropertyRow::new("意图", Box::new(dynamic_hdr_dropdown)))
+            PropertySection::new(localizer.text("export-dynamic-hdr-delivery"))
+                .with_row(PropertyRow::new(
+                    localizer.text("export-intent"),
+                    Box::new(dynamic_hdr_dropdown),
+                ))
                 .with_row(PropertyRow::new(
                     "Program",
                     Box::new(
-                        Label::new(format!(
-                            "{} 个已分析 Program",
-                            model.dynamic_hdr.program_count
-                        ))
+                        Label::new({
+                            let mut args = fluent_bundle::FluentArgs::new();
+                            args.set("count", model.dynamic_hdr.program_count as i64);
+                            localizer.format("export-hdr-program-count", Some(&args))
+                        })
                         .muted(),
                     ),
                 ))
                 .with_row(
                     PropertyRow::new(
-                        "资格状态",
+                        localizer.text("export-qualification-status"),
                         Box::new(Label::new(model.dynamic_hdr.readiness.clone()).muted().wrapped()),
                     )
                     .with_height(58.0),
                 ),
         )
         .with_section(
-            PropertySection::new("输入")
-                .with_row(PropertyRow::new("序列", Box::new(sequence_dropdown)))
+            PropertySection::new(localizer.text("export-input"))
                 .with_row(PropertyRow::new(
-                    "Summary",
+                    localizer.text("export-sequence"),
+                    Box::new(sequence_dropdown),
+                ))
+                .with_row(PropertyRow::new(
+                    localizer.text("export-summary"),
                     Box::new(Label::new(sequence_summary).muted()),
                 ))
-                .with_row(PropertyRow::new("范围", Box::new(range_dropdown))),
+                .with_row(PropertyRow::new(
+                    localizer.text("export-range"),
+                    Box::new(range_dropdown),
+                )),
         )
         .with_section(
-            PropertySection::new("输出")
-                .with_row(PropertyRow::new("路径", Box::new(output_row)))
+            PropertySection::new(localizer.text("export-output"))
                 .with_row(PropertyRow::new(
-                    "Status",
+                    localizer.text("export-path"),
+                    Box::new(output_row),
+                ))
+                .with_row(PropertyRow::new(
+                    localizer.text("export-status"),
                     Box::new(Label::new(status_text).muted()),
                 ))
                 .with_row(PropertyRow::new("", Box::new(enqueue_button))),
@@ -6811,7 +6936,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         .with_section(queue_section)
 }
 
-fn export_job_row(job: &ExportJobModel) -> PropertyRow {
+fn export_job_row(job: &ExportJobModel, localizer: &Localizer) -> PropertyRow {
     let mut summary_children = vec![
         FlexChild::fixed(Box::new(
             Label::new(job.title.clone()).with_padding(0.0, 0.0),
@@ -6837,7 +6962,7 @@ fn export_job_row(job: &ExportJobModel) -> PropertyRow {
 
     let content: Box<dyn Widget> = if job.can_cancel {
         let cancel = AppIcon::Trash
-            .text_button_or_label("取消")
+            .text_button_or_label(localizer.text("export-cancel"))
             .on_click(export_cancel_action(job.id));
         Box::new(
             FlexContainer::row(vec![
@@ -6854,7 +6979,7 @@ fn export_job_row(job: &ExportJobModel) -> PropertyRow {
     let detail_rows =
         usize::from(job.color_diagnostics.is_some()) + usize::from(job.broadcast_qc.is_some());
     let height = base_height + detail_rows as f32 * 18.0;
-    PropertyRow::new("任务", content).with_height(height)
+    PropertyRow::new(localizer.text("export-job"), content).with_height(height)
 }
 
 fn export_job_broadcast_qc_label(
@@ -7095,32 +7220,41 @@ fn export_job_title(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-fn export_job_status_label(status: &JobStatus, progress: ExportProgress) -> String {
+fn export_job_status_label(
+    status: &JobStatus,
+    progress: ExportProgress,
+    localizer: &Localizer,
+) -> String {
     match status {
-        JobStatus::Pending => "Pending".to_owned(),
+        JobStatus::Pending => localizer.text("export-job-pending"),
         JobStatus::Running { phase } => match progress.detail {
             ExportProgressDetail::Frames { completed, total }
                 if *phase == ExportProgressPhase::Rendering =>
             {
-                format!("Rendering {completed}/{total}")
+                let mut args = fluent_bundle::FluentArgs::new();
+                args.set("completed", completed as i64);
+                args.set("total", total as i64);
+                localizer.format("export-job-rendering-progress", Some(&args))
             }
-            _ => export_progress_phase_label(*phase).to_owned(),
+            _ => localizer.text(export_progress_phase_message_id(*phase)),
         },
-        JobStatus::Cancelling { .. } => "Cancelling".to_owned(),
-        JobStatus::Completed => "Completed".to_owned(),
-        JobStatus::Failed(failure) => format!("Failed: {}", failure.detail),
-        JobStatus::Cancelled => "Cancelled".to_owned(),
+        JobStatus::Cancelling { .. } => localizer.text("export-job-cancelling"),
+        JobStatus::Completed => localizer.text("export-job-completed"),
+        JobStatus::Failed(failure) => {
+            localizer.format_text("export-job-failed", "detail", &failure.detail)
+        }
+        JobStatus::Cancelled => localizer.text("export-job-cancelled"),
     }
 }
 
-fn export_progress_phase_label(phase: ExportProgressPhase) -> &'static str {
+fn export_progress_phase_message_id(phase: ExportProgressPhase) -> &'static str {
     match phase {
-        ExportProgressPhase::Preparing => "Preparing",
-        ExportProgressPhase::Rendering => "Rendering",
-        ExportProgressPhase::Encoding => "Encoding",
-        ExportProgressPhase::Packaging => "Packaging",
-        ExportProgressPhase::Validating => "Validating",
-        ExportProgressPhase::Publishing => "Publishing",
+        ExportProgressPhase::Preparing => "export-job-preparing",
+        ExportProgressPhase::Rendering => "export-job-rendering",
+        ExportProgressPhase::Encoding => "export-job-encoding",
+        ExportProgressPhase::Packaging => "export-job-packaging",
+        ExportProgressPhase::Validating => "export-job-validating",
+        ExportProgressPhase::Publishing => "export-job-publishing",
     }
 }
 

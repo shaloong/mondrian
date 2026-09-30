@@ -139,7 +139,10 @@ fn dynamic_hdr_authoring_is_atomic_undoable_and_projected_without_brand_claims()
         .expect("select Remake Program");
     let model = ExportPanelModel::from_app_state(&state);
     assert_eq!(model.dynamic_hdr.program_count, 1);
-    assert_eq!(model.dynamic_hdr.intent_label, "重制：Master analysis");
+    assert_eq!(
+        model.dynamic_hdr.intent_label,
+        "重制：\u{2068}Master analysis\u{2069}"
+    );
     assert!(model.dynamic_hdr.readiness.contains("合格且已授权"));
     assert!(!model.dynamic_hdr.readiness.contains("已认证"));
 
