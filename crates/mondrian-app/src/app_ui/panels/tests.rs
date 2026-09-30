@@ -1121,6 +1121,33 @@ fn export_projection_uses_locale_without_changing_authoring_state() {
 }
 
 #[test]
+fn export_image_sequence_summary_names_the_selected_format_in_both_locales() {
+    let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+    let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+    let preset = ExportPreset::open_exr_half_sequence();
+
+    let zh_summary = export_preset_summary(Some(&preset), &chinese);
+    let en_summary = export_preset_summary(Some(&preset), &english);
+    assert!(zh_summary.contains("OpenEXR Half"));
+    assert!(en_summary.contains("OpenEXR Half"));
+    assert!(!zh_summary.contains("PNG"));
+    assert!(!en_summary.contains("PNG"));
+    assert!(!zh_summary.contains("sRGB"));
+    assert!(!en_summary.contains("sRGB"));
+    let stems_summary = export_preset_summary(Some(&ExportPreset::audio_stems_pcm24()), &english);
+    assert!(stems_summary.contains("Program Output stems"));
+    assert!(!stems_summary.contains("image sequence"));
+    assert_eq!(
+        export_range_label(TimelineExportRange::EntireSequence, &english),
+        "Entire sequence"
+    );
+    assert_eq!(
+        export_range_label(TimelineExportRange::EntireSequence, &chinese),
+        "整个序列"
+    );
+}
+
+#[test]
 fn export_ancillary_import_freezes_selection_and_preflights_format_and_range() {
     let mut state = AppState::new();
     let mut sequence = Sequence::new("ANC delivery");
@@ -1490,7 +1517,8 @@ fn export_panel_preserves_professional_metadata_and_reports_the_physical_artifac
 
     let model = ExportPanelModel::from_app_state(&state);
     assert!(model.can_enqueue());
-    let summary = export_preset_summary(Some(&model.preset));
+    let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+    let summary = export_preset_summary(Some(&model.preset), &english);
     assert!(summary.contains("IMF RDD 45"));
     assert!(summary.contains("ProRes 422 HQ 10-bit 4:2:2"));
     assert!(summary.contains("PCM 24-bit 48 kHz stereo"));

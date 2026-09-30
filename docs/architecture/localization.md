@@ -153,9 +153,11 @@ Dynamic HDR intent, ANC/PSE guidance, and frame/packet summaries from the
 captured locale. The Export draft, Sequence delivery intent, and queued jobs
 retain typed values and diagnostic evidence; changing locale only rebuilds
 display text. Codec/profile names and exact regulatory identifiers stay as
-technical identities. The remaining option labels and raw provider diagnostics
-need the same projection before the Export workspace can be considered fully
-localized.
+technical identities. Dropdown option labels and preset summaries use the same
+snapshot; summaries derive image-sequence format and color target from the
+selected preset, and distinguish audio stems from image sequences. Raw provider
+diagnostics still need localized presentation before the Export workspace can
+be considered fully localized.
 Inspector audio Component mapping follows the same boundary: the model's
 diagnostics and the widget's policy controls share the panel locale, while
 channel layout identities and edit addresses remain typed author data.

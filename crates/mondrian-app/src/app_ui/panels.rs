@@ -5539,16 +5539,20 @@ fn export_video_codec_label(video: &VideoCodecConfig) -> &'static str {
     }
 }
 
-fn export_image_sequence_format_label(format: ImageSequenceFormat) -> &'static str {
-    match format {
-        ImageSequenceFormat::Png8 => "PNG 8-bit（无损）",
-        ImageSequenceFormat::Png16 => "PNG 16-bit（无损）",
-        ImageSequenceFormat::OpenExrHalf => "OpenEXR Half（ZIP16）",
-        ImageSequenceFormat::OpenExrFloat => "OpenEXR Float32（ZIP16）",
-        ImageSequenceFormat::Dpx16 => "DPX 16-bit RGB",
-        ImageSequenceFormat::Tiff16 => "TIFF 16-bit（Deflate）",
-        ImageSequenceFormat::TiffFloat => "TIFF Float32（无损）",
-    }
+fn export_image_sequence_format_label(
+    format: ImageSequenceFormat,
+    localizer: &Localizer,
+) -> String {
+    let message_id = match format {
+        ImageSequenceFormat::Png8 => "export-image-png8",
+        ImageSequenceFormat::Png16 => "export-image-png16",
+        ImageSequenceFormat::OpenExrHalf => "export-image-exr-half",
+        ImageSequenceFormat::OpenExrFloat => "export-image-exr-float",
+        ImageSequenceFormat::Dpx16 => "export-image-dpx16",
+        ImageSequenceFormat::Tiff16 => "export-image-tiff16",
+        ImageSequenceFormat::TiffFloat => "export-image-tiff-float",
+    };
+    localizer.text(message_id)
 }
 
 fn export_video_rate_control(video: &VideoCodecConfig) -> Option<(VideoRateControl, u8)> {
@@ -5649,16 +5653,16 @@ fn export_video_codec_items(preset: &ExportPreset) -> Vec<MenuItem> {
         .collect()
 }
 
-fn export_audio_codec_label(audio: &AudioCodecConfig) -> &'static str {
+fn export_audio_codec_label(audio: &AudioCodecConfig, localizer: &Localizer) -> String {
     match audio {
-        AudioCodecConfig::Disabled => "无音频",
-        AudioCodecConfig::Aac { .. } => "AAC",
-        AudioCodecConfig::Pcm { .. } => "PCM",
-        AudioCodecConfig::Mp3 { .. } => "MP3",
+        AudioCodecConfig::Disabled => localizer.text("export-no-audio"),
+        AudioCodecConfig::Aac { .. } => "AAC".to_owned(),
+        AudioCodecConfig::Pcm { .. } => "PCM".to_owned(),
+        AudioCodecConfig::Mp3 { .. } => "MP3".to_owned(),
     }
 }
 
-fn export_audio_codec_items(preset: &ExportPreset) -> Vec<MenuItem> {
+fn export_audio_codec_items(preset: &ExportPreset, localizer: &Localizer) -> Vec<MenuItem> {
     let Some(media) = preset.media_file() else {
         return Vec::new();
     };
@@ -5682,7 +5686,7 @@ fn export_audio_codec_items(preset: &ExportPreset) -> Vec<MenuItem> {
     ]
     .into_iter()
     .map(|audio| {
-        let label = export_audio_codec_label(&audio);
+        let label = export_audio_codec_label(&audio, localizer);
         let mut updated = preset.clone();
         if let Some(media) = updated.media_file_mut() {
             media.audio = audio;
@@ -5692,29 +5696,29 @@ fn export_audio_codec_items(preset: &ExportPreset) -> Vec<MenuItem> {
     .collect()
 }
 
-fn export_resolution_label(resolution: Option<ExportResolution>) -> String {
+fn export_resolution_label(resolution: Option<ExportResolution>, localizer: &Localizer) -> String {
     resolution
         .map(|resolution| format!("{} × {}", resolution.width, resolution.height))
-        .unwrap_or_else(|| "跟随序列".to_owned())
+        .unwrap_or_else(|| localizer.text("export-follow-sequence"))
 }
 
-fn export_resolution_items(preset: &ExportPreset) -> Vec<MenuItem> {
+fn export_resolution_items(preset: &ExportPreset, localizer: &Localizer) -> Vec<MenuItem> {
     [
-        ("跟随序列", None),
+        (localizer.text("export-follow-sequence"), None),
         (
-            "1280 × 720",
+            "1280 × 720".to_owned(),
             Some(ExportResolution { width: 1280, height: 720 }),
         ),
         (
-            "1920 × 1080",
+            "1920 × 1080".to_owned(),
             Some(ExportResolution { width: 1920, height: 1080 }),
         ),
         (
-            "UHD 3840 × 2160",
+            "UHD 3840 × 2160".to_owned(),
             Some(ExportResolution { width: 3840, height: 2160 }),
         ),
         (
-            "DCI 4096 × 2160",
+            "DCI 4096 × 2160".to_owned(),
             Some(ExportResolution { width: 4096, height: 2160 }),
         ),
     ]
@@ -5727,37 +5731,40 @@ fn export_resolution_items(preset: &ExportPreset) -> Vec<MenuItem> {
     .collect()
 }
 
-fn export_frame_rate_label(frame_rate: ExportParameter<Rational>) -> String {
+fn export_frame_rate_label(frame_rate: ExportParameter<Rational>, localizer: &Localizer) -> String {
     match frame_rate {
-        ExportParameter::FollowSequence => "跟随序列".to_owned(),
+        ExportParameter::FollowSequence => localizer.text("export-follow-sequence"),
         ExportParameter::Explicit(frame_rate) => frame_rate_label(frame_rate),
     }
 }
 
-fn export_frame_rate_items(preset: &ExportPreset) -> Vec<MenuItem> {
+fn export_frame_rate_items(preset: &ExportPreset, localizer: &Localizer) -> Vec<MenuItem> {
     std::iter::once(ExportParameter::FollowSequence)
         .chain(Rational::SEQUENCE_FRAME_RATES.into_iter().map(ExportParameter::Explicit))
         .map(|frame_rate| {
             let mut updated = preset.clone();
             updated.frame_rate = frame_rate;
             MenuItem::new(
-                export_frame_rate_label(frame_rate),
+                export_frame_rate_label(frame_rate, localizer),
                 export_preset_update_action(updated),
             )
         })
         .collect()
 }
 
-fn export_bit_depth_label(bit_depth: ExportParameter<DeliveryBitDepth>) -> &'static str {
+fn export_bit_depth_label(
+    bit_depth: ExportParameter<DeliveryBitDepth>,
+    localizer: &Localizer,
+) -> String {
     match bit_depth {
-        ExportParameter::FollowSequence => "跟随序列",
-        ExportParameter::Explicit(DeliveryBitDepth::Eight) => "8-bit",
-        ExportParameter::Explicit(DeliveryBitDepth::Ten) => "10-bit",
-        ExportParameter::Explicit(DeliveryBitDepth::Twelve) => "12-bit",
+        ExportParameter::FollowSequence => localizer.text("export-follow-sequence"),
+        ExportParameter::Explicit(DeliveryBitDepth::Eight) => "8-bit".to_owned(),
+        ExportParameter::Explicit(DeliveryBitDepth::Ten) => "10-bit".to_owned(),
+        ExportParameter::Explicit(DeliveryBitDepth::Twelve) => "12-bit".to_owned(),
     }
 }
 
-fn export_bit_depth_items(preset: &ExportPreset) -> Vec<MenuItem> {
+fn export_bit_depth_items(preset: &ExportPreset, localizer: &Localizer) -> Vec<MenuItem> {
     [
         ExportParameter::FollowSequence,
         ExportParameter::Explicit(DeliveryBitDepth::Eight),
@@ -5769,22 +5776,22 @@ fn export_bit_depth_items(preset: &ExportPreset) -> Vec<MenuItem> {
         let mut updated = preset.clone();
         updated.video_signal.bit_depth = bit_depth;
         MenuItem::new(
-            export_bit_depth_label(bit_depth),
+            export_bit_depth_label(bit_depth, localizer),
             export_preset_update_action(updated),
         )
     })
     .collect()
 }
 
-fn export_video_range_label(range: ExportParameter<VideoRange>) -> &'static str {
+fn export_video_range_label(range: ExportParameter<VideoRange>, localizer: &Localizer) -> String {
     match range {
-        ExportParameter::FollowSequence => "跟随序列",
-        ExportParameter::Explicit(VideoRange::Full) => "Full",
-        ExportParameter::Explicit(VideoRange::Legal) => "Legal / Video",
+        ExportParameter::FollowSequence => localizer.text("export-follow-sequence"),
+        ExportParameter::Explicit(VideoRange::Full) => "Full".to_owned(),
+        ExportParameter::Explicit(VideoRange::Legal) => "Legal / Video".to_owned(),
     }
 }
 
-fn export_video_range_items(preset: &ExportPreset) -> Vec<MenuItem> {
+fn export_video_range_items(preset: &ExportPreset, localizer: &Localizer) -> Vec<MenuItem> {
     [
         ExportParameter::FollowSequence,
         ExportParameter::Explicit(VideoRange::Full),
@@ -5795,7 +5802,7 @@ fn export_video_range_items(preset: &ExportPreset) -> Vec<MenuItem> {
         let mut updated = preset.clone();
         updated.video_signal.range = range;
         MenuItem::new(
-            export_video_range_label(range),
+            export_video_range_label(range, localizer),
             export_preset_update_action(updated),
         )
     })
@@ -5830,21 +5837,21 @@ fn export_chroma_items(preset: &ExportPreset) -> Vec<MenuItem> {
     .collect()
 }
 
-fn export_alpha_mode_label(alpha_mode: ExportAlphaMode) -> &'static str {
-    match alpha_mode {
-        ExportAlphaMode::FlattenBlack => "合成到黑色",
-        ExportAlphaMode::Preserve => "保留 Straight Alpha",
-    }
+fn export_alpha_mode_label(alpha_mode: ExportAlphaMode, localizer: &Localizer) -> String {
+    localizer.text(match alpha_mode {
+        ExportAlphaMode::FlattenBlack => "export-alpha-flatten-black",
+        ExportAlphaMode::Preserve => "export-alpha-preserve",
+    })
 }
 
-fn export_alpha_mode_items(preset: &ExportPreset) -> Vec<MenuItem> {
+fn export_alpha_mode_items(preset: &ExportPreset, localizer: &Localizer) -> Vec<MenuItem> {
     [ExportAlphaMode::FlattenBlack, ExportAlphaMode::Preserve]
         .into_iter()
         .map(|alpha_mode| {
             let mut updated = preset.clone();
             updated.alpha_mode = alpha_mode;
             MenuItem::new(
-                export_alpha_mode_label(alpha_mode),
+                export_alpha_mode_label(alpha_mode, localizer),
                 export_preset_update_action(updated),
             )
         })
@@ -5866,27 +5873,27 @@ fn export_color_target_mode(target: ExportColorTarget) -> ExportColorTargetMode 
     }
 }
 
-fn export_color_target_mode_label(mode: ExportColorTargetMode) -> &'static str {
-    match mode {
-        ExportColorTargetMode::FollowSequence => "跟随序列 Program Output",
-        ExportColorTargetMode::RenderingView => "项目引擎 Rendering View",
-        ExportColorTargetMode::Colorimetric => "直接 Colorimetric 转换",
-    }
+fn export_color_target_mode_label(mode: ExportColorTargetMode, localizer: &Localizer) -> String {
+    localizer.text(match mode {
+        ExportColorTargetMode::FollowSequence => "export-color-follow-sequence",
+        ExportColorTargetMode::RenderingView => "export-color-rendering-view",
+        ExportColorTargetMode::Colorimetric => "export-color-colorimetric",
+    })
 }
 
-fn export_color_target_label(target: ExportColorTarget) -> String {
+fn export_color_target_label(target: ExportColorTarget, localizer: &Localizer) -> String {
     match target {
         ExportColorTarget::FollowSequence => {
-            export_color_target_mode_label(ExportColorTargetMode::FollowSequence).to_owned()
+            export_color_target_mode_label(ExportColorTargetMode::FollowSequence, localizer)
         }
         ExportColorTarget::RenderingView(color_space) => format!(
             "{} / {}",
-            export_color_target_mode_label(ExportColorTargetMode::RenderingView),
+            export_color_target_mode_label(ExportColorTargetMode::RenderingView, localizer),
             color_space_label(color_space)
         ),
         ExportColorTarget::Colorimetric(color_space) => format!(
             "{} / {}",
-            export_color_target_mode_label(ExportColorTargetMode::Colorimetric),
+            export_color_target_mode_label(ExportColorTargetMode::Colorimetric, localizer),
             color_space_label(color_space)
         ),
     }
@@ -5955,7 +5962,7 @@ fn export_color_target_spaces(
         .collect()
 }
 
-fn export_color_target_mode_items(preset: &ExportPreset) -> Vec<MenuItem> {
+fn export_color_target_mode_items(preset: &ExportPreset, localizer: &Localizer) -> Vec<MenuItem> {
     [
         ExportColorTargetMode::FollowSequence,
         ExportColorTargetMode::RenderingView,
@@ -5966,7 +5973,7 @@ fn export_color_target_mode_items(preset: &ExportPreset) -> Vec<MenuItem> {
         let mut updated = preset.clone();
         updated.color_target = export_color_target_with_mode(updated.color_target, mode);
         MenuItem::new(
-            export_color_target_mode_label(mode),
+            export_color_target_mode_label(mode, localizer),
             export_preset_update_action(updated),
         )
     })
@@ -6088,7 +6095,7 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
                 model
                     .preset
                     .image_sequence_format()
-                    .map(|format| export_image_sequence_format_label(format).to_owned())
+                    .map(|format| export_image_sequence_format_label(format, localizer))
                     .unwrap_or_else(|| localizer.text("export-no-video"))
             }),
         export_video_codec_items(&model.preset),
@@ -6096,27 +6103,27 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
     .with_max_visible_items(8)
     .enabled(media.is_some() && professional.is_none());
     let resolution_dropdown = Dropdown::new(
-        export_resolution_label(model.preset.resolution),
-        export_resolution_items(&model.preset),
+        export_resolution_label(model.preset.resolution, localizer),
+        export_resolution_items(&model.preset, localizer),
     )
     .with_max_visible_items(5)
     .enabled(professional.is_none());
     let frame_rate_dropdown = Dropdown::new(
-        export_frame_rate_label(model.preset.frame_rate),
-        export_frame_rate_items(&model.preset),
+        export_frame_rate_label(model.preset.frame_rate, localizer),
+        export_frame_rate_items(&model.preset, localizer),
     )
     .with_max_visible_items(8)
     .enabled(professional.is_none());
     let bit_depth_dropdown = Dropdown::new(
-        export_bit_depth_label(model.preset.video_signal.bit_depth),
-        export_bit_depth_items(&model.preset),
+        export_bit_depth_label(model.preset.video_signal.bit_depth, localizer),
+        export_bit_depth_items(&model.preset, localizer),
     )
     .with_max_visible_items(4)
     .enabled(media.is_some() && professional.is_none());
     let color_target_mode = export_color_target_mode(model.preset.color_target);
     let color_target_mode_dropdown = Dropdown::new(
-        export_color_target_mode_label(color_target_mode),
-        export_color_target_mode_items(&model.preset),
+        export_color_target_mode_label(color_target_mode, localizer),
+        export_color_target_mode_items(&model.preset, localizer),
     )
     .with_max_visible_items(3)
     .enabled(professional.is_none());
@@ -6132,8 +6139,8 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
     .with_max_visible_items(8)
     .enabled(professional.is_none() && color_target_mode != ExportColorTargetMode::FollowSequence);
     let video_range_dropdown = Dropdown::new(
-        export_video_range_label(model.preset.video_signal.range),
-        export_video_range_items(&model.preset),
+        export_video_range_label(model.preset.video_signal.range, localizer),
+        export_video_range_items(&model.preset, localizer),
     )
     .with_max_visible_items(3)
     .enabled(media.is_some() && professional.is_none());
@@ -6144,8 +6151,8 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
     .with_max_visible_items(4)
     .enabled(media.is_some() && professional.is_none());
     let alpha_dropdown = Dropdown::new(
-        export_alpha_mode_label(model.preset.alpha_mode),
-        export_alpha_mode_items(&model.preset),
+        export_alpha_mode_label(model.preset.alpha_mode, localizer),
+        export_alpha_mode_items(&model.preset, localizer),
     )
     .with_max_visible_items(2)
     .enabled(professional.is_none());
@@ -6172,10 +6179,10 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
     });
     let audio_codec_dropdown = Dropdown::new(
         media
-            .map(|media| export_audio_codec_label(&media.audio).to_owned())
+            .map(|media| export_audio_codec_label(&media.audio, localizer))
             .or_else(|| professional.map(|_| "PCM 24-bit / 48 kHz / stereo".to_owned()))
             .unwrap_or_else(|| localizer.text("export-no-audio-image-sequence")),
-        export_audio_codec_items(&model.preset),
+        export_audio_codec_items(&model.preset, localizer),
     )
     .with_max_visible_items(4)
     .enabled(media.is_some() && professional.is_none());
@@ -6244,16 +6251,16 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
         Dropdown::new(sequence_label, sequence_items).enabled(!model.sequences.is_empty());
 
     let range_dropdown = Dropdown::new(
-        export_range_label(model.range),
+        export_range_label(model.range, localizer),
         vec![
             MenuItem::new(
-                export_range_label(TimelineExportRange::SequenceInOut),
+                export_range_label(TimelineExportRange::SequenceInOut, localizer),
                 export_edit_draft_action(ExportDraftEdit::Range(
                     TimelineExportRange::SequenceInOut,
                 )),
             ),
             MenuItem::new(
-                export_range_label(TimelineExportRange::EntireSequence),
+                export_range_label(TimelineExportRange::EntireSequence, localizer),
                 export_edit_draft_action(ExportDraftEdit::Range(
                     TimelineExportRange::EntireSequence,
                 )),
@@ -6798,7 +6805,9 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
                     PropertyRow::new(
                         localizer.text("export-details"),
                         Box::new(
-                            Label::new(export_preset_summary(selected_preset)).muted().wrapped(),
+                            Label::new(export_preset_summary(selected_preset, localizer))
+                                .muted()
+                                .wrapped(),
                         ),
                     )
                     .with_height(72.0),
@@ -7123,93 +7132,153 @@ fn export_default_file_name(preset: Option<&ExportPreset>) -> String {
     )
 }
 
-fn export_preset_summary(preset: Option<&ExportPreset>) -> String {
+fn export_preset_summary(preset: Option<&ExportPreset>, localizer: &Localizer) -> String {
     let Some(preset) = preset else {
-        return "No preset available".to_owned();
+        return localizer.text("export-status-no-presets");
     };
     let resolution = preset
         .resolution
         .as_ref()
         .map(|resolution| format!("{}x{}", resolution.width, resolution.height))
-        .unwrap_or_else(|| "Follow sequence".to_owned());
+        .unwrap_or_else(|| localizer.text("export-follow-sequence"));
     if let Some(delivery) = preset.professional_delivery() {
         let (profile, layout, essence) = match delivery.profile {
             ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25 => (
                 "IMF RDD 45",
-                "directory package",
+                localizer.text("export-directory-package"),
                 "ProRes 422 HQ 10-bit 4:2:2",
             ),
             ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => (
                 "AMWA AS-11 X9",
-                "OP1a MXF file",
+                localizer.text("export-op1a-mxf-file"),
                 "AVC High 4:2:2 10-bit intra",
             ),
             ProfessionalDeliveryProfile::SmpteDcp2kFlat24 => (
                 "SMPTE DCP 2K Flat",
-                "directory package",
+                localizer.text("export-directory-package"),
                 "JPEG 2000 XYZ 12-bit",
             ),
         };
-        return format!(
-            "{resolution} / {profile} / {essence} / {} / PCM 24-bit 48 kHz stereo / {layout} / .{}",
-            export_frame_rate_label(preset.frame_rate),
-            export_preset_extension(preset),
+        let mut args = fluent_bundle::FluentArgs::new();
+        args.set("resolution", resolution);
+        args.set("profile", profile);
+        args.set("essence", essence);
+        args.set(
+            "frame_rate",
+            export_frame_rate_label(preset.frame_rate, localizer),
         );
+        args.set("layout", layout);
+        args.set("extension", export_preset_extension(preset));
+        return localizer.format("export-summary-professional", Some(&args));
+    }
+    if matches!(&preset.artifact, ExportArtifactEncoding::AudioStems { .. }) {
+        return localizer.text("export-summary-audio-stems");
     }
     let Some(media) = preset.media_file() else {
-        return format!(
-            "{resolution} / PNG 无损序列 / sRGB / {} / {} / .{} 目录",
-            export_alpha_mode_label(preset.alpha_mode),
-            export_frame_rate_label(preset.frame_rate),
-            export_preset_extension(preset)
+        let mut args = fluent_bundle::FluentArgs::new();
+        args.set("resolution", resolution);
+        args.set(
+            "format",
+            preset
+                .image_sequence_format()
+                .map(|format| export_image_sequence_format_label(format, localizer))
+                .unwrap_or_else(|| localizer.text("export-image-sequence-directory")),
         );
+        args.set(
+            "alpha",
+            export_alpha_mode_label(preset.alpha_mode, localizer),
+        );
+        args.set(
+            "color",
+            export_color_target_label(preset.color_target, localizer),
+        );
+        args.set(
+            "frame_rate",
+            export_frame_rate_label(preset.frame_rate, localizer),
+        );
+        args.set("extension", export_preset_extension(preset));
+        return localizer.format("export-summary-image-sequence", Some(&args));
     };
     let bitrate = match &media.video {
-        VideoCodecConfig::H264 { rate_control, .. } => export_rate_control_label(*rate_control),
-        VideoCodecConfig::Hevc { rate_control, .. } => export_rate_control_label(*rate_control),
-        VideoCodecConfig::Av1 { rate_control, .. } => export_rate_control_label(*rate_control),
+        VideoCodecConfig::H264 { rate_control, .. } => {
+            export_rate_control_label(*rate_control, localizer)
+        }
+        VideoCodecConfig::Hevc { rate_control, .. } => {
+            export_rate_control_label(*rate_control, localizer)
+        }
+        VideoCodecConfig::Av1 { rate_control, .. } => {
+            export_rate_control_label(*rate_control, localizer)
+        }
         VideoCodecConfig::ProRes { .. }
         | VideoCodecConfig::DnxHr { .. }
         | VideoCodecConfig::AvcIntra { .. }
-        | VideoCodecConfig::Uncompressed { .. } => "固定 Profile/Class 表示".to_owned(),
+        | VideoCodecConfig::Uncompressed { .. } => localizer.text("export-fixed-profile-class"),
         VideoCodecConfig::Gif { colors, dither } => {
-            format!(
-                "{colors} 色 / dither {}",
-                if *dither { "on" } else { "off" }
-            )
+            let mut args = fluent_bundle::FluentArgs::new();
+            args.set("colors", *colors as i64);
+            args.set(
+                "dither",
+                localizer.text(if *dither { "export-on" } else { "export-off" }),
+            );
+            localizer.format("export-gif-rate-control", Some(&args))
         }
     };
     let audio = match media.audio {
-        AudioCodecConfig::Disabled => "无音频".to_owned(),
+        AudioCodecConfig::Disabled => localizer.text("export-no-audio"),
         AudioCodecConfig::Aac { bitrate_kbps } => format!("AAC {bitrate_kbps} kbps"),
         AudioCodecConfig::Pcm { bit_depth } => format!("PCM {bit_depth}-bit"),
         AudioCodecConfig::Mp3 { bitrate_kbps } => format!("MP3 {bitrate_kbps} kbps"),
     };
-    format!(
-        "{resolution} / {} / {bitrate} / {} / {} / {} / {} / {} / {audio} / .{}",
-        export_video_codec_label(&media.video),
-        export_color_target_label(preset.color_target),
-        export_bit_depth_label(preset.video_signal.bit_depth),
-        export_video_range_label(preset.video_signal.range),
+    let mut args = fluent_bundle::FluentArgs::new();
+    args.set("resolution", resolution);
+    args.set("codec", export_video_codec_label(&media.video));
+    args.set("bitrate", bitrate);
+    args.set(
+        "color",
+        export_color_target_label(preset.color_target, localizer),
+    );
+    args.set(
+        "bit_depth",
+        export_bit_depth_label(preset.video_signal.bit_depth, localizer),
+    );
+    args.set(
+        "range",
+        export_video_range_label(preset.video_signal.range, localizer),
+    );
+    args.set(
+        "chroma",
         export_chroma_label(preset.video_signal.chroma_sampling),
-        export_alpha_mode_label(preset.alpha_mode),
-        export_preset_extension(preset)
-    )
+    );
+    args.set(
+        "alpha",
+        export_alpha_mode_label(preset.alpha_mode, localizer),
+    );
+    args.set("audio", audio);
+    args.set("extension", export_preset_extension(preset));
+    localizer.format("export-summary-media", Some(&args))
 }
 
-fn export_rate_control_label(rate_control: mondrian_export::preset::VideoRateControl) -> String {
+fn export_rate_control_label(
+    rate_control: mondrian_export::preset::VideoRateControl,
+    localizer: &Localizer,
+) -> String {
+    let mut args = fluent_bundle::FluentArgs::new();
+    args.set("crf", rate_control.crf as i64);
     match rate_control.max_bitrate_kbps {
-        Some(max_bitrate) => format!("CRF {} / max {max_bitrate} kbps", rate_control.crf),
-        None => format!("CRF {}", rate_control.crf),
+        Some(max_bitrate) => {
+            args.set("max", max_bitrate as i64);
+            localizer.format("export-rate-control-max", Some(&args))
+        }
+        None => localizer.format("export-rate-control", Some(&args)),
     }
 }
 
-fn export_range_label(range: TimelineExportRange) -> &'static str {
-    match range {
-        TimelineExportRange::SequenceInOut => "序列入点/出点",
-        TimelineExportRange::EntireSequence => "整个序列",
-        TimelineExportRange::WorkArea { .. } => "工作区域",
-    }
+fn export_range_label(range: TimelineExportRange, localizer: &Localizer) -> String {
+    localizer.text(match range {
+        TimelineExportRange::SequenceInOut => "export-range-in-out",
+        TimelineExportRange::EntireSequence => "export-range-entire",
+        TimelineExportRange::WorkArea { .. } => "export-range-work-area",
+    })
 }
 
 fn export_job_title(path: &Path) -> String {
