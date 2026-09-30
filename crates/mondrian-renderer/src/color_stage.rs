@@ -969,6 +969,54 @@ impl RenderGpuOutputBoundaryRuntime {
         &mut self.frame_table
     }
 
+    /// Import a decoder-native source into this owner's frame identity/table.
+    /// Platform sampling and input color use the same native import contract
+    /// for Viewer and Export; no CPU pixel materialization is permitted here.
+    pub fn import_native_frame(
+        &mut self,
+        native_runtime: &mut crate::NativeVideoImportRuntime,
+        source_color_space: mondrian_core::ColorSpace,
+        input_transform: &crate::RenderInputTransform,
+        output_extent: mondrian_core::Resolution,
+        native_frame: &mondrian_media::PreviewNativeDecodedFrame,
+    ) -> Result<
+        RenderColorStageExecution<GpuColorFrameHandle>,
+        crate::GpuNativeDecodedFrameImportError,
+    > {
+        let resource = native_runtime.import(
+            &mut self.frame_ids,
+            source_color_space,
+            input_transform,
+            output_extent.width,
+            output_extent.height,
+            native_frame,
+        )?;
+        let handle = resource.handle().clone();
+        if self
+            .frame_table
+            .insert(resource)
+            .map_err(
+                |error| crate::GpuNativeDecodedFrameImportError::BackendRejected {
+                    reason: format!("native working resource insertion failed: {error:?}"),
+                },
+            )?
+            .is_some()
+        {
+            return Err(crate::GpuNativeDecodedFrameImportError::BackendRejected {
+                reason: "native working frame unexpectedly replaced a live resource".to_owned(),
+            });
+        }
+        Ok(RenderColorStageExecution {
+            result: handle,
+            stage_diagnostics: RenderColorStageDiagnostics {
+                total_stages: 1,
+                gpu_color_stages: 1,
+                stage_pixels: u64::from(output_extent.width) * u64::from(output_extent.height),
+                ..RenderColorStageDiagnostics::default()
+            },
+        })
+    }
+
     /// Detach one exact output resource from this runtime's frame table.
     ///
     /// The complete handle contract is validated before ownership moves. A

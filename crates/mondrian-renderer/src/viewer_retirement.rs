@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::{
     GpuColorFrameWgpuResourcePool, GpuDisplayCalibrationRuntime, GpuFrameCompositor,
     GpuNativeDecodedFrameImportError, GpuProgramScopesRuntime, GpuSignalMonitorRuntime,
-    RenderGpuOutputBoundaryRuntime, ViewerNativeVideoImportRuntime,
+    NativeVideoImportRuntime, RenderGpuOutputBoundaryRuntime,
 };
 
 /// Observed terminal result after joining the actual CPU YUV upload worker.
@@ -44,7 +44,7 @@ impl ViewerGpuRetirementReceipt {
 /// worker forever, or turn its failure into a successful qualification.
 #[must_use = "retain and poll the Renderer owner through the Adapter's queue retirement barrier"]
 pub struct ViewerGpuExecutionRetirement {
-    pub(crate) native_video_import: ViewerNativeVideoImportRuntime,
+    pub(crate) native_video_import: NativeVideoImportRuntime,
     pub(crate) cpu_yuv_upload: crate::cpu_yuv::CpuYuvUploadRetirement,
     pub(crate) terminal: Option<ViewerGpuRetirementReceipt>,
     pub(crate) native_device_removed: bool,

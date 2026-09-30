@@ -256,6 +256,20 @@ fails before allocating that node. Export freezes the grant per attempt and
 reports its active high-water bytes/textures; it may not reduce precision or
 fall back after GPU execution has begun.
 
+Native decoded Export sources use `NativeVideoImportRuntime`, the same concrete
+platform importer used by Viewer. The frozen source contract selects the GPU
+input intent through `SourceColorModule`; `GpuColorExecutionSession` adopts its
+working resource into the existing frame identity namespace/table. Media keeps
+codec/profile, timestamp, scan and decoded-plane authority; exact observed
+handle/format/sampling routes are validated by the importer. Native request or
+import failure cannot substitute CPU pixels after this path starts. Source
+hardware observation is counted independently from resident encode hardware.
+Terminal source retirement observes actual GPU completion, consumes the native
+release worker, clears the job decode context, and checks issued native outputs
+are released. Resident first-frame render/surface failures are terminal even
+before the first encoded packet; only pre-render adapter/session rejection may
+select the separately diagnosed generic route.
+
 Software-decoded compact YUV follows that same ownership rule. Its encoded-RGB
 intermediate is acquired from the shared exact-contract pool and returned when
 the submitted candidate's frame resource table clears on the next record; it
@@ -724,7 +738,7 @@ distinguish CPU-decoded media, native GPU-decoded media, native media blocked
 by missing sampling facts, mixed CPU/native stacks, and procedural GPU-native
 content across the concrete D3D12, VideoToolbox/Metal, and VA-API/Vulkan
 Adapters.
-The renderer owns `ViewerNativeVideoImportRuntime` independently from the
+The renderer owns `NativeVideoImportRuntime` independently from the
 swapchain UI renderer. On Windows it constructs the concrete renderer
 backend from the active adapter/device/queue and publishes that backend's support
 contract; construction failure remains unavailable with its exact reason. The
@@ -897,7 +911,7 @@ policy. App code consumes these contracts directly; it must not re-export them
 under App-owned aliases.
 
 Native decoded-frame format and sampling resolution is Renderer policy and
-therefore lives beside `ViewerNativeVideoImportRuntime`. Unknown range,
+therefore lives beside `NativeVideoImportRuntime`. Unknown range,
 bit-depth mismatch, unsupported chroma location, or an RGB/YUV matrix mismatch
 fails closed before backend execution. Product admission explanations remain an
 App Adapter responsibility: they may combine exact media facts with the

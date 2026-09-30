@@ -74,7 +74,7 @@ fn visual_working_set_estimate_includes_retained_closure_and_numeric_upload() {
 
     assert_eq!(estimate.retained_closure.bytes, 10);
     let working_bpp = u64::from(product_gpu_working_bytes_per_pixel());
-    assert_eq!(estimate.source_uploads.bytes, 2 * working_bpp);
+    assert_eq!(estimate.source_materialization.bytes, 2 * working_bpp);
     assert_eq!(estimate.working_composite.bytes, 2 * 2 * working_bpp);
     assert_eq!(
         estimate.total().bytes,
@@ -122,6 +122,7 @@ async fn data_texture_gpu_visual_path_preserves_numeric_channels_without_ocio() 
             &context.device,
             &context.queue,
             &mut rejected_encoder,
+            None,
             GpuVisualFrameRequest {
                 width: 2,
                 height: 1,
@@ -149,6 +150,7 @@ async fn data_texture_gpu_visual_path_preserves_numeric_channels_without_ocio() 
             &context.device,
             &context.queue,
             &mut encoder,
+            None,
             GpuVisualFrameRequest {
                 width: 2,
                 height: 1,
@@ -252,6 +254,7 @@ async fn export_visual_path_uses_shared_spatial_composite_execution_plan() {
             &context.device,
             &context.queue,
             &mut encoder,
+            None,
             GpuVisualFrameRequest {
                 width: 4,
                 height: 4,
@@ -378,6 +381,7 @@ async fn compact_yuv_visual_sources_reuse_uploads_without_aliasing_and_retire_pe
                         &context.device,
                         &context.queue,
                         &mut encoder,
+                        None,
                         GpuVisualFrameRequest {
                             color_engine: request.color_engine.clone(),
                             ..request
@@ -393,6 +397,7 @@ async fn compact_yuv_visual_sources_reuse_uploads_without_aliasing_and_retire_pe
                     &context.device,
                     &context.queue,
                     &mut encoder,
+                    None,
                     request,
                 )
                 .expect("shared production YUV/color/composite");

@@ -180,7 +180,7 @@ pub struct ViewerGpuCpuYuvSource {
 }
 
 /// Renderer backend lifetime for native decoded-frame import.
-pub struct ViewerNativeVideoImportRuntime {
+pub struct NativeVideoImportRuntime {
     support: GpuNativeDecodedFrameImportSupport,
     pub(crate) cpu_yuv_decoder: GpuNativeYuvDecoder,
     #[cfg(target_os = "windows")]
@@ -191,7 +191,7 @@ pub struct ViewerNativeVideoImportRuntime {
     backend: Option<VulkanNativeVideoImportBackend>,
 }
 
-impl ViewerNativeVideoImportRuntime {
+impl NativeVideoImportRuntime {
     /// Create the backend implementation selected for one renderer device.
     pub fn new(adapter: &wgpu::Adapter, device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         Self::new_with_gpu_timing_policy(
@@ -671,7 +671,7 @@ fn native_decoded_frame_import_contract(
         handle_kind: native_frame.handle_kind(),
         source_texture_format,
         video_sampling,
-        label: format!("viewer-native-working-{}", native_frame.handle.id().get()),
+        label: format!("native-working-{}", native_frame.handle.id().get()),
     })
 }
 

@@ -55,7 +55,9 @@ async fn production_color_output_stays_gpu_resident_through_hevc() {
             ResidentEncodeColorimetry::Rec2100Hlg,
         ),
     ] {
-        compare_production_output(signal, bit_depth, colorimetry).await;
+        for spatial_pattern in [false, true] {
+            compare_production_output(signal, bit_depth, colorimetry, spatial_pattern).await;
+        }
     }
 }
 
@@ -63,8 +65,10 @@ async fn compare_production_output(
     signal: ColorSpace,
     bit_depth: ResidentEncodeBitDepth,
     colorimetry: ResidentEncodeColorimetry,
+    spatial_pattern: bool,
 ) {
-    const WIDTH: u32 = 320;
+    // The spatial case deliberately has a partial packed word and padded rows.
+    let width: u32 = if spatial_pattern { 322 } else { 320 };
     const HEIGHT: u32 = 180;
 
     ensure_mondrian_default_ocio_loaded().expect("Mondrian OCIO configuration");
@@ -79,7 +83,7 @@ async fn compare_production_output(
     assert_eq!(adapter_info.backend, wgpu::Backend::Metal);
 
     let contract = ResidentEncodeAdapterContract {
-        width: WIDTH,
+        width,
         height: HEIGHT,
         frame_rate_num: 30_000,
         frame_rate_den: 1_001,
@@ -99,7 +103,7 @@ async fn compare_production_output(
     });
     let config = ResidentHevcEncoderConfig {
         output_path: artifact.clone(),
-        width: WIDTH,
+        width,
         height: HEIGHT,
         frame_rate_num: 30_000,
         frame_rate_den: 1_001,
@@ -118,10 +122,19 @@ async fn compare_production_output(
         .expect("same-device native codec session");
 
     let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
-        width: WIDTH,
+        width,
         height: HEIGHT,
         color_space: WorkingColorSpace::LinearRec709,
-        data: vec![[0.18, 0.04, 0.72, 1.0]; (WIDTH * HEIGHT) as usize],
+        data: (0..width * HEIGHT)
+            .map(|index| {
+                if !spatial_pattern {
+                    return [0.18, 0.04, 0.72, 1.0];
+                }
+                let x = (index % width) as f32 / (width - 1) as f32;
+                let y = (index / width) as f32 / (HEIGHT - 1) as f32;
+                [0.02 + 0.70 * x, 0.04 + 0.60 * y, 0.03 + 0.25 * (x + y), 1.0]
+            })
+            .collect(),
     });
     let boundary = ProgramOutputBoundary::export(signal, false, ColorEngine::mondrian_standard());
     let expected = ProgramOutputModule::execute_cpu_float(
@@ -165,8 +178,9 @@ async fn compare_production_output(
             &context.device,
             &context.queue,
             &mut commands,
+            None,
             GpuVisualFrameRequest {
-                width: WIDTH,
+                width,
                 height: HEIGHT,
                 working_color_space: WorkingColorSpace::LinearRec709,
                 color_engine: ColorEngine::mondrian_standard(),
@@ -234,7 +248,7 @@ async fn compare_production_output(
     );
     let probe = probe_media_info(&artifact).expect("independent FFmpeg artifact probe");
     assert!(probe.has_video);
-    assert_eq!(probe.primary_video().expect("video stream").width, WIDTH);
+    assert_eq!(probe.primary_video().expect("video stream").width, width);
     assert_eq!(probe.primary_video().expect("video stream").height, HEIGHT);
     let mut chroma_probe = mondrian_media::ffprobe_command().expect("qualified ffprobe command");
     let chroma_probe = chroma_probe
@@ -280,29 +294,39 @@ async fn compare_production_output(
         "artifact decode failed: {}",
         String::from_utf8_lossy(&decoded.stderr)
     );
-    assert_eq!(decoded.stdout.len(), (WIDTH * HEIGHT * 3) as usize);
-    let expected_rgb = expected.frame.rgba_f32().data[0][..3]
+    assert_eq!(decoded.stdout.len(), (width * HEIGHT * 3) as usize);
+    let expected_pixels = expected
+        .frame
+        .rgba_f32()
+        .data
         .iter()
-        .map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8)
-        .collect::<Vec<_>>();
-    let pixel_count = (WIDTH * HEIGHT) as usize;
-    let actual_average = (0..3)
-        .map(|channel| {
-            decoded
-                .stdout
-                .chunks_exact(3)
-                .map(|pixel| u64::from(pixel[channel]))
-                .sum::<u64>()
-                / pixel_count as u64
+        .map(|pixel| {
+            [pixel[0], pixel[1], pixel[2]]
+                .map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8)
         })
         .collect::<Vec<_>>();
-    for (channel, (actual, expected)) in actual_average.iter().zip(expected_rgb.iter()).enumerate()
+    let mut actual_sums = [0_u64; 3];
+    let mut expected_sums = [0_u64; 3];
+    let mut maximum_pixel_delta = 0_u8;
+    for (index, (actual, expected)) in
+        decoded.stdout.chunks_exact(3).zip(&expected_pixels).enumerate()
     {
-        assert!(
-            actual.abs_diff(u64::from(*expected)) <= 12,
-            "{signal:?}/{bit_depth:?}: decoded channel {channel} average {actual} differs from same-contract CPU output {expected}"
-        );
+        for channel in 0..3 {
+            actual_sums[channel] += u64::from(actual[channel]);
+            expected_sums[channel] += u64::from(expected[channel]);
+            let delta = actual[channel].abs_diff(expected[channel]);
+            maximum_pixel_delta = maximum_pixel_delta.max(delta);
+            if spatial_pattern {
+                assert!(delta <= 12, "{signal:?}/{bit_depth:?}: pixel ({},{}) channel {channel}: decoded {} versus independent CPU {}, delta {delta}", index % width as usize, index / width as usize, actual[channel], expected[channel]);
+            }
+        }
     }
+    for channel in 0..3 {
+        let actual = actual_sums[channel] / u64::from(width * HEIGHT);
+        let expected = expected_sums[channel] / u64::from(width * HEIGHT);
+        assert!(actual.abs_diff(expected) <= 12, "{signal:?}/{bit_depth:?}: channel {channel} average {actual} versus independent CPU {expected}");
+    }
+    println!("resident_pixel_evidence={signal:?}/{bit_depth:?}; spatial_pattern={spatial_pattern}; width={width}; height={HEIGHT}; max_rgb8_delta={maximum_pixel_delta}");
     #[cfg(target_os = "macos")]
     {
         let mut exhausted = NativeEncoder::open(
@@ -328,7 +352,7 @@ async fn compare_production_output(
         );
         // Escaped +1 pixel buffers remain valid through codec invalidation;
         // they carry no right to submit to a replacement owner.
-        assert_eq!(inputs[0].surface().width, WIDTH);
+        assert_eq!(inputs[0].surface().width, width);
         drop(inputs);
         println!("resident_pool_error_case={signal:?}/{bit_depth:?}; allocation rejected and native owner joined");
     }

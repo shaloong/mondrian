@@ -42,6 +42,15 @@ pub enum GpuVisualFrameSource {
         /// Frozen source-to-working interpretation.
         transform: RenderInputTransform,
     },
+    /// Decoder-native source sampled by the device-bound shared platform importer.
+    Native {
+        /// Immutable Media native surface and decoded sampling/ownership facts.
+        frame: Arc<mondrian_media::PreviewNativeDecodedFrame>,
+        /// Frozen source color interpretation.
+        source_color_space: mondrian_core::ColorSpace,
+        /// Shared source-to-working GPU intent.
+        transform: RenderInputTransform,
+    },
     /// CPU working-linear color pixels uploaded without another color transform.
     Working(Arc<CpuColorFrame>),
     /// CPU RGBA numeric channels uploaded with `NonColorData + DataTexture` identity.
@@ -63,6 +72,7 @@ impl GpuVisualFrameSource {
                 (descriptor.width, descriptor.height)
             }
             Self::CompactYuv { frame, .. } => (frame.width, frame.height),
+            Self::Native { frame, .. } => (frame.width, frame.height),
             Self::Working(frame) | Self::DataTexture(frame) => {
                 let descriptor = frame.descriptor();
                 (descriptor.width, descriptor.height)
@@ -162,7 +172,7 @@ pub enum GpuVisualFrameActiveWorkingSetStage {
     /// Textures already retained by earlier child nodes in the same closure.
     RetainedClosure,
     /// CPU working or typed DataTexture uploads.
-    SourceUploads,
+    SourceMaterialization,
     /// Source-domain and adjustment-domain intermediate textures.
     Effects,
     /// Independently materialized Transition endpoints and outputs.
@@ -178,8 +188,8 @@ pub enum GpuVisualFrameActiveWorkingSetStage {
 pub struct GpuVisualFrameActiveWorkingSetEstimate {
     /// Existing closure resources retained by the shared frame table.
     pub retained_closure: GpuVisualFrameActiveTextureDemand,
-    /// New CPU-source uploads.
-    pub source_uploads: GpuVisualFrameActiveTextureDemand,
+    /// New CPU/native source materialization textures.
+    pub source_materialization: GpuVisualFrameActiveTextureDemand,
     /// New Effect-domain intermediates.
     pub effects: GpuVisualFrameActiveTextureDemand,
     /// New Transition intermediates.
@@ -325,6 +335,9 @@ pub enum GpuVisualFrameExecutionError {
     /// Source/transition working compositing failed.
     #[error("GPU visual source composite failed: {0}")]
     Composite(#[from] GpuCompositeError),
+    /// Native source failed the exact platform/sampling/color import contract.
+    #[error(transparent)]
+    NativeImport(#[from] crate::GpuNativeDecodedFrameImportError),
     /// Compact decoded planes failed the shared video/color materialization contract.
     #[error("GPU visual compact YUV materialization failed: {0}")]
     CompactYuv(String),
@@ -399,6 +412,7 @@ impl GpuVisualFrameExecutor {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        mut native_import: Option<&mut crate::NativeVideoImportRuntime>,
         request: GpuVisualFrameRequest<'_>,
     ) -> Result<GpuVisualFrameRecord, GpuVisualFrameExecutionError> {
         let runtime = session.runtime_mut();
@@ -446,6 +460,7 @@ impl GpuVisualFrameExecutor {
                         device,
                         queue,
                         encoder,
+                        native_import.as_deref_mut(),
                         &request,
                         source,
                         &mut compositing_diagnostics,
@@ -474,6 +489,7 @@ impl GpuVisualFrameExecutor {
                         device,
                         queue,
                         encoder,
+                        native_import.as_deref_mut(),
                         &request,
                         left,
                         &mut compositing_diagnostics,
@@ -484,6 +500,7 @@ impl GpuVisualFrameExecutor {
                         device,
                         queue,
                         encoder,
+                        native_import.as_deref_mut(),
                         &request,
                         right,
                         &mut compositing_diagnostics,
@@ -577,6 +594,7 @@ impl GpuVisualFrameExecutor {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        native_import: Option<&mut crate::NativeVideoImportRuntime>,
         request: &GpuVisualFrameRequest<'_>,
         source: &GpuVisualSourceLayer,
         compositing_diagnostics: &mut GpuCompositingDiagnostics,
@@ -599,6 +617,23 @@ impl GpuVisualFrameExecutor {
                     .map_err(|error| GpuVisualFrameExecutionError::InputColor(Box::new(error)))?;
                 color_stage_diagnostics.accumulate(record.stage_diagnostics);
                 GpuVisualFrameSource::GpuWorking(record.materialized.output)
+            }
+            GpuVisualFrameSource::Native { frame, source_color_space, transform } => {
+                let native = native_import.ok_or_else(|| {
+                    crate::GpuNativeDecodedFrameImportError::BackendRejected {
+                        reason: "native visual source has no device-bound import runtime"
+                            .to_owned(),
+                    }
+                })?;
+                let execution = runtime.import_native_frame(
+                    native,
+                    *source_color_space,
+                    transform,
+                    mondrian_core::Resolution { width: frame.width, height: frame.height },
+                    frame,
+                )?;
+                color_stage_diagnostics.accumulate(execution.stage_diagnostics);
+                GpuVisualFrameSource::GpuWorking(execution.result)
             }
             GpuVisualFrameSource::CompactYuv { frame, transform } => {
                 let mut owner = self.cpu_yuv.lock();
@@ -698,6 +733,7 @@ impl GpuVisualFrameExecutor {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        native_import: Option<&mut crate::NativeVideoImportRuntime>,
         request: &GpuVisualFrameRequest<'_>,
         input: &GpuVisualTransitionInput,
         compositing_diagnostics: &mut GpuCompositingDiagnostics,
@@ -710,6 +746,7 @@ impl GpuVisualFrameExecutor {
                 device,
                 queue,
                 encoder,
+                native_import,
                 request,
                 source,
                 compositing_diagnostics,
@@ -823,8 +860,8 @@ pub fn estimate_gpu_visual_frame_active_working_set(
             GpuVisualFrameActiveWorkingSetStage::RetainedClosure,
         ),
         (
-            estimate.source_uploads,
-            GpuVisualFrameActiveWorkingSetStage::SourceUploads,
+            estimate.source_materialization,
+            GpuVisualFrameActiveWorkingSetStage::SourceMaterialization,
         ),
         (
             estimate.effects,
@@ -852,31 +889,31 @@ fn estimate_visual_source(
 ) -> Result<(), GpuVisualFrameActiveWorkingSetEstimateError> {
     let (width, height) = source.source.extent(request.width, request.height);
     let upload_textures = match source.source {
-        GpuVisualFrameSource::ColorManaged { .. } => 2,
+        GpuVisualFrameSource::ColorManaged { .. } | GpuVisualFrameSource::Native { .. } => 2,
         GpuVisualFrameSource::CompactYuv { .. } => 1,
         GpuVisualFrameSource::Working(_) | GpuVisualFrameSource::DataTexture(_) => 1,
         GpuVisualFrameSource::GpuWorking(_) | GpuVisualFrameSource::Solid(_) => 0,
     };
     if upload_textures > 0 {
-        estimate.source_uploads.checked_add(
+        estimate.source_materialization.checked_add(
             repeated_texture_demand(
                 width,
                 height,
                 upload_textures,
-                GpuVisualFrameActiveWorkingSetStage::SourceUploads,
+                GpuVisualFrameActiveWorkingSetStage::SourceMaterialization,
             )?,
-            GpuVisualFrameActiveWorkingSetStage::SourceUploads,
+            GpuVisualFrameActiveWorkingSetStage::SourceMaterialization,
         )?;
     }
     if let GpuVisualFrameSource::CompactYuv { frame, .. } = &source.source {
         let (bytes, textures) = crate::cpu_yuv::queue_plane_demand(frame).map_err(|_| {
             GpuVisualFrameActiveWorkingSetEstimateError::ArithmeticOverflow {
-                stage: GpuVisualFrameActiveWorkingSetStage::SourceUploads,
+                stage: GpuVisualFrameActiveWorkingSetStage::SourceMaterialization,
             }
         })?;
-        estimate.source_uploads.checked_add(
+        estimate.source_materialization.checked_add(
             GpuVisualFrameActiveTextureDemand { bytes, textures },
-            GpuVisualFrameActiveWorkingSetStage::SourceUploads,
+            GpuVisualFrameActiveWorkingSetStage::SourceMaterialization,
         )?;
     }
     if !source.effect_plan.is_identity()
@@ -957,7 +994,8 @@ impl PreparedSourceLayer {
         GpuCompositeLayer {
             source: match &self.source {
                 GpuVisualFrameSource::ColorManaged { .. }
-                | GpuVisualFrameSource::CompactYuv { .. } => {
+                | GpuVisualFrameSource::CompactYuv { .. }
+                | GpuVisualFrameSource::Native { .. } => {
                     unreachable!("encoded source must cross GPU input color before compositing")
                 }
                 GpuVisualFrameSource::Working(frame) => GpuCompositeLayerSource::CpuFrame(frame),

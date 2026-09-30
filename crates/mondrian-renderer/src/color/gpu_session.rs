@@ -123,6 +123,11 @@ impl GpuColorExecutionSession {
         self.runtime.diagnostics()
     }
 
+    /// Device-scoped pool shared by adjacent renderer Adapters.
+    pub fn resource_pool(&self) -> Arc<GpuColorFrameWgpuResourcePool> {
+        self.runtime.resource_pool()
+    }
+
     /// Release frame-local resources while preserving reusable caches and the pool.
     pub fn clear_frame_resources(&mut self) {
         self.runtime.clear_frame_resources();

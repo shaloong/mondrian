@@ -33,7 +33,7 @@ use crate::{
     HeterogeneousGpuRecordResources, HeterogeneousGpuRecordedContinuation,
     HeterogeneousGpuSubmittedContinuation, NativeVideoImportCandidateTimingReceipt,
     NativeVideoImportCpuTimings, NativeVideoImportGpuTimingDiagnostics,
-    NativeVideoImportGpuTimingPolicy, NativeVideoImportGpuTimingSample,
+    NativeVideoImportGpuTimingPolicy, NativeVideoImportGpuTimingSample, NativeVideoImportRuntime,
     RenderColorStageDiagnostics, RenderColorTransformGpuOptions,
     RenderGpuColorTransformRuntimeRecordError, RenderGpuCompositeGraphRecordError,
     RenderGpuInputStageRecord, RenderGpuInputStageRuntimeRecordError,
@@ -42,8 +42,8 @@ use crate::{
     ViewerGpuActiveWorkingSetAdmissionError, ViewerGpuActiveWorkingSetEstimate,
     ViewerGpuActiveWorkingSetEstimateError, ViewerGpuExecutionLayer,
     ViewerGpuExecutionResourceGrant, ViewerGpuMediaSource, ViewerGpuNativeSource,
-    ViewerGpuPresentationOutputLease, ViewerHeterogeneousGpuInput, ViewerNativeVideoImportRuntime,
-    ViewerSourceRect, PRODUCT_GPU_WORKING_FLOAT_DECISION,
+    ViewerGpuPresentationOutputLease, ViewerHeterogeneousGpuInput, ViewerSourceRect,
+    PRODUCT_GPU_WORKING_FLOAT_DECISION,
 };
 use mondrian_core::display_calibration::DisplayCalibrationLut3d;
 use mondrian_core::types::{BlendMode, Color, SequenceId};
@@ -191,7 +191,7 @@ pub struct ViewerGpuExecutionRuntime {
     resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
     resource_grant: ViewerGpuExecutionResourceGrant,
     last_active_working_set: Option<ViewerGpuActiveWorkingSetEstimate>,
-    native_video_import: ViewerNativeVideoImportRuntime,
+    native_video_import: NativeVideoImportRuntime,
     cpu_yuv_upload: crate::cpu_yuv::CpuYuvUploadRuntime,
     color_output: RenderGpuOutputBoundaryRuntime,
     spatial: GpuViewerSpatialRuntime,
@@ -270,7 +270,7 @@ impl ViewerGpuExecutionRuntime {
         // Prepare every fallible GPU component before starting an upload worker.
         // An early construction error then owns no detached upload execution.
         let native_video_import =
-            ViewerNativeVideoImportRuntime::new_with_resource_pool_and_gpu_timing_policy(
+            NativeVideoImportRuntime::new_with_resource_pool_and_gpu_timing_policy(
                 adapter,
                 device,
                 queue,
@@ -1865,7 +1865,7 @@ fn prepare_composite<'a>(
     request: &ViewerGpuExecutionRequest<'a>,
     heterogeneous_inputs: &mut [Option<ViewerHeterogeneousGpuInput>],
     runtime: &mut RenderGpuOutputBoundaryRuntime,
-    native_runtime: &mut ViewerNativeVideoImportRuntime,
+    native_runtime: &mut NativeVideoImportRuntime,
     cpu_yuv_upload: &crate::cpu_yuv::CpuYuvUploadRuntime,
     compositor: &GpuFrameCompositor,
     resource_pool: &Arc<GpuColorFrameWgpuResourcePool>,
@@ -1988,7 +1988,7 @@ fn prepare_transition_input<'a>(
     heterogeneous_inputs: &mut [Option<ViewerHeterogeneousGpuInput>],
     prepared: &mut PreparedComposite<'a>,
     runtime: &mut RenderGpuOutputBoundaryRuntime,
-    native_runtime: &mut ViewerNativeVideoImportRuntime,
+    native_runtime: &mut NativeVideoImportRuntime,
     cpu_yuv_upload: &crate::cpu_yuv::CpuYuvUploadRuntime,
     compositor: &GpuFrameCompositor,
     resource_pool: &Arc<GpuColorFrameWgpuResourcePool>,
@@ -2031,7 +2031,7 @@ fn prepare_source_layer<'a>(
     heterogeneous_inputs: &mut [Option<ViewerHeterogeneousGpuInput>],
     prepared: &mut PreparedComposite<'a>,
     runtime: &mut RenderGpuOutputBoundaryRuntime,
-    native_runtime: &mut ViewerNativeVideoImportRuntime,
+    native_runtime: &mut NativeVideoImportRuntime,
     cpu_yuv_upload: &crate::cpu_yuv::CpuYuvUploadRuntime,
     compositor: &GpuFrameCompositor,
     resource_pool: &Arc<GpuColorFrameWgpuResourcePool>,
@@ -2461,7 +2461,7 @@ fn visible_native_video_frames(
 }
 fn prepare_source_native_video_import(
     layer: &crate::ViewerGpuSourceLayer,
-    runtime: &mut crate::ViewerNativeVideoImportRuntime,
+    runtime: &mut crate::NativeVideoImportRuntime,
     seen: &mut Vec<usize>,
 ) -> Result<(), ViewerGpuExecutionError> {
     if source_layer_has_zero_contribution(layer) {
@@ -2665,39 +2665,27 @@ fn native_import_failure_without_cpu_fallback(
 
 fn record_native_video_layer(
     source: &ViewerGpuNativeSource,
-    native_runtime: &mut ViewerNativeVideoImportRuntime,
+    native_runtime: &mut NativeVideoImportRuntime,
     color_runtime: &mut RenderGpuOutputBoundaryRuntime,
 ) -> Result<GpuColorFrameHandle, crate::GpuNativeDecodedFrameImportError> {
-    let resource = native_runtime.import(
-        color_runtime.frame_ids_mut(),
-        source.source_color_space,
-        &source.input_transform,
-        source.materialization_width,
-        source.materialization_height,
-        &source.native_frame,
-    )?;
-    let handle = resource.handle().clone();
-    if color_runtime
-        .frame_table_mut()
-        .insert(resource)
-        .map_err(
-            |error| crate::GpuNativeDecodedFrameImportError::BackendRejected {
-                reason: format!("native working resource insertion failed: {error:?}"),
+    color_runtime
+        .import_native_frame(
+            native_runtime,
+            source.source_color_space,
+            &source.input_transform,
+            mondrian_core::Resolution {
+                width: source.materialization_width,
+                height: source.materialization_height,
             },
-        )?
-        .is_some()
-    {
-        return Err(crate::GpuNativeDecodedFrameImportError::BackendRejected {
-            reason: "native working frame unexpectedly replaced a live resource".to_owned(),
-        });
-    }
-    Ok(handle)
+            &source.native_frame,
+        )
+        .map(|execution| execution.result)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn record_cpu_yuv_video_layer(
     source: &crate::ViewerGpuCpuYuvSource,
-    native_runtime: &mut ViewerNativeVideoImportRuntime,
+    native_runtime: &mut NativeVideoImportRuntime,
     cpu_yuv_upload: &crate::cpu_yuv::CpuYuvUploadRuntime,
     color_runtime: &mut RenderGpuOutputBoundaryRuntime,
     device: &wgpu::Device,

@@ -2935,7 +2935,7 @@ through `gpu_compositor.rs`. For supported layer stacks, the app window records:
 ```
 Resolved preview layers
   -> for each retained renderer-qualified native media layer:
-       ViewerNativeVideoImportRuntime
+       NativeVideoImportRuntime
        -> exact zero-copy or declared GPU-bridge Adapter route
        -> native YUV/RGB shader into encoded-float Rgba32Float source texture
        -> OCIO GPU input transform into Rgba32Float working texture
