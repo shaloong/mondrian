@@ -75,6 +75,8 @@ pub enum ExportVideoEncoderImplementation {
     AmdAmf,
     /// In-process FFmpeg D3D12VA HEVC encoder.
     HevcD3d12Va,
+    /// Owned public VideoToolbox HEVC session on native Metal IOSurfaces.
+    HevcVideoToolbox,
 }
 
 /// Stable renderer backend bound to hardware-encoder candidate admission.
@@ -404,6 +406,23 @@ pub(crate) fn resident_hevc_cuda_diagnostics(
         frame_transport: ExportVideoEncoderFrameTransport::SameDeviceGpuSurface,
         hardware_admission: ExportHardwareEncoderAdmission::SameDeviceSessionOpened,
         hardware_candidate: Some(ExportVideoEncoderImplementation::NvidiaNvenc),
+        renderer_adapter_vendor: adapter.map(|adapter| adapter.vendor),
+        renderer_adapter_device: adapter.map(|adapter| adapter.device),
+        renderer_adapter_backend: adapter.map(renderer_backend),
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn resident_hevc_videotoolbox_diagnostics(
+    adapter: Option<&ActiveGraphicsAdapterIdentity>,
+    hardware_observed: bool,
+) -> ExportVideoEncoderDiagnostics {
+    ExportVideoEncoderDiagnostics {
+        selected_encoder: ExportVideoEncoderImplementation::HevcVideoToolbox,
+        hardware_selected: hardware_observed,
+        frame_transport: ExportVideoEncoderFrameTransport::SameDeviceGpuSurface,
+        hardware_admission: ExportHardwareEncoderAdmission::SameDeviceSessionOpened,
+        hardware_candidate: Some(ExportVideoEncoderImplementation::HevcVideoToolbox),
         renderer_adapter_vendor: adapter.map(|adapter| adapter.vendor),
         renderer_adapter_device: adapter.map(|adapter| adapter.device),
         renderer_adapter_backend: adapter.map(renderer_backend),

@@ -23,9 +23,10 @@ residency still fails when field processing needs CPU access.
 
 Media selects the FFmpeg binding features explicitly: codec, format, filter,
 software scaling, and software resampling. It does not register or link the
-unused libavdevice capture/output module through binding defaults. Hardware
-decoding and resident encoding continue to use libavutil hardware-device/frame
-contexts and libavcodec; field processing retains libavfilter. This dependency
+unused libavdevice capture/output module through binding defaults. FFmpeg-owned hardware
+decoding and resident encoding use libavutil hardware-device/frame contexts and
+libavcodec; the exclusive macOS codec adapter uses public VideoToolbox sessions
+and CoreVideo surfaces. Field processing retains libavfilter. This dependency
 boundary does not change CLI-provider admission or qualify physical devices.
 
 Media metadata discovery and first-frame HDR supplements share one opened FFmpeg
@@ -2882,6 +2883,38 @@ pitch only to the Renderer Adapter; it becomes `CudaResidentEncodeReadyFrame`
 only after the same-device copy completes. Main10 still depends on the physical
 NVENC generation: an unsupported profile fails during admission and cannot
 inherit a Main8 or generic encoder probe result.
+
+On macOS, `VideoToolboxResidentHevcEncoderSession` owns one public HEVC
+compression session and a threshold-bounded CVPixelBuffer/IOSurface pool on one
+exclusive codec worker. The renderer binds its actual unified-memory Metal
+registry identity. Main/Main10, SDR Rec.709 and limited-range PQ/HLG enter the
+same existing frozen Timeline Export executor. The native layer receives sealed
+CICP and pixel layout facts; it does not interpret Timeline or color policy.
+Hardware is required at open, but admission diagnostics remain unobserved until
+actual encoded output reports `UsingHardwareAcceleratedVideoEncoder=true`.
+A returned encoder GPU registry identity must match; built-in media engines may
+return no GPU identity. Absence is not represented as a fabricated registry ID.
+
+The public minimum and maximum frame-QP bounds are set to the requested native
+quantizer and read back before prepare. `Quality` and low-latency encoder
+selection are not substituted for that quantizer. This is frame-QP control,
+not proof of uniform coding-unit QP or equivalence to software CRF. Frame
+reordering and open GOP are disabled. Zero B frames obey the delivery's maximum
+B-frame constraint; this does not qualify B-frame support. Each frame is drained
+through its exact rational PTS without ending the session. A missing, dropped,
+extra or wrong-PTS callback, unexpected keyframe cadence, or unobserved hardware
+output is terminal. Compressed NAL bytes alone pass through FFmpeg's MPEG-TS
+muxer and the normal final stream-copy/audio path.
+
+The move-only input carries a +1 CVPixelBuffer reference and its exact codec
+owner identity. GPU completion precedes native submission. The worker invalidates
+the compression session before releasing callback storage, then emits its closed
+receipt and is joined. The Export owner explicitly consumes it on success,
+cancellation and failure before returning an outcome. A canceled staging video
+never becomes a final artifact or input to a new attempt. A driver timeout is
+an unproven shutdown, not zero residual: the worker retains live native parents
+until the call actually returns. This remains in-process driver-hang containment,
+not a killable process boundary.
 
 The Renderer compositor is the sole authority for opaque working-frame
 evidence. A full-canvas, identity, opaque solid base proves `Opaque`; partial or

@@ -13,7 +13,7 @@ typedef struct {
 enum {
     MDN_VT_ARGUMENT = 1, MDN_VT_FORMAT, MDN_VT_SESSION, MDN_VT_PACKET,
     MDN_VT_DECODE, MDN_VT_FINISH, MDN_VT_WAIT, MDN_VT_CALLBACK,
-    MDN_VT_SURFACE, MDN_VT_HARDWARE, MDN_VT_METADATA
+    MDN_VT_SURFACE, MDN_VT_HARDWARE, MDN_VT_METADATA, MDN_VT_ENCODE
 };
 /* Adapter contract failures, distinct from OSStatus returned by VideoToolbox. */
 enum {

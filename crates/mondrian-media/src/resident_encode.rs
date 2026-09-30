@@ -66,7 +66,7 @@ pub struct ResidentHevcEncoderConfig {
     pub keyframe_interval_frames: u32,
     /// Maximum B-frame count.
     pub max_b_frames: u32,
-    /// Constant-quantizer quality value accepted by the D3D12VA encoder.
+    /// Constant base-frame quantizer requested from the native encoder.
     pub quantizer: u8,
     /// Maximum codec-owned input surfaces.
     pub surface_pool_size: u32,
@@ -144,6 +144,9 @@ pub enum ResidentEncodeError {
     /// Surface readiness fence values must remain strictly monotonic.
     #[error("resident HEVC input-surface fence value is exhausted")]
     FenceValueExhausted,
+    /// The native platform encoder rejected or timed out its exact contract.
+    #[error("resident encode native stage {stage} failed: {reason}")]
+    Native { stage: &'static str, reason: String },
     /// FFmpeg returned an incomplete object or rejected the exact contract.
     #[error("resident HEVC FFmpeg stage {stage} failed: {reason}")]
     Ffmpeg { stage: &'static str, reason: String },
@@ -1446,3 +1449,8 @@ mod tests {
         );
     }
 }
+
+#[cfg(target_os = "macos")]
+mod videotoolbox_encode;
+#[cfg(target_os = "macos")]
+pub use videotoolbox_encode::*;

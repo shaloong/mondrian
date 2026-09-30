@@ -1412,7 +1412,7 @@ impl GpuResidentEncoderInputLease {
     }
 
     /// Borrow the source texture inside the renderer-owned platform Adapter.
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     pub(crate) fn texture(&self) -> &wgpu::Texture {
         &self.resource().resource().texture
     }

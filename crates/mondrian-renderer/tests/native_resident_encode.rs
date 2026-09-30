@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::sync::Arc;
 
@@ -8,8 +8,7 @@ use mondrian_core::{
 };
 use mondrian_effects::{identity_compiled_effect_graph, lower_effect_graph_to_gpu_plan};
 use mondrian_media::{
-    probe_media_info, CudaResidentHevcEncoderSession, ResidentEncodeBitDepth,
-    ResidentEncodeColorimetry, ResidentHevcEncoderConfig,
+    probe_media_info, ResidentEncodeBitDepth, ResidentEncodeColorimetry, ResidentHevcEncoderConfig,
 };
 use mondrian_renderer::{
     color::{
@@ -20,58 +19,103 @@ use mondrian_renderer::{
     GpuVisualFrameElement, GpuVisualFrameExecutor, GpuVisualFrameRequest, GpuVisualFrameSource,
     GpuVisualSourceLayer, RenderColorTransformGpuOptions, RenderCpuColorExecutionSession,
     RenderGpuOutputExecutionResourceGrant, ResidentEncodeAdapterContract,
-    VulkanCudaResidentEncodeAdapter,
 };
 
+#[cfg(target_os = "linux")]
+use mondrian_media::CudaResidentHevcEncoderSession as NativeEncoder;
+#[cfg(target_os = "macos")]
+use mondrian_media::VideoToolboxResidentHevcEncoderSession as NativeEncoder;
+#[cfg(target_os = "macos")]
+use mondrian_renderer::MetalResidentEncodeAdapter as NativeAdapter;
+#[cfg(target_os = "linux")]
+use mondrian_renderer::VulkanCudaResidentEncodeAdapter as NativeAdapter;
+
 #[tokio::test]
-#[ignore = "manual NVIDIA qualification; requires Vulkan external memory, CUDA, and NVENC"]
-async fn production_color_output_stays_gpu_resident_through_nvenc() {
+#[ignore = "physical resident encode qualification; requires exact native GPU/codec device"]
+async fn production_color_output_stays_gpu_resident_through_hevc() {
+    for (signal, bit_depth, colorimetry) in [
+        (
+            ColorSpace::Rec709,
+            ResidentEncodeBitDepth::Eight,
+            ResidentEncodeColorimetry::Rec709,
+        ),
+        (
+            ColorSpace::Rec709,
+            ResidentEncodeBitDepth::Ten,
+            ResidentEncodeColorimetry::Rec709,
+        ),
+        (
+            ColorSpace::Rec2100Pq,
+            ResidentEncodeBitDepth::Ten,
+            ResidentEncodeColorimetry::Rec2100Pq,
+        ),
+        (
+            ColorSpace::Rec2100Hlg,
+            ResidentEncodeBitDepth::Ten,
+            ResidentEncodeColorimetry::Rec2100Hlg,
+        ),
+    ] {
+        compare_production_output(signal, bit_depth, colorimetry).await;
+    }
+}
+
+async fn compare_production_output(
+    signal: ColorSpace,
+    bit_depth: ResidentEncodeBitDepth,
+    colorimetry: ResidentEncodeColorimetry,
+) {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 180;
 
     ensure_mondrian_default_ocio_loaded().expect("Mondrian OCIO configuration");
-    let context = GpuContext::new().await.expect("physical Vulkan GPU");
+    let context = GpuContext::new().await.expect("physical GPU");
     let adapter_info = context.adapter.get_info();
-    assert_eq!(adapter_info.backend, wgpu::Backend::Vulkan);
-    assert_eq!(adapter_info.vendor, 0x10de, "NVIDIA qualification device");
+    #[cfg(target_os = "linux")]
+    {
+        assert_eq!(adapter_info.backend, wgpu::Backend::Vulkan);
+        assert_eq!(adapter_info.vendor, 0x10de);
+    }
+    #[cfg(target_os = "macos")]
+    assert_eq!(adapter_info.backend, wgpu::Backend::Metal);
 
     let contract = ResidentEncodeAdapterContract {
         width: WIDTH,
         height: HEIGHT,
         frame_rate_num: 30_000,
         frame_rate_den: 1_001,
-        bit_depth: ResidentEncodeBitDepth::Eight,
-        colorimetry: ResidentEncodeColorimetry::Rec709,
+        bit_depth,
+        colorimetry,
         full_range: false,
         chroma_location: mondrian_media::ResidentEncodeChromaLocation::Left,
         max_frames_in_flight: 3,
     };
-    let mut adapter =
-        VulkanCudaResidentEncodeAdapter::new(&context.device, &context.queue, contract)
-            .expect("same-device Vulkan/CUDA Adapter");
+    let mut adapter = NativeAdapter::new(&context.device, &context.queue, contract)
+        .expect("same-device native adapter");
     let directory = tempfile::tempdir().expect("temporary artifact directory");
-    let artifact = directory.path().join("resident-hevc.mkv");
-    let mut encoder = CudaResidentHevcEncoderSession::open(
-        &adapter.encoder_device_root(),
-        ResidentHevcEncoderConfig {
-            output_path: artifact.clone(),
-            width: WIDTH,
-            height: HEIGHT,
-            frame_rate_num: 30_000,
-            frame_rate_den: 1_001,
-            sample_aspect_ratio_num: 1,
-            sample_aspect_ratio_den: 1,
-            bit_depth: ResidentEncodeBitDepth::Eight,
-            colorimetry: ResidentEncodeColorimetry::Rec709,
-            full_range: false,
-            chroma_location: mondrian_media::ResidentEncodeChromaLocation::Left,
-            keyframe_interval_frames: 30,
-            max_b_frames: 0,
-            quantizer: 18,
-            surface_pool_size: 3,
-        },
-    )
-    .expect("same-device CUDA/NVENC Session");
+    let artifact = directory.path().join(if cfg!(target_os = "macos") {
+        "resident-hevc.ts"
+    } else {
+        "resident-hevc.mkv"
+    });
+    let config = ResidentHevcEncoderConfig {
+        output_path: artifact.clone(),
+        width: WIDTH,
+        height: HEIGHT,
+        frame_rate_num: 30_000,
+        frame_rate_den: 1_001,
+        sample_aspect_ratio_num: 1,
+        sample_aspect_ratio_den: 1,
+        bit_depth,
+        colorimetry,
+        full_range: false,
+        chroma_location: mondrian_media::ResidentEncodeChromaLocation::Left,
+        keyframe_interval_frames: 30,
+        max_b_frames: 0,
+        quantizer: 18,
+        surface_pool_size: 3,
+    };
+    let mut encoder = NativeEncoder::open(&adapter.encoder_device_root(), config.clone())
+        .expect("same-device native codec session");
 
     let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
         width: WIDTH,
@@ -79,9 +123,8 @@ async fn production_color_output_stays_gpu_resident_through_nvenc() {
         color_space: WorkingColorSpace::LinearRec709,
         data: vec![[0.18, 0.04, 0.72, 1.0]; (WIDTH * HEIGHT) as usize],
     });
-    let boundary =
-        ProgramOutputBoundary::export(ColorSpace::Rec709, false, ColorEngine::mondrian_standard());
-    let expected = ProgramOutputModule::execute_cpu_rgba8(
+    let boundary = ProgramOutputBoundary::export(signal, false, ColorEngine::mondrian_standard());
+    let expected = ProgramOutputModule::execute_cpu_float(
         &frame,
         &boundary,
         &mut RenderCpuColorExecutionSession::default(),
@@ -114,7 +157,7 @@ async fn production_color_output_stays_gpu_resident_through_nvenc() {
     let mut session = GpuColorExecutionSession::new().expect("production color session");
     let visual = GpuVisualFrameExecutor::new(&context.device).expect("production GPU compositor");
     let mut commands = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("linux-resident-encode-production-color"),
+        label: Some("resident-encode-production-color"),
     });
     let composite = visual
         .record(
@@ -130,7 +173,7 @@ async fn production_color_output_stays_gpu_resident_through_nvenc() {
                 elements: &elements,
             },
         )
-        .expect("production opaque-black GPU composite");
+        .expect("production opaque GPU composite");
     assert_eq!(
         composite.output.descriptor().alpha,
         mondrian_renderer::ColorFrameAlpha::Opaque
@@ -139,7 +182,11 @@ async fn production_color_output_stays_gpu_resident_through_nvenc() {
         .record_program_output(
             &boundary,
             GpuProgramInput::Gpu(&composite.output),
-            GpuColorFrameTextureFormat::Rgba8Unorm,
+            if bit_depth == ResidentEncodeBitDepth::Eight {
+                GpuColorFrameTextureFormat::Rgba8Unorm
+            } else {
+                GpuColorFrameTextureFormat::Rgba32Float
+            },
             RenderColorTransformGpuOptions {
                 output_residency: ColorFrameResidency::Gpu,
                 ..RenderColorTransformGpuOptions::default()
@@ -159,14 +206,19 @@ async fn production_color_output_stays_gpu_resident_through_nvenc() {
     let source = session
         .take_resident_encoder_input(&output)
         .expect("move-only resident Program Output");
-    let destination = encoder.acquire_input_frame().expect("FFmpeg CUDA surface");
-    let ready = adapter.process(source, destination).expect("Vulkan-to-CUDA resident copy");
-    encoder.submit_input_frame(ready, 0).expect("NVENC frame submission");
-    encoder.finish().expect("NVENC trailer");
+    let destination = encoder.acquire_input_frame().expect("codec-owned surface");
+    let ready = adapter.process(source, destination).expect("native resident conversion/copy");
+    encoder.submit_input_frame(ready, 0).expect("native frame submission");
+    encoder.finish().expect("native codec/mux finalization");
 
     let renderer = adapter.diagnostics();
     assert_eq!(renderer.color_conversion_submissions, 1);
-    assert_eq!(renderer.device_to_device_copies, 1);
+    assert_eq!(
+        renderer.device_to_device_copies,
+        if cfg!(target_os = "macos") { 2 } else { 1 }
+    );
+    #[cfg(target_os = "macos")]
+    assert!(encoder.diagnostics().hardware_observed && encoder.diagnostics().consuming_shutdown);
     assert_eq!(renderer.cpu_pixel_readbacks, 0);
     assert_eq!(renderer.rawvideo_pipe_bytes, 0);
     assert_eq!(renderer.cpu_pixel_uploads, 0);
@@ -177,6 +229,9 @@ async fn production_color_output_stays_gpu_resident_through_nvenc() {
     assert_eq!(media.cpu_pixel_readbacks, 0);
     assert_eq!(media.rawvideo_pipe_bytes, 0);
     assert_eq!(media.cpu_pixel_uploads, 0);
+    println!(
+        "resident_color_case={signal:?}/{bit_depth:?}; hardware observed and owner shutdown proven"
+    );
     let probe = probe_media_info(&artifact).expect("independent FFmpeg artifact probe");
     assert!(probe.has_video);
     assert_eq!(probe.primary_video().expect("video stream").width, WIDTH);
@@ -191,16 +246,19 @@ async fn production_color_output_stays_gpu_resident_through_nvenc() {
             "-show_entries",
             "stream=chroma_location",
             "-of",
-            "default=noprint_wrappers=1:nokey=1",
+            "json",
         ])
         .arg(&artifact)
         .output()
         .expect("probe authored chroma location");
     assert!(chroma_probe.status.success());
+    let chroma: serde_json::Value =
+        serde_json::from_slice(&chroma_probe.stdout).expect("structured chroma evidence");
+    let streams = chroma["streams"].as_array().expect("stream inventory");
+    assert_eq!(streams.len(), 1, "one coded video stream");
     assert_eq!(
-        String::from_utf8_lossy(&chroma_probe.stdout).trim(),
-        "left",
-        "encoded metadata must identify the conversion kernel's left-sited chroma samples"
+        streams[0]["chroma_location"], "left",
+        "encoded signal matches shared sampling"
     );
     let mut decode = mondrian_media::ffmpeg_command().expect("qualified FFmpeg command");
     let decoded = decode
@@ -223,7 +281,10 @@ async fn production_color_output_stays_gpu_resident_through_nvenc() {
         String::from_utf8_lossy(&decoded.stderr)
     );
     assert_eq!(decoded.stdout.len(), (WIDTH * HEIGHT * 3) as usize);
-    let expected_rgb = &expected.rgba[..3];
+    let expected_rgb = expected.frame.rgba_f32().data[0][..3]
+        .iter()
+        .map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8)
+        .collect::<Vec<_>>();
     let pixel_count = (WIDTH * HEIGHT) as usize;
     let actual_average = (0..3)
         .map(|channel| {
@@ -239,7 +300,36 @@ async fn production_color_output_stays_gpu_resident_through_nvenc() {
     {
         assert!(
             actual.abs_diff(u64::from(*expected)) <= 12,
-            "decoded channel {channel} average {actual} differs from same-contract CPU output {expected}"
+            "{signal:?}/{bit_depth:?}: decoded channel {channel} average {actual} differs from same-contract CPU output {expected}"
         );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut exhausted = NativeEncoder::open(
+            &adapter.encoder_device_root(),
+            ResidentHevcEncoderConfig {
+                output_path: directory.path().join("rejected-pool.ts"),
+                ..config
+            },
+        )
+        .expect("fresh native pool owner");
+        let inputs = (0..3)
+            .map(|_| exhausted.acquire_input_frame().expect("bounded pool slot"))
+            .collect::<Vec<_>>();
+        assert!(
+            exhausted.acquire_input_frame().is_err(),
+            "pool must reject allocation past its grant"
+        );
+        exhausted.shutdown().expect("error path consumes actual native worker");
+        assert!(exhausted.diagnostics().consuming_shutdown);
+        assert!(
+            !exhausted.diagnostics().hardware_observed,
+            "opening a session is not observed hardware output"
+        );
+        // Escaped +1 pixel buffers remain valid through codec invalidation;
+        // they carry no right to submit to a replacement owner.
+        assert_eq!(inputs[0].surface().width, WIDTH);
+        drop(inputs);
+        println!("resident_pool_error_case={signal:?}/{bit_depth:?}; allocation rejected and native owner joined");
     }
 }

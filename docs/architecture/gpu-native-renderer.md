@@ -1566,13 +1566,27 @@ detached source lease may return to the Renderer pool. Any error after native
 submission retains the source and destination as poisoned resources until
 Adapter retirement; they cannot be silently recycled under unknown state.
 
-Only the narrow exact HEVC contract is admitted. HLG, full-range PQ, authored
-static HDR metadata, active Legalizer/VBV constraints, unsupported codecs or
-pixel formats, and non-D3D12 platforms use the complete reported rawvideo path.
-Failure before the first resident frame submission may fall back to that path;
-failure after submission is terminal. Renderer and Media diagnostics count
-resident submissions while proving zero host-transfer operations, and the
-ordinary post-encode validation remains authoritative.
+Linux and macOS use one shared RGB-to-YCbCr WGSL kernel, with the same range,
+Rec.709/Rec.2020 coefficients and chroma sampling. The Metal adapter imports one
+private MTLBuffer into the active wgpu device, writes packed NV12/P010 words,
+then blits the two planes into the codec-owned CVMetalTextures. Both the exact
+wgpu submission and the actual Metal command-buffer completion are observed
+before releasing the source lease or promoting the encoder input. Metal's
+completed handler carries no borrowed surface. Timeout quarantines the source,
+destination and GPU parents instead of recycling them under uncertain state.
+The bridge allocation is included once in the unified-memory resource grant;
+GPU and CPU views do not each incur a full second allocation charge. Encoded
+Float32 output stays Float32 on compute-capable adapters, while D3D12's source
+precision admission remains its independently qualified contract.
+
+Only the narrow exact HEVC contract is admitted. Full-range PQ, authored static
+HDR metadata, active Legalizer/VBV constraints, unsupported codecs or pixel
+formats use the complete reported rawvideo path. D3D12 additionally rejects HLG.
+Before native conversion, exact backend or input admission may select that path;
+conversion/submission failure is terminal. Renderer and Media diagnostics count
+resident submissions and actual native shutdown while proving zero host-transfer
+operations. The ordinary post-encode validation remains authoritative. These
+HEVC adapters do not qualify the separate H.264 rawvideo delivery path.
 
 ## Viewer Resource Reuse
 

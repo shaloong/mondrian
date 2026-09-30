@@ -183,3 +183,10 @@ pub use waveform::{
 
 #[cfg(target_os = "linux")]
 pub use preview::FfmpegCudaFrameView;
+
+#[cfg(target_os = "macos")]
+pub use resident_encode::{
+    MetalResidentEncodeDeviceRoot, MetalResidentEncodeInputFrame, MetalResidentEncodeReadyFrame,
+    MetalResidentEncodeSurfaceView, VideoToolboxResidentHevcEncoderSession,
+    VideoToolboxResidentHevcEncoderSessionDiagnostics,
+};

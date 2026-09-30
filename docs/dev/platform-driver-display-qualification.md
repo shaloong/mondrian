@@ -467,3 +467,46 @@ This workstation cannot produce macOS/Metal, Linux/Vulkan Wayland HDR, or the
 required physical P3/PQ/ICC rows. Until the exact real-device campaign is
 captured, COL-046 remains hardware HITL and no macOS/Linux commercial display
 claim is implied.
+
+## macOS resident HEVC development qualification
+
+Use the existing physical production filters with the pinned native runtime and
+an external `CARGO_TARGET_DIR`. They are ignored by the ordinary workspace run;
+absence of these explicit runs is NotRun, not a hardware pass.
+
+```sh
+cargo test --locked -p mondrian-renderer --all-features -j 2 \
+  --test native_resident_encode -- --ignored --nocapture
+MONDRIAN_RESIDENT_ENCODE_TEST_FRAMES=64 \
+MONDRIAN_RESIDENT_ENCODE_TEST_RESOLUTION=1080p \
+MONDRIAN_RESIDENT_ENCODE_TEST_SIGNAL=pq \
+cargo test --locked -p mondrian-export --all-features -j 2 \
+  production_export_queue_runs_same_device_metal_resident_hevc -- --ignored --nocapture
+MONDRIAN_RESIDENT_ENCODE_TEST_FRAMES=64 \
+MONDRIAN_RESIDENT_ENCODE_TEST_RESOLUTION=1080p \
+MONDRIAN_RESIDENT_ENCODE_TEST_SIGNAL=pq \
+cargo test --locked -p mondrian-export --all-features -j 2 \
+  production_resident_export_cancel_consumes_codec_before_retry -- --ignored --nocapture
+```
+
+The color filter independently decodes Main8/Main10 SDR, PQ and HLG outputs,
+compares them to the shared CPU Program Output with the existing 12-code-value
+lossy-encode bound, and verifies native pool exhaustion/consuming shutdown.
+Its input includes an intentional CPU working-frame upload; zero transport
+counters apply to the resident encoder adapter, not that entire fixture.
+
+The Export filter renders the canonical solid Timeline through the frozen
+production visual owner and existing Export executor. Signals are
+`rec709-eight`, `rec709-ten`, `pq`, `hlg`; resolutions are the default 320x180,
+`1080p`, or `4k`; frame count is 1..600, default 3. The cancellation filter needs
+at least 3 frames: it cancels after the second real submission, proves native
+worker join and no final artifact, then renders a fresh complete attempt.
+Every successful artifact is probed, packet-counted and fully decoded. Temporary
+artifacts are scoped outside Git and removed by the test owner.
+
+These are bounded physical transport/color/lifecycle tests. Solid frames,
+29.97-fps cadence and a fresh encoder attempt do not qualify real-media decode,
+all effects, queue job identity, audio, physical HDR, sustained throughput,
+4K60/8K, or the commercial performance matrix. Re-run those distinct contracts
+through their existing production-linked entry points. No threshold or source
+precision reduction is allowed to obtain a pass.

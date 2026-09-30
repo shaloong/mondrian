@@ -358,9 +358,8 @@ pub use realtime_performance::{
 };
 pub use reference_output::{ReferenceOutputProgram, ReferenceOutputProgramError};
 pub use resident_encode::{
-    D3D12ResidentEncodeAdapter, D3D12ResidentEncodeAdapterContract,
-    D3D12ResidentEncodeAdapterCreateError, D3D12ResidentEncodeAdapterDiagnostics,
-    D3D12ResidentEncodeSubmissionError, ResidentEncodeAdapterContract,
+    D3D12ResidentEncodeAdapter, D3D12ResidentEncodeAdapterDiagnostics,
+    ResidentEncodeAdapterContract, ResidentEncodeAdapterCreateError, ResidentEncodeSubmissionError,
 };
 #[cfg(target_os = "linux")]
 pub use resident_encode::{
@@ -465,3 +464,6 @@ pub use basic_title::{
 };
 
 pub use context::request_device_with_native_video_support;
+
+#[cfg(target_os = "macos")]
+pub use resident_encode::{MetalResidentEncodeAdapter, MetalResidentEncodeAdapterDiagnostics};
