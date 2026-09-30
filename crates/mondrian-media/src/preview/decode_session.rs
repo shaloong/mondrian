@@ -1886,7 +1886,7 @@ impl PreviewDecodeSession {
                 && super::videotoolbox::prores_chroma_format_for_tag(raw.codec_tag.swap_bytes())
                     .is_some())
                 || (codec_id == ffmpeg::codec::Id::HEVC
-                    && super::videotoolbox::hevc::source_chroma_format(raw.profile, raw.format)
+                    && super::videotoolbox::hevc::source_sampling(raw.profile, raw.format)
                         .is_some()
                     && raw.color_range == ffmpeg::ffi::AVColorRange::AVCOL_RANGE_MPEG))
                 && hardware_decode_request.prefers_gpu_residency()
@@ -1898,14 +1898,25 @@ impl PreviewDecodeSession {
                 let range = source_color.range.resolve_for_frame(
                     crate::decoder::decoded_video_range_from_ffmpeg(raw.color_range.into()),
                 );
-                Some(
-                    PreviewCodec::videotoolbox(&parameters, stream_tb, range).map_err(|error| {
-                        MondrianError::DecodeFailed {
+                match PreviewCodec::videotoolbox(&parameters, stream_tb, range) {
+                    Ok(decoder) => Some(decoder),
+                    Err(super::codec::PreviewCodecError::Hevc(
+                        super::videotoolbox::hevc::HevcContractError::UnsupportedLayers,
+                    )) => {
+                        // The direct adapter cannot interpret auxiliary layers.
+                        // Leave the complete stream with the existing FFmpeg
+                        // codec adapter; its output still has to prove residency
+                        // and retains unknown hardware execution when unobserved.
+                        preview_trace("[preview] direct VideoToolbox single-layer capability unavailable; retaining FFmpeg codec ownership for the complete HEVC stream".to_owned());
+                        None
+                    }
+                    Err(error) => {
+                        return Err(MondrianError::DecodeFailed {
                             asset_id: path.display().to_string(),
                             reason: format!("direct VideoToolbox codec setup failed: {error}"),
-                        }
-                    })?,
-                )
+                        });
+                    }
+                }
             } else {
                 None
             }

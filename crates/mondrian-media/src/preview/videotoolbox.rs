@@ -25,7 +25,7 @@ pub(super) const fn prores_chroma_format_for_tag(codec: u32) -> Option<u32> {
     }
 }
 
-/// Explicit source contract for limited-range ProRes or ten-bit HEVC.
+/// Explicit source contract for limited-range ProRes or HEVC.
 /// CICP values must come from the resolved source contract, never defaults.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -44,6 +44,8 @@ pub(super) struct VideoToolboxContract {
     pub matrix: u32,
     /// Validated HEVC SPS chroma_format_idc (1/2/3); ProRes 422 uses 2 and 4444 uses 3.
     pub chroma_format_idc: u32,
+    /// Coded HEVC component depth (8/10); zero for the ProRes adapter.
+    pub hevc_bit_depth: u32,
 }
 
 /// Native stage and OSStatus are retained for structured rejection diagnostics.
@@ -144,7 +146,10 @@ impl VideoToolboxDecoder {
         if range != DecodedVideoRange::Limited {
             return Err(VideoToolboxError { status: -70001, stage: 11 });
         }
-        if configuration.is_some_and(|c| c.chroma_format_idc != contract.chroma_format_idc) {
+        if configuration.is_some_and(|c| {
+            c.sampling.chroma_format_idc != contract.chroma_format_idc
+                || c.sampling.bit_depth != contract.hevc_bit_depth
+        }) {
             return Err(VideoToolboxError { status: -70001, stage: 11 });
         }
         let sets: Vec<_> = configuration
@@ -225,10 +230,14 @@ impl VideoToolboxDecoder {
             || output.height != self.contract.height
             || output.pixel_format
                 != if self.contract.codec == u32::from_be_bytes(*b"hvc1") {
-                    match self.contract.chroma_format_idc {
-                        1 => u32::from_be_bytes(*b"x420"),
-                        2 => u32::from_be_bytes(*b"x422"),
-                        3 => u32::from_be_bytes(*b"x444"),
+                    match (
+                        self.contract.chroma_format_idc,
+                        self.contract.hevc_bit_depth,
+                    ) {
+                        (1, 8) => u32::from_be_bytes(*b"420v"),
+                        (1, 10) => u32::from_be_bytes(*b"x420"),
+                        (2, 10) => u32::from_be_bytes(*b"x422"),
+                        (3, 10) => u32::from_be_bytes(*b"x444"),
                         _ => return Err(VideoToolboxError { status: -70001, stage: 9 }),
                     }
                 } else if self.contract.chroma_format_idc == 2 {
@@ -399,6 +408,7 @@ mod tests {
             transfer: raw.color_trc as u32,
             matrix: raw.color_space as u32,
             chroma_format_idc: 3,
+            hevc_bit_depth: 0,
         };
         assert_eq!(raw.color_range, ffmpeg::ffi::AVColorRange::AVCOL_RANGE_MPEG);
         let packet = input.packets().find(|(s, _)| s.index() == index).unwrap().1;
@@ -450,6 +460,7 @@ mod tests {
             transfer: 0,
             matrix: 1,
             chroma_format_idc: 3,
+            hevc_bit_depth: 0,
         };
         let error = VideoToolboxDecoder::new(contract, DecodedVideoRange::Limited).unwrap_err();
         assert_eq!(error.stage, 11);

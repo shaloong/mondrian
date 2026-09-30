@@ -58,6 +58,8 @@ static OSType output_pixel(const MdnVtContract *contract) {
         return kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange;
     if (contract->codec != kCMVideoCodecType_HEVC)
         return kCVPixelFormatType_444YpCbCr16VideoRange_16A_TriPlanar;
+    if (contract->hevc_bit_depth == 8)
+        return contract->chroma_format_idc == 1 ? kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange : 0;
     switch (contract->chroma_format_idc) {
         case 1: return kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange;
         case 2: return kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange;
@@ -96,6 +98,10 @@ MdnVtDecoder *mdn_vt_create(const MdnVtContract *contract,
     if (!contract || !contract->width || !contract->height ||
         contract->width > INT32_MAX || contract->height > INT32_MAX ||
         contract->chroma_format_idc < 1 || contract->chroma_format_idc > 3 ||
+        (contract->codec == kCMVideoCodecType_HEVC ?
+         ((contract->hevc_bit_depth != 8 && contract->hevc_bit_depth != 10) ||
+          (contract->hevc_bit_depth == 8 && contract->chroma_format_idc != 1)) :
+         contract->hevc_bit_depth != 0) ||
         (prores422(contract->codec) && contract->chroma_format_idc != 2) ||
         ((contract->codec == kCMVideoCodecType_AppleProRes4444 ||
           contract->codec == kCMVideoCodecType_AppleProRes4444XQ) &&
@@ -279,7 +285,8 @@ int mdn_vt_decode(MdnVtDecoder *decoder, const uint8_t *bytes, size_t size,
             (decoder->contract.width + 1) / 2 : decoder->contract.width;
         size_t height = hevc && plane && decoder->contract.chroma_format_idc == 1 ?
             (decoder->contract.height + 1) / 2 : decoder->contract.height;
-        size_t bytes_per_pixel = plane == 1 ? 4 : 2;
+        size_t component_bytes = hevc && decoder->contract.hevc_bit_depth == 8 ? 1 : 2;
+        size_t bytes_per_pixel = component_bytes * (plane == 1 ? 2 : 1);
         if (CVPixelBufferGetWidthOfPlane(image, plane) != width ||
             CVPixelBufferGetHeightOfPlane(image, plane) != height ||
             CVPixelBufferGetBytesPerRowOfPlane(image, plane) < width * bytes_per_pixel) {

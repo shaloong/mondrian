@@ -989,6 +989,12 @@ fn decoded_native_surface_format(
         // or infer eight-bit storage from that context's absence.
         let pixel = super::native_frame::ffmpeg_cv_pixel_buffer_format(decoded)?;
         match pixel {
+            value
+                if value == u32::from_be_bytes(*b"420v")
+                    || value == u32::from_be_bytes(*b"420f") =>
+            {
+                return Ok(DecodedVideoSurfaceFormat::Nv12);
+            }
             value if value == u32::from_be_bytes(*b"s4as") => {
                 return Ok(DecodedVideoSurfaceFormat::Yuva444sp16);
             }

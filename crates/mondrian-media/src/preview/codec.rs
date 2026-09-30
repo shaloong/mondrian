@@ -91,12 +91,12 @@ impl PreviewCodec {
             return Err(PreviewCodecError::Packet("unsupported native codec tag"));
         }
         let hevc = if is_hevc {
-            let source_chroma =
-                super::videotoolbox::hevc::source_chroma_format(raw.profile, raw.format).ok_or(
+            let source_sampling =
+                super::videotoolbox::hevc::source_sampling(raw.profile, raw.format).ok_or(
                     PreviewCodecError::Hevc(HevcContractError::UnsupportedSampling),
                 )?;
             if raw.color_range != ffmpeg::ffi::AVColorRange::AVCOL_RANGE_MPEG
-                || (source_chroma == 1
+                || (source_sampling.chroma_format_idc == 1
                     && raw.chroma_location
                         == ffmpeg::ffi::AVChromaLocation::AVCHROMA_LOC_UNSPECIFIED)
                 || raw.extradata.is_null()
@@ -111,7 +111,7 @@ impl PreviewCodec {
                 unsafe { std::slice::from_raw_parts(raw.extradata, raw.extradata_size as usize) };
             let configuration =
                 HevcConfiguration::parse(bytes, raw.width as u32, raw.height as u32)?;
-            if configuration.chroma_format_idc != source_chroma {
+            if configuration.sampling != source_sampling {
                 return Err(PreviewCodecError::Hevc(
                     HevcContractError::UnsupportedSampling,
                 ));
@@ -135,10 +135,13 @@ impl PreviewCodec {
             transfer: raw.color_trc as u32,
             matrix: raw.color_space as u32,
             chroma_format_idc: if let Some(configuration) = &hevc {
-                configuration.chroma_format_idc
+                configuration.sampling.chroma_format_idc
             } else {
                 prores_chroma.expect("validated ProRes tag")
             },
+            hevc_bit_depth: hevc
+                .as_ref()
+                .map_or(0, |configuration| configuration.sampling.bit_depth),
         };
         Ok(Self::VideoToolbox(VideoToolboxCodec {
             decoder: Some(match &hevc {
@@ -399,6 +402,7 @@ mod native_codec_tests {
         fn CVPixelBufferUnlockBaseAddress(buffer: *mut c_void, flags: u64) -> i32;
         fn CVPixelBufferGetBaseAddressOfPlane(buffer: *mut c_void, plane: usize) -> *const u8;
         fn CVPixelBufferGetBytesPerRowOfPlane(buffer: *mut c_void, plane: usize) -> usize;
+        fn CVPixelBufferGetPixelFormatType(buffer: *const c_void) -> u32;
     }
 
     fn fixture() -> (
@@ -408,7 +412,7 @@ mod native_codec_tests {
     ) {
         ffmpeg::init().unwrap();
         let path = std::env::var("MONDRIAN_HEVC_VT_TEST_MEDIA_PATH")
-            .expect("explicit sixty-frame progressive Main10 motion/B-frame fixture");
+            .expect("explicit sixty-frame progressive Main/Main10 motion/B-frame fixture");
         let mut input = ffmpeg::format::input(&path).unwrap();
         let stream = input.streams().best(ffmpeg::media::Type::Video).unwrap();
         let parameters = stream.parameters();
@@ -468,22 +472,32 @@ mod native_codec_tests {
         } else {
             std::ptr::null_mut()
         };
+        let component_bytes = if native {
+            assert!(!buffer.is_null());
+            // SAFETY: The AVFrame owns the live retained CVPixelBuffer.
+            match unsafe { CVPixelBufferGetPixelFormatType(buffer) } {
+                value if value == u32::from_be_bytes(*b"420v") => 1,
+                value if value == u32::from_be_bytes(*b"x420") => 2,
+                other => panic!("unexpected native pixel format {other:#x}"),
+            }
+        } else {
+            match frame.format() {
+                ffmpeg::util::format::pixel::Pixel::YUV420P => 1,
+                ffmpeg::util::format::pixel::Pixel::YUV420P10LE => 2,
+                other => panic!("unexpected software pixel format {other:?}"),
+            }
+        };
         if native {
             // Test oracle only: production never locks or reads these pixels.
             assert!(!buffer.is_null());
             // SAFETY: Live retained buffer; matching read-only unlock below.
             assert_eq!(unsafe { CVPixelBufferLockBaseAddress(buffer, 1) }, 0);
-        } else {
-            assert_eq!(
-                frame.format(),
-                ffmpeg::util::format::pixel::Pixel::YUV420P10LE
-            );
         }
         let mut hash = Sha256::new();
         for plane in 0..3 {
             let width = frame.width() as usize / if plane == 0 { 1 } else { 2 };
             let height = frame.height() as usize / if plane == 0 { 1 } else { 2 };
-            let mut row = vec![0; width * 2];
+            let mut row = vec![0; width * component_bytes];
             let (base, stride) = if native {
                 // SAFETY: Locked buffer plane addresses remain live until unlock.
                 unsafe {
@@ -499,13 +513,23 @@ mod native_codec_tests {
             for y in 0..height {
                 for x in 0..width {
                     let offset = y * stride
-                        + x * if native && plane != 0 { 4 } else { 2 }
-                        + if native && plane == 2 { 2 } else { 0 };
+                        + x * component_bytes * if native && plane != 0 { 2 } else { 1 }
+                        + if native && plane == 2 {
+                            component_bytes
+                        } else {
+                            0
+                        };
                     // SAFETY: Loop bounds address only actual Y/Cb/Cr pixels.
-                    let value =
-                        unsafe { u16::from_le_bytes([*base.add(offset), *base.add(offset + 1)]) };
-                    let value = if native { value >> 6 } else { value };
-                    row[x * 2..x * 2 + 2].copy_from_slice(&value.to_le_bytes());
+                    if component_bytes == 1 {
+                        // SAFETY: The same actual-pixel bounds cover NV12/YUV420P.
+                        row[x] = unsafe { *base.add(offset) };
+                    } else {
+                        let value = unsafe {
+                            u16::from_le_bytes([*base.add(offset), *base.add(offset + 1)])
+                        };
+                        let value = if native { value >> 6 } else { value };
+                        row[x * 2..x * 2 + 2].copy_from_slice(&value.to_le_bytes());
+                    }
                 }
                 hash.update(&row);
             }
@@ -530,7 +554,7 @@ mod native_codec_tests {
     }
 
     #[test]
-    #[ignore = "requires actual VideoToolbox and the explicit sixty-frame motion Main10/B fixture"]
+    #[ignore = "requires actual VideoToolbox and the explicit sixty-frame motion Main/Main10 B fixture"]
     fn hevc_real_codec_reorders_pixels_drains_eof_and_resets_temporal_owner() {
         let (parameters, tb, packets) = fixture();
         assert_eq!(packets.len(), 60);
@@ -620,13 +644,30 @@ mod native_codec_tests {
         for frame in frames.iter().take(5) {
             assert_eq!(hash_pixels(frame), oracle[&frame.pts().unwrap()]);
         }
-        eprintln!("hardware-only native codec: 60 exact ordered frames, 2 EOF frames, reset=8, retained-after-close=5");
+        eprintln!("hardware-only native codec: 60 exact ordered frames, source pixel format {:?}, 2 EOF frames, reset=8, retained-after-close=5", unsafe { (*parameters.as_ptr()).format });
     }
 
     #[test]
     #[ignore = "requires actual VideoToolbox and an explicit Main10/B fixture"]
     fn hevc_parameter_change_and_color_conflict_poison_native_codec() {
         let (parameters, tb, packets) = fixture();
+        let mut precision_conflict = parameters.clone();
+        // SAFETY: Sole owned parameters deliberately conflict with the coded SPS.
+        unsafe {
+            let raw = &mut *precision_conflict.as_mut_ptr();
+            raw.profile = ffmpeg::ffi::FF_PROFILE_HEVC_MAIN_10;
+            raw.format = if raw.format == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_YUV420P as i32 {
+                ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_YUV420P10LE as i32
+            } else {
+                ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_YUV420P as i32
+            };
+        }
+        assert!(matches!(
+            PreviewCodec::videotoolbox(&precision_conflict, tb, crate::DecodedVideoRange::Limited),
+            Err(PreviewCodecError::Hevc(
+                HevcContractError::UnsupportedSampling
+            ))
+        ));
         let mut codec =
             PreviewCodec::videotoolbox(&parameters, tb, crate::DecodedVideoRange::Limited).unwrap();
         let PreviewCodec::VideoToolbox(state) = &codec else {

@@ -62,6 +62,18 @@ fn cpu_and_cuda_decoded_viewer_pixels_agree_across_gop_seeks() -> Result<()> {
 }
 #[cfg(target_os = "macos")]
 #[test]
+#[ignore = "requires real Metal, explicit demux worker and a 30 fps Main 8-bit SDR motion/B fixture"]
+fn cpu_and_native_main8_motion_viewer_pixels_agree_across_gop_seeks() -> Result<()> {
+    compare_macos_videotoolbox_fixtures(
+        "MONDRIAN_MACOS_MAIN8_MOTION_FIXTURE",
+        [(DecodedVideoSurfaceFormat::Nv12, ColorSpace::Rec709)],
+        1.0,
+        PreviewDecodePath::InProcessVideoToolboxNative,
+    )
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 #[ignore = "requires real Metal, explicit demux worker and a 30 fps Main10 PQ motion/B fixture"]
 fn cpu_and_native_main10_motion_viewer_pixels_agree_across_gop_seeks() -> Result<()> {
     compare_macos_videotoolbox_fixtures(

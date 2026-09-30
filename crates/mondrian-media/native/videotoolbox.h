@@ -29,6 +29,8 @@ typedef struct {
     uint32_t primaries, transfer, matrix;
     /* HEVC SPS chroma_format_idc (1/2/3); ProRes 422 uses 2, 4444 uses 3. */
     uint32_t chroma_format_idc;
+    /* Coded HEVC component depth (8/10); zero for the ProRes adapter. */
+    uint32_t hevc_bit_depth;
 } MdnVtContract;
 typedef struct {
     /* +1 CVPixelBuffer reference; release with mdn_vt_surface_release. */

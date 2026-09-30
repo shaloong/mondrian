@@ -29,6 +29,18 @@ libavcodec; the exclusive macOS codec adapter uses public VideoToolbox sessions
 and CoreVideo surfaces. Field processing retains libavfilter. This dependency
 boundary does not change CLI-provider admission or qualify physical devices.
 
+The direct macOS HEVC adapter requires agreement between source metadata and
+the coded SPS on both chroma sampling and component precision. Progressive
+limited-range Main/Main10 8-bit 4:2:0 retains an NV12 carrier; 10-bit Main10 or
+Range Extensions retains P010/P210/P410. The same packet ordering, color
+attachment checks and consuming session ownership apply to both precisions.
+Successful direct output additionally requires the actual VideoToolbox
+hardware-execution property after decoding; requesting hardware or obtaining
+a CVPixelBuffer alone cannot supply that evidence. Multilayer HEVC remains
+with the existing FFmpeg codec adapter; the direct adapter cannot discard
+auxiliary layers to manufacture a supported single-layer stream. FFmpeg's
+VideoToolbox output retains unknown hardware execution when not observed.
+
 Media metadata discovery and first-frame HDR supplements share one opened FFmpeg
 input. Stream discovery retains its packets; the HDR supplement dispatches that
 same packet stream to the requested video decoders until each has its first
