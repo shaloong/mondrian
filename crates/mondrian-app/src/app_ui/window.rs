@@ -4969,13 +4969,31 @@ fn app_ui_surface_presentation_intent_for_role(
     }
     let (engine, policy) = host.resolved_display_color_management();
     match policy.resolve_output_color_space(&engine, host.active_program_output_color_space()) {
-        Ok(output_color_space) => AppUiSurfacePresentationIntent::DisplayOutput(output_color_space),
+        Ok(output_color_space) => {
+            app_ui_surface_presentation_intent(output_color_space, policy.calibration())
+        }
         Err(error) => {
             tracing::warn!(
                 "display policy cannot resolve a monitor target; retaining fail-closed SDR UI carrier: {error}"
             );
             AppUiSurfacePresentationIntent::SdrSrgb
         }
+    }
+}
+
+fn app_ui_surface_presentation_intent(
+    output_color_space: ColorSpace,
+    calibration: &mondrian_core::color_models::DisplayCalibrationPolicy,
+) -> AppUiSurfacePresentationIntent {
+    // ICC produces opaque device code values, not standard target-primary RGB.
+    // Preserve the existing direct sRGB carrier without relabelling the payload.
+    if !matches!(
+        calibration,
+        mondrian_core::color_models::DisplayCalibrationPolicy::Disabled
+    ) {
+        AppUiSurfacePresentationIntent::SdrSrgb
+    } else {
+        AppUiSurfacePresentationIntent::DisplayOutput(output_color_space)
     }
 }
 
@@ -5037,16 +5055,15 @@ struct AppUiDisplayTarget {
 }
 
 impl AppUiDisplayOutputContract {
-    fn presentation_readiness_for_color_space(
+    fn presentation_readiness_for_intent(
         &self,
         output_color_space: ColorSpace,
+        intent: AppUiSurfacePresentationIntent,
     ) -> AppUiDisplayPresentationReadinessDiagnostics {
-        if app_ui_surface_color_space_matches_display_output(self.surface_color, output_color_space)
-        {
+        if app_ui_surface_color_space_matches_intent(self.surface_color, intent) {
             return self.display_presentation_readiness_current(output_color_space);
         }
 
-        let intent = AppUiSurfacePresentationIntent::DisplayOutput(output_color_space);
         let desired =
             choose_app_ui_surface_color_contract(&self.surface_capabilities_snapshot(), intent);
         match desired {
@@ -5095,7 +5112,10 @@ impl AppUiDisplayOutputContract {
         if boundary.target() != ProgramOutputRole::Display {
             return self.display_presentation_readiness_current(boundary.output_color_space());
         }
-        self.presentation_readiness_for_color_space(boundary.output_color_space())
+        self.presentation_readiness_for_intent(
+            boundary.output_color_space(),
+            AppUiSurfacePresentationIntent::DisplayOutput(boundary.output_color_space()),
+        )
     }
 
     fn display_presentation_readiness_current(
@@ -5168,16 +5188,20 @@ impl AppUiDisplayOutputContract {
         if boundary.target() != ProgramOutputRole::Display {
             return None;
         }
-        self.boundary_blocker_for_color_space(boundary.output_color_space())
+        self.boundary_blocker_for_intent(
+            boundary.output_color_space(),
+            AppUiSurfacePresentationIntent::DisplayOutput(boundary.output_color_space()),
+        )
     }
 
-    fn boundary_blocker_for_color_space(
+    fn boundary_blocker_for_intent(
         &self,
         output_color_space: ColorSpace,
+        intent: AppUiSurfacePresentationIntent,
     ) -> Option<AppUiDisplayBoundaryBlocker> {
         let supported_surface_color_spaces =
             self.supported_surface_color_spaces_for_selected_format();
-        if output_color_space.is_hdr()
+        if app_ui_surface_hdr_mode_for_intent(intent) != AppUiSurfaceHdrMode::SdrOnly
             && self.surface_color.hdr_mode == AppUiSurfaceHdrMode::SdrOnly
         {
             return Some(AppUiDisplayBoundaryBlocker::HdrOutputRequiresHdrSurface {
@@ -5190,8 +5214,7 @@ impl AppUiDisplayOutputContract {
             });
         }
 
-        if app_ui_surface_color_space_matches_display_output(self.surface_color, output_color_space)
-        {
+        if app_ui_surface_color_space_matches_intent(self.surface_color, intent) {
             return None;
         }
 
@@ -5556,14 +5579,24 @@ fn app_ui_display_tone_map_headroom_ppm(display_hdr_info: &wgpu::DisplayHdrInfo)
     })
 }
 
+fn app_ui_surface_color_space_matches_intent(
+    surface_color: AppUiSurfaceColorContract,
+    intent: AppUiSurfacePresentationIntent,
+) -> bool {
+    app_ui_surface_color_space_for_intent(intent) == Some(surface_color.color_space)
+        && surface_color.hdr_mode == app_ui_surface_hdr_mode_for_intent(intent)
+        && surface_color.encoding == app_ui_surface_encoding_for_intent(intent)
+}
+
+#[cfg(test)]
 fn app_ui_surface_color_space_matches_display_output(
     surface_color: AppUiSurfaceColorContract,
     output_color_space: ColorSpace,
 ) -> bool {
-    app_ui_surface_color_space_for_intent(AppUiSurfacePresentationIntent::DisplayOutput(
-        output_color_space,
-    )) == Some(surface_color.color_space)
-        && surface_color.hdr_mode == app_ui_surface_hdr_mode_for_output(output_color_space)
+    app_ui_surface_color_space_matches_intent(
+        surface_color,
+        AppUiSurfacePresentationIntent::DisplayOutput(output_color_space),
+    )
 }
 
 fn target_display_surface_color_space(
@@ -7167,9 +7200,15 @@ fn prepare_viewer_gpu_preview(
         AppUiViewerGpuOutputPreviewCandidateState::Ready,
         Some(frame.candidate_id()),
     );
+    let monitor_color_space = frame.monitor_adaptation.monitor_color_space();
+    let presentation_intent = if session.display_calibration.is_some() {
+        AppUiSurfacePresentationIntent::SdrSrgb
+    } else {
+        AppUiSurfacePresentationIntent::DisplayOutput(monitor_color_space)
+    };
     let presentation_readiness = session
         .display_output_contract
-        .presentation_readiness_for_color_space(frame.monitor_adaptation.monitor_color_space());
+        .presentation_readiness_for_intent(monitor_color_space, presentation_intent);
     session
         .viewer_gpu_output_telemetry
         .record_display_presentation_readiness(presentation_readiness);
@@ -7218,7 +7257,7 @@ fn prepare_viewer_gpu_preview(
 
     if let Some(blocker) = session
         .display_output_contract
-        .boundary_blocker_for_color_space(frame.monitor_adaptation.monitor_color_space())
+        .boundary_blocker_for_intent(monitor_color_space, presentation_intent)
     {
         unregister_program_scopes_textures(session);
         session.viewer_gpu_output_telemetry.record_display_contract_blocker(&blocker);
@@ -11875,6 +11914,49 @@ mod tests {
         assert!(display_output_contract_requires_renderer_rebuild(
             &first, &second
         ));
+    }
+
+    #[test]
+    fn icc_device_output_selects_direct_carrier_without_relabelling_p3() {
+        use mondrian_core::color_models::DisplayCalibrationPolicy;
+        for calibration in [
+            DisplayCalibrationPolicy::OsDefault,
+            DisplayCalibrationPolicy::IccProfilePath("display.icc".to_owned()),
+        ] {
+            let intent = app_ui_surface_presentation_intent(ColorSpace::DisplayP3, &calibration);
+            assert_eq!(
+                app_ui_surface_color_space_for_intent(intent),
+                Some(wgpu::SurfaceColorSpace::Srgb)
+            );
+            assert_eq!(
+                app_ui_surface_encoding_for_intent(intent),
+                AppUiSurfaceEncoding::Srgb
+            );
+        }
+        let contract = test_display_output_contract();
+        let readiness = contract.presentation_readiness_for_intent(
+            ColorSpace::DisplayP3,
+            AppUiSurfacePresentationIntent::SdrSrgb,
+        );
+        assert_eq!(
+            readiness.status,
+            AppUiDisplayPresentationReadinessStatus::Current
+        );
+        assert_eq!(readiness.output_color_space, ColorSpace::DisplayP3);
+        assert!(contract
+            .boundary_blocker_for_intent(
+                ColorSpace::DisplayP3,
+                AppUiSurfacePresentationIntent::SdrSrgb,
+            )
+            .is_none());
+        let uncalibrated = app_ui_surface_presentation_intent(
+            ColorSpace::DisplayP3,
+            &DisplayCalibrationPolicy::Disabled,
+        );
+        assert_eq!(
+            app_ui_surface_color_space_for_intent(uncalibrated),
+            Some(wgpu::SurfaceColorSpace::DisplayP3)
+        );
     }
 
     #[test]

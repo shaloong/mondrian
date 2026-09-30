@@ -398,8 +398,28 @@ pub fn compute_display_blockers(
             "DisplayP3" | "ExtendedDisplayP3" | "Bt2100Pq" | "Bt2100Hlg"
         ) || (matches!(surface_color_space, "ExtendedSrgbLinear" | "ExtendedSrgb")
             && surface_format == "Rgba16Float");
+    // A verified ICC transform replaces standard target code values with
+    // opaque device code values. Its SDR source primaries do not describe the
+    // final carrier; only the direct sRGB carrier preserves that payload.
+    let icc_device_carrier = matches!(
+        monitor_profile,
+        MonitorProfileStatus::ManagedIccCalibration { source_color_space, .. }
+            if !source_color_space.is_hdr()
+    ) && surface_color_space == "Srgb"
+        && matches!(surface_format, "Bgra8UnormSrgb" | "Rgba8UnormSrgb");
+    if matches!(
+        monitor_profile,
+        MonitorProfileStatus::ManagedIccCalibration { .. }
+    ) && !icc_device_carrier
+    {
+        blockers.push(DisplayOutputBlocker::SurfaceContractMismatch {
+            surface_format: surface_format.to_owned(),
+            output_color_space: "ICC device code values".to_owned(),
+        });
+    }
     if is_wide_gamut_output
         && !surface_supports_wide_gamut
+        && !icc_device_carrier
         && !matches!(hdr_status, HdrStatus::RequestedSurfaceUnsupported { .. })
     {
         // The surface is sRGB-only but the output needs wide gamut.
@@ -837,6 +857,46 @@ mod tests {
                 assert!(blockers.iter().any(|b| b.code() == "unsupported_display_color_space"));
             }
         }
+    }
+
+    #[test]
+    fn verified_icc_device_output_uses_direct_carrier_for_wide_source() {
+        let profile = MonitorProfileStatus::ManagedIccCalibration {
+            source_color_space: ColorSpace::DisplayP3,
+            profile_fingerprint: crate::display_calibration::IccProfileFingerprint::from_bytes(
+                b"verified ICC payload fixture",
+            ),
+        };
+        assert!(compute_display_blockers(
+            &profile,
+            &HdrStatus::NotRequested,
+            "Bgra8UnormSrgb",
+            "Srgb",
+            "DisplayP3",
+        )
+        .is_empty());
+        for (format, carrier) in [
+            ("Bgra8UnormSrgb", "DisplayP3"),
+            ("Rgba16Float", "ExtendedSrgbLinear"),
+            ("Bgra8UnormSrgb", "unknown"),
+        ] {
+            let blockers = compute_display_blockers(
+                &profile,
+                &HdrStatus::NotRequested,
+                format,
+                carrier,
+                "DisplayP3",
+            );
+            assert!(blockers.iter().any(|b| b.code() == "surface_contract_mismatch"));
+        }
+        let unverified = compute_display_blockers(
+            &MonitorProfileStatus::NotRequested,
+            &HdrStatus::NotRequested,
+            "Bgra8UnormSrgb",
+            "Srgb",
+            "DisplayP3",
+        );
+        assert!(unverified.iter().any(|b| b.code() == "unsupported_display_color_space"));
     }
 
     #[test]
