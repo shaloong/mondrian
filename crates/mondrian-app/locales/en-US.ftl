@@ -940,3 +940,15 @@ export-off = off
 export-gif-rate-control = { $colors } colors / dither { $dither }
 export-rate-control-max = CRF { $crf } / max { $max } kbps
 export-rate-control = CRF { $crf }
+
+# Export diagnostic summaries retain provider codes as values.
+export-diagnostic-none = None
+export-diagnostic-pass = Passed
+export-diagnostic-warn = Warning
+export-diagnostic-fail = Failed
+export-diagnostic-complete = Complete
+export-diagnostic-incomplete = Incomplete
+export-diagnostic-warning-code = Warning: { $code }
+export-broadcast-qc-summary = Broadcast QC: { $profile }@{ $edition } / { $verdict } / { $frames } frames ({ $coverage }) / findings { $findings }, retained { $retained }, overflow { $overflow } / obligations { $obligations } / { $complete }
+export-color-assets-summary = assets { $count } / issues { $issues }
+export-color-health-summary = Color: { $verdict } / { $frames } frames / metadata { $metadata } / overrides { $overrides } / policy { $policy } / data { $data } / rejected { $rejected } / { $assets } / checks { $checks } / causes { $causes } / actions { $actions } / stages CPU input { $cpu_in }, CPU output { $cpu_out }, GPU { $gpu }, blockers { $blockers }, transfer { $transfer } / GPU blockers shader { $shader }, resource { $resource }, wrapper { $wrapper }, pipeline { $pipeline } / composites float { $float }, legacy { $legacy }, reasons { $reasons }

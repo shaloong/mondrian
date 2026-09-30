@@ -1618,18 +1618,26 @@ fn export_panel_formats_structured_queue_status_and_diagnostics() {
         ),
         "Failed: \u{2068}disk full\u{2069}"
     );
-    let color_diagnostics =
-        export_job_color_diagnostics_label(diagnostics).expect("encoding color diagnostics");
-    assert!(color_diagnostics.contains("metadata 1 / override 1 / policy 0 / data 0 / reject 0"));
+    let color_diagnostics = export_job_color_diagnostics_label(diagnostics, &localizer)
+        .expect("encoding color diagnostics")
+        .replace(['\u{2068}', '\u{2069}'], "");
+    assert!(color_diagnostics.contains("metadata 1 / overrides 1 / policy 0 / data 0 / rejected 0"));
     assert!(color_diagnostics.contains("assets 2 / issues warn 2 missing-cicp 1 decoder 1"));
-    assert!(color_diagnostics.contains("report Fail"));
-    assert!(color_diagnostics.contains("warn:asset_color_diagnostics_warning"));
+    assert!(color_diagnostics.contains("Color: Failed"));
+    let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+    let chinese_diagnostics = export_job_color_diagnostics_label(diagnostics, &chinese)
+        .expect("Chinese diagnostic summary");
+    assert!(chinese_diagnostics.contains("色彩："));
+    assert!(chinese_diagnostics.contains("失败"));
+    assert!(chinese_diagnostics.contains("asset_color_diagnostics_warning"));
+
+    assert!(color_diagnostics.contains("Warning: asset_color_diagnostics_warning"));
     assert!(color_diagnostics.contains("export_gpu_color_stage_blocked"));
     assert!(color_diagnostics.contains("actions inspect_asset_color_warning_evidence"));
-    assert!(color_diagnostics.contains("gpu blockers shader 0 resource 0 wrapper 0 pipeline 1"));
+    assert!(color_diagnostics.contains("GPU blockers shader 0, resource 0, wrapper 0, pipeline 1"));
 
-    let broadcast_qc =
-        export_job_broadcast_qc_label(Some(&mondrian_broadcast::BroadcastQcReport {
+    let broadcast_qc = export_job_broadcast_qc_label(
+        Some(&mondrian_broadcast::BroadcastQcReport {
             schema_version: 1,
             profile_id: "network-x".to_owned(),
             profile_edition: "2026-01".to_owned(),
@@ -1648,10 +1656,13 @@ fn export_panel_formats_structured_queue_status_and_diagnostics() {
                 detail: "external rescan required".to_owned(),
             }],
             evidence_sha256: [2; 32],
-        }))
-        .expect("broadcast QC summary");
-    assert!(broadcast_qc.contains("network-x@2026-01 / Warn / 240 帧 (100..=339)"));
-    assert!(broadcast_qc.contains("findings 2 retained 0 overflow 0 / obligations 1 / complete"));
+        }),
+        &localizer,
+    )
+    .expect("broadcast QC summary")
+    .replace(['\u{2068}', '\u{2069}'], "");
+    assert!(broadcast_qc.contains("network-x@2026-01 / Warning / 240 frames (100..=339)"));
+    assert!(broadcast_qc.contains("findings 2, retained 0, overflow 0 / obligations 1 / Complete"));
 }
 
 #[test]

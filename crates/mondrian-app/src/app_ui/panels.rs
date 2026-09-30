@@ -3110,8 +3110,14 @@ impl ExportPanelModel {
                 id: job.id,
                 title: export_job_title(job.output_path.as_path()),
                 status: export_job_status_label(&job.status, job.progress, localizer),
-                color_diagnostics: export_job_color_diagnostics_label(job.diagnostics.color),
-                broadcast_qc: export_job_broadcast_qc_label(job.diagnostics.broadcast_qc.as_ref()),
+                color_diagnostics: export_job_color_diagnostics_label(
+                    job.diagnostics.color,
+                    localizer,
+                ),
+                broadcast_qc: export_job_broadcast_qc_label(
+                    job.diagnostics.broadcast_qc.as_ref(),
+                    localizer,
+                ),
                 progress_percent: (job.progress.fraction.clamp(0.0, 1.0) * 100.0).round() as u8,
                 can_cancel: job.status.can_cancel(),
                 is_completed: job.status.is_terminal(),
@@ -6993,51 +6999,70 @@ fn export_job_row(job: &ExportJobModel, localizer: &Localizer) -> PropertyRow {
 
 fn export_job_broadcast_qc_label(
     report: Option<&mondrian_broadcast::BroadcastQcReport>,
+    localizer: &Localizer,
 ) -> Option<String> {
+    use mondrian_broadcast::BroadcastQcVerdict;
     let report = report?;
     let coverage = match (report.first_frame, report.last_frame) {
         (Some(first), Some(last)) => format!("{first}..={last}"),
-        _ => "none".to_owned(),
+        _ => localizer.text("export-diagnostic-none"),
     };
-    Some(format!(
-        "广播 QC: {}@{} / {:?} / {} 帧 ({coverage}) / findings {} retained {} overflow {} / obligations {} / {}",
-        report.profile_id,
-        report.profile_edition,
-        report.verdict,
-        report.analyzed_frames,
-        report.finding_count,
-        report.findings.len(),
-        report.overflow_count,
-        report.obligations.len(),
-        if report.complete { "complete" } else { "incomplete" }
-    ))
+    let verdict = localizer.text(match report.verdict {
+        BroadcastQcVerdict::Pass => "export-diagnostic-pass",
+        BroadcastQcVerdict::Warn => "export-diagnostic-warn",
+        BroadcastQcVerdict::Fail => "export-diagnostic-fail",
+        BroadcastQcVerdict::Incomplete => "export-diagnostic-incomplete",
+    });
+    let mut args = fluent_bundle::FluentArgs::new();
+    args.set("profile", report.profile_id.as_str());
+    args.set("edition", report.profile_edition.as_str());
+    args.set("verdict", verdict);
+    args.set("coverage", coverage);
+    args.set("frames", report.analyzed_frames.to_string());
+    args.set("findings", report.finding_count.to_string());
+    args.set("retained", report.findings.len().to_string());
+    args.set("overflow", report.overflow_count.to_string());
+    args.set("obligations", report.obligations.len().to_string());
+    args.set(
+        "complete",
+        localizer.text(if report.complete {
+            "export-diagnostic-complete"
+        } else {
+            "export-diagnostic-incomplete"
+        }),
+    );
+    Some(localizer.format("export-broadcast-qc-summary", Some(&args)))
 }
 
-fn export_job_color_diagnostics_label(diagnostics: ExportJobColorDiagnostics) -> Option<String> {
+fn export_job_color_diagnostics_label(
+    diagnostics: ExportJobColorDiagnostics,
+    localizer: &Localizer,
+) -> Option<String> {
     let report = diagnostics.health_report("export-panel")?;
     let summary = report.summary;
     let asset_issue_tags = color_issue_aggregate_tags(&summary.asset_issue_summary);
-    let asset_issue_segment = if asset_issue_tags.is_empty() {
-        format!(
-            "assets {} / issues none",
-            summary.asset_issue_summary.diagnostics
-        )
-    } else {
-        format!(
-            "assets {} / issues {}",
-            summary.asset_issue_summary.diagnostics,
+    let mut asset_args = fluent_bundle::FluentArgs::new();
+    asset_args.set("count", summary.asset_issue_summary.diagnostics.to_string());
+    asset_args.set(
+        "issues",
+        if asset_issue_tags.is_empty() {
+            localizer.text("export-diagnostic-none")
+        } else {
             asset_issue_tags.join(" ")
-        )
-    };
+        },
+    );
+    let asset_issue_segment = localizer.format("export-color-assets-summary", Some(&asset_args));
     let root_causes = if report.root_causes.is_empty() {
-        "none".to_owned()
+        localizer.text("export-diagnostic-none")
     } else {
         report
             .root_causes
             .iter()
             .map(|root| {
                 if root.severity == ExportColorHealthSeverity::Warn {
-                    format!("warn:{}", root.code)
+                    let mut args = fluent_bundle::FluentArgs::new();
+                    args.set("code", root.code);
+                    localizer.format("export-diagnostic-warning-code", Some(&args))
                 } else {
                     root.code.to_owned()
                 }
@@ -7046,36 +7071,52 @@ fn export_job_color_diagnostics_label(diagnostics: ExportJobColorDiagnostics) ->
             .join(" ")
     };
     let actions = if report.actions.is_empty() {
-        "none".to_owned()
+        localizer.text("export-diagnostic-none")
     } else {
         report.actions.iter().map(|action| action.code).collect::<Vec<_>>().join(" ")
     };
-    Some(format!(
-        "色彩: report {:?} / {} 帧 / metadata {} / override {} / policy {} / data {} / reject {} / {} / checks {} / causes {} / actions {} / stages cpu-in {} cpu-out {} gpu {} blockers {} transfer {} / gpu blockers shader {} resource {} wrapper {} pipeline {} / composite float {} legacy {} reasons {}",
-        report.verdict,
-        summary.diagnosed_frames,
-        summary.detected_metadata,
-        summary.override_count,
-        summary.policy_assumptions,
-        summary.data_textures,
-        summary.policy_rejections,
-        asset_issue_segment,
-        report.checks.len(),
-        root_causes,
-        actions,
-        summary.cpu_input_stages,
-        summary.cpu_output_stages,
-        summary.gpu_color_stages,
-        summary.gpu_blockers,
-        summary.transfer_stages,
-        summary.gpu_blocker_breakdown.shader_module_not_prepared,
-        summary.gpu_blocker_breakdown.ocio_resource_bind_group_not_prepared,
-        summary.gpu_blocker_breakdown.fullscreen_wrapper_not_prepared,
-        summary.gpu_blocker_breakdown.render_pipeline_not_prepared,
-        summary.float_linear_composites,
-        summary.legacy_rgba8_composites,
-        summary.legacy_reason_total
-    ))
+    let verdict = localizer.text(match report.verdict {
+        mondrian_export::queue::ExportColorHealthVerdict::Pass => "export-diagnostic-pass",
+        mondrian_export::queue::ExportColorHealthVerdict::Warn => "export-diagnostic-warn",
+        mondrian_export::queue::ExportColorHealthVerdict::Fail => "export-diagnostic-fail",
+    });
+    let mut args = fluent_bundle::FluentArgs::new();
+    args.set("verdict", verdict);
+    args.set("assets", asset_issue_segment);
+    args.set("causes", root_causes);
+    args.set("actions", actions);
+    args.set("frames", summary.diagnosed_frames.to_string());
+    args.set("metadata", summary.detected_metadata.to_string());
+    args.set("overrides", summary.override_count.to_string());
+    args.set("policy", summary.policy_assumptions.to_string());
+    args.set("data", summary.data_textures.to_string());
+    args.set("rejected", summary.policy_rejections.to_string());
+    args.set("checks", report.checks.len().to_string());
+    args.set("cpu_in", summary.cpu_input_stages.to_string());
+    args.set("cpu_out", summary.cpu_output_stages.to_string());
+    args.set("gpu", summary.gpu_color_stages.to_string());
+    args.set("blockers", summary.gpu_blockers.to_string());
+    args.set("transfer", summary.transfer_stages.to_string());
+    args.set(
+        "shader",
+        summary.gpu_blocker_breakdown.shader_module_not_prepared.to_string(),
+    );
+    args.set(
+        "resource",
+        summary.gpu_blocker_breakdown.ocio_resource_bind_group_not_prepared.to_string(),
+    );
+    args.set(
+        "wrapper",
+        summary.gpu_blocker_breakdown.fullscreen_wrapper_not_prepared.to_string(),
+    );
+    args.set(
+        "pipeline",
+        summary.gpu_blocker_breakdown.render_pipeline_not_prepared.to_string(),
+    );
+    args.set("float", summary.float_linear_composites.to_string());
+    args.set("legacy", summary.legacy_rgba8_composites.to_string());
+    args.set("reasons", summary.legacy_reason_total.to_string());
+    Some(localizer.format("export-color-health-summary", Some(&args)))
 }
 
 fn color_issue_summary_tags(summary: &VideoColorDiagnosticIssueSummary) -> Vec<String> {

@@ -895,3 +895,15 @@ export-off = 关
 export-gif-rate-control = { $colors } 色 / 抖动 { $dither }
 export-rate-control-max = CRF { $crf } / 最大 { $max } kbps
 export-rate-control = CRF { $crf }
+
+# Export diagnostic summaries retain provider codes as values.
+export-diagnostic-none = 无
+export-diagnostic-pass = 通过
+export-diagnostic-warn = 警告
+export-diagnostic-fail = 失败
+export-diagnostic-complete = 完整
+export-diagnostic-incomplete = 不完整
+export-diagnostic-warning-code = 警告：{ $code }
+export-broadcast-qc-summary = 广播 QC：{ $profile }@{ $edition } / { $verdict } / { $frames } 帧（{ $coverage }）/ 发现 { $findings }，保留 { $retained }，溢出 { $overflow } / 待验收项 { $obligations } / { $complete }
+export-color-assets-summary = 素材 { $count } / 问题 { $issues }
+export-color-health-summary = 色彩：{ $verdict } / { $frames } 帧 / 元数据 { $metadata } / 覆盖 { $overrides } / 策略假设 { $policy } / 数据纹理 { $data } / 拒绝 { $rejected } / { $assets } / 检查 { $checks } / 原因 { $causes } / 建议 { $actions } / 阶段 CPU 输入 { $cpu_in }、CPU 输出 { $cpu_out }、GPU { $gpu }、阻塞 { $blockers }、传输 { $transfer } / GPU 阻塞 着色器 { $shader }、资源 { $resource }、包装器 { $wrapper }、管线 { $pipeline } / 合成 浮点 { $float }、旧 RGBA8 { $legacy }、原因 { $reasons }

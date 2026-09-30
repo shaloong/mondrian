@@ -168,3 +168,5 @@ site.
 References: [Project Fluent](https://projectfluent.org/),
 [Fluent selectors](https://projectfluent.org/fluent/guide/selectors.html), and
 [the Rust Fluent bundle](https://docs.rs/fluent/latest/fluent/).
+
+Export queue broadcast QC and color health summaries use the captured UI locale, including verdicts, coverage, evidence counts, and completion state. Provider diagnostic codes remain untranslated argument values so reports retain stable lookup identifiers.
