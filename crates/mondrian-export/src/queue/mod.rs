@@ -2011,6 +2011,18 @@ fn push_export_root_causes_and_actions(
             "Inspect renderer GPU color blocker breakdown before relying on export GPU scheduling.",
         );
     }
+    if summary.transfer_stages > 0 {
+        push_export_root_cause_with_action(
+            root_causes,
+            actions,
+            ExportColorHealthArea::StageScheduling,
+            "export_transfer_stage_present",
+            ExportColorHealthSeverity::Fail,
+            format!("transfer_stages={}", summary.transfer_stages),
+            color_report_vocab::action::REMOVE_TRANSFER_STAGE,
+            "Trace export source uploads and encoder-boundary readbacks before claiming GPU residency.",
+        );
+    }
     if summary.gpu_output_cpu_fallbacks > 0 || summary.gpu_output_fallback_reasons.total() > 0 {
         push_export_root_cause_with_action(
             root_causes,
@@ -14349,6 +14361,54 @@ mod tests {
             .root_causes
             .iter()
             .any(|root| root.code == "export_gpu_color_stage_blocked"));
+    }
+
+    #[test]
+    fn export_transfer_only_failure_has_shared_root_cause_and_action() {
+        let mut diagnostics = ExportJobColorDiagnostics::default();
+        diagnostics.record_frame_diagnostics(
+            InputColorResolutionSourceCounts::default(),
+            RenderColorStageDiagnostics {
+                upload_stages: 60,
+                readback_stages: 87,
+                ..RenderColorStageDiagnostics::default()
+            },
+            TimelineCompositeDiagnostics {
+                float_linear_composites: 87,
+                ..TimelineCompositeDiagnostics::default()
+            },
+        );
+        let report = diagnostics.health_report("export-transfer-only").expect("health report");
+        assert_eq!(report.verdict, ExportColorHealthVerdict::Fail);
+        let failures: Vec<_> = report
+            .checks
+            .iter()
+            .filter(|check| check.severity == ExportColorHealthSeverity::Fail)
+            .collect();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].code, color_report_vocab::check::TRANSFER_STAGES);
+        assert_eq!(failures[0].observed, 147);
+        assert_eq!(failures[0].limit, Some(0));
+        assert_eq!(report.root_causes.len(), 1);
+        let root = &report.root_causes[0];
+        assert_eq!(
+            color_report_vocab::normalize_root_cause_code(root.code),
+            color_report_vocab::root_cause::TRANSFER_STAGE_PRESENT
+        );
+        assert_eq!(root.severity, ExportColorHealthSeverity::Fail);
+        assert_eq!(root.evidence, "transfer_stages=147");
+        assert_eq!(report.actions.len(), 1);
+        assert_eq!(
+            report.actions[0].code,
+            color_report_vocab::action::REMOVE_TRANSFER_STAGE
+        );
+
+        diagnostics.stage_diagnostics.upload_stages = 0;
+        diagnostics.stage_diagnostics.readback_stages = 0;
+        let resident = diagnostics.health_report("export-resident").expect("health report");
+        assert_eq!(resident.verdict, ExportColorHealthVerdict::Pass);
+        assert!(resident.root_causes.is_empty());
+        assert!(resident.actions.is_empty());
     }
 
     #[test]
