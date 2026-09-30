@@ -775,6 +775,128 @@ where
 type EffectDomainProcessor<'a> =
     dyn FnMut(&mut [[f32; 4]], EffectDomainTransition) -> Result<(), String> + 'a;
 
+/// Cold admission and per-node pixel reservations for the scalar buffer pool.
+fn scalar_processor_reservations(
+    compiled: &CompiledEffectGraph,
+    width: u32,
+    height: u32,
+    budget: usize,
+) -> Result<Option<Vec<usize>>, EffectFloatExecutionError> {
+    let has_factory = compiled.schedule().ordered_nodes.iter().any(|id| {
+        compiled.graph().node(*id).is_some_and(|node| matches!(&node.kind,
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Custom { processor: Some(binding), .. }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Custom { processor: Some(binding), .. }, .. }
+            if binding.float32_factory().is_some()))
+    });
+    if !has_factory {
+        return Ok(None);
+    }
+    let frame_bytes = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(std::mem::size_of::<[f32; 4]>());
+    let mut remaining = compiled.node_use_counts().clone();
+    let mut pooled = 0usize;
+    let mut allocated = 0usize;
+    let mut reservations = Vec::with_capacity(compiled.schedule().ordered_nodes.len());
+    for id in &compiled.schedule().ordered_nodes {
+        let node = compiled
+            .graph()
+            .node(*id)
+            .ok_or(EffectFloatExecutionError::MissingOutput { node_id: *id })?;
+        let inputs = node.input_ids();
+        let sequential_overlays = matches!(node.kind, EffectGraphNodeKind::MultiInput { .. });
+        for (index, input) in inputs.iter().enumerate() {
+            let uses = remaining
+                .get_mut(input)
+                .ok_or(EffectFloatExecutionError::MissingOutput { node_id: *input })?;
+            *uses = uses
+                .checked_sub(1)
+                .ok_or(EffectFloatExecutionError::MissingOutput { node_id: *input })?;
+            if *uses > 0 {
+                if pooled > 0 {
+                    pooled -= 1;
+                } else {
+                    allocated = allocated.saturating_add(1);
+                }
+            }
+            // The executor releases each multi-input overlay immediately.
+            if sequential_overlays && index > 0 {
+                pooled = pooled.saturating_add(1);
+            }
+        }
+        let (scratch_frames, processor_bytes, key) = match &node.kind {
+            EffectGraphNodeKind::Source => {
+                if pooled > 0 {
+                    pooled -= 1;
+                } else {
+                    allocated = allocated.saturating_add(1);
+                }
+                (0, 0, "source")
+            }
+            EffectGraphNodeKind::MaskSource { .. } => {
+                allocated = allocated.saturating_add(1);
+                (0, 0, "mask")
+            }
+            EffectGraphNodeKind::UnaryEffect { op, .. }
+            | EffectGraphNodeKind::DomainEffect { op, .. } => {
+                let bytes = crate::processor_residency::frame_processor_charge(op, width, height)
+                    .map_err(EffectFloatExecutionError::CustomProcessor)?;
+                let key = match op {
+                    EffectRenderOp::Custom { key, .. } => key.as_str(),
+                    _ => "builtin",
+                };
+                (
+                    crate::adjustment::render_op_f32_scratch_frames(op),
+                    bytes,
+                    key,
+                )
+            }
+            _ => (0, 0, "join"),
+        };
+        let mask_bytes = if matches!(node.kind, EffectGraphNodeKind::MaskSource { .. }) {
+            // Only this raster lives during scalar mask evaluation. The set
+            // estimate bounds its geometry and row workspace without allocation.
+            let estimate = || -> Result<usize, crate::MaskRasterError> {
+                Ok(
+                    crate::mask_raster::PreparedMaskRasterSet::required_retained_bytes(
+                        compiled.graph(),
+                    )?
+                    .saturating_add(
+                        crate::mask_raster::PreparedMaskRasterSet::required_max_scratch_bytes(
+                            compiled.graph(),
+                        )?,
+                    ),
+                )
+            };
+            estimate().map_err(|source| EffectFloatExecutionError::MaskRasterFailed {
+                node_id: *id,
+                source,
+            })?
+        } else {
+            0
+        };
+        let occupied = allocated
+            .saturating_add(scratch_frames)
+            .saturating_mul(frame_bytes)
+            .saturating_add(mask_bytes);
+        let required = occupied.saturating_add(processor_bytes);
+        if required > budget {
+            return Err(EffectFloatExecutionError::CustomProcessor(
+                EffectExecutionError::CustomProcessorBudgetExceeded {
+                    key: key.to_owned(),
+                    required_bytes: required,
+                    budget_bytes: budget,
+                },
+            ));
+        }
+        reservations.push(occupied);
+        if inputs.len() > 1 && !sequential_overlays {
+            pooled = pooled.saturating_add(inputs.len() - 1);
+        }
+    }
+    Ok(Some(reservations))
+}
+
 fn apply_compiled_effect_graph_rgba_f32_inner(
     session: &mut EffectExecutionSession,
     input: &[[f32; 4]],
@@ -793,6 +915,13 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
         });
     }
     validate_float_effect_graph(compiled, processor.is_some())?;
+    let reservations =
+        scalar_processor_reservations(compiled, width, height, session.max_working_bytes())?;
+    if reservations.is_none() {
+        // A built-in-only graph cannot reuse the previous graph's workers.
+        // Retire them before identity/cache output copies as well.
+        session.processors.clear();
+    }
     if compiled.graph().is_identity() || input.is_empty() || width == 0 || height == 0 {
         return Ok(input.to_vec());
     }
@@ -812,7 +941,12 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
         HashMap::<EffectGraphNodeId, Vec<[f32; 4]>>::with_capacity(compiled.graph().nodes.len());
     let mut remaining_uses = compiled.node_use_counts().clone();
     let mut buffer_pool = Vec::<Vec<[f32; 4]>>::new();
-    for node_id in &compiled.schedule().ordered_nodes {
+    for (step, node_id) in compiled.schedule().ordered_nodes.iter().enumerate() {
+        if let Some(reservations) = &reservations {
+            session
+                .processors
+                .trim_working(session.max_working_bytes() - reservations[step]);
+        }
         let Some(node) = compiled.graph().node(*node_id) else {
             return Err(EffectFloatExecutionError::UnsupportedNode {
                 node_id: *node_id,

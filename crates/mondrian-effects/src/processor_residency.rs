@@ -83,7 +83,8 @@ pub trait EffectFloatProcessorInstance: std::fmt::Debug + Send {
 /// native instances. Each execution session prepares its own instance.
 pub trait EffectFloatProcessorFactory: std::fmt::Debug + Send + Sync {
     /// Conservative resident byte charge, including owned worker/frame buffers.
-    /// This charge is checked before constructing the instance.
+    /// This charge is checked before constructing the instance. Sizing must be
+    /// deterministic for the request and independent of prior invocations.
     fn resident_bytes(&self, request: EffectFloatProcessorPreparation) -> Result<usize>;
     /// Create one instance for this occurrence and exact frame extent.
     fn prepare(
@@ -91,6 +92,33 @@ pub trait EffectFloatProcessorFactory: std::fmt::Debug + Send + Sync {
         request: EffectFloatProcessorPreparation,
         control: &mut EffectProcessorControl<'_>,
     ) -> Result<Box<dyn EffectFloatProcessorInstance>>;
+}
+
+/// Query immutable recipe sizing before any raster/instance allocation.
+pub(crate) fn frame_processor_charge(
+    op: &crate::EffectRenderOp,
+    width: u32,
+    height: u32,
+) -> std::result::Result<usize, crate::EffectExecutionError> {
+    let crate::EffectRenderOp::Custom { key, processor: Some(binding), .. } = op else {
+        return Ok(0);
+    };
+    let Some(factory) = binding.float32_factory() else {
+        return Ok(0);
+    };
+    let Some(effect_id) = binding.occurrence_id() else {
+        return Err(crate::EffectExecutionError::CustomProcessorUnavailable { key: key.clone() });
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        factory.resident_bytes(EffectFloatProcessorPreparation { effect_id, width, height })
+    }));
+    let reason = match result {
+        Ok(Ok(bytes)) => return Ok(bytes),
+        Ok(Err(error)) => error.to_string(),
+        Err(_) => "custom processor sizing panicked".to_owned(),
+    };
+    binding.record_runtime_failure(reason.clone());
+    Err(crate::EffectExecutionError::CustomProcessorFailed { key: key.clone(), reason })
 }
 
 /// Distinguish resource-policy denial from processor execution faults.
@@ -261,6 +289,7 @@ mod tests {
         dropped: Arc<AtomicUsize>,
         reached: Arc<AtomicBool>,
         cancellation: Option<mondrian_core::ExecutionCancellationToken>,
+        resident_charge: Option<usize>,
     }
     #[derive(Debug)]
     struct ProbeInstance {
@@ -275,7 +304,7 @@ mod tests {
     }
     impl EffectFloatProcessorFactory for ProbeFactory {
         fn resident_bytes(&self, _: EffectFloatProcessorPreparation) -> Result<usize> {
-            Ok(64)
+            Ok(self.resident_charge.unwrap_or(64))
         }
         fn prepare(
             &self,
@@ -334,7 +363,7 @@ mod tests {
         graph_with_tail(factory, false)
     }
 
-    fn graph_with_tail(factory: Arc<ProbeFactory>, gpu_tail: bool) -> Arc<CompiledEffectGraph> {
+    fn register_probe_factory(factory: Arc<ProbeFactory>) -> String {
         let key = format!("test.resident.{}", EffectId::new());
         let definition = EffectDefinition::new(
             &key,
@@ -359,6 +388,11 @@ mod tests {
             factory,
         );
         register_effect_definition(definition).expect("register factory");
+        key
+    }
+
+    fn graph_with_tail(factory: Arc<ProbeFactory>, gpu_tail: bool) -> Arc<CompiledEffectGraph> {
+        let key = register_probe_factory(factory);
         let first =
             instantiate_effect_node(EffectType::Plugin(key.clone())).expect("first occurrence");
         let second = instantiate_effect_node(EffectType::Plugin(key)).expect("second occurrence");
@@ -787,6 +821,101 @@ mod tests {
                     assert_eq!(factory.created.load(Ordering::SeqCst), 2);
                     assert_eq!(factory.dropped.load(Ordering::SeqCst), 2 - retained);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn later_recipe_budget_denial_precedes_all_instances_and_media_fetches() {
+        struct CountingProvider(usize);
+        impl EffectTemporalFrameProvider for CountingProvider {
+            fn source_identity(&self) -> EffectTemporalSourceIdentity {
+                ConstantProvider.source_identity()
+            }
+            fn retained_coverage_bytes(&self) -> usize {
+                0
+            }
+            fn copy_frame(
+                &mut self,
+                request: EffectTemporalFrameRequest,
+                cancellation: &mondrian_core::ExecutionCancellationToken,
+                destination: &mut Vec<[f32; 4]>,
+            ) -> std::result::Result<(), EffectTemporalFrameProviderError> {
+                self.0 += 1;
+                ConstantProvider.copy_frame(request, cancellation, destination)
+            }
+        }
+        for route in ["scalar", "temporal", "mixed"] {
+            let first = Arc::new(ProbeFactory::default());
+            let second = Arc::new(ProbeFactory {
+                resident_charge: Some(128),
+                ..ProbeFactory::default()
+            });
+            let keys = [
+                register_probe_factory(Arc::clone(&first)),
+                register_probe_factory(Arc::clone(&second)),
+            ];
+            let mut correction = EffectNode::with_defaults(EffectType::BasicCorrection);
+            correction
+                .set_static_value_by_parameter(
+                    &EffectType::BasicCorrection.parameter_id("exposure").expect("exposure"),
+                    mondrian_core::automation::PropertyValue::Float(0.5),
+                )
+                .expect("set GPU tail");
+            let effects = [
+                instantiate_effect_node(EffectType::Plugin(keys[0].clone())).expect("first"),
+                instantiate_effect_node(EffectType::Plugin(keys[1].clone())).expect("second"),
+                correction,
+            ];
+            let graph =
+                PreparedEffectProgram::prepare(&effects, &[], WorkingColorSpace::LinearRec709)
+                    .expect("prepare")
+                    .evaluate(TimelineTime::ZERO)
+                    .expect("compile");
+            let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+                max_working_bytes: 159,
+                ..EffectExecutionSessionConfig::default()
+            });
+            session.bind_generation(1);
+            let input = [[0.25, 0.5, 0.75, 1.0]];
+            let mut provider = CountingProvider(0);
+            let denied = match route {
+                "scalar" => session.apply_compiled_rgba_f32(&input, 1, 1, &graph, 0).is_err(),
+                "temporal" => {
+                    let request = EffectTemporalExecutionRequest::new(
+                        1,
+                        EffectExecutionContinuity::Continuous,
+                        TimelineTime::ZERO,
+                        EffectFrameExtent::new(1, 1),
+                        EffectPixelRoi::new(0, 0, 1, 1),
+                        mondrian_core::ExecutionCancellationToken::new(),
+                    );
+                    session.execute_temporal_f32(&graph, &request, &mut provider).is_err()
+                }
+                "mixed" => mixed_work(Arc::clone(&graph))
+                    .execute_cpu_prefix_uncancelled(
+                        &mut session,
+                        1,
+                        &input,
+                        0,
+                        WorkingColorSpace::LinearRec709,
+                    )
+                    .is_err(),
+                _ => unreachable!(),
+            };
+            assert!(denied, "{route}");
+            assert_eq!(
+                first.created.load(Ordering::SeqCst),
+                0,
+                "{route}: earlier recipe must not start"
+            );
+            assert_eq!(second.created.load(Ordering::SeqCst), 0, "{route}");
+            assert_eq!(provider.0, 0, "{route}: media must not be fetched");
+            assert_eq!(session.diagnostics().processor_instances, 0);
+            for key in keys {
+                let status = effect_plugin_runtime_status(&key).expect("status");
+                assert!(!status.disabled);
+                assert_eq!(status.last_error, None);
             }
         }
     }

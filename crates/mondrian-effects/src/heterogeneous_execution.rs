@@ -2457,6 +2457,7 @@ pub struct PreparedHeterogeneousEffectWork {
     shape_identity: HeterogeneousEffectShapeIdentity,
     cpu_frontier_retained_bytes: u64,
     cpu_required_working_bytes: usize,
+    cpu_pixel_reservations: Arc<[usize]>,
     mask_auxiliary_bytes: usize,
 }
 
@@ -2637,16 +2638,22 @@ impl PreparedHeterogeneousEffectWork {
                     compiled.graph(),
                 )?)
                 .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
-        let cpu_required_working_bytes = cpu_prefix_working_bytes(
+        let (cpu_pixel_peak, mut cpu_pixel_reservations) = cpu_prefix_working_bytes(
             &compiled,
             &cpu_dispatches,
             &cpu_use_counts,
             cpu_input_materialization,
             &cpu_materializations,
             frame_extent,
-        )?
-        .checked_add(mask_auxiliary_bytes)
-        .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
+        )?;
+        for reservation in &mut cpu_pixel_reservations {
+            *reservation = reservation
+                .checked_add(mask_auxiliary_bytes)
+                .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
+        }
+        let cpu_required_working_bytes = cpu_pixel_peak
+            .checked_add(mask_auxiliary_bytes)
+            .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
         let shape_identity =
             heterogeneous_effect_shape_identity(&compiled, &plan, &cpu_nodes, &gpu_nodes)?;
         let cpu_frontier_retained_bytes = transfers.iter().try_fold(0_u64, |total, transfer| {
@@ -2681,6 +2688,7 @@ impl PreparedHeterogeneousEffectWork {
             shape_identity,
             cpu_frontier_retained_bytes,
             cpu_required_working_bytes,
+            cpu_pixel_reservations: cpu_pixel_reservations.into(),
             mask_auxiliary_bytes,
         })
     }
@@ -2802,6 +2810,41 @@ impl PreparedHeterogeneousEffectWork {
                 },
             );
         }
+        // Query immutable factory charges before masks, source copies or
+        // native instances are allocated. Each node has its own pixel peak.
+        for (dispatch, &pixels) in
+            self.cpu_dispatches.iter().zip(self.cpu_pixel_reservations.iter())
+        {
+            checkpoint_result()?;
+            let node = self.compiled.graph().node(dispatch.node).ok_or(
+                PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: dispatch.node },
+            )?;
+            if let EffectGraphNodeKind::UnaryEffect { op, .. }
+            | EffectGraphNodeKind::DomainEffect { op, .. } = &node.kind
+            {
+                let charge = crate::processor_residency::frame_processor_charge(
+                    op,
+                    self.frame_extent.width(),
+                    self.frame_extent.height(),
+                )?;
+                let required = pixels
+                    .checked_add(charge)
+                    .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
+                if required > diagnostics.max_working_bytes {
+                    return Err(
+                        PreparedHeterogeneousEffectWorkError::WorkingBudgetExceeded {
+                            required,
+                            limit: diagnostics.max_working_bytes,
+                        },
+                    );
+                }
+            }
+        }
+        let initial_bytes = expected
+            .checked_mul(std::mem::size_of::<[f32; 4]>())
+            .and_then(|bytes| bytes.checked_add(self.mask_auxiliary_bytes))
+            .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
+        session.processors.trim_working(diagnostics.max_working_bytes - initial_bytes);
         checkpoint_result()?;
         let prepared_masks = PreparedMaskRasterSet::prepare_controlled(
             self.compiled.graph(),
@@ -2826,6 +2869,7 @@ impl PreparedHeterogeneousEffectWork {
             session,
             &self.compiled,
             &self.cpu_dispatches,
+            &self.cpu_pixel_reservations,
             &self.cpu_use_counts,
             self.cpu_input_materialization,
             &self.transfers,
@@ -2874,6 +2918,7 @@ fn execute_cpu_dag_prefix(
     session: &mut EffectExecutionSession,
     compiled: &CompiledEffectGraph,
     dispatches: &[PreparedCpuGraphDispatch],
+    pixel_reservations: &[usize],
     use_counts: &HashMap<EffectMaterializationId, usize>,
     input_materialization: EffectMaterializationId,
     transfers: &[HeterogeneousCpuTransferEvidence],
@@ -2892,8 +2937,9 @@ fn execute_cpu_dag_prefix(
     let raster_region = EffectRasterRegion::full_frame(extent.width(), extent.height());
     checkpoint()?;
 
-    for dispatch in dispatches {
+    for (dispatch, &pixels) in dispatches.iter().zip(pixel_reservations) {
         checkpoint()?;
+        session.processors.trim_working(session.max_working_bytes() - pixels);
         let node = compiled.graph().node(dispatch.node).cloned().ok_or(
             PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: dispatch.node },
         )?;
@@ -2950,7 +2996,7 @@ fn execute_cpu_dag_prefix(
                             &op,
                             frame_seed,
                             Some(session),
-                            caller_owned_bytes,
+                            caller_owned_bytes.saturating_add(prepared_masks.retained_bytes()),
                             &mut control,
                         )
                     };
@@ -3230,13 +3276,14 @@ fn cpu_prefix_working_bytes(
     input_materialization: EffectMaterializationId,
     output_materializations: &[EffectMaterializationId],
     extent: EffectFrameExtent,
-) -> Result<usize, PreparedHeterogeneousEffectWorkError> {
+) -> Result<(usize, Vec<usize>), PreparedHeterogeneousEffectWorkError> {
     let frame_bytes = usize::try_from(frame_bytes(extent, EffectWorkingPrecision::Float32)?)
         .map_err(|_| PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
     let mut remaining = use_counts.clone();
     let mut live_materializations = HashSet::from([input_materialization]);
     let mut live_frames = 1_usize;
     let mut peak_owned_frames = live_frames;
+    let mut reservations = Vec::with_capacity(dispatches.len());
     for dispatch in dispatches {
         let node = compiled.graph().node(dispatch.node).ok_or(
             PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: dispatch.node },
@@ -3280,6 +3327,11 @@ fn cpu_prefix_working_bytes(
                 .checked_add(scratch_frames)
                 .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?,
         );
+        let node_peak = live_frames
+            .checked_add(scratch_frames.max(usize::from(is_mask_source)))
+            .and_then(|frames| frames.checked_mul(frame_bytes))
+            .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
+        reservations.push(node_peak);
         if is_mask_source {
             live_frames = live_frames
                 .checked_add(1)
@@ -3310,9 +3362,10 @@ fn cpu_prefix_working_bytes(
             },
         );
     }
-    frame_bytes
+    let peak = frame_bytes
         .checked_mul(peak_owned_frames)
-        .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)
+        .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
+    Ok((peak, reservations))
 }
 
 fn prepare_gpu_suffix(

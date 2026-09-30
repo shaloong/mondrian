@@ -1068,6 +1068,15 @@ impl EffectExecutionSession {
             return Ok(output);
         }
         let budget = self.max_working_bytes();
+        let mask_reservation = prepared.temporal_program.contexts().iter().try_fold(
+            prepared.retained_coverage_bytes,
+            |bytes, context| {
+                PreparedMaskRasterSet::required_retained_bytes(context.graph.graph())
+                    .map(|retained| bytes.saturating_add(retained))
+                    .map_err(|source| EffectTemporalExecutionError::MaskRasterFailed { source })
+            },
+        )?;
+        self.processors.trim_working(budget.saturating_sub(mask_reservation));
         let prepared = prepared.prepare_mask_rasters(request, budget)?;
         let direct_working_bytes = temporal_scalar_required_bytes(
             &prepared.temporal_program,
@@ -1075,12 +1084,12 @@ impl EffectExecutionSession {
             &prepared.mask_rasters,
         )?;
         let retained_execution_bytes = prepared.retained_execution_bytes()?;
-        let direct_required = retained_execution_bytes.checked_add(direct_working_bytes).ok_or(
-            EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+        let direct_required = retained_execution_bytes
+            .checked_add(direct_working_bytes.required_bytes)
+            .ok_or(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
                 required_bytes: usize::MAX,
                 budget_bytes: budget,
-            },
-        )?;
+            })?;
         if direct_required <= budget {
             let mut output = self.execute_prepared_temporal_tile_f32(
                 compiled,
@@ -1127,6 +1136,15 @@ impl EffectExecutionSession {
         if let Some(output) = self.cached_or_empty_temporal_output(compiled, request, &prepared)? {
             return Ok(output);
         }
+        let mask_reservation = prepared.temporal_program.contexts().iter().try_fold(
+            prepared.retained_coverage_bytes,
+            |bytes, context| {
+                PreparedMaskRasterSet::required_retained_bytes(context.graph.graph())
+                    .map(|retained| bytes.saturating_add(retained))
+                    .map_err(|source| EffectTemporalExecutionError::MaskRasterFailed { source })
+            },
+        )?;
+        self.processors.trim_working(budget.saturating_sub(mask_reservation));
         let prepared = prepared.prepare_mask_rasters(request, budget)?;
         let retained_execution_bytes = prepared.retained_execution_bytes()?;
         let available = budget.checked_sub(retained_execution_bytes).ok_or(
@@ -1236,6 +1254,17 @@ impl EffectExecutionSession {
         working_budget: usize,
         publish_output_cache: bool,
     ) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
+        let footprint = temporal_scalar_required_bytes(
+            &prepared.temporal_program,
+            &prepared.demand,
+            &prepared.mask_rasters,
+        )?;
+        if footprint.required_bytes > working_budget {
+            return Err(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                required_bytes: footprint.required_bytes,
+                budget_bytes: working_budget,
+            });
+        }
         let mask_rasters = prepared.mask_rasters.clone();
         let mut evaluator = ScalarTemporalEvaluator::new(
             request,
@@ -1246,7 +1275,7 @@ impl EffectExecutionSession {
             provider,
             working_budget,
         )?;
-        let output = evaluator.execute(self)?;
+        let output = evaluator.execute(self, &footprint.pixel_reservations)?;
         if request.cancellation.is_canceled() {
             return Err(EffectTemporalExecutionError::Canceled);
         }
@@ -1259,6 +1288,11 @@ impl EffectExecutionSession {
         // The crop Vec enters `Arc<Vec<_>>` ownership without copying its pixel
         // allocation, so publication adds exactly one output-sized buffer.
         evaluator.working.ensure_transient(output_pixel_bytes)?;
+        self.processors
+            .trim_working(working_budget - evaluator.working.resident_bytes - output_pixel_bytes);
+        evaluator
+            .working
+            .ensure_transient(output_pixel_bytes + self.processors.counts().1)?;
         let output_pixels = Arc::new(crop_tile(
             &output,
             prepared.demand.input_roi().region(),
@@ -1350,6 +1384,7 @@ impl EffectExecutionSession {
             budget,
             &mask_rasters,
         )?;
+        self.processors.trim_working(tile_budget);
         let mut assembled = vec![[0.0_f32; 4]; output_pixels];
         let mut provider_requests = 0usize;
         let mut peak_working_bytes = base_resident_bytes;
@@ -1596,9 +1631,12 @@ impl<'a> ScalarTemporalEvaluator<'a> {
     fn execute(
         &mut self,
         session: &mut EffectExecutionSession,
+        pixel_reservations: &[usize],
     ) -> Result<Vec<[f32; 4]>, EffectTemporalExecutionError> {
         let schedule = self.temporal_program.ordered_values().to_vec();
-        for address in schedule {
+        for (address, &pixels) in schedule.into_iter().zip(pixel_reservations) {
+            session.processors.trim_working(self.working.budget - pixels);
+            self.working.peak = self.working.peak.max(pixels + session.processors.counts().1);
             temporal_cancellation_checkpoint(&self.request.cancellation)?;
             let output = match address {
                 TemporalValueAddress::Source(time) => self.fetch_source(time)?,
@@ -3640,7 +3678,7 @@ mod tests {
             temporal_scalar_required_bytes(&temporal_program, &demand, &mask_rasters)
                 .expect("direct proof");
         assert!(base_resident_bytes <= budget);
-        assert!(source_coverage_bytes + direct_working > budget);
+        assert!(source_coverage_bytes + direct_working.required_bytes > budget);
 
         let tiles = plan_temporal_tiles(
             &graph,

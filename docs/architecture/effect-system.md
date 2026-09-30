@@ -1186,6 +1186,24 @@ heterogeneous executors provide still-owned raster bytes;
 the dispatcher subtracts them and its atomic staging frame before admission.
 Temporal dispatch also reserves coverage already deducted from its evaluator
 budget and reports the processor peak charge in its working-set evidence.
-Product retained-native grants remain closed until resource coordination and
-startup/whole-attempt admission are integrated; this per-dispatch contract alone
-does not claim a global process-memory cap.
+Before any graph frame allocation or media fetch, all three Float32 routes
+query immutable recipe charges and prove each scheduled invocation against its
+own pixel reservation. Sizing is deterministic for the occurrence and extent;
+sizing errors/panics are plugin faults, whereas insufficient grants remain
+retryable resource denial. A later oversized recipe therefore cannot start an
+earlier plugin or fetch an otherwise unused source frame.
+
+The scalar planner models the actual buffer pool and sequential multi-input
+overlay reuse. The heterogeneous planner retains per-dispatch materialization
+peaks, including masks; temporal planning models exact-time uses, crop
+publication and tile assembly. Temporal mask geometry remains separately
+bounded and prepared before the frame proof. Each executor evicts retained
+workers before source/fan-out allocation or kernel scratch, and temporal peak
+evidence includes workers that remain resident during those operations.
+Built-in-only scalar graphs retire native resources before identity/cache
+copies. Optional residency cannot make cold-admitted work fail.
+
+Product retained-native grants remain closed until cross-owner resource
+coordination and the native factory's memory charge are qualified. These
+owner-local frame/processor proofs do not claim a global process-memory cap
+or enforcement of arbitrary third-party native heap allocations.
