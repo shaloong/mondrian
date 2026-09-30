@@ -20,6 +20,7 @@ const PROFILE: InterchangeFormatProfile = InterchangeFormatProfile::Cmx3600;
 struct Event {
     number: String,
     reel: String,
+    clip_name: Option<String>,
     edit: char,
     dissolve: i64,
     source_in: i64,
@@ -55,9 +56,18 @@ pub(crate) fn parse(
         .map(str::trim)
         .unwrap_or("Untitled CMX")
         .to_owned();
-    let mut events = Vec::new();
+    let mut events: Vec<Event> = Vec::new();
     for (line_index, raw) in text.lines().enumerate() {
         let line = raw.trim();
+        if let Some(name) = line.strip_prefix("* FROM CLIP NAME:") {
+            let name = name.trim();
+            if !name.is_empty()
+                && let Some(event) = events.last_mut()
+            {
+                event.clip_name = Some(name.to_owned());
+            }
+            continue;
+        }
         if line.is_empty()
             || line.starts_with('*')
             || line.starts_with("TITLE:")
@@ -126,6 +136,7 @@ pub(crate) fn parse(
         events.push(Event {
             number: fields[0].to_owned(),
             reel: fields[1].to_owned(),
+            clip_name: None,
             edit,
             dissolve,
             source_in: parse_tc(fields[tc_index])?,
@@ -215,7 +226,7 @@ pub(crate) fn parse(
         clips.push(InterchangeClip {
             key: clip_key.clone(),
             media_key,
-            name: Some(event.reel),
+            name: Some(event.clip_name.unwrap_or(event.reel)),
             record_start: event.record_in - start_frame,
             duration: event.record_out - event.record_in,
             source_start: event.source_in,
