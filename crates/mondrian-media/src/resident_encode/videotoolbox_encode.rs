@@ -7,8 +7,8 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use super::{
-    ResidentEncodeBitDepth, ResidentEncodeChromaLocation, ResidentEncodeColorimetry,
-    ResidentEncodeError, ResidentHevcEncoderConfig,
+    ResidentEncodeBitDepth, ResidentEncodeChromaLocation, ResidentEncodeCodec,
+    ResidentEncodeColorimetry, ResidentEncodeError, ResidentVideoEncoderConfig,
 };
 use ffmpeg_next as ffmpeg;
 
@@ -39,6 +39,7 @@ impl MetalResidentEncodeDeviceRoot {
 
 #[repr(C)]
 struct NativeContract {
+    codec: u32,
     width: u32,
     height: u32,
     fps_num: u32,
@@ -106,7 +107,7 @@ pub struct MetalResidentEncodeSurfaceView<'a> {
 pub struct MetalResidentEncodeInputFrame {
     buffer: NonNull<c_void>,
     owner: Arc<()>,
-    config: Arc<ResidentHevcEncoderConfig>,
+    config: Arc<ResidentVideoEncoderConfig>,
     registry_id: u64,
 }
 // SAFETY: each +1 CoreVideo reference moves exclusively between the codec
@@ -145,7 +146,7 @@ pub struct MetalResidentEncodeReadyFrame {
 
 /// Cumulative codec evidence from actual submissions and consuming shutdown.
 #[derive(Clone, Copy, Default, Debug)]
-pub struct VideoToolboxResidentHevcEncoderSessionDiagnostics {
+pub struct VideoToolboxResidentVideoEncoderSessionDiagnostics {
     /// Acquired native surfaces.
     pub surfaces_acquired: u64,
     /// Encoded frames.
@@ -166,17 +167,17 @@ pub struct VideoToolboxResidentHevcEncoderSessionDiagnostics {
 
 type Work = Box<dyn FnOnce(&mut Option<NativeSession>) + Send>;
 /// One exclusive platform worker; no queue, scheduling or Export authority.
-pub struct VideoToolboxResidentHevcEncoderSession {
+pub struct VideoToolboxResidentVideoEncoderSession {
     sender: Option<mpsc::SyncSender<Work>>,
     worker: Option<JoinHandle<()>>,
     closed: mpsc::Receiver<()>,
-    diagnostics: VideoToolboxResidentHevcEncoderSessionDiagnostics,
+    diagnostics: VideoToolboxResidentVideoEncoderSessionDiagnostics,
 }
-impl VideoToolboxResidentHevcEncoderSession {
+impl VideoToolboxResidentVideoEncoderSession {
     /// Open a bounded native codec/mux owner under the renderer device identity.
     pub fn open(
         root: &MetalResidentEncodeDeviceRoot,
-        config: ResidentHevcEncoderConfig,
+        config: ResidentVideoEncoderConfig,
     ) -> Result<Self, ResidentEncodeError> {
         config.validate()?;
         let (sender, receiver) = mpsc::sync_channel::<Work>(1);
@@ -301,11 +302,11 @@ impl VideoToolboxResidentHevcEncoderSession {
         Ok(())
     }
     /// Return only facts from actual completed operations.
-    pub fn diagnostics(&self) -> VideoToolboxResidentHevcEncoderSessionDiagnostics {
+    pub fn diagnostics(&self) -> VideoToolboxResidentVideoEncoderSessionDiagnostics {
         self.diagnostics
     }
 }
-impl Drop for VideoToolboxResidentHevcEncoderSession {
+impl Drop for VideoToolboxResidentVideoEncoderSession {
     fn drop(&mut self) {
         self.sender.take();
         if let Err(error) = self.wait_closed() {
@@ -321,7 +322,7 @@ struct NativeSession {
     output: ffmpeg::format::context::Output,
     input_time_base: ffmpeg::Rational,
     output_time_base: ffmpeg::Rational,
-    config: Arc<ResidentHevcEncoderConfig>,
+    config: Arc<ResidentVideoEncoderConfig>,
     owner: Arc<()>,
     registry_id: u64,
     next_index: u64,
@@ -336,7 +337,7 @@ impl Drop for NativeSession {
 impl NativeSession {
     fn open(
         root: MetalResidentEncodeDeviceRoot,
-        config: ResidentHevcEncoderConfig,
+        config: ResidentVideoEncoderConfig,
     ) -> Result<Self, ResidentEncodeError> {
         ffmpeg::init().map_err(|e| native_error("FFmpeg initialize", e))?;
         let num = i32::try_from(config.frame_rate_num).map_err(|e| native_error("cadence", e))?;
@@ -347,6 +348,10 @@ impl NativeSession {
             ResidentEncodeColorimetry::Rec2100Hlg => (9, 18, 9),
         };
         let contract = NativeContract {
+            codec: match config.codec {
+                ResidentEncodeCodec::Hevc => 1,
+                ResidentEncodeCodec::H264High => 2,
+            },
             width: config.width,
             height: config.height,
             fps_num: config.frame_rate_num,
@@ -387,7 +392,10 @@ impl NativeSession {
         unsafe {
             let p = &mut *parameters.as_mut_ptr();
             p.codec_type = ffmpeg::ffi::AVMediaType::AVMEDIA_TYPE_VIDEO;
-            p.codec_id = ffmpeg::ffi::AVCodecID::AV_CODEC_ID_HEVC;
+            p.codec_id = match config.codec {
+                ResidentEncodeCodec::Hevc => ffmpeg::ffi::AVCodecID::AV_CODEC_ID_HEVC,
+                ResidentEncodeCodec::H264High => ffmpeg::ffi::AVCodecID::AV_CODEC_ID_H264,
+            };
             p.width = i32::try_from(config.width).map_err(|e| native_error("coded width", e))?;
             p.height = i32::try_from(config.height).map_err(|e| native_error("coded height", e))?;
             p.format = if config.bit_depth == ResidentEncodeBitDepth::Ten {
@@ -395,7 +403,9 @@ impl NativeSession {
             } else {
                 ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_YUV420P as i32
             };
-            p.profile = if config.bit_depth == ResidentEncodeBitDepth::Ten {
+            p.profile = if config.codec == ResidentEncodeCodec::H264High {
+                100
+            } else if config.bit_depth == ResidentEncodeBitDepth::Ten {
                 2
             } else {
                 1
@@ -415,7 +425,10 @@ impl NativeSession {
         let input_time_base = ffmpeg::Rational(den, num);
         {
             let mut stream = output
-                .add_stream(ffmpeg::codec::Id::HEVC)
+                .add_stream(match config.codec {
+                    ResidentEncodeCodec::Hevc => ffmpeg::codec::Id::HEVC,
+                    ResidentEncodeCodec::H264High => ffmpeg::codec::Id::H264,
+                })
                 .map_err(|e| native_error("add stream", e))?;
             stream.set_time_base(input_time_base);
             stream.set_parameters(parameters);

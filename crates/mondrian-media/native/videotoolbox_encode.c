@@ -55,6 +55,13 @@ static OSType pixel_format(const MdnVtEncodeContract *c) {
     return c->ten_bit ? (c->full_range ? kCVPixelFormatType_420YpCbCr10BiPlanarFullRange : kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange)
         : (c->full_range ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
 }
+static OSStatus parameter_set(const MdnVtEncoder *s, CMFormatDescriptionRef format,
+                              size_t index, const uint8_t **data, size_t *bytes,
+                              size_t *count, int *nal_size) {
+    return s->contract.codec==2
+        ? CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format,index,data,bytes,count,nal_size)
+        : CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(format,index,data,bytes,count,nal_size);
+}
 static void callback(void *context, void *frame, OSStatus status,
                      VTEncodeInfoFlags flags, CMSampleBufferRef sample) {
     (void)frame;
@@ -70,11 +77,12 @@ static void callback(void *context, void *frame, OSStatus status,
     s->key=1;
     if(a && CFArrayGetCount(a)) s->key=CFDictionaryGetValue(CFArrayGetValueAtIndex(a,0),kCMSampleAttachmentKey_NotSync)!=kCFBooleanTrue;
     CMFormatDescriptionRef format=CMSampleBufferGetFormatDescription(sample);
+    if(CMFormatDescriptionGetMediaSubType(format)!=(s->contract.codec==2?kCMVideoCodecType_H264:kCMVideoCodecType_HEVC)) {s->callback_error=-70118;goto end;}
     size_t count=0,bytes=0,parameter_bytes=0;int nal_size=0;const uint8_t *data=NULL;
-    status=CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(format,0,&data,&bytes,&count,&nal_size);
+    status=parameter_set(s,format,0,&data,&bytes,&count,&nal_size);
     if(status || nal_size!=4) {s->callback_error=status ? status : -70101;goto end;}
     if(s->key) for(size_t i=0;i<count;i++) {
-        status=CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(format,i,&data,&bytes,NULL,NULL);
+        status=parameter_set(s,format,i,&data,&bytes,NULL,NULL);
         if(status || parameter_bytes>SIZE_MAX-4 || bytes>SIZE_MAX-parameter_bytes-4) {s->callback_error=status ? status : -70102;goto end;}
         parameter_bytes+=bytes+4;
     }
@@ -87,21 +95,24 @@ static void callback(void *context, void *frame, OSStatus status,
     size_t offset=0;
     const uint8_t start[]={0,0,0,1};
     if(s->key) for(size_t i=0;i<count;i++) {
-        status=CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(format,i,&data,&bytes,NULL,NULL);
+        status=parameter_set(s,format,i,&data,&bytes,NULL,NULL);
         if(status) {s->callback_error=status;goto end;}
         memcpy(s->packet+offset,start,4);offset+=4;memcpy(s->packet+offset,data,bytes);offset+=bytes;
     }
     status=CMBlockBufferCopyDataBytes(block,0,length,s->packet+offset);
     if(status) {s->callback_error=status;goto end;}
     size_t pos=offset;
+    int h264_idr=0;
     while(offset+length-pos>=4) {
         uint8_t *p=s->packet+pos;
         uint32_t n=((uint32_t)p[0]<<24)|((uint32_t)p[1]<<16)|((uint32_t)p[2]<<8)|p[3];
         pos+=4;
         if(!n || n>offset+length-pos) {s->callback_error=-70105;goto end;}
+        if(s->contract.codec==2 && (s->packet[pos]&31)==5) h264_idr=1;
         memcpy(p,start,4);pos+=n;
     }
     if(pos!=offset+length) {s->callback_error=-70106;goto end;}
+    if(s->contract.codec==2 && h264_idr!=(int)s->key) {s->callback_error=-70119;goto end;}
     s->size=pos;
 end:
     pthread_mutex_unlock(&s->mutex);
@@ -113,7 +124,7 @@ void mdn_vt_encoder_close(MdnVtEncoder *s) {
     free(s->packet);pthread_mutex_destroy(&s->mutex);free(s);
 }
 MdnVtEncoder *mdn_vt_encoder_create(const MdnVtEncodeContract *c, MdnVtError *e) {
-    if(!c || !c->width || !c->height || !c->fps_num || c->fps_num>INT_MAX
+    if(!c || (c->codec!=1 && c->codec!=2) || (c->codec==2 && c->ten_bit) || !c->width || !c->height || !c->fps_num || c->fps_num>INT_MAX
        || !c->fps_den || !c->sar_num || !c->sar_den || !c->gop
        || !c->metal_registry_id || c->pool_size<2 || c->quantizer<1 || c->quantizer>51
        || !primaries(c->primaries) || !transfer(c->transfer) || !matrix(c->matrix)) {
@@ -137,13 +148,13 @@ MdnVtEncoder *mdn_vt_encoder_create(const MdnVtEncodeContract *c, MdnVtError *e)
     CFDictionarySetValue(attrs,kCVPixelBufferWidthKey,w);CFDictionarySetValue(attrs,kCVPixelBufferHeightKey,h);
     CFDictionarySetValue(attrs,kCVPixelBufferPixelFormatTypeKey,f);CFDictionarySetValue(attrs,kCVPixelBufferMetalCompatibilityKey,kCFBooleanTrue);
     CFDictionarySetValue(attrs,kCVPixelBufferIOSurfacePropertiesKey,empty);
-    OSStatus status=VTCompressionSessionCreate(NULL,c->width,c->height,kCMVideoCodecType_HEVC,spec,attrs,NULL,callback,s,&s->session);
+    OSStatus status=VTCompressionSessionCreate(NULL,c->width,c->height,c->codec==2?kCMVideoCodecType_H264:kCMVideoCodecType_HEVC,spec,attrs,NULL,callback,s,&s->session);
     if(!status)status=CVPixelBufferPoolCreate(NULL,NULL,attrs,&s->pool);
     CFRelease(w);CFRelease(h);CFRelease(f);CFRelease(empty);CFRelease(attrs);CFRelease(spec);
     if(status) {fail(e,MDN_VT_SESSION,status);goto reject;}
 #define SET(key,value) do { status=VTSessionSetProperty(s->session,key,value);if(status){fail(e,MDN_VT_METADATA,status);goto reject;} } while(0)
 #define NUM(key,value) do { status=set_number(s->session,key,value);if(status){fail(e,MDN_VT_METADATA,status);goto reject;} } while(0)
-    SET(kVTCompressionPropertyKey_ProfileLevel,c->ten_bit?kVTProfileLevel_HEVC_Main10_AutoLevel:kVTProfileLevel_HEVC_Main_AutoLevel);
+    SET(kVTCompressionPropertyKey_ProfileLevel,c->codec==2?kVTProfileLevel_H264_High_AutoLevel:(c->ten_bit?kVTProfileLevel_HEVC_Main10_AutoLevel:kVTProfileLevel_HEVC_Main_AutoLevel));
     SET(kVTCompressionPropertyKey_AllowFrameReordering,kCFBooleanFalse);
     SET(kVTCompressionPropertyKey_AllowOpenGOP,kCFBooleanFalse);
     SET(kVTCompressionPropertyKey_RealTime,kCFBooleanFalse);

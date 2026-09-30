@@ -6,6 +6,7 @@
 /* Exclusive platform codec worker; no Timeline, color interpretation or Export policy. */
 typedef struct MdnVtEncoder MdnVtEncoder;
 typedef struct {
+    uint32_t codec; /* 1=HEVC, 2=H.264 High; Rust supplies exact typed identity. */
     uint32_t width, height, fps_num, fps_den, sar_num, sar_den;
     uint32_t ten_bit, full_range, primaries, transfer, matrix, centered_chroma;
     uint32_t gop, quantizer, pool_size;

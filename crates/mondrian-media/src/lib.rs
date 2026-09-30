@@ -174,8 +174,8 @@ pub use resident_encode::{
 pub use resident_encode::{
     D3D12ResidentEncodeInputFrame, D3D12ResidentEncodeReadyFrame, D3D12ResidentHevcEncoderSession,
     D3D12ResidentHevcEncoderSessionDiagnostics, ResidentEncodeBitDepth,
-    ResidentEncodeChromaLocation, ResidentEncodeColorimetry, ResidentEncodeError,
-    ResidentHevcEncoderConfig,
+    ResidentEncodeChromaLocation, ResidentEncodeCodec, ResidentEncodeColorimetry,
+    ResidentEncodeError, ResidentVideoEncoderConfig,
 };
 pub use waveform::{
     WaveformAnalysisError, WaveformEnvelope, WaveformEnvelopeBuilder, MAX_WAVEFORM_WIDTH,
@@ -187,6 +187,6 @@ pub use preview::FfmpegCudaFrameView;
 #[cfg(target_os = "macos")]
 pub use resident_encode::{
     MetalResidentEncodeDeviceRoot, MetalResidentEncodeInputFrame, MetalResidentEncodeReadyFrame,
-    MetalResidentEncodeSurfaceView, VideoToolboxResidentHevcEncoderSession,
-    VideoToolboxResidentHevcEncoderSessionDiagnostics,
+    MetalResidentEncodeSurfaceView, VideoToolboxResidentVideoEncoderSession,
+    VideoToolboxResidentVideoEncoderSessionDiagnostics,
 };

@@ -8,7 +8,8 @@ use mondrian_core::{
 };
 use mondrian_effects::{identity_compiled_effect_graph, lower_effect_graph_to_gpu_plan};
 use mondrian_media::{
-    probe_media_info, ResidentEncodeBitDepth, ResidentEncodeColorimetry, ResidentHevcEncoderConfig,
+    probe_media_info, ResidentEncodeBitDepth, ResidentEncodeCodec, ResidentEncodeColorimetry,
+    ResidentVideoEncoderConfig,
 };
 use mondrian_renderer::{
     color::{
@@ -24,7 +25,7 @@ use mondrian_renderer::{
 #[cfg(target_os = "linux")]
 use mondrian_media::CudaResidentHevcEncoderSession as NativeEncoder;
 #[cfg(target_os = "macos")]
-use mondrian_media::VideoToolboxResidentHevcEncoderSession as NativeEncoder;
+use mondrian_media::VideoToolboxResidentVideoEncoderSession as NativeEncoder;
 #[cfg(target_os = "macos")]
 use mondrian_renderer::MetalResidentEncodeAdapter as NativeAdapter;
 #[cfg(target_os = "linux")]
@@ -56,16 +57,45 @@ async fn production_color_output_stays_gpu_resident_through_hevc() {
         ),
     ] {
         for spatial_pattern in [false, true] {
-            compare_production_output(signal, bit_depth, colorimetry, spatial_pattern).await;
+            compare_production_output(
+                ResidentEncodeCodec::Hevc,
+                signal,
+                bit_depth,
+                colorimetry,
+                spatial_pattern,
+                18,
+            )
+            .await;
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "physical H.264 resident encode color qualification; real Metal and VideoToolbox"]
+async fn production_color_output_stays_gpu_resident_through_h264() {
+    for quantizer in [18, 23] {
+        for spatial_pattern in [false, true] {
+            compare_production_output(
+                ResidentEncodeCodec::H264High,
+                ColorSpace::Rec709,
+                ResidentEncodeBitDepth::Eight,
+                ResidentEncodeColorimetry::Rec709,
+                spatial_pattern,
+                quantizer,
+            )
+            .await;
         }
     }
 }
 
 async fn compare_production_output(
+    codec: ResidentEncodeCodec,
     signal: ColorSpace,
     bit_depth: ResidentEncodeBitDepth,
     colorimetry: ResidentEncodeColorimetry,
     spatial_pattern: bool,
+    quantizer: u8,
 ) {
     // The spatial case deliberately has a partial packed word and padded rows.
     let width: u32 = if spatial_pattern { 322 } else { 320 };
@@ -97,11 +127,12 @@ async fn compare_production_output(
         .expect("same-device native adapter");
     let directory = tempfile::tempdir().expect("temporary artifact directory");
     let artifact = directory.path().join(if cfg!(target_os = "macos") {
-        "resident-hevc.ts"
+        "resident-video.ts"
     } else {
-        "resident-hevc.mkv"
+        "resident-video.mkv"
     });
-    let config = ResidentHevcEncoderConfig {
+    let config = ResidentVideoEncoderConfig {
+        codec,
         output_path: artifact.clone(),
         width,
         height: HEIGHT,
@@ -115,7 +146,7 @@ async fn compare_production_output(
         chroma_location: mondrian_media::ResidentEncodeChromaLocation::Left,
         keyframe_interval_frames: 30,
         max_b_frames: 0,
-        quantizer: 18,
+        quantizer,
         surface_pool_size: 3,
     };
     let mut encoder = NativeEncoder::open(&adapter.encoder_device_root(), config.clone())
@@ -244,7 +275,7 @@ async fn compare_production_output(
     assert_eq!(media.rawvideo_pipe_bytes, 0);
     assert_eq!(media.cpu_pixel_uploads, 0);
     println!(
-        "resident_color_case={signal:?}/{bit_depth:?}; hardware observed and owner shutdown proven"
+        "resident_color_case={codec:?}/{signal:?}/{bit_depth:?}; hardware observed and owner shutdown proven"
     );
     let probe = probe_media_info(&artifact).expect("independent FFmpeg artifact probe");
     assert!(probe.has_video);
@@ -326,12 +357,13 @@ async fn compare_production_output(
         let expected = expected_sums[channel] / u64::from(width * HEIGHT);
         assert!(actual.abs_diff(expected) <= 12, "{signal:?}/{bit_depth:?}: channel {channel} average {actual} versus independent CPU {expected}");
     }
-    println!("resident_pixel_evidence={signal:?}/{bit_depth:?}; spatial_pattern={spatial_pattern}; width={width}; height={HEIGHT}; max_rgb8_delta={maximum_pixel_delta}");
+    println!("resident_pixel_evidence={codec:?}/QP{quantizer}/{signal:?}/{bit_depth:?}; spatial_pattern={spatial_pattern}; width={width}; height={HEIGHT}; max_rgb8_delta={maximum_pixel_delta}");
     #[cfg(target_os = "macos")]
     {
         let mut exhausted = NativeEncoder::open(
             &adapter.encoder_device_root(),
-            ResidentHevcEncoderConfig {
+            ResidentVideoEncoderConfig {
+                codec,
                 output_path: directory.path().join("rejected-pool.ts"),
                 ..config
             },
@@ -354,6 +386,6 @@ async fn compare_production_output(
         // they carry no right to submit to a replacement owner.
         assert_eq!(inputs[0].surface().width, width);
         drop(inputs);
-        println!("resident_pool_error_case={signal:?}/{bit_depth:?}; allocation rejected and native owner joined");
+        println!("resident_pool_error_case={codec:?}/{signal:?}/{bit_depth:?}; allocation rejected and native owner joined");
     }
 }

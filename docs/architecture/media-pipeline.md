@@ -2884,7 +2884,7 @@ only after the same-device copy completes. Main10 still depends on the physical
 NVENC generation: an unsupported profile fails during admission and cannot
 inherit a Main8 or generic encoder probe result.
 
-On macOS, `VideoToolboxResidentHevcEncoderSession` owns one public HEVC
+On macOS, `VideoToolboxResidentVideoEncoderSession` owns one public video
 compression session and a threshold-bounded CVPixelBuffer/IOSurface pool on one
 exclusive codec worker. The renderer binds its actual unified-memory Metal
 registry identity. Main/Main10, SDR Rec.709 and limited-range PQ/HLG enter the
@@ -2894,6 +2894,17 @@ Hardware is required at open, but admission diagnostics remain unobserved until
 actual encoded output reports `UsingHardwareAcceleratedVideoEncoder=true`.
 A returned encoder GPU registry identity must match; built-in media engines may
 return no GPU identity. Absence is not represented as a fabricated registry ID.
+
+The immutable `ResidentVideoEncoderConfig` carries `ResidentEncodeCodec`.
+macOS uses that same owner for HEVC Main/Main10 and H.264 High8: native
+codec/profile, parameter-set API and compressed mux identity follow the exact
+value. H.264 ten-bit is rejected before native creation; D3D12VA and CUDA/NVENC
+currently reject non-HEVC resident contracts explicitly. H.264 sync packets
+must contain an observed IDR picture, so a key flag cannot stand in for an
+independently decodable GOP. Hardware observation, GPU completion and consuming
+source/codec retirement remain shared. Constrained rate/VBV contracts are
+rejected before this route; no alternate quality or software fallback is hidden
+after execution starts.
 
 The public minimum and maximum frame-QP bounds are set to the requested native
 quantizer and read back before prepare. `Quality` and low-latency encoder

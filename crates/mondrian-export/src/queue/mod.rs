@@ -67,15 +67,15 @@ use mondrian_media::FfmpegCommand as Command;
 #[cfg(test)]
 use mondrian_media::PreviewDecodeSessionDisposition;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-use mondrian_media::ResidentHevcEncoderConfig;
+use mondrian_media::ResidentVideoEncoderConfig;
 #[cfg(target_os = "macos")]
-use mondrian_media::VideoToolboxResidentHevcEncoderSession;
+use mondrian_media::VideoToolboxResidentVideoEncoderSession;
 use mondrian_media::{
     run_supervised_command, DecodedVideoRange, DecodedVideoRangeContract, MediaFileFingerprint,
     PreviewDecodeAccessMode, PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodeRequest,
     PreviewDecodeSessionContext, PreviewSourceColorContract, ResidentEncodeBitDepth,
-    ResidentEncodeColorimetry, SupervisedChild, SupervisedProcessError, SupervisedProcessPolicy,
-    SupervisedStreamCapture, VideoColorDiagnosticIssueAggregate,
+    ResidentEncodeCodec, ResidentEncodeColorimetry, SupervisedChild, SupervisedProcessError,
+    SupervisedProcessPolicy, SupervisedStreamCapture, VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_media::{AudioSourceCache, AudioSourceCacheConfig, AudioSourceCacheShutdownEvidence};
 use mondrian_renderer::{
@@ -4467,7 +4467,7 @@ fn execute_timeline_export(
         let resident_qualification = if job.config.broadcast_qc.is_some() {
             Err(ExportResidentEncodeBlocker::BroadcastQcObservationRequired)
         } else {
-            qualify_resident_hevc_export(
+            qualify_resident_video_export(
                 timeline,
                 &delivery,
                 job.config.preset.alpha_mode,
@@ -4477,7 +4477,7 @@ fn execute_timeline_export(
         match resident_qualification {
             Ok(plan) => {
                 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-                match execute_resident_hevc_export(
+                match execute_resident_video_export(
                     timeline,
                     &delivery,
                     range,
@@ -4499,7 +4499,7 @@ fn execute_timeline_export(
                         return JobExecutionResult::ReversibleWorkCompleted;
                     }
                     ResidentExportAttemptOutcome::NotStarted(reason) => {
-                        tracing::debug!(%reason, "resident HEVC route did not start");
+                        tracing::debug!(%reason, "resident video route did not start");
                         visual_session.visual_diagnostics.resident_encode_blocker =
                             Some(ExportResidentEncodeBlocker::BackendUnavailable);
                     }
@@ -4822,7 +4822,7 @@ enum ResidentExportAttemptOutcome {
 
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 #[allow(clippy::too_many_arguments)]
-fn execute_resident_hevc_export(
+fn execute_resident_video_export(
     timeline: &TimelineExportSnapshot,
     delivery: &ResolvedExportDeliveryContract,
     range: TimelineRenderRange,
@@ -4834,7 +4834,7 @@ fn execute_resident_hevc_export(
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
     visual_session: &mut ExportVisualRenderSession,
     initial_diagnostics: ExportRenderInitialDiagnostics,
-    plan: ResidentHevcExportPlan,
+    plan: ResidentVideoExportPlan,
 ) -> ResidentExportAttemptOutcome {
     let renderer_adapter_identity = visual_session.active_adapter_identity();
     let width = delivery.resolution.width;
@@ -4843,7 +4843,7 @@ fn execute_resident_hevc_export(
         Ok(value) if value > 0 => value,
         _ => {
             return ResidentExportAttemptOutcome::NotStarted(
-                "resident HEVC frame-rate numerator is invalid".to_owned(),
+                "resident video frame-rate numerator is invalid".to_owned(),
             );
         }
     };
@@ -4851,7 +4851,7 @@ fn execute_resident_hevc_export(
         Ok(value) if value > 0 => value,
         _ => {
             return ResidentExportAttemptOutcome::NotStarted(
-                "resident HEVC frame-rate denominator is invalid".to_owned(),
+                "resident video frame-rate denominator is invalid".to_owned(),
             );
         }
     };
@@ -4870,7 +4870,7 @@ fn execute_resident_hevc_export(
         match visual_session.gpu_output.create_resident_encode_adapter(adapter_contract) {
             Ok(adapter) => adapter,
             Err(error) => {
-                tracing::debug!(%error, "resident HEVC Adapter qualification rejected");
+                tracing::debug!(%error, "resident video Adapter qualification rejected");
                 return ResidentExportAttemptOutcome::NotStarted(error.to_string());
             }
         };
@@ -4879,10 +4879,10 @@ fn execute_resident_hevc_export(
         visual_session.visual_diagnostics.resident_encode_transport_allocation_bytes =
             adapter.diagnostics().bridge_allocation_bytes;
     }
-    let temp_dir = match tempfile::Builder::new().prefix("mondrian-resident-hevc-").tempdir() {
+    let temp_dir = match tempfile::Builder::new().prefix("mondrian-resident-video-").tempdir() {
         Ok(directory) => directory,
         Err(error) => {
-            tracing::debug!(%error, "resident HEVC temporary directory unavailable");
+            tracing::debug!(%error, "resident video temporary directory unavailable");
             return ResidentExportAttemptOutcome::NotStarted(error.to_string());
         }
     };
@@ -4890,7 +4890,8 @@ fn execute_resident_hevc_export(
     // codec extradata during open. MPEG-TS admits that standard Annex-B stream
     // while preserving timestamps for the final pixel-free stream-copy mux.
     let resident_video_path = temp_dir.path().join("resident-video.ts");
-    let config = ResidentHevcEncoderConfig {
+    let config = ResidentVideoEncoderConfig {
+        codec: plan.codec,
         output_path: resident_video_path.clone(),
         width,
         height,
@@ -4914,11 +4915,11 @@ fn execute_resident_hevc_export(
     let encoder_open = CudaResidentHevcEncoderSession::open(&adapter.encoder_device_root(), config);
     #[cfg(target_os = "macos")]
     let encoder_open =
-        VideoToolboxResidentHevcEncoderSession::open(&adapter.encoder_device_root(), config);
+        VideoToolboxResidentVideoEncoderSession::open(&adapter.encoder_device_root(), config);
     let mut encoder = match encoder_open {
         Ok(encoder) => encoder,
         Err(error) => {
-            tracing::debug!(%error, "resident HEVC encoder Session rejected");
+            tracing::debug!(%error, "resident video encoder Session rejected");
             return ResidentExportAttemptOutcome::NotStarted(error.to_string());
         }
     };
@@ -4937,7 +4938,8 @@ fn execute_resident_hevc_export(
             renderer_adapter_identity.as_ref(),
         );
         #[cfg(target_os = "macos")]
-        let encoder_diagnostics = crate::hardware_encoding::resident_hevc_videotoolbox_diagnostics(
+        let encoder_diagnostics = crate::hardware_encoding::resident_videotoolbox_diagnostics(
+            plan.codec,
             renderer_adapter_identity.as_ref(),
             false,
         );
@@ -4984,7 +4986,7 @@ fn execute_resident_hevc_export(
                 }
                 Err(error) => {
                     return ResidentExportAttemptOutcome::Failed(format!(
-                        "resident HEVC render failed after {submitted} submitted frames: {error}"
+                        "resident video render failed after {submitted} submitted frames: {error}"
                     ));
                 }
             };
@@ -4992,7 +4994,7 @@ fn execute_resident_hevc_export(
                 Ok(frame) => frame,
                 Err(error) => {
                     return ResidentExportAttemptOutcome::Failed(format!(
-                    "resident HEVC surface acquisition failed after {submitted} frames: {error}"
+                    "resident video surface acquisition failed after {submitted} frames: {error}"
                 ));
                 }
             };
@@ -5000,13 +5002,13 @@ fn execute_resident_hevc_export(
                 Ok(ready) => ready,
                 Err(error) => {
                     return ResidentExportAttemptOutcome::Failed(format!(
-                        "resident HEVC native conversion failed after {submitted} frames: {error}"
+                        "resident video native conversion failed after {submitted} frames: {error}"
                     ));
                 }
             };
             if let Err(error) = encoder.submit_input_frame(ready, index) {
                 return ResidentExportAttemptOutcome::Failed(format!(
-                    "resident HEVC encoder rejected frame {index}: {error}"
+                    "resident video encoder rejected frame {index}: {error}"
                 ));
             }
             submitted = submitted.saturating_add(1);
@@ -5028,12 +5030,12 @@ fn execute_resident_hevc_export(
             }
             #[cfg(target_os = "macos")]
             {
-                visual_session.visual_diagnostics.video_encoder = Some(
-                    crate::hardware_encoding::resident_hevc_videotoolbox_diagnostics(
+                visual_session.visual_diagnostics.video_encoder =
+                    Some(crate::hardware_encoding::resident_videotoolbox_diagnostics(
+                        plan.codec,
                         renderer_adapter_identity.as_ref(),
                         encoder.diagnostics().hardware_observed,
-                    ),
-                );
+                    ));
             }
             diagnostics.visual = visual_session.visual_diagnostics();
             report_diagnostics(diagnostics.clone());
@@ -5050,7 +5052,7 @@ fn execute_resident_hevc_export(
         }
         if let Err(error) = encoder.finish() {
             return ResidentExportAttemptOutcome::Failed(format!(
-                "resident HEVC encoder finalization failed: {error}"
+                "resident video encoder finalization failed: {error}"
             ));
         }
         let media_evidence = encoder.diagnostics();
@@ -5067,7 +5069,7 @@ fn execute_resident_hevc_export(
         let ResolvedExportArtifactEncoding::MediaFile { container, audio, .. } = &delivery.artifact
         else {
             return ResidentExportAttemptOutcome::Failed(
-                "resident HEVC route lost its media-file contract".to_owned(),
+                "resident video route lost its media-file contract".to_owned(),
             );
         };
         let mut command = match mondrian_media::ffmpeg_command() {
@@ -5091,7 +5093,7 @@ fn execute_resident_hevc_export(
             TimelineAudioInput::PcmFile { path, sample_rate, channel_layout, .. } => {
                 let Some(layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
                     return ResidentExportAttemptOutcome::Failed(
-                        "resident HEVC audio layout has no FFmpeg lowering".to_owned(),
+                        "resident video audio layout has no FFmpeg lowering".to_owned(),
                     );
                 };
                 command
@@ -5113,7 +5115,7 @@ fn execute_resident_hevc_export(
             TimelineAudioInput::Silent { sample_rate, channel_layout, analysis } => {
                 let Some(layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
                     return ResidentExportAttemptOutcome::Failed(
-                        "resident HEVC audio layout has no FFmpeg lowering".to_owned(),
+                        "resident video audio layout has no FFmpeg lowering".to_owned(),
                     );
                 };
                 command
@@ -5168,14 +5170,14 @@ fn execute_resident_hevc_export(
                     .unwrap_or("unknown FFmpeg remux failure")
                     .to_owned();
                 ResidentExportAttemptOutcome::Failed(format!(
-                    "resident HEVC final stream-copy mux failed: {reason}"
+                    "resident video final stream-copy mux failed: {reason}"
                 ))
             }
             Err(error) if error.is_canceled() && !error.has_cleanup_failure() => {
                 ResidentExportAttemptOutcome::Cancelled
             }
             Err(error) => ResidentExportAttemptOutcome::Failed(format!(
-                "resident HEVC final stream-copy mux failed: {error}"
+                "resident video final stream-copy mux failed: {error}"
             )),
         }
     })();
@@ -6564,7 +6566,8 @@ struct ExportDeliveryPixelContract {
 type ExportFrameSink<'a> = dyn FnMut(u64, &mut Vec<u8>) -> Result<(), JobExecutionResult> + 'a;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ResidentHevcExportPlan {
+struct ResidentVideoExportPlan {
+    codec: ResidentEncodeCodec,
     bit_depth: ResidentEncodeBitDepth,
     colorimetry: ResidentEncodeColorimetry,
     full_range: bool,
@@ -6574,12 +6577,12 @@ struct ResidentHevcExportPlan {
     surface_pool_size: u32,
 }
 
-fn qualify_resident_hevc_export(
+fn qualify_resident_video_export(
     timeline: &TimelineExportSnapshot,
     delivery: &ResolvedExportDeliveryContract,
     alpha_mode: ExportAlphaMode,
     policy: service::ExportExecutionResourcePolicy,
-) -> Result<ResidentHevcExportPlan, ExportResidentEncodeBlocker> {
+) -> Result<ResidentVideoExportPlan, ExportResidentEncodeBlocker> {
     if !policy.opportunistic_gpu_acceleration {
         return Err(ExportResidentEncodeBlocker::ResourceGrant);
     }
@@ -6589,8 +6592,34 @@ fn qualify_resident_hevc_export(
     let ResolvedExportArtifactEncoding::MediaFile { video, .. } = &delivery.artifact else {
         return Err(ExportResidentEncodeBlocker::UnsupportedCodec);
     };
-    let (profile, rate_control) = match video {
-        VideoCodecConfig::Hevc { profile, rate_control } => (*profile, *rate_control),
+    let (codec, bit_depth, rate_control) = match (video, delivery.bit_depth) {
+        (
+            VideoCodecConfig::Hevc { profile: HevcProfile::Main, rate_control },
+            DeliveryBitDepth::Eight,
+        ) => (
+            ResidentEncodeCodec::Hevc,
+            ResidentEncodeBitDepth::Eight,
+            *rate_control,
+        ),
+        (
+            VideoCodecConfig::Hevc { profile: HevcProfile::Main10, rate_control },
+            DeliveryBitDepth::Ten,
+        ) => (
+            ResidentEncodeCodec::Hevc,
+            ResidentEncodeBitDepth::Ten,
+            *rate_control,
+        ),
+        (
+            VideoCodecConfig::H264 {
+                profile: crate::preset::H264Profile::High,
+                rate_control,
+            },
+            DeliveryBitDepth::Eight,
+        ) => (
+            ResidentEncodeCodec::H264High,
+            ResidentEncodeBitDepth::Eight,
+            *rate_control,
+        ),
         _ => return Err(ExportResidentEncodeBlocker::UnsupportedCodec),
     };
     if delivery.chroma_sampling != ExportChromaSampling::Yuv420 {
@@ -6614,11 +6643,6 @@ fn qualify_resident_hevc_export(
     if rate_control.max_bitrate_kbps.is_some() || rate_control.buffer_size_kbits.is_some() {
         return Err(ExportResidentEncodeBlocker::RateControl);
     }
-    let bit_depth = match (profile, delivery.bit_depth) {
-        (HevcProfile::Main, DeliveryBitDepth::Eight) => ResidentEncodeBitDepth::Eight,
-        (HevcProfile::Main10, DeliveryBitDepth::Ten) => ResidentEncodeBitDepth::Ten,
-        _ => return Err(ExportResidentEncodeBlocker::UnsupportedCodec),
-    };
     let colorimetry = match delivery.color_target.color_space {
         ColorSpace::Rec709 => ResidentEncodeColorimetry::Rec709,
         ColorSpace::Rec2100Pq => ResidentEncodeColorimetry::Rec2100Pq,
@@ -6675,7 +6699,8 @@ fn qualify_resident_hevc_export(
     if pool_bytes_x2 > u128::from(policy.resident_encoder_surface_bytes).saturating_mul(2) {
         return Err(ExportResidentEncodeBlocker::ResourceGrant);
     }
-    Ok(ResidentHevcExportPlan {
+    Ok(ResidentVideoExportPlan {
+        codec,
         bit_depth,
         colorimetry,
         full_range,
@@ -12767,7 +12792,7 @@ mod tests {
     }
 
     #[test]
-    fn resident_hevc_admission_is_exact_and_resource_bounded() {
+    fn resident_video_admission_is_exact_and_resource_bounded() {
         let timeline = timeline_input_with_output_color(ColorSpace::Rec709);
         let mut delivery = test_delivery_contract(
             DeliveryBitDepth::Ten,
@@ -12783,13 +12808,14 @@ mod tests {
             },
             audio: AudioCodecConfig::Disabled,
         };
-        let plan = qualify_resident_hevc_export(
+        let plan = qualify_resident_video_export(
             &timeline,
             &delivery,
             ExportAlphaMode::FlattenBlack,
             ExportExecutionResourcePolicy::default(),
         )
         .expect("qualified Main10 resident route");
+        assert_eq!(plan.codec, ResidentEncodeCodec::Hevc);
         assert_eq!(plan.bit_depth, ResidentEncodeBitDepth::Ten);
         assert_eq!(plan.colorimetry, ResidentEncodeColorimetry::Rec709);
         assert!(!plan.full_range);
@@ -12800,7 +12826,7 @@ mod tests {
             ..ExportExecutionResourcePolicy::default()
         };
         assert_eq!(
-            qualify_resident_hevc_export(
+            qualify_resident_video_export(
                 &timeline,
                 &delivery,
                 ExportAlphaMode::FlattenBlack,
@@ -12811,11 +12837,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resident_h264_admission_rejects_precision_and_constrained_rate_substitution() {
+        let timeline = timeline_input_with_output_color(ColorSpace::Rec709);
+        let mut delivery = test_delivery_contract(
+            DeliveryBitDepth::Eight,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv420,
+            "yuv420p",
+        );
+        delivery.artifact = ResolvedExportArtifactEncoding::MediaFile {
+            container: Container::Mp4,
+            video: VideoCodecConfig::H264 {
+                profile: crate::preset::H264Profile::High,
+                rate_control: VideoRateControl::constant_quality(23),
+            },
+            audio: AudioCodecConfig::Disabled,
+        };
+        let admit = |delivery: &ResolvedExportDeliveryContract| {
+            qualify_resident_video_export(
+                &timeline,
+                delivery,
+                ExportAlphaMode::FlattenBlack,
+                ExportExecutionResourcePolicy::default(),
+            )
+        };
+        assert_eq!(
+            admit(&delivery).expect("exact High8 contract").codec,
+            ResidentEncodeCodec::H264High
+        );
+        delivery.bit_depth = DeliveryBitDepth::Ten;
+        assert_eq!(
+            admit(&delivery),
+            Err(ExportResidentEncodeBlocker::UnsupportedCodec)
+        );
+        delivery.bit_depth = DeliveryBitDepth::Eight;
+        delivery.artifact = ResolvedExportArtifactEncoding::MediaFile {
+            container: Container::Mp4,
+            video: VideoCodecConfig::H264 {
+                profile: crate::preset::H264Profile::High,
+                rate_control: VideoRateControl::constrained_quality(23, 8_000, 16_000),
+            },
+            audio: AudioCodecConfig::Disabled,
+        };
+        assert_eq!(
+            admit(&delivery),
+            Err(ExportResidentEncodeBlocker::RateControl)
+        );
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     #[ignore = "manual Windows qualification; requires DX12, D3D12 Video Process, and D3D12VA HEVC encode"]
     fn production_export_queue_runs_same_device_d3d12_resident_hevc() {
-        run_production_export_queue_resident_hevc_qualification(
+        run_production_export_queue_resident_video_qualification(
+            ResidentEncodeCodec::Hevc,
             ResidentExportQualification::Complete,
         );
     }
@@ -12824,7 +12900,8 @@ mod tests {
     #[test]
     #[ignore = "manual NVIDIA qualification; requires Vulkan external memory, CUDA, and NVENC"]
     fn production_export_queue_runs_same_device_cuda_resident_hevc() {
-        run_production_export_queue_resident_hevc_qualification(
+        run_production_export_queue_resident_video_qualification(
+            ResidentEncodeCodec::Hevc,
             ResidentExportQualification::Complete,
         );
     }
@@ -12833,8 +12910,49 @@ mod tests {
     #[test]
     #[ignore = "physical macOS qualification; requires unified Metal and observed VideoToolbox hardware encode"]
     fn production_export_queue_runs_same_device_metal_resident_hevc() {
-        run_production_export_queue_resident_hevc_qualification(
+        run_production_export_queue_resident_video_qualification(
+            ResidentEncodeCodec::Hevc,
             ResidentExportQualification::Complete,
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "physical macOS H.264 qualification; requires unified Metal and observed VideoToolbox encode"]
+    fn production_export_queue_runs_same_device_metal_resident_h264() {
+        run_production_export_queue_resident_video_qualification(
+            ResidentEncodeCodec::H264High,
+            ResidentExportQualification::Complete,
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "physical macOS H.264 qualification; consuming cancel before a fresh encoder attempt"]
+    fn production_resident_h264_cancel_consumes_sources_before_retry() {
+        run_production_export_queue_resident_video_qualification(
+            ResidentEncodeCodec::H264High,
+            ResidentExportQualification::CancelRetry,
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "physical H.264 failure/retry qualification after actual native source import"]
+    fn production_resident_h264_first_frame_failure_consumes_sources_before_retry() {
+        run_production_export_queue_resident_video_qualification(
+            ResidentEncodeCodec::H264High,
+            ResidentExportQualification::RejectFirstFrame,
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "physical H.264 qualification; active grant must reject before native import"]
+    fn production_resident_h264_native_grant_rejection_precedes_import_and_retry() {
+        run_production_export_queue_resident_video_qualification(
+            ResidentEncodeCodec::H264High,
+            ResidentExportQualification::RejectActiveGrant,
         );
     }
 
@@ -12842,7 +12960,8 @@ mod tests {
     #[test]
     #[ignore = "physical macOS qualification; cancels actual resident frames before a fresh encoder attempt"]
     fn production_resident_export_cancel_consumes_codec_before_retry() {
-        run_production_export_queue_resident_hevc_qualification(
+        run_production_export_queue_resident_video_qualification(
+            ResidentEncodeCodec::Hevc,
             ResidentExportQualification::CancelRetry,
         );
     }
@@ -12851,7 +12970,8 @@ mod tests {
     #[test]
     #[ignore = "physical macOS qualification; rejects the first GPU boundary after native decode, then retries"]
     fn production_resident_first_frame_failure_consumes_sources_before_retry() {
-        run_production_export_queue_resident_hevc_qualification(
+        run_production_export_queue_resident_video_qualification(
+            ResidentEncodeCodec::Hevc,
             ResidentExportQualification::RejectFirstFrame,
         );
     }
@@ -12860,7 +12980,8 @@ mod tests {
     #[test]
     #[ignore = "physical macOS qualification; rejects native visual allocation before GPU import, then retries"]
     fn production_resident_native_grant_rejection_precedes_import_and_retry() {
-        run_production_export_queue_resident_hevc_qualification(
+        run_production_export_queue_resident_video_qualification(
+            ResidentEncodeCodec::Hevc,
             ResidentExportQualification::RejectActiveGrant,
         );
     }
@@ -12875,7 +12996,10 @@ mod tests {
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-    fn run_production_export_queue_resident_hevc_qualification(mode: ResidentExportQualification) {
+    fn run_production_export_queue_resident_video_qualification(
+        codec: ResidentEncodeCodec,
+        mode: ResidentExportQualification,
+    ) {
         let _gpu_visual = GpuVisualExecutionGuard::activate();
         let frame_count = std::env::var("MONDRIAN_RESIDENT_ENCODE_TEST_FRAMES")
             .ok()
@@ -12890,6 +13014,10 @@ mod tests {
                 Ok("rec709-eight") | Err(_) => (DeliveryBitDepth::Eight, ColorSpace::Rec709),
                 Ok(other) => panic!("unknown resident test signal {other}"),
             };
+        let quantizer = std::env::var("MONDRIAN_RESIDENT_ENCODE_TEST_QUANTIZER")
+            .map(|value| value.parse::<u8>().expect("integer quantizer"))
+            .unwrap_or(18);
+        assert!((1..=51).contains(&quantizer));
         let resolution = match std::env::var("MONDRIAN_RESIDENT_ENCODE_TEST_RESOLUTION").as_deref()
         {
             Ok("1080p") => Resolution { width: 1920, height: 1080 },
@@ -12897,8 +13025,18 @@ mod tests {
             Err(_) => Resolution { width: 320, height: 180 },
             Ok(other) => panic!("unknown resident test resolution {other}"),
         };
+        let video_range = match std::env::var("MONDRIAN_RESIDENT_ENCODE_TEST_RANGE").as_deref() {
+            Ok("full") => VideoRange::Full,
+            Ok("legal") | Err(_) => VideoRange::Legal,
+            Ok(other) => panic!("unknown resident range {other}"),
+        };
+        let container = match std::env::var("MONDRIAN_RESIDENT_ENCODE_TEST_CONTAINER").as_deref() {
+            Ok("mp4") => Container::Mp4,
+            Ok("mkv") | Err(_) => Container::Mkv,
+            Ok(other) => panic!("unknown resident container {other}"),
+        };
         let clip_frames = i64::try_from(frame_count).expect("bounded test frame count");
-        let mut sequence = Sequence::new("same-device resident HEVC Export");
+        let mut sequence = Sequence::new("same-device resident video Export");
         sequence.settings.resolution = resolution;
         sequence.settings.frame_rate = Rational::new(30_000, 1_001);
         sequence.settings.delivery.bit_depth = bit_depth;
@@ -12967,7 +13105,7 @@ mod tests {
         let mut visual_session = captured_visual_session_for_test(&mut timeline);
         let mut delivery = test_delivery_contract(
             bit_depth,
-            VideoRange::Legal,
+            video_range,
             ExportChromaSampling::Yuv420,
             if bit_depth == DeliveryBitDepth::Ten {
                 "yuv420p10le"
@@ -12976,14 +13114,22 @@ mod tests {
             },
         );
         delivery.artifact = ResolvedExportArtifactEncoding::MediaFile {
-            container: Container::Mkv,
-            video: VideoCodecConfig::Hevc {
-                profile: if bit_depth == DeliveryBitDepth::Ten {
-                    HevcProfile::Main10
-                } else {
-                    HevcProfile::Main
-                },
-                rate_control: VideoRateControl::constant_quality(18),
+            container,
+            video: if codec == ResidentEncodeCodec::H264High {
+                assert_eq!(bit_depth, DeliveryBitDepth::Eight);
+                VideoCodecConfig::H264 {
+                    profile: crate::preset::H264Profile::High,
+                    rate_control: VideoRateControl::constant_quality(quantizer),
+                }
+            } else {
+                VideoCodecConfig::Hevc {
+                    profile: if bit_depth == DeliveryBitDepth::Ten {
+                        HevcProfile::Main10
+                    } else {
+                        HevcProfile::Main
+                    },
+                    rate_control: VideoRateControl::constant_quality(quantizer),
+                }
             },
             audio: AudioCodecConfig::Disabled,
         };
@@ -12998,7 +13144,7 @@ mod tests {
             scene_cut: crate::video_encoding::VideoSceneCutPolicy::Disabled,
         };
         let policy = service::ExportExecutionResourcePolicy::default();
-        let plan = qualify_resident_hevc_export(
+        let plan = qualify_resident_video_export(
             &timeline,
             &delivery,
             ExportAlphaMode::FlattenBlack,
@@ -13009,7 +13155,11 @@ mod tests {
             .expect("bounded render range");
         assert_eq!(range.total_frames, frame_count);
         let directory = tempfile::tempdir().expect("temporary Export directory");
-        let output = directory.path().join("resident-queue.mkv");
+        let output = directory.path().join(if container == Container::Mp4 {
+            "resident-queue.mp4"
+        } else {
+            "resident-queue.mkv"
+        });
         if matches!(
             mode,
             ResidentExportQualification::RejectFirstFrame
@@ -13025,7 +13175,7 @@ mod tests {
                     visual_session.gpu_output.visual_active_grant =
                         GpuVisualFrameExecutionResourceGrant::new(1, 1);
                 }
-                execute_resident_hevc_export(
+                execute_resident_video_export(
                     &timeline,
                     &delivery,
                     range,
@@ -13075,7 +13225,7 @@ mod tests {
             let partial = directory.path().join("canceled-attempt.mkv");
             let cancellation = ExecutionCancellationToken::new();
             let mut canceled_diagnostics = ExportJobDiagnostics::default();
-            let canceled = execute_resident_hevc_export(
+            let canceled = execute_resident_video_export(
                 &timeline,
                 &delivery,
                 range,
@@ -13122,7 +13272,7 @@ mod tests {
         }
         let cancellation = ExecutionCancellationToken::new();
         let mut latest = ExportJobDiagnostics::default();
-        let outcome = execute_resident_hevc_export(
+        let outcome = execute_resident_video_export(
             &timeline,
             &delivery,
             range,
@@ -13180,6 +13330,24 @@ mod tests {
         );
         assert_eq!(video.frame_rate, delivery.frame_rate);
         assert_eq!(
+            video.codec,
+            if codec == ResidentEncodeCodec::H264High {
+                mondrian_core::VideoCodec::H264
+            } else {
+                mondrian_core::VideoCodec::H265
+            }
+        );
+        assert_eq!(
+            video.codec_profile,
+            if codec == ResidentEncodeCodec::H264High {
+                mondrian_media::VideoCodecProfile::H264High
+            } else if bit_depth == DeliveryBitDepth::Ten {
+                mondrian_media::VideoCodecProfile::HevcMain10
+            } else {
+                mondrian_media::VideoCodecProfile::HevcMain
+            }
+        );
+        assert_eq!(
             video.bit_depth,
             if bit_depth == DeliveryBitDepth::Ten {
                 10
@@ -13187,7 +13355,14 @@ mod tests {
                 8
             }
         );
-        assert_eq!(video.color_range, mondrian_core::DecodedVideoRange::Limited);
+        assert_eq!(
+            video.color_range,
+            if video_range == VideoRange::Full {
+                mondrian_core::DecodedVideoRange::Full
+            } else {
+                mondrian_core::DecodedVideoRange::Limited
+            }
+        );
         assert_eq!(
             video.color_interpretation.candidate_color_space,
             Some(signal)
@@ -13289,12 +13464,12 @@ mod tests {
         };
         let policy = ExportExecutionResourcePolicy::default();
         assert_eq!(
-            qualify_resident_hevc_export(&timeline, &delivery, ExportAlphaMode::Preserve, policy,),
+            qualify_resident_video_export(&timeline, &delivery, ExportAlphaMode::Preserve, policy,),
             Err(ExportResidentEncodeBlocker::AlphaPreservation)
         );
         delivery.legalizer = SignalLegalizer::ClampRgb;
         assert_eq!(
-            qualify_resident_hevc_export(
+            qualify_resident_video_export(
                 &timeline,
                 &delivery,
                 ExportAlphaMode::FlattenBlack,
@@ -13311,7 +13486,7 @@ mod tests {
             rate_control: VideoRateControl::constrained_quality(20, 20_000, 40_000),
         };
         assert_eq!(
-            qualify_resident_hevc_export(
+            qualify_resident_video_export(
                 &timeline,
                 &delivery,
                 ExportAlphaMode::FlattenBlack,
@@ -13340,7 +13515,7 @@ mod tests {
             audio: AudioCodecConfig::Disabled,
         };
         assert_eq!(
-            qualify_resident_hevc_export(
+            qualify_resident_video_export(
                 &timeline,
                 &delivery,
                 ExportAlphaMode::FlattenBlack,
@@ -13354,7 +13529,7 @@ mod tests {
             ..ExportExecutionResourcePolicy::default()
         };
         assert_eq!(
-            qualify_resident_hevc_export(
+            qualify_resident_video_export(
                 &timeline,
                 &delivery,
                 ExportAlphaMode::FlattenBlack,

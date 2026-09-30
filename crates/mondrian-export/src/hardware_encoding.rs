@@ -77,6 +77,8 @@ pub enum ExportVideoEncoderImplementation {
     HevcD3d12Va,
     /// Owned public VideoToolbox HEVC session on native Metal IOSurfaces.
     HevcVideoToolbox,
+    /// Owned public VideoToolbox H.264 High session on native Metal IOSurfaces.
+    H264VideoToolbox,
 }
 
 /// Stable renderer backend bound to hardware-encoder candidate admission.
@@ -413,16 +415,25 @@ pub(crate) fn resident_hevc_cuda_diagnostics(
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn resident_hevc_videotoolbox_diagnostics(
+pub(crate) fn resident_videotoolbox_diagnostics(
+    codec: mondrian_media::ResidentEncodeCodec,
     adapter: Option<&ActiveGraphicsAdapterIdentity>,
     hardware_observed: bool,
 ) -> ExportVideoEncoderDiagnostics {
+    let selected_encoder = match codec {
+        mondrian_media::ResidentEncodeCodec::Hevc => {
+            ExportVideoEncoderImplementation::HevcVideoToolbox
+        }
+        mondrian_media::ResidentEncodeCodec::H264High => {
+            ExportVideoEncoderImplementation::H264VideoToolbox
+        }
+    };
     ExportVideoEncoderDiagnostics {
-        selected_encoder: ExportVideoEncoderImplementation::HevcVideoToolbox,
+        selected_encoder,
         hardware_selected: hardware_observed,
         frame_transport: ExportVideoEncoderFrameTransport::SameDeviceGpuSurface,
         hardware_admission: ExportHardwareEncoderAdmission::SameDeviceSessionOpened,
-        hardware_candidate: Some(ExportVideoEncoderImplementation::HevcVideoToolbox),
+        hardware_candidate: Some(selected_encoder),
         renderer_adapter_vendor: adapter.map(|adapter| adapter.vendor),
         renderer_adapter_device: adapter.map(|adapter| adapter.device),
         renderer_adapter_backend: adapter.map(renderer_backend),
