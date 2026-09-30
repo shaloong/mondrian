@@ -101,6 +101,55 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
         }
     }
 
+    let component_input = OpenFxFloatFrame {
+        width: 4,
+        height: 4,
+        pixels: (0..16)
+            .map(|index| {
+                let index = index as f32;
+                [
+                    index / 16.0 - 0.2,
+                    0.1 + index / 32.0,
+                    1.25 - index / 64.0,
+                    0.6 + index / 16.0,
+                ]
+            })
+            .collect(),
+    };
+    let component_parameters = BTreeMap::from([
+        ("scale".to_owned(), OpenFxScalarValue::Double(0.5)),
+        (
+            "scaleComponents".to_owned(),
+            OpenFxScalarValue::Boolean(true),
+        ),
+        ("scaleR".to_owned(), OpenFxScalarValue::Double(2.0)),
+        ("scaleG".to_owned(), OpenFxScalarValue::Double(0.5)),
+        ("scaleB".to_owned(), OpenFxScalarValue::Double(1.0)),
+        ("scaleA".to_owned(), OpenFxScalarValue::Double(3.0)),
+    ]);
+    let component_timing = OpenFxRenderTiming {
+        frame: 42.0,
+        pixel_aspect_ratio: 1.2,
+        ..timing.clone()
+    };
+    let component_output = render_openfx_filter_frame(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+        &component_timing,
+        &component_parameters,
+        &component_input,
+    )
+    .expect("render per-component authored gains without clipping HDR or alpha");
+    for (actual, source) in component_output.pixels.iter().zip(&component_input.pixels) {
+        for (actual, expected) in actual
+            .iter()
+            .zip(source.iter().zip([1.0, 0.25, 0.5, 1.5]).map(|(value, gain)| value * gain))
+        {
+            assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+        }
+    }
+
     let mut invalid = input.clone();
     invalid.pixels[7][2] = f32::NAN;
     let rejected = render_openfx_filter_frame(

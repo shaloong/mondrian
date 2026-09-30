@@ -87,7 +87,9 @@ pixel coordinates with negative row bytes over Mondrian's top-row-first frame.
 Conan or vendoring the plugin. It checks the upstream commit at configure time
 and emits a platform bundle outside the product tree for the ignored real-host
 pixel test. Windows MinGW-built Basic passed the selected-binary host and
-compiled-graph comparison; macOS and Linux still require their own built
+compiled-graph comparison. The reference test also exercises per-component
+controls at a later frame with non-square pixels and unclamped Float32 HDR
+and alpha values; macOS and Linux still require their own built
 fixture and native qualification run.
 `mondrian-app::openfx_effect` can now register one explicitly selected and
 described Filter as a Float32 CPU definition in the shared compiled visual

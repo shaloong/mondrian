@@ -26,6 +26,8 @@ cargo test -p mondrian-app --test openfx_host \
 ```
 
 The test verifies pinned discovery, parameter description, native Float32
-rendering, and equality between direct host and compiled effect-graph output.
+rendering, authored per-component gains on a later frame with a non-square
+pixel aspect ratio, preservation of negative/HDR/alpha values, and equality
+between direct host and compiled effect-graph output.
 The result qualifies this example and this host subset only; other vendors,
 contexts, pixel formats, and controls require separate evidence.
