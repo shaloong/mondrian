@@ -205,6 +205,7 @@ cc = "1"
 winres = "0.1"
 
 [dev-dependencies]
+toml = { workspace = true }
 mondrian-editor-state = { workspace = true, features = ["test-support"] }
 mondrian-export = { workspace = true, features = ["validation"] }
 mondrian-renderer = { workspace = true, features = ["validation"] }

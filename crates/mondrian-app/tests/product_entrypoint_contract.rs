@@ -2,65 +2,55 @@
 
 use std::path::Path;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Deserialize)]
+struct AppManifest {
+    package: AppPackage,
+    #[serde(rename = "bin")]
+    bins: Vec<BinEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct AppPackage {
+    #[serde(rename = "default-run")]
+    default_run: String,
+}
+
+#[derive(serde::Deserialize)]
 struct BinEntry {
     name: String,
     path: String,
+    #[serde(default, rename = "required-features")]
+    required_features: Vec<String>,
+    #[serde(default = "enabled_by_default")]
+    test: bool,
+    #[serde(default = "enabled_by_default")]
+    bench: bool,
 }
 
-fn manifest_line_value(line: &str, key: &str) -> Option<String> {
-    let (actual_key, value) = line.split_once('=')?;
-    (actual_key.trim() == key)
-        .then(|| value.trim().trim_matches('"').to_owned())
-        .filter(|value| !value.is_empty())
+fn enabled_by_default() -> bool {
+    true
 }
 
-fn manifest_bins(manifest: &str) -> Vec<BinEntry> {
-    let mut bins = Vec::new();
-    let mut in_bin = false;
-    let mut name = None;
-    let mut path = None;
-
-    for line in manifest.lines() {
-        let trimmed = line.trim();
-        if trimmed == "[[bin]]" {
-            if let (Some(name), Some(path)) = (name.take(), path.take()) {
-                bins.push(BinEntry { name, path });
-            }
-            in_bin = true;
-            continue;
-        }
-        if trimmed.starts_with('[') && trimmed != "[[bin]]" {
-            if let (Some(name), Some(path)) = (name.take(), path.take()) {
-                bins.push(BinEntry { name, path });
-            }
-            in_bin = false;
-            continue;
-        }
-        if !in_bin {
-            continue;
-        }
-        name = manifest_line_value(trimmed, "name").or(name);
-        path = manifest_line_value(trimmed, "path").or(path);
-    }
-
-    if let (Some(name), Some(path)) = (name, path) {
-        bins.push(BinEntry { name, path });
-    }
-
-    bins
+fn assert_validation_only(bin: &BinEntry) {
+    assert_eq!(
+        bin.required_features,
+        ["validation"],
+        "{} must remain feature-gated",
+        bin.name
+    );
+    assert!(
+        !bin.test && !bin.bench,
+        "{} must remain outside product test/benchmark routes",
+        bin.name
+    );
 }
 
 #[test]
 fn product_default_run_targets_app_ui_main_binary() {
     let manifest = include_str!("../Cargo.toml");
-    let default_run = manifest
-        .lines()
-        .filter_map(|line| manifest_line_value(line.trim(), "default-run"))
-        .next();
-    assert_eq!(default_run.as_deref(), Some("mondrian"));
-
-    let bins = manifest_bins(manifest);
+    let manifest: AppManifest = toml::from_str(manifest).expect("valid application Cargo manifest");
+    assert_eq!(manifest.package.default_run, "mondrian");
+    let bins = manifest.bins;
     let product_bin = bins.iter().find(|bin| bin.name == "mondrian").expect("mondrian product bin");
     assert_eq!(product_bin.path, "src/main.rs");
     let golden_bin = bins
@@ -68,17 +58,7 @@ fn product_default_run_targets_app_ui_main_binary() {
         .find(|bin| bin.name == "mondrian-golden")
         .expect("Golden validation bin");
     assert_eq!(golden_bin.path, "src/bin/mondrian_golden.rs");
-    assert!(
-        manifest.contains(
-            r#"[[bin]]
-name = "mondrian-golden"
-path = "src/bin/mondrian_golden.rs"
-required-features = ["validation"]
-test = false
-bench = false"#,
-        ),
-        "Golden validation must remain feature-gated and outside product/test routes"
-    );
+    assert_validation_only(golden_bin);
     let surface_reopen_bin = bins
         .iter()
         .find(|bin| bin.name == "mondrian-surface-reopen")
@@ -87,33 +67,13 @@ bench = false"#,
         surface_reopen_bin.path,
         "src/bin/mondrian_surface_reopen.rs"
     );
-    assert!(
-        manifest.contains(
-            r#"[[bin]]
-name = "mondrian-surface-reopen"
-path = "src/bin/mondrian_surface_reopen.rs"
-required-features = ["validation"]
-test = false
-bench = false"#,
-        ),
-        "Surface reopen validation must remain feature-gated and outside product/test routes"
-    );
+    assert_validation_only(surface_reopen_bin);
     let endurance_bin = bins
         .iter()
         .find(|bin| bin.name == "mondrian-endurance")
         .expect("commercial endurance validation bin");
     assert_eq!(endurance_bin.path, "src/bin/mondrian_endurance.rs");
-    assert!(
-        manifest.contains(
-            r#"[[bin]]
-name = "mondrian-endurance"
-path = "src/bin/mondrian_endurance.rs"
-required-features = ["validation"]
-test = false
-bench = false"#,
-        ),
-        "commercial endurance validation must remain feature-gated and outside product/test routes"
-    );
+    assert_validation_only(endurance_bin);
 
     let allowed_bins = [
         "mondrian",

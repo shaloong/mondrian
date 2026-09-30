@@ -6954,7 +6954,7 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
 fn export_job_row(job: &ExportJobModel, localizer: &Localizer) -> PropertyRow {
     let mut summary_children = vec![
         FlexChild::fixed(Box::new(
-            Label::new(job.title.clone()).with_padding(0.0, 0.0),
+            Label::new(job.title.clone()).wrapped().with_padding(0.0, 0.0),
         )),
         FlexChild::fixed(Box::new(
             Label::new(format!("{} / {}%", job.status, job.progress_percent))
@@ -6984,17 +6984,14 @@ fn export_job_row(job: &ExportJobModel, localizer: &Localizer) -> PropertyRow {
                 FlexChild::flex(Box::new(summary), 1.0),
                 FlexChild::fixed(Box::new(cancel)),
             ])
-            .with_gap(8.0),
+            .with_gap(8.0)
+            .with_align_items(mondrian_ui_layout::AlignItems::Start),
         )
     } else {
         Box::new(summary)
     };
 
-    let base_height = if job.can_cancel { 48.0 } else { 42.0 };
-    let detail_rows =
-        usize::from(job.color_diagnostics.is_some()) + usize::from(job.broadcast_qc.is_some());
-    let height = base_height + detail_rows as f32 * 18.0;
-    PropertyRow::new(localizer.text("export-job"), content).with_height(height)
+    PropertyRow::new(localizer.text("export-job"), content).with_content_height()
 }
 
 fn export_job_broadcast_qc_label(

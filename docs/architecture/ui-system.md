@@ -2590,3 +2590,19 @@ Channel Strip, Route, parameter, and processor identities remain typed and
 locale-independent; rebuilding the widgets after a language change does not
 rewrite audio authoring state. Both bundled catalogs must contain identical
 message IDs so an untranslated new control cannot silently fall back.
+
+Property rows can opt into content height, measuring their control at the actual
+form lane width with unconstrained vertical space and using the theme row height
+as a minimum. Panel measurement and layout use the same policy. Export queue
+rows use this mode for localized titles, progress, and diagnostic summaries so
+narrow panels reserve space for wrapped content instead of clipping later lines.
+
+FlexContainer delegates constrained measurement to the shared FlexLayout owner.
+Horizontal flexible children shrink proportionally to their preferred widths
+when fixed controls and gaps consume the available width. Both measurement and
+placement remeasure children at their allocated widths, preserving wrapped text
+height. Vertical content keeps its natural extent for scrolling.
+
+Product entrypoint guards parse Cargo TOML to check default-run, binary paths, validation feature gates, and test/benchmark exclusion. Whitespace and line endings are not route semantics.
+
+A panel with content-height rows fills a finite offered width during measurement, matching vertical ScrollView placement; unbounded measurements retain the theme preferred width. This keeps wrapping, row placement, and scroll extent consistent across viewport resizing.

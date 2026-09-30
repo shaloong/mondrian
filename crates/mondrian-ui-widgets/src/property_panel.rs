@@ -159,11 +159,17 @@ impl Default for PropertyPanelOptions {
     }
 }
 
+enum PropertyRowHeight {
+    Default,
+    Fixed(f32),
+    Content,
+}
+
 /// One labeled control row in a [`PropertySection`].
 pub struct PropertyRow {
     label: Label,
     control: Box<dyn Widget>,
-    height: Option<f32>,
+    height: PropertyRowHeight,
     bounds: Rect,
     control_bounds: Rect,
     label_position: Point,
@@ -179,7 +185,7 @@ impl PropertyRow {
                 .with_font_size(visual.row_label_font_size)
                 .with_padding(0.0, 0.0),
             control,
-            height: None,
+            height: PropertyRowHeight::Default,
             bounds: Rect::ZERO,
             control_bounds: Rect::ZERO,
             label_position: Point::ZERO,
@@ -188,7 +194,16 @@ impl PropertyRow {
 
     /// Set an explicit row height for taller controls.
     pub fn with_height(mut self, height: f32) -> Self {
-        self.height = Some(height.max(1.0));
+        self.height = PropertyRowHeight::Fixed(height.max(1.0));
+        self
+    }
+
+    /// Fit the row to its control's measured height at the available lane width.
+    ///
+    /// The theme's default row height remains the minimum. Wrapped text and
+    /// compound controls can grow without clipping or overlapping later rows.
+    pub fn with_content_height(mut self) -> Self {
+        self.height = PropertyRowHeight::Content;
         self
     }
 
@@ -202,8 +217,15 @@ impl PropertyRow {
         self.bounds
     }
 
-    fn height(&self, fallback: f32) -> f32 {
-        self.height.unwrap_or(fallback).max(1.0)
+    fn height(&self, fallback: f32, control_constraint: LayoutConstraint) -> f32 {
+        match self.height {
+            PropertyRowHeight::Default => fallback,
+            PropertyRowHeight::Fixed(height) => height,
+            PropertyRowHeight::Content => {
+                self.control.measure(control_constraint).height.max(fallback)
+            }
+        }
+        .max(1.0)
     }
 }
 
@@ -445,17 +467,35 @@ impl Widget for PropertyPanel {
             );
             return constraint.constrain(preferred);
         }
+        let fits_content = self
+            .sections
+            .iter()
+            .flat_map(|section| &section.rows)
+            .any(|row| matches!(row.height, PropertyRowHeight::Content));
+        let preferred_width = if fits_content
+            && constraint.max.width.is_finite()
+            && constraint.max.width < f32::MAX
+        {
+            constraint.max.width
+        } else {
+            visual.preferred_width
+        };
+        let width = constraint.constrain(Size::new(preferred_width, 0.0)).width;
+        let content =
+            Rect::new(0.0, 0.0, width, 0.0).inset(self.options.margin, self.options.margin);
+        let form_layout = FormLayout::new(self.options.form_row_options());
+        let control_constraint = form_layout.control_constraint(content, f32::MAX);
         let rows_height: f32 = self
             .sections
             .iter()
             .flat_map(|section| section.rows.iter())
-            .map(|row| row.height(self.options.row_height))
+            .map(|row| row.height(self.options.row_height, control_constraint))
             .sum();
         let section_headers =
             self.sections.iter().filter(|section| !section.title().is_empty()).count();
         let section_gaps = self.sections.len().saturating_sub(1);
         let preferred = Size::new(
-            visual.preferred_width,
+            width,
             self.options.margin * 2.0
                 + self.header_height()
                 + rows_height
@@ -548,7 +588,10 @@ impl Widget for PropertyPanel {
 
             let section_top = y;
             for row in &mut section.rows {
-                let row_h = row.height(self.options.row_height);
+                let row_h = row.height(
+                    self.options.row_height,
+                    form_layout.control_constraint(content, f32::MAX),
+                );
                 let measured = row.control.measure(form_layout.control_constraint(content, row_h));
                 let rects = form_layout.row_rects(
                     content,
@@ -985,6 +1028,84 @@ mod tests {
         assert_eq!(panel.section_count(), 1);
         assert_eq!(panel.child_count(), 1);
         assert!(panel.child(0).is_some());
+    }
+
+    #[test]
+    fn content_height_rows_reflow_nested_summaries_and_keep_following_rows_clear() {
+        use crate::{FlexChild, FlexContainer};
+        let summary = FlexContainer::column(vec![
+            FlexChild::fixed(Box::new(
+                Label::new("Export job with a long localized title".repeat(3))
+                    .wrapped()
+                    .with_padding(0.0, 0.0),
+            )),
+            FlexChild::fixed(Box::new(
+                Label::new("Broadcast QC findings and color diagnostics ".repeat(12))
+                    .wrapped()
+                    .with_padding(0.0, 0.0),
+            )),
+        ])
+        .with_gap(4.0);
+        let content = FlexContainer::row(vec![
+            FlexChild::flex(Box::new(summary), 1.0),
+            FlexChild::fixed(Box::new(ProbeWidget::new(Rc::new(Cell::new(false))))),
+        ])
+        .with_gap(8.0)
+        .with_align_items(mondrian_ui_layout::AlignItems::Start);
+        let mut panel = PropertyPanel::new("Export").with_embedded_panel_chrome().with_section(
+            PropertySection::new("")
+                .with_row(PropertyRow::new("Job", Box::new(content)).with_content_height())
+                .with_row(PropertyRow::new(
+                    "Next",
+                    Box::new(ProbeWidget::new(Rc::new(Cell::new(false)))),
+                )),
+        );
+        let mut heights = Vec::new();
+        for width in [360.0, 260.0, 360.0] {
+            let size = panel
+                .measure(LayoutConstraint { min: Size::ZERO, max: Size::new(width, f32::MAX) });
+            assert_eq!(
+                size.width, width,
+                "content height must measure at the scroll viewport width"
+            );
+            panel.layout(Rect::new(0.0, 0.0, width, size.height));
+            let first = &panel.sections[0].rows[0];
+            let next = &panel.sections[0].rows[1];
+            let full = first.control.measure(LayoutConstraint {
+                min: Size::ZERO,
+                max: Size::new(first.control_bounds.width, f32::MAX),
+            });
+            assert!(
+                (first.control_bounds.height - full.height).abs() < 0.01,
+                "wrapped summary must fit the control clip"
+            );
+            assert!(next.bounds.y >= first.bounds.y + first.bounds.height);
+            assert!(next.bounds.y + next.bounds.height <= size.height);
+            let cancel = first.control.child(1).expect("cancel control");
+            let summary = first.control.child(0).expect("summary");
+            assert!(cancel.hit_test(Point::new(
+                first.control_bounds.x + first.control_bounds.width - 1.0,
+                first.control_bounds.y + 1.0
+            )));
+            assert!(
+                summary
+                    .measure(LayoutConstraint {
+                        min: Size::ZERO,
+                        max: Size::new((first.control_bounds.width - 88.0).max(0.0), f32::MAX)
+                    })
+                    .height
+                    <= first.control_bounds.height + 0.01
+            );
+            heights.push(first.bounds.height);
+        }
+        assert!(
+            heights[1] > heights[0],
+            "narrower text must reserve more vertical space"
+        );
+        assert_eq!(
+            heights[0], heights[2],
+            "resizing back must not retain stale height"
+        );
     }
 
     #[test]
