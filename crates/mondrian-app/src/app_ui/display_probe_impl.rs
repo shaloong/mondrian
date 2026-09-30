@@ -908,6 +908,17 @@ mod tests {
         )
         .with_native_display_path_id(Some("42".to_owned()));
         assert!(macos_edr_request_eligible(&probe, Some(42)));
+        assert!(matches!(
+            resolve_monitor_hdr_capability(&probe, no_hdr_info()),
+            MonitorHdrReadiness::Unknown { .. }
+        ));
+        let mut active = probe.clone();
+        active.details.current_headroom_ppm = Some(2_000_000);
+        active.details.hdr_enabled = Some(true);
+        assert!(matches!(
+            resolve_monitor_hdr_capability(&active, no_hdr_info()),
+            MonitorHdrReadiness::Ready { .. }
+        ));
         assert!(!macos_edr_request_eligible(&probe, Some(43)));
         assert!(!macos_edr_request_eligible(&probe, None));
         let mut no_headroom = probe.clone();

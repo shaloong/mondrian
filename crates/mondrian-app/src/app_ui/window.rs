@@ -122,6 +122,8 @@ use mondrian_ui_widgets::{VideoScopesSettings, ViewerExternalTexturePresentation
 use sha2::{Digest, Sha256};
 
 const APP_UI_WINDOW_PRODUCT_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(750);
+#[cfg(target_os = "macos")]
+const APP_UI_NATIVE_DISPLAY_OBSERVATION_PERIOD: Duration = Duration::from_secs(1);
 
 fn control_flow_wake_no_later_than(
     current: winit::event_loop::ControlFlow,
@@ -1019,6 +1021,8 @@ enum AppUiDisplayContractRefreshReasonDiagnostic {
     ScaleFactorChanged,
     WindowMoved,
     DisplayPolicyChanged,
+    #[cfg(target_os = "macos")]
+    NativeDisplayObservation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -1694,6 +1698,8 @@ enum DisplayOutputContractRefreshReason {
     SurfaceLifecycle(SurfaceLifecycleReason),
     WindowMoved,
     DisplayPolicyChanged,
+    #[cfg(target_os = "macos")]
+    NativeDisplayObservation,
 }
 
 impl AppUiDisplayContractRefreshReasonDiagnostic {
@@ -1707,6 +1713,10 @@ impl AppUiDisplayContractRefreshReasonDiagnostic {
             ) => Self::ScaleFactorChanged,
             DisplayOutputContractRefreshReason::WindowMoved => Self::WindowMoved,
             DisplayOutputContractRefreshReason::DisplayPolicyChanged => Self::DisplayPolicyChanged,
+            #[cfg(target_os = "macos")]
+            DisplayOutputContractRefreshReason::NativeDisplayObservation => {
+                Self::NativeDisplayObservation
+            }
         }
     }
 }
@@ -1818,6 +1828,8 @@ struct AppUiWindowSession {
     config: wgpu::SurfaceConfiguration,
     display_output_contract: AppUiDisplayOutputContract,
     display_snapshot: Option<mondrian_core::display_contract::DisplayOutputSnapshot>,
+    #[cfg(target_os = "macos")]
+    next_native_display_observation: Instant,
     display_calibration: Option<Arc<mondrian_core::display_calibration::DisplayCalibrationLut3d>>,
     renderer_adapter: AppUiRendererAdapterDiagnostics,
     color_engine: mondrian_core::ColorEngine,
@@ -4516,6 +4528,22 @@ fn run_app_ui_with_initial_state_on_event_loop(
             }
 
             Event::AboutToWait => {
+                #[cfg(target_os = "macos")]
+                {
+                    if Instant::now() >= session.next_native_display_observation {
+                        // AppKit activates EDR asynchronously after CAMetalLayer configuration.
+                        // OS HDR/profile changes also need observation when the window is idle.
+                        refresh_display_output_contract(
+                            DisplayOutputContractRefreshReason::NativeDisplayObservation,
+                            adapter,
+                            device,
+                            session,
+                            &mut host,
+                        );
+                        session.next_native_display_observation =
+                            Instant::now() + APP_UI_NATIVE_DISPLAY_OBSERVATION_PERIOD;
+                    }
+                }
                 #[cfg(feature = "validation")]
                 if let Some(validation) = surface_reopen_validation.as_mut() {
                     if Instant::now() >= validation.deadline {
@@ -4664,6 +4692,11 @@ fn run_app_ui_with_initial_state_on_event_loop(
                 elwt.set_control_flow(control_flow_wake_no_later_than(
                     elwt.control_flow(),
                     host.next_execution_resource_observation_deadline(),
+                ));
+                #[cfg(target_os = "macos")]
+                elwt.set_control_flow(control_flow_wake_no_later_than(
+                    elwt.control_flow(),
+                    session.next_native_display_observation,
                 ));
                 #[cfg(feature = "validation")]
                 if let Some(validation) = surface_reopen_validation.as_ref() {
@@ -8295,7 +8328,14 @@ fn refresh_display_output_contract(
         reason,
         DisplayOutputContractRefreshReason::DisplayPolicyChanged
     );
-    if !contract_requires_invalidation && !policy_requires_snapshot_refresh {
+    #[cfg(target_os = "macos")]
+    let native_observation = matches!(
+        reason,
+        DisplayOutputContractRefreshReason::NativeDisplayObservation
+    );
+    #[cfg(not(target_os = "macos"))]
+    let native_observation = false;
+    if !contract_requires_invalidation && !policy_requires_snapshot_refresh && !native_observation {
         return;
     }
 
@@ -8348,6 +8388,14 @@ fn refresh_display_output_contract(
         &reason_str,
     );
     let snapshot = display_resolution.snapshot;
+    let previous_identity = session.display_snapshot.as_ref().map(|s| s.contract_identity());
+    let new_identity = snapshot.contract_identity();
+    if native_observation
+        && !contract_requires_invalidation
+        && previous_identity == Some(new_identity)
+    {
+        return;
+    }
 
     if let Some(ref prev_snapshot) = session.display_snapshot
         && prev_snapshot.display_id != snapshot.display_id
@@ -8364,9 +8412,6 @@ fn refresh_display_output_contract(
     for blocker in &snapshot_blockers {
         host.record_preview_gpu_output_blocker(blocker);
     }
-
-    let previous_identity = session.display_snapshot.as_ref().map(|s| s.contract_identity());
-    let new_identity = snapshot.contract_identity();
 
     session.display_snapshot = Some(snapshot);
     session.display_calibration = display_resolution.calibration;
@@ -8609,6 +8654,9 @@ impl AppUiPreparedWindowSession {
             config: config.clone(),
             display_output_contract,
             display_snapshot: Some(initial_snapshot),
+            #[cfg(target_os = "macos")]
+            next_native_display_observation: Instant::now()
+                + APP_UI_NATIVE_DISPLAY_OBSERVATION_PERIOD,
             display_calibration: initial_display_resolution.calibration,
             renderer_adapter,
             color_engine,
