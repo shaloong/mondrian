@@ -181,12 +181,18 @@ pub(super) fn fit_rect_into(source_width: f32, source_height: f32, bounds: Rect)
 }
 
 pub(super) fn item_matches_query(item: &AssetGridItem, query: &str) -> bool {
-    if query.is_empty() {
+    if query.trim().is_empty() {
         return true;
     }
-    item.title.to_lowercase().contains(query)
-        || item.subtitle.to_lowercase().contains(query)
-        || item.badges.iter().any(|badge| badge.label.to_lowercase().contains(query))
+    let title = item.title.to_lowercase();
+    let subtitle = item.subtitle.to_lowercase();
+    let badges: Vec<String> = item.badges.iter().map(|badge| badge.label.to_lowercase()).collect();
+    query.split_whitespace().all(|word| {
+        let word = word.to_lowercase();
+        title.contains(&word)
+            || subtitle.contains(&word)
+            || badges.iter().any(|badge| badge.contains(&word))
+    })
 }
 
 pub(super) fn rebuild_visible_indices(items: &[AssetGridItem], query: &str) -> Vec<usize> {
@@ -359,6 +365,35 @@ mod tests {
         assert_eq!(rebuild_visible_indices(&items, "rec"), vec![0]);
         assert_eq!(rebuild_visible_indices(&items, "AUDIO"), vec![1]);
         assert_eq!(rebuild_visible_indices(&items, "brand"), vec![2]);
+    }
+
+    #[test]
+    fn multiword_filter_preserves_original_indices_and_navigation() {
+        let items = vec![
+            item("other", "Other"),
+            item("a", "Camera 上海").with_subtitle("Rec.709").with_badge("夜景"),
+            item("disabled", "Camera 上海").with_badge("夜景").disabled(true),
+            item("b", "上海 Camera").with_subtitle("夜景"),
+            item("partial", "Camera 上海"),
+        ];
+        let visible = rebuild_visible_indices(&items, "  CAMERA  上海\t夜景  ");
+        assert_eq!(visible, vec![1, 2, 3]);
+        assert_eq!(rebuild_visible_indices(&items, "夜景 rec.709"), vec![1]);
+        assert_eq!(
+            rebuild_visible_indices(&items, "上海 missing"),
+            Vec::<usize>::new()
+        );
+        for query in ["", "  \t\n", "\u{3000}"] {
+            assert_eq!(rebuild_visible_indices(&items, query), vec![0, 1, 2, 3, 4]);
+        }
+        assert_eq!(visible_position_for_index(&visible, 3), Some(2));
+        assert_eq!(move_selection(&visible, &items, Some(1), 1), Some(3));
+        assert_eq!(move_selection(&visible, &items, Some(3), -1), Some(1));
+        assert_eq!(move_selection(&visible, &items, Some(0), 1), Some(1));
+        assert_eq!(
+            selected_range(&visible, &items, 1, 3),
+            BTreeSet::from([1, 3])
+        );
     }
 
     #[test]
