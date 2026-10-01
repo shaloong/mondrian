@@ -2733,3 +2733,11 @@ precision, not the audio DSP working format or temporal interpretation.
 Acceptance covers actual Rack and Mixer author commits with exact Undo/Redo,
 real Rack text entry for Double/Integer, invalid fraction/non-finite rejection,
 and a day-long fade retaining its final millisecond.
+
+Inspector audio source, stream-binding and track-lock reasons use the active
+Localizer. Component/catalog absence, unavailable nested output, physical rebinding,
+primary/default stream and unknown native channel-layout labels come from Fluent.
+Media language tags, user-authored stream titles, stable identities and named
+multichannel speaker layouts retain their canonical values. Re-projecting locale
+changes labels without modifying component selection, channel mapping or author
+generation. Both catalogs carry the same message IDs.

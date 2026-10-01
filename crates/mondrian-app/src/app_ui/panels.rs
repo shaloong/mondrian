@@ -2594,7 +2594,7 @@ impl InspectorPanelModel {
                 (clip_id == resolved_selection.clip_id).then_some(mask_id)
             }),
             is_editable,
-            edit_disabled_reason: (!is_editable).then(|| "所选剪辑所在轨道已锁定".to_owned()),
+            edit_disabled_reason: (!is_editable).then(|| localizer.text("inspector-track-locked")),
             enabled: !clip.is_disabled,
             blend_mode: resolved_selection
                 .is_video_track
@@ -4538,7 +4538,11 @@ fn inspector_audio_components(
                 let Some(asset) = asset.as_ref() else {
                     return inspector_audio_component_model(
                         edit,
-                        format!("Component {component_id}（素材不可用）"),
+                        localizer.format_text(
+                            "inspector-audio-asset-unavailable",
+                            "identity",
+                            &component_id.to_string(),
+                        ),
                         Vec::new(),
                         None,
                         None,
@@ -4565,7 +4569,7 @@ fn inspector_audio_components(
                                 )
                         });
                         InspectorAudioSourceOptionModel {
-                            label: asset_audio_component_label(asset, component.id),
+                            label: asset_audio_component_label(asset, component.id, localizer),
                             source: AudioComponentSource::Media { component_id: component.id },
                             selected,
                             selectable: selected || !used_by_sibling,
@@ -4576,7 +4580,13 @@ fn inspector_audio_components(
                     .iter()
                     .find(|option| option.selected)
                     .map(|option| option.label.clone())
-                    .unwrap_or_else(|| format!("Component {component_id}（目录中不存在）"));
+                    .unwrap_or_else(|| {
+                        localizer.format_text(
+                            "inspector-audio-component-missing",
+                            "identity",
+                            &component_id.to_string(),
+                        )
+                    });
                 let binding = asset
                     .audio_components
                     .components
@@ -4585,7 +4595,7 @@ fn inspector_audio_components(
                     .map(|component| InspectorAudioBindingModel {
                         asset_id: asset.id,
                         component_id,
-                        label: asset_audio_binding_label(asset, component_id),
+                        label: asset_audio_binding_label(asset, component_id, localizer),
                         options: asset
                             .media_probe()
                             .map(|probe| {
@@ -4593,7 +4603,7 @@ fn inspector_audio_components(
                                     .audio_streams
                                     .iter()
                                     .map(|stream| InspectorAudioStreamOptionModel {
-                                        label: audio_stream_label(stream),
+                                        label: audio_stream_label(stream, localizer),
                                         stream_index: stream.index,
                                         selected: component.binding.matches_stream(stream),
                                     })
@@ -4637,7 +4647,13 @@ fn inspector_audio_components(
                     .iter()
                     .find(|option| option.selected)
                     .map(|option| option.label.clone())
-                    .unwrap_or_else(|| format!("嵌套输出 {output_id}（不可用）"));
+                    .unwrap_or_else(|| {
+                        localizer.format_text(
+                            "inspector-audio-output-unavailable",
+                            "identity",
+                            &output_id.to_string(),
+                        )
+                    });
                 inspector_audio_component_model(
                     edit,
                     source_label,
@@ -4720,6 +4736,7 @@ fn inspector_audio_component_model(
 fn asset_audio_component_label(
     asset: &AssetRecord,
     component_id: AudioSourceComponentId,
+    localizer: &Localizer,
 ) -> String {
     let Some(component) = asset
         .audio_components
@@ -4727,31 +4744,42 @@ fn asset_audio_component_label(
         .iter()
         .find(|component| component.id == component_id)
     else {
-        return format!("Component {component_id}（目录中不存在）");
+        return localizer.format_text(
+            "inspector-audio-component-missing",
+            "identity",
+            &component_id.to_string(),
+        );
     };
-    let primary = (component_id == AudioSourceComponentId::primary()).then_some("Primary · ");
     let stream = asset.media_probe().and_then(|probe| {
         probe
             .audio_streams
             .iter()
             .find(|stream| component.binding.matches_stream(stream))
     });
-    match stream {
-        Some(stream) => format!(
-            "{}{}",
-            primary.unwrap_or_default(),
-            audio_stream_label(stream)
-        ),
-        None => format!(
-            "{}流 #{} · {}（需重绑定）",
-            primary.unwrap_or_default(),
-            component.binding.stream_index,
-            native_audio_layout_label(&component.binding.channel_layout)
-        ),
+    let label = match stream {
+        Some(stream) => audio_stream_label(stream, localizer),
+        None => {
+            let mut args = fluent_bundle::FluentArgs::new();
+            args.set("index", component.binding.stream_index.to_string());
+            args.set(
+                "layout",
+                native_audio_layout_label(&component.binding.channel_layout, localizer),
+            );
+            localizer.format("inspector-audio-stream-rebind", Some(&args))
+        }
+    };
+    if component_id == AudioSourceComponentId::primary() {
+        localizer.format_text("inspector-audio-primary", "label", &label)
+    } else {
+        label
     }
 }
 
-fn asset_audio_binding_label(asset: &AssetRecord, component_id: AudioSourceComponentId) -> String {
+fn asset_audio_binding_label(
+    asset: &AssetRecord,
+    component_id: AudioSourceComponentId,
+    localizer: &Localizer,
+) -> String {
     asset
         .audio_components
         .components
@@ -4766,16 +4794,22 @@ fn asset_audio_binding_label(asset: &AssetRecord, component_id: AudioSourceCompo
                         .iter()
                         .find(|stream| component.binding.matches_stream(stream))
                 })
-                .map(audio_stream_label)
-                .unwrap_or_else(|| format!("流 #{}（需重绑定）", component.binding.stream_index))
+                .map(|stream| audio_stream_label(stream, localizer))
+                .unwrap_or_else(|| {
+                    localizer.format_text(
+                        "inspector-audio-stream-rebind-short",
+                        "index",
+                        &component.binding.stream_index.to_string(),
+                    )
+                })
         })
-        .unwrap_or_else(|| "无有效物理映射".to_owned())
+        .unwrap_or_else(|| localizer.text("inspector-audio-binding-unavailable"))
 }
 
-fn audio_stream_label(stream: &AudioStreamInfo) -> String {
+fn audio_stream_label(stream: &AudioStreamInfo, localizer: &Localizer) -> String {
     let mut details = vec![
-        format!("流 #{}", stream.index),
-        native_audio_layout_label(&stream.channel_layout),
+        localizer.format_text("inspector-audio-stream", "index", &stream.index.to_string()),
+        native_audio_layout_label(&stream.channel_layout, localizer),
     ];
     if let Some(language) = stream.language.as_deref().filter(|value| !value.trim().is_empty()) {
         details.push(language.to_owned());
@@ -4784,16 +4818,26 @@ fn audio_stream_label(stream: &AudioStreamInfo) -> String {
         details.push(title.to_owned());
     }
     if stream.is_default {
-        details.push("Default".to_owned());
+        details.push(localizer.text("inspector-audio-stream-default"));
     }
     details.join(" · ")
 }
 
-fn native_audio_layout_label(layout: &ChannelLayout) -> String {
+fn native_audio_layout_label(layout: &ChannelLayout, localizer: &Localizer) -> String {
     match layout {
+        ChannelLayout::Exact(AudioChannelLayout::Mono) => localizer.text("sequence-audio-mono"),
+        ChannelLayout::Exact(AudioChannelLayout::Stereo) => localizer.text("sequence-audio-stereo"),
         ChannelLayout::Exact(layout) => layout.to_string(),
-        ChannelLayout::Unspecified(channels) => format!("未指定 {channels}ch"),
-        ChannelLayout::Unsupported(channels) => format!("不支持的命名布局 {channels}ch"),
+        ChannelLayout::Unspecified(channels) => localizer.format_text(
+            "inspector-audio-layout-unspecified",
+            "count",
+            &channels.to_string(),
+        ),
+        ChannelLayout::Unsupported(channels) => localizer.format_text(
+            "inspector-audio-layout-unsupported",
+            "count",
+            &channels.to_string(),
+        ),
     }
 }
 

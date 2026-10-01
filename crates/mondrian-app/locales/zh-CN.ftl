@@ -1126,3 +1126,16 @@ reason-import-empty-batch = 请至少选择一个媒体文件
 reason-import-batch-capacity = 排队的导入批次已达上限 { $capacity }，请等待导入完成或取消一个批次
 reason-import-batch-too-large = 本次导入包含 { $files } 个文件，每批最多可选择 { $capacity } 个
 reason-import-file-capacity = 本次导入需要 { $files } 个文件槽位，当前仅剩 { $available } 个，请等待导入完成或减少所选文件
+
+inspector-track-locked = 所选剪辑所在轨道已锁定
+inspector-audio-asset-unavailable = 音频组件 { $identity }（素材不可用）
+inspector-audio-component-missing = 音频组件 { $identity }（目录中不存在）
+inspector-audio-output-unavailable = 嵌套输出 { $identity }（不可用）
+inspector-audio-primary = 主音频流 · { $label }
+inspector-audio-stream-rebind = 流 #{ $index } · { $layout }（需重绑定）
+inspector-audio-stream-rebind-short = 流 #{ $index }（需重绑定）
+inspector-audio-binding-unavailable = 无有效物理映射
+inspector-audio-stream = 流 #{ $index }
+inspector-audio-stream-default = 默认
+inspector-audio-layout-unspecified = 未指定 { $count }ch
+inspector-audio-layout-unsupported = 不支持的命名布局 { $count }ch

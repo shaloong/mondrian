@@ -351,6 +351,94 @@ fn inspector_model_projects_asset_components_and_physical_binding_separately() {
     assert_eq!(model.audio_processor_racks[0].processors.len(), 1);
     assert_eq!(model.audio_processor_racks[0].processors[0].label, "增益");
 
+    let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+    let author_before = state.active_sequence().expect("sequence").clone();
+    let generation_before = state.project_author_generation();
+    let english_model = InspectorPanelModel::from_app_state(&state, &english);
+    let english_component = &english_model.audio_components[0];
+    let visible = |text: &str| text.replace(['\u{2068}', '\u{2069}'], "");
+    assert!(visible(&component.source_label).starts_with("主音频流 · 流 #3"));
+    assert!(visible(&english_component.source_label).starts_with("Primary · Stream #3"));
+    assert!(english_component.source_label.contains("jpn"));
+    assert!(english_component.source_label.contains("Default"));
+    assert!(
+        visible(&english_component.binding.as_ref().expect("binding").label)
+            .starts_with("Stream #3")
+    );
+    let selections = |component: &InspectorAudioComponentModel| {
+        component
+            .source_options
+            .iter()
+            .map(|option| (option.source.clone(), option.selected, option.selectable))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(selections(component), selections(english_component));
+    assert_eq!(
+        english_component.channel_mapping.mapping,
+        component.channel_mapping.mapping
+    );
+    assert_eq!(
+        english_component.channel_mapping.observed_source_layout,
+        component.channel_mapping.observed_source_layout
+    );
+    assert_eq!(
+        english_component.channel_mapping.destination_layout,
+        component.channel_mapping.destination_layout
+    );
+    assert_eq!(
+        english_component.channel_mapping.review_matrix,
+        component.channel_mapping.review_matrix
+    );
+    assert_eq!(
+        english_component.channel_mapping.matrix_is_explicit,
+        component.channel_mapping.matrix_is_explicit
+    );
+    assert_eq!(state.active_sequence().expect("sequence"), &author_before);
+    assert_eq!(state.project_author_generation(), generation_before);
+
+    let asset = state
+        .asset_library()
+        .expect("library")
+        .get_asset(asset_id)
+        .expect("lookup")
+        .expect("asset");
+    let mut named_stream = asset.media_probe().expect("probe").audio_streams[0].clone();
+    named_stream.title = Some("Commentary / 注释".to_owned());
+    let named_label = audio_stream_label(&named_stream, &english);
+    assert!(named_label.contains("Commentary / 注释"));
+    assert!(named_label.contains("eng"));
+    let missing_id = AudioSourceComponentId::new();
+    assert!(
+        asset_audio_component_label(&asset, missing_id, &english).contains("missing from catalog")
+    );
+    assert_eq!(
+        asset_audio_binding_label(&asset, missing_id, &english),
+        "No valid physical mapping"
+    );
+    let mut stale = asset.clone();
+    stale
+        .audio_components
+        .components
+        .iter_mut()
+        .find(|component| component.id == AudioSourceComponentId::primary())
+        .expect("primary")
+        .binding
+        .stream_index = 255;
+    assert!(
+        asset_audio_component_label(&stale, AudioSourceComponentId::primary(), &english)
+            .contains("rebind required")
+    );
+    assert!(
+        asset_audio_binding_label(&stale, AudioSourceComponentId::primary(), &english)
+            .contains("rebind required")
+    );
+    assert!(asset_audio_binding_label(
+        &stale,
+        AudioSourceComponentId::primary(),
+        &chinese_localizer()
+    )
+    .contains("需重绑定"));
+    drop(english_model);
     drop(model);
     drop(state);
     let _ = std::fs::remove_dir_all(root);
@@ -6461,6 +6549,17 @@ fn app_state_models_disable_effect_actions_for_locked_selected_track() {
         clip_id,
     });
 
+    let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+    let english_model = InspectorPanelModel::from_app_state(&state, &english);
+    assert_eq!(
+        english_model.edit_disabled_reason.as_deref(),
+        Some("The selected clip's track is locked")
+    );
+    let chinese_model = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
+    assert_eq!(
+        chinese_model.edit_disabled_reason.as_deref(),
+        Some("所选剪辑所在轨道已锁定")
+    );
     let models = AppUiPanelModels::from_app_state(&state);
 
     assert!(models.effects.subtitle.is_empty());
@@ -8285,4 +8384,40 @@ fn sequence_form_confirms_numeric_draft_before_submission_and_cancel_discards_it
             ));
         }
     }
+}
+
+#[test]
+fn native_audio_layout_labels_follow_locale_and_retain_exact_layout_names() {
+    let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+    let chinese = chinese_localizer();
+    let visible = |text: String| text.replace(['\u{2068}', '\u{2069}'], "");
+    assert_eq!(
+        native_audio_layout_label(&ChannelLayout::Mono, &english),
+        "Mono"
+    );
+    assert_eq!(
+        native_audio_layout_label(&ChannelLayout::Stereo, &chinese),
+        "立体声"
+    );
+    for count in [0, 1, 255] {
+        assert_eq!(
+            visible(native_audio_layout_label(
+                &ChannelLayout::Unspecified(count),
+                &english
+            )),
+            format!("Unspecified {count}ch")
+        );
+        assert_eq!(
+            visible(native_audio_layout_label(
+                &ChannelLayout::Unsupported(count),
+                &chinese
+            )),
+            format!("不支持的命名布局 {count}ch")
+        );
+    }
+    let surround = ChannelLayout::Exact(AudioChannelLayout::Surround51Side);
+    assert_eq!(
+        native_audio_layout_label(&surround, &english),
+        native_audio_layout_label(&surround, &chinese)
+    );
 }

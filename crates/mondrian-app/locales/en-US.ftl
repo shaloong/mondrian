@@ -1191,3 +1191,16 @@ reason-import-empty-batch = Choose at least one media file
 reason-import-batch-capacity = Too many import batches are queued (limit: { $capacity }); wait for an import to finish or cancel one
 reason-import-batch-too-large = This import contains { $files } files; select no more than { $capacity } files per batch
 reason-import-file-capacity = This import needs { $files } file slots, but only { $available } are available; wait for an import to finish or select fewer files
+
+inspector-track-locked = The selected clip's track is locked
+inspector-audio-asset-unavailable = Component { $identity } (asset unavailable)
+inspector-audio-component-missing = Component { $identity } (missing from catalog)
+inspector-audio-output-unavailable = Nested output { $identity } (unavailable)
+inspector-audio-primary = Primary · { $label }
+inspector-audio-stream-rebind = Stream #{ $index } · { $layout } (rebind required)
+inspector-audio-stream-rebind-short = Stream #{ $index } (rebind required)
+inspector-audio-binding-unavailable = No valid physical mapping
+inspector-audio-stream = Stream #{ $index }
+inspector-audio-stream-default = Default
+inspector-audio-layout-unspecified = Unspecified { $count }ch
+inspector-audio-layout-unsupported = Unsupported named layout { $count }ch
