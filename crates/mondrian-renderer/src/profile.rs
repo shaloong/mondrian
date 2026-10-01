@@ -448,15 +448,19 @@ impl GpuTimestampPassIntervalSample {
         counters: Vec<u64>,
         timestamp_period_ns: f64,
     ) -> Result<Self, GpuTimestampReadError> {
-        for pair in counters.windows(2) {
-            timestamp_elapsed_us(pair[0], pair[1], timestamp_period_ns)?;
+        let pass_counters: Vec<_> =
+            counters.chunks_exact(2).map(|pair| [pair[0], pair[1]]).collect();
+        let mut first_start = u64::MAX;
+        let mut last_end = 0;
+        for &[start, end] in &pass_counters {
+            // A pass's own clock must not regress, but different passes may
+            // overlap (for example vertex work alongside an earlier fragment
+            // stage). Preserve those pairs and bracket all actual pass work.
+            timestamp_elapsed_us(start, end, timestamp_period_ns)?;
+            first_start = first_start.min(start);
+            last_end = last_end.max(end);
         }
-        let elapsed_us = timestamp_elapsed_us(
-            counters[0],
-            counters[counters.len() - 1],
-            timestamp_period_ns,
-        )?;
-        let pass_counters = counters.chunks_exact(2).map(|pair| [pair[0], pair[1]]).collect();
+        let elapsed_us = timestamp_elapsed_us(first_start, last_end, timestamp_period_ns)?;
         Ok(Self { elapsed_us, timestamp_period_ns, pass_counters })
     }
 }
@@ -1010,16 +1014,26 @@ mod tests {
     };
 
     #[test]
-    fn interval_sample_preserves_pass_pairs_and_intervening_time() {
+    fn interval_sample_preserves_gaps_and_legal_overlap_without_undermeasurement() {
         let sample =
             super::GpuTimestampPassIntervalSample::from_counters(vec![100, 200, 800, 900], 10.0)
                 .unwrap();
         assert_eq!(sample.elapsed_us, 8);
         assert_eq!(sample.pass_counters, vec![[100, 200], [800, 900]]);
         assert_eq!(sample.timestamp_period_ns, 10.0);
+        let overlap =
+            super::GpuTimestampPassIntervalSample::from_counters(vec![100, 900, 150, 200], 10.0)
+                .unwrap();
+        assert_eq!(overlap.elapsed_us, 8);
+        assert_eq!(overlap.pass_counters, vec![[100, 900], [150, 200]]);
+        // Recording order does not imply GPU stage execution order either.
+        let reordered =
+            super::GpuTimestampPassIntervalSample::from_counters(vec![500, 700, 100, 200], 10.0)
+                .unwrap();
+        assert_eq!(reordered.elapsed_us, 6);
         assert!(matches!(
-            super::GpuTimestampPassIntervalSample::from_counters(vec![100, 200, 150, 900], 10.0),
-            Err(super::GpuTimestampReadError::CounterRegression { start: 200, end: 150 })
+            super::GpuTimestampPassIntervalSample::from_counters(vec![100, 200, 900, 150], 10.0),
+            Err(super::GpuTimestampReadError::CounterRegression { start: 900, end: 150 })
         ));
     }
 
