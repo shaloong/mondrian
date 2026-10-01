@@ -304,7 +304,8 @@ impl AppState {
         result.map_err(|err| {
             let reason = err.to_string();
             self.set_status_hint(
-                AppMessage::new("status-open-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-open-failed")
+                    .with_message("reason", AppMessage::from_anyhow(&err)),
                 true,
             );
             MondrianError::WorkflowStepFailed { step_id: "open_project".to_string(), reason }
@@ -332,7 +333,8 @@ impl AppState {
         self.request_project_save_as(path).map_err(|err| {
             let reason = err.to_string();
             self.set_status_hint(
-                AppMessage::new("status-save-as-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-save-as-failed")
+                    .with_message("reason", AppMessage::from_anyhow(&err)),
                 true,
             );
             MondrianError::WorkflowStepFailed { step_id: "save_project_as".to_string(), reason }
@@ -371,7 +373,8 @@ impl AppState {
         .map_err(|err| {
             let reason = err.to_string();
             self.set_status_hint(
-                AppMessage::new("status-create-project-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-create-project-failed")
+                    .with_message("reason", AppMessage::from_anyhow(&err)),
                 true,
             );
             MondrianError::WorkflowStepFailed { step_id: "create_project".to_string(), reason }
@@ -392,7 +395,8 @@ impl AppState {
         self.open_project_from_autosave_snapshot(payload.candidate).map_err(|err| {
             let reason = err.to_string();
             self.set_status_hint(
-                AppMessage::new("status-recovery-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-recovery-failed")
+                    .with_message("reason", AppMessage::from_anyhow(&err)),
                 true,
             );
             MondrianError::WorkflowStepFailed { step_id: "recover_project".to_string(), reason }
@@ -468,7 +472,8 @@ impl AppState {
         .map_err(|err| {
             let reason = err.to_string();
             self.set_status_hint(
-                AppMessage::new("status-relink-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-relink-failed")
+                    .with_message("reason", AppMessage::from_error(&err)),
                 true,
             );
             MondrianError::WorkflowStepFailed { step_id: "relink_asset".to_string(), reason }
@@ -486,7 +491,8 @@ impl AppState {
         .map_err(|error| {
             let reason = error.to_string();
             self.set_status_hint(
-                AppMessage::new("status-audio-probe-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-audio-probe-failed")
+                    .with_message("reason", AppMessage::from_error(&error)),
                 true,
             );
             MondrianError::WorkflowStepFailed {
@@ -513,7 +519,8 @@ impl AppState {
         .map_err(|error| {
             let reason = error.to_string();
             self.set_status_hint(
-                AppMessage::new("status-audio-rebind-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-audio-rebind-failed")
+                    .with_message("reason", AppMessage::from_error(&error)),
                 true,
             );
             MondrianError::WorkflowStepFailed {
@@ -550,7 +557,8 @@ impl AppState {
         library.rename_asset(payload.asset_id, &payload.name).map_err(|err| {
             let reason = err.to_string();
             self.set_status_hint(
-                AppMessage::new("status-rename-asset-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-rename-asset-failed")
+                    .with_message("reason", AppMessage::from_error(&err)),
                 true,
             );
             MondrianError::WorkflowStepFailed { step_id: "rename_asset".to_string(), reason }
@@ -603,7 +611,8 @@ impl AppState {
             .map_err(|err| {
                 let reason = err.to_string();
                 self.set_status_hint(
-                    AppMessage::new("status-interpret-failed").with_text("reason", reason.clone()),
+                    AppMessage::new("status-interpret-failed")
+                        .with_message("reason", AppMessage::from_error(&err)),
                     true,
                 );
                 MondrianError::WorkflowStepFailed {
@@ -645,7 +654,8 @@ impl AppState {
         library.rename_folder(&payload.folder_id, &payload.name).map_err(|err| {
             let reason = err.to_string();
             self.set_status_hint(
-                AppMessage::new("status-rename-folder-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-rename-folder-failed")
+                    .with_message("reason", AppMessage::from_error(&err)),
                 true,
             );
             MondrianError::WorkflowStepFailed { step_id: "rename_folder".to_string(), reason }
@@ -828,7 +838,7 @@ impl AppState {
                 let reason = err.to_string();
                 self.set_status_hint(
                     AppMessage::new("status-remove-assets-failed")
-                        .with_text("reason", reason.clone()),
+                        .with_message("reason", AppMessage::from_error(&err)),
                     true,
                 );
                 MondrianError::WorkflowStepFailed {
@@ -903,7 +913,8 @@ impl AppState {
         let folders = library.list_folders().map_err(|err| {
             let reason = err.to_string();
             self.set_status_hint(
-                AppMessage::new("status-move-assets-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-move-assets-failed")
+                    .with_message("reason", AppMessage::from_error(&err)),
                 true,
             );
             MondrianError::WorkflowStepFailed {
@@ -943,7 +954,7 @@ impl AppState {
                 let reason = err.to_string();
                 self.set_status_hint(
                     AppMessage::new("status-move-assets-failed")
-                        .with_text("reason", reason.clone()),
+                        .with_message("reason", AppMessage::from_error(&err)),
                     true,
                 );
                 MondrianError::WorkflowStepFailed {

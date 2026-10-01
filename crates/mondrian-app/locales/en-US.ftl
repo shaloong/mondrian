@@ -1126,3 +1126,42 @@ status-range-extracted = Extract complete: { $removed } clips removed, { $trimme
 status-opaque-detail = { $detail }
 
 status-no-project = No project
+
+# Typed core failure projection
+error-media-open = Could not open media: { $path } — { $reason }
+error-decode-failed = Decode failed (asset { $asset_id }): { $reason }
+error-unsupported-format = Unsupported media format: { $format }
+error-proxy-generation = Proxy generation failed: { $reason }
+error-track-not-found = Track not found: { $track_id }
+error-clip-not-found = Clip not found: { $clip_id }
+error-time-out-of-range = Time position out of range: { $timecode }
+error-track-locked = Track is locked; editing is unavailable: { $track_id }
+error-action-not-executed = Action was not executed ({ $action }): { $reason }
+error-gpu-init = GPU initialization failed: { $reason }
+error-shader-compile = Shader compilation failed ({ $shader_name }): { $reason }
+error-texture-upload = Texture upload failed: { $reason }
+error-effect-evaluation = Effect graph evaluation failed: { $reason }
+error-asset-not-found = Asset not found: { $asset_id }
+error-asset-file-missing = Asset file moved or deleted; relink the media: { $path }
+error-asset-database = Asset library database error: { $reason }
+error-ai-provider = AI provider failed ({ $provider }): { $reason }
+error-ai-rate-limit = AI rate limit reached; retry later ({ $provider })
+error-workflow-step = Workflow step failed ({ $step_id }): { $reason }
+error-workflow-parse = Workflow parsing failed: { $reason }
+error-export = Export encoding failed: { $reason }
+error-hardware-encoder = Hardware encoder unavailable: { $encoder }
+error-source-revision-unavailable = Could not verify media file revision: { $path } — { $reason }
+error-source-revision-changed = Media file changed; refresh or relink the source: { $path }
+error-media-resource = Media execution resource unavailable ({ $operation }): { $source }
+error-media-resource-cleanup = Media execution resource unavailable ({ $operation }): { $source }; cleanup failed: { $cleanup }
+error-decode-timeout = Decode timed out (asset { $asset_id }, mode { $access_mode }, frame { $frame }, source { $secs } s, budget { $budget_ms } ms)
+error-decode-budget = Decode scan budget exhausted (asset { $asset_id }, mode { $access_mode }, decoded { $decoded_frames } frames, budget { $budget_frames } frames, target PTS { $target_pts })
+error-decode-temporal = Decoded frame does not cover requested time (asset { $asset_id }, mode { $access_mode }, requested PTS { $requested_pts }, frame PTS { $selected_pts }, duration { $selected_duration_pts })
+error-timeline-time = Invalid exact timeline time: { $reason }
+error-io = File I/O failed: { $reason }
+error-serialization = Data serialization failed: { $reason }
+error-canceled = Operation canceled
+error-other = Operation failed: { $reason }
+error-timestamp-unknown = not supplied
+
+error-context = { $context }: { $source }

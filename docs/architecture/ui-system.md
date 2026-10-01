@@ -2635,3 +2635,14 @@ open history and scroll position. Failed status continues to outrank Export
 progress, and adjacent fact/severity duplicate suppression remains bounded.
 Product labels nested inside status messages resolve with that same locale;
 user-authored names and native failure evidence remain unchanged text data.
+
+
+### Typed fallback action errors
+
+The Host's unreported-action fallback nests `AppMessage::from_error` in its
+localized action-failure context. A newer operation-specific error still wins.
+Asset/workflow adapters similarly retain typed causes when available; contextual
+project failures use the actual anyhow chain. Locale switching therefore changes
+error headings without replacing paths, native details or error evidence. The
+App does not parse core diagnostic Display strings. Existing String reason bodies
+remain a separate typed-domain diagnostic migration requirement.

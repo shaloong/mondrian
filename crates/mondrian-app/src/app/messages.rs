@@ -1,5 +1,7 @@
 //! Language-neutral product messages shared by status history and notifications.
 
+mod error;
+
 /// One display argument retained so locale changes can reformat product messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppMessageValue {

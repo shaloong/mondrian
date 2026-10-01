@@ -240,3 +240,31 @@ history, current error priority, opaque path values, and unchanged author
 state/generation. The real async import test projects its terminal fact in
 English after the import completes. Additional product diagnostic bodies beyond
 these localized context messages remain a separate coverage requirement.
+
+
+## Typed core failure projection
+
+`AppMessage::from_error` exhaustively matches the existing `MondrianError`
+variants. Host fallback status and typed Asset/workflow failure adapters retain
+that projection as a nested message instead of freezing `Display` text. This
+adds no error-string classifier or second error enum. A newly added core variant
+requires an explicit product projection at compile time.
+
+Media/Timeline/GPU/Asset/AI/workflow/Export/I/O headings use bilingual catalog
+keys. Native source details, paths, IDs, and shader/encoder names stay opaque
+arguments. Decode frame counts, budgets, and stream timestamps remain exact
+decimal text. An unavailable stream timestamp is a nested localized value rather
+than the technical token `None`. Source-revision failures retain expected/actual
+fingerprint evidence as named data for fact identity while their concise headline
+uses the path; different evidence cannot disappear through history deduplication.
+
+`from_anyhow` walks the existing error chain by actual source types. When a core
+failure is present, outer context nodes remain opaque context arguments around
+its typed projection. Otherwise the complete foreign error chain remains one
+opaque reason under a localized heading. `MondrianError::Other` uses that same
+boundary. Returned errors and diagnostic logs retain their original authority;
+there is no reverse mapping from formatted text to error semantics.
+
+This projects existing structured failure categories. Internal reasons still
+stored as String inside those categories require further domain-owned codes;
+complete English diagnostic coverage is not yet claimed.

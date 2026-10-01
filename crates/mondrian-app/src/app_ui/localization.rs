@@ -822,6 +822,187 @@ mod tests {
     }
 
     #[test]
+    fn typed_core_failures_resolve_in_all_locales_without_parsing_diagnostics() {
+        use crate::app::AppMessage;
+        use mondrian_core::MondrianError;
+        let failures = vec![
+            MondrianError::MediaOpen {
+                path: "native detail / {file}".to_owned(),
+                reason: "native detail / {file}".to_owned(),
+            },
+            MondrianError::DecodeFailed {
+                asset_id: "native detail / {file}".to_owned(),
+                reason: "native detail / {file}".to_owned(),
+            },
+            MondrianError::UnsupportedFormat { format: "native detail / {file}".to_owned() },
+            MondrianError::ProxyGenerationFailed { reason: "native detail / {file}".to_owned() },
+            MondrianError::TrackNotFound { track_id: "native detail / {file}".to_owned() },
+            MondrianError::ClipNotFound { clip_id: "native detail / {file}".to_owned() },
+            MondrianError::TimecodeOutOfRange { timecode: "native detail / {file}".to_owned() },
+            MondrianError::TrackLocked { track_id: "native detail / {file}".to_owned() },
+            MondrianError::ActionNotExecuted {
+                action: "native detail / {file}".to_owned(),
+                reason: "native detail / {file}".to_owned(),
+            },
+            MondrianError::GpuInitFailed { reason: "native detail / {file}".to_owned() },
+            MondrianError::ShaderCompileFailed {
+                shader_name: "native detail / {file}".to_owned(),
+                reason: "native detail / {file}".to_owned(),
+            },
+            MondrianError::TextureUploadFailed { reason: "native detail / {file}".to_owned() },
+            MondrianError::EffectGraphEvaluationFailed {
+                reason: "native detail / {file}".to_owned(),
+            },
+            MondrianError::AssetNotFound { asset_id: "native detail / {file}".to_owned() },
+            MondrianError::AssetFileMissing { path: "native detail / {file}".to_owned() },
+            MondrianError::AssetDbError { reason: "native detail / {file}".to_owned() },
+            MondrianError::AiProviderFailed {
+                provider: "native detail / {file}".to_owned(),
+                reason: "native detail / {file}".to_owned(),
+            },
+            MondrianError::AiRateLimited { provider: "native detail / {file}".to_owned() },
+            MondrianError::WorkflowStepFailed {
+                step_id: "native detail / {file}".to_owned(),
+                reason: "native detail / {file}".to_owned(),
+            },
+            MondrianError::WorkflowParseFailed { reason: "native detail / {file}".to_owned() },
+            MondrianError::ExportFailed { reason: "native detail / {file}".to_owned() },
+            MondrianError::HwEncoderUnavailable { encoder: "native detail / {file}".to_owned() },
+            MondrianError::MediaSourceRevisionUnavailable {
+                path: "E:/素材/{file}".to_owned(),
+                reason: "native detail".to_owned(),
+            },
+            MondrianError::MediaSourceRevisionChanged {
+                path: "E:/素材/{file}".to_owned(),
+                expected: Box::default(),
+                actual: Box::default(),
+            },
+            MondrianError::MediaExecutionResourceUnavailable {
+                operation: "decode",
+                source: std::io::Error::other("native detail"),
+                cleanup: None,
+            },
+            MondrianError::MediaExecutionResourceUnavailable {
+                operation: "decode",
+                source: std::io::Error::other("native detail"),
+                cleanup: Some("cleanup detail".to_owned()),
+            },
+            MondrianError::DecodeTimeout {
+                asset_id: "asset".to_owned(),
+                access_mode: "preview".to_owned(),
+                budget_ms: u64::MAX,
+                frame: u64::MAX,
+                secs: 1.25,
+            },
+            MondrianError::DecodeBudgetExhausted {
+                asset_id: "asset".to_owned(),
+                access_mode: "seek".to_owned(),
+                decoded_frames: u64::MAX,
+                budget_frames: u64::MAX,
+                target_pts: i64::MIN,
+            },
+            MondrianError::DecodeTemporalMismatch {
+                asset_id: "asset".to_owned(),
+                access_mode: "seek".to_owned(),
+                requested_pts: Some(i64::MIN),
+                selected_pts: None,
+                selected_duration_pts: Some(i64::MAX),
+            },
+            MondrianError::InvalidTimelineTime(
+                mondrian_core::TimelineTime::new(1, 0).expect_err("invalid denominator"),
+            ),
+            MondrianError::Io(std::io::Error::other("native detail")),
+            MondrianError::Serialization(
+                serde_json::from_str::<serde_json::Value>("{").expect_err("invalid JSON"),
+            ),
+            MondrianError::Cancelled,
+            MondrianError::Other(anyhow::anyhow!("native detail")),
+        ];
+        for failure in &failures {
+            let message = AppMessage::from_error(failure);
+            for locale in [AppUiLocale::ZhCn, AppUiLocale::EnUs, AppUiLocale::Pseudo] {
+                let localizer = Localizer::new(locale).expect("catalog");
+                assert!(
+                    localizer.requested.get_message(message.id).is_some(),
+                    "missing {}",
+                    message.id
+                );
+                let text = localizer.message(&message);
+                assert_ne!(text, message.id, "unresolved {failure:?}");
+                if locale == AppUiLocale::EnUs {
+                    assert!(text.chars().next().is_some_and(|c| c.is_ascii()), "{text}");
+                }
+                if matches!(failure, MondrianError::DecodeTimeout { .. }) {
+                    assert!(text.contains(&u64::MAX.to_string()));
+                    assert!(text.contains("1.250"));
+                }
+                if matches!(failure, MondrianError::DecodeTemporalMismatch { .. }) {
+                    assert!(text.contains(&i64::MIN.to_string()));
+                    assert!(text.contains(&i64::MAX.to_string()));
+                    if locale == AppUiLocale::EnUs {
+                        assert!(text.contains("not supplied"));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn contextual_core_failure_retains_context_and_typed_source_in_each_locale() {
+        use crate::app::{AppMessage, AppMessageValue};
+        use mondrian_core::MondrianError;
+        let source = MondrianError::AssetFileMissing { path: "E:/素材/{file}.mov".to_owned() };
+        let error = anyhow::Error::new(source).context("mount metadata").context("project open");
+        let message = AppMessage::from_anyhow(&error);
+        assert_eq!(message.id, "error-context");
+        assert_eq!(
+            message.args.get("context"),
+            Some(&AppMessageValue::Text("project open".to_owned()))
+        );
+        for locale in [AppUiLocale::ZhCn, AppUiLocale::EnUs, AppUiLocale::Pseudo] {
+            let localizer = Localizer::new(locale).expect("catalog");
+            let text = localizer.message(&message);
+            assert!(text.contains("project open"));
+            assert!(text.contains("mount metadata"));
+            assert!(text.contains("E:/素材/{file}.mov"));
+            if locale == AppUiLocale::EnUs {
+                assert!(text.contains("Asset file moved or deleted"));
+            }
+        }
+        let opaque = anyhow::anyhow!("decoder detail").context("container detail");
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English");
+        let text = english.message(&AppMessage::from_anyhow(&opaque));
+        assert!(text.contains("container detail: decoder detail"));
+        let wrapped = MondrianError::Other(error);
+        assert_eq!(AppMessage::from_error(&wrapped), message);
+    }
+
+    #[test]
+    fn source_revision_evidence_distinguishes_failures_with_the_same_path() {
+        use crate::app::AppMessage;
+        use mondrian_core::{MediaFileFingerprint, MondrianError};
+        let first = MondrianError::MediaSourceRevisionChanged {
+            path: "source.mov".to_owned(),
+            expected: Box::default(),
+            actual: Box::default(),
+        };
+        let changed = MondrianError::MediaSourceRevisionChanged {
+            path: "source.mov".to_owned(),
+            expected: Box::default(),
+            actual: Box::new(MediaFileFingerprint { len: Some(20), ..Default::default() }),
+        };
+        assert_ne!(
+            AppMessage::from_error(&first),
+            AppMessage::from_error(&changed)
+        );
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English");
+        assert_eq!(
+            english.message(&AppMessage::from_error(&first)),
+            english.message(&AppMessage::from_error(&changed))
+        );
+    }
+
+    #[test]
     fn import_summary_variants_localize_counts_without_empty_interpolations() {
         use crate::app::AppMessage;
         for (id, proxies, failed) in [

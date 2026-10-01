@@ -1061,3 +1061,42 @@ status-range-extracted = Extract 完成：移除 { $removed } 个片段，修剪
 status-opaque-detail = { $detail }
 
 status-no-project = 没有项目
+
+# Typed core failure projection
+error-media-open = 媒体文件无法打开：{ $path } — { $reason }
+error-decode-failed = 解码失败（素材 { $asset_id }）：{ $reason }
+error-unsupported-format = 不支持的媒体格式：{ $format }
+error-proxy-generation = 代理生成失败：{ $reason }
+error-track-not-found = 轨道不存在：{ $track_id }
+error-clip-not-found = 剪辑不存在：{ $clip_id }
+error-time-out-of-range = 时间位置超出范围：{ $timecode }
+error-track-locked = 轨道已锁定，无法编辑：{ $track_id }
+error-action-not-executed = 操作未执行（{ $action }）：{ $reason }
+error-gpu-init = GPU 初始化失败：{ $reason }
+error-shader-compile = Shader 编译失败（{ $shader_name }）：{ $reason }
+error-texture-upload = 纹理上传失败：{ $reason }
+error-effect-evaluation = 效果图求值失败：{ $reason }
+error-asset-not-found = 素材不存在：{ $asset_id }
+error-asset-file-missing = 素材文件已移动或删除，请重新链接：{ $path }
+error-asset-database = 素材库数据库错误：{ $reason }
+error-ai-provider = AI 服务调用失败（{ $provider }）：{ $reason }
+error-ai-rate-limit = AI 服务限流，请稍后重试（{ $provider }）
+error-workflow-step = 工作流步骤失败（{ $step_id }）：{ $reason }
+error-workflow-parse = 工作流解析失败：{ $reason }
+error-export = 导出编码失败：{ $reason }
+error-hardware-encoder = 硬件编码器不可用：{ $encoder }
+error-source-revision-unavailable = 无法确认媒体文件修订：{ $path } — { $reason }
+error-source-revision-changed = 媒体文件已变化，请刷新或重新链接：{ $path }
+error-media-resource = 媒体执行资源不可用（{ $operation }）：{ $source }
+error-media-resource-cleanup = 媒体执行资源不可用（{ $operation }）：{ $source }；清理失败：{ $cleanup }
+error-decode-timeout = 解码超时（素材 { $asset_id }，模式 { $access_mode }，帧 { $frame }，源时间 { $secs } 秒，预算 { $budget_ms } 毫秒）
+error-decode-budget = 解码扫描预算耗尽（素材 { $asset_id }，模式 { $access_mode }，已解码 { $decoded_frames } 帧，预算 { $budget_frames } 帧，目标 PTS { $target_pts }）
+error-decode-temporal = 解码帧未覆盖请求时间（素材 { $asset_id }，模式 { $access_mode }，请求 PTS { $requested_pts }，帧 PTS { $selected_pts }，持续时间 { $selected_duration_pts }）
+error-timeline-time = 无效的精确时间：{ $reason }
+error-io = 文件读写失败：{ $reason }
+error-serialization = 数据序列化失败：{ $reason }
+error-canceled = 操作已取消
+error-other = 操作失败：{ $reason }
+error-timestamp-unknown = 未提供
+
+error-context = { $context }：{ $source }

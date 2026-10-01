@@ -1824,7 +1824,8 @@ impl AppUiHost {
             && current_status_hint != previous_status_hint;
         if !has_new_error {
             state.set_status_hint(
-                AppMessage::new("status-action-failed").with_text("err", err.to_string()),
+                AppMessage::new("status-action-failed")
+                    .with_message("err", AppMessage::from_error(err)),
                 true,
             );
         }
@@ -3824,6 +3825,15 @@ mod tests {
                 .contains("unknown app UI action")
         );
         assert!(err.to_string().contains("unknown app UI action"));
+        let english = crate::app_ui::localization::Localizer::new(
+            crate::app_ui::localization::AppUiLocale::EnUs,
+        )
+        .expect("English");
+        let text = english.message(message);
+        assert!(text.contains("Action failed"));
+        assert!(text.contains("Workflow step failed"));
+        assert!(text.contains("unknown app UI action"));
+        assert!(!text.contains("工作流步骤失败"));
     }
 
     #[test]
