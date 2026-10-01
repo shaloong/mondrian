@@ -7,6 +7,8 @@
 #include <set>
 #include <memory>
 #include <cstring>
+#include <cstdint>
+#include <algorithm>
 
 #include "render.h"
 
@@ -76,12 +78,15 @@ static int loadFrame(MondrianOpenFx::FrameState& state, const void* input,
   const size_t pixels = size_t(info.width) * size_t(info.height);
   if (frameBytes != pixels * sizeof(OfxRGBAColourF) ||
       frameBytes > 128u * 1024u * 1024u) { return 2; }
-  state.input.resize(pixels);
-  std::memcpy(state.input.data(), input, frameBytes);
-  for (const auto& pixel : state.input) {
+  if (reinterpret_cast<uintptr_t>(input) % alignof(OfxRGBAColourF) != 0) { return 2; }
+  const auto* data = static_cast<const OfxRGBAColourF*>(input);
+  for (size_t index = 0; index < pixels; ++index) {
+    const auto& pixel = data[index];
     if (!std::isfinite(pixel.r) || !std::isfinite(pixel.g) ||
         !std::isfinite(pixel.b) || !std::isfinite(pixel.a)) { return 2; }
   }
+  state.input = data;
+  state.pixelCount = pixels;
   state.info = info;
   return 0;
 }
@@ -167,24 +172,35 @@ struct MondrianOpenFxSession {
     if (bracket && status == kOfxStatOK) {
       for (const auto& update : updates) {
         if (!update.changed) { continue; }
-        status = instance->paramInstanceChangedAction(
-            update.parameter->getName(), reason, frame.info.frame, scale);
-        if (!accepted(status)) { break; }
+        {
+          MondrianOpenFx::ImageAccess images(frame, std::strcmp(reason, kOfxChangeUserEdited) == 0);
+          status = instance->paramInstanceChangedAction(
+              update.parameter->getName(), reason, frame.info.frame, scale);
+        }
+        if (!accepted(status) || frame.invalidImageLifetime) { break; }
       }
-      if (accepted(status) && clipsChanged) {
+      if (accepted(status) && !frame.invalidImageLifetime && clipsChanged) {
         for (const char* name : {"Source", "Output"}) {
-          status = instance->clipInstanceChangedAction(name, reason, frame.info.frame, scale);
-          if (!accepted(status)) { break; }
+          {
+            MondrianOpenFx::ImageAccess images(frame, std::strcmp(reason, kOfxChangeUserEdited) == 0);
+            status = instance->clipInstanceChangedAction(name, reason, frame.info.frame, scale);
+          }
+          if (!accepted(status) || frame.invalidImageLifetime) { break; }
         }
       }
     }
-    const auto endStatus = bracket ? instance->endInstanceChangedAction(reason) : kOfxStatOK;
-    return accepted(status) && accepted(endStatus) ? 0 : 4;
+    OfxStatus endStatus = kOfxStatOK;
+    if (bracket) {
+      MondrianOpenFx::ImageAccess images(frame, !frame.invalidImageLifetime && std::strcmp(reason, kOfxChangeUserEdited) == 0);
+      endStatus = instance->endInstanceChangedAction(reason);
+    }
+    return accepted(status) && accepted(endStatus) && !frame.invalidImageLifetime ? 0 : 4;
   }
 
   int initialize(const char* path, const char* bundle, const char* identifier,
                  const void* input, size_t bytes, const MondrianOpenFxFrameInfo& info,
                  const MondrianOpenFxParameter* parameters, int count) {
+    MondrianOpenFx::FrameBorrow borrowed(frame);
     const int loaded = loadFrame(frame, input, bytes, info);
     if (loaded != 0) { return loaded; }
     binary = std::make_unique<OFX::Host::PluginBinary>(path, bundle, &cache);
@@ -206,8 +222,11 @@ struct MondrianOpenFxSession {
     if (failed || !output || info.width != frame.info.width ||
         info.height != frame.info.height) { return 2; }
     const auto previous = frame.info;
+    if (reinterpret_cast<uintptr_t>(output) % alignof(OfxRGBAColourF) != 0 || output == input) { return 2; }
+    MondrianOpenFx::FrameBorrow borrowed(frame);
     const int loaded = loadFrame(frame, input, bytes, info);
     if (loaded != 0) { return loaded; }
+    frame.output = static_cast<OfxRGBAColourF*>(output);
     auto* outputClip = dynamic_cast<MondrianOpenFx::FilterClipInstance*>(instance->getClip("Output"));
     if (!outputClip) { return 5; }
     const bool clipsChanged = previous.frame_rate != info.frame_rate ||
@@ -236,20 +255,16 @@ struct MondrianOpenFxSession {
     std::map<OFX::Host::ImageEffect::ClipInstance*, OfxRectD> rois;
     status = instance->getRegionOfInterestAction(info.frame, scale, region, rois);
     if (accepted(status)) {
+      MondrianOpenFx::ImageAccess images(frame, true, true);
       status = instance->renderAction(info.frame, kOfxImageFieldBoth, window,
                                      scale, false, false, false);
     }
-    bool written = false;
-    if (status == kOfxStatOK) {
-      if (auto* image = outputClip->getOutputImage()) {
-        const auto* data = image->rawData();
-        written = true;
-        for (size_t index = 0; index < frame.input.size(); ++index) {
-          const auto& pixel = data[index];
-          if (!std::isfinite(pixel.r) || !std::isfinite(pixel.g) ||
-              !std::isfinite(pixel.b) || !std::isfinite(pixel.a)) { written = false; break; }
-        }
-        if (written) { std::memcpy(output, data, bytes); }
+    bool written = status == kOfxStatOK && !frame.invalidImageLifetime && outputClip->outputFetched();
+    if (written) {
+      for (size_t index = 0; index < frame.pixelCount; ++index) {
+        const auto& pixel = frame.output[index];
+        if (!std::isfinite(pixel.r) || !std::isfinite(pixel.g) ||
+            !std::isfinite(pixel.b) || !std::isfinite(pixel.a)) { written = false; break; }
       }
     }
     const auto endStatus = instance->endRenderAction(info.frame, info.frame, 1.0,

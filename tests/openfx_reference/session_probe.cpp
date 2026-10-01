@@ -27,9 +27,9 @@ void property(const void* handle, const char* name, int value) {
 // Hold two legal Source image handles simultaneously, release one, then read
 // and release the other. Repeated fetch/release must not consume session pixels
 // or invalidate an independent handle before the Render action completes.
-bool sourceImageLifetimes(const void* handle, OfxPropertySetHandle in) {
+bool imageLifetimes(const void* handle, OfxPropertySetHandle in, const char* clip) {
   OfxImageClipHandle source = nullptr;
-  if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Source", &source, nullptr) != kOfxStatOK) {
+  if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, clip, &source, nullptr) != kOfxStatOK) {
     return false;
   }
   double time = 0.0;
@@ -42,7 +42,7 @@ bool sourceImageLifetimes(const void* handle, OfxPropertySetHandle in) {
   }
   void* firstData = nullptr;
   void* secondData = nullptr;
-  bool valid = gPropHost->propGetPointer(first, kOfxImagePropData, 0, &firstData) == kOfxStatOK &&
+  bool valid = first != second && gPropHost->propGetPointer(first, kOfxImagePropData, 0, &firstData) == kOfxStatOK &&
                gPropHost->propGetPointer(second, kOfxImagePropData, 0, &secondData) == kOfxStatOK &&
                firstData && secondData;
   OfxRGBAColourF saved{};
@@ -55,10 +55,29 @@ bool sourceImageLifetimes(const void* handle, OfxPropertySetHandle in) {
   valid = gEffectHost->clipReleaseImage(second) == kOfxStatOK && valid;
   return valid;
 }
+bool imageUnavailable(const void* handle, OfxPropertySetHandle in) {
+  OfxImageClipHandle clip = nullptr;
+  if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Source", &clip, nullptr) != kOfxStatOK) { return false; }
+  double time = 0.0;
+  if (in) { gPropHost->propGetDouble(in, kOfxPropTime, 0, &time); }
+  OfxPropertySetHandle image = nullptr;
+  const auto status = gEffectHost->clipGetImage(clip, time, nullptr, &image);
+  if (status == kOfxStatOK) {
+    gEffectHost->clipReleaseImage(image);
+    return false;
+  }
+  return status == kOfxStatFailed;
+}
 OfxStatus probe(const char* action, const void* handle,
                 OfxPropertySetHandle in, OfxPropertySetHandle out) {
   const std::string operation(action);
   const std::string selected = mode();
+  if ((operation == kOfxActionCreateInstance || operation == kOfxActionDestroyInstance ||
+       operation == kOfxActionBeginInstanceChanged ||
+       operation == kOfxImageEffectActionBeginSequenceRender ||
+       operation == kOfxImageEffectActionEndSequenceRender) && !imageUnavailable(handle, in)) {
+    return kOfxStatFailed;
+  }
   if (operation == kOfxImageEffectActionBeginSequenceRender ||
       operation == kOfxImageEffectActionRender ||
       operation == kOfxImageEffectActionEndSequenceRender) {
@@ -77,6 +96,10 @@ OfxStatus probe(const char* action, const void* handle,
     auto& state = actions.at(handle);
     if (!state.changing) { return kOfxStatFailed; }
     ++state.changes;
+    char* reason = nullptr;
+    if (gPropHost->propGetString(in, kOfxPropChangeReason, 0, &reason) == kOfxStatOK &&
+        reason && std::string(reason) == kOfxChangeUserEdited &&
+        !imageLifetimes(handle, in, "Source")) { return kOfxStatFailed; }
   } else if (operation == kOfxActionEndInstanceChanged) {
     auto& state = actions.at(handle);
     if (!state.changing || state.changes == 0) { return kOfxStatFailed; }
@@ -84,8 +107,17 @@ OfxStatus probe(const char* action, const void* handle,
   } else if (operation == kOfxImageEffectActionRender) {
     auto& state = actions.at(handle);
     if (state.changing) { return kOfxStatFailed; }
-    if ((selected == "normal" || selected == "optional") && !sourceImageLifetimes(handle, in)) {
+    if ((selected == "normal" || selected == "optional") && (!imageLifetimes(handle, in, "Source") || !imageLifetimes(handle, in, "Output"))) {
       return kOfxStatFailed;
+    }
+    if (selected == "leak_source") {
+      OfxImageClipHandle source = nullptr;
+      OfxPropertySetHandle image = nullptr;
+      double time = 0.0;
+      gPropHost->propGetDouble(in, kOfxPropTime, 0, &time);
+      if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Source", &source, nullptr) != kOfxStatOK ||
+          gEffectHost->clipGetImage(source, time, nullptr, &image) != kOfxStatOK) { return kOfxStatFailed; }
+      // Deliberate contract violation: the action must fail before publication.
     }
     ++state.renders;
     if (selected == "hang") { std::this_thread::sleep_for(std::chrono::seconds(5)); }

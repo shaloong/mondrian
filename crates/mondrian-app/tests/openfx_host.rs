@@ -524,10 +524,11 @@ fn official_basic_resident_transfer_preserves_partial_blocks_and_changed_rasters
     session.shutdown().expect("shutdown");
 }
 
-fn authored_probe_graph(gpu_tail: bool) -> std::sync::Arc<mondrian_effects::CompiledEffectGraph> {
-    let binary = PathBuf::from(
-        std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe binary"),
-    );
+fn authored_filter_graph(
+    binary_environment: &str,
+    gpu_tail: bool,
+) -> std::sync::Arc<mondrian_effects::CompiledEffectGraph> {
+    let binary = PathBuf::from(std::env::var_os(binary_environment).expect("filter binary"));
     let inspection = inspect_openfx_binary(product_executable(), &binary).expect("inspect probe");
     let effect_type = register_selected_openfx_filter(
         product_executable(),
@@ -583,12 +584,12 @@ fn authored_native_factory_reuses_instances_and_rejects_stale_output() {
         std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("probe mode"),
         "unfetched"
     );
-    let graph = authored_probe_graph(false);
+    let graph = authored_filter_graph("MONDRIAN_OPENFX_SESSION_PROBE_BINARY", false);
     let input = [[-0.25, 1.5, 0.75, 0.5]];
-    // Two executor rasters plus five controlled host rasters must fit before
+    // Two executor rasters plus three controlled host rasters must fit before
     // any native session is constructed. The one-byte shortfall stays retryable.
     let mut config = EffectExecutionSessionConfig {
-        max_working_bytes: 111,
+        max_working_bytes: 79,
         ..EffectExecutionSessionConfig::default()
     };
     let mut session = EffectExecutionSession::new(config);
@@ -604,7 +605,7 @@ fn authored_native_factory_reuses_instances_and_rejects_stale_output() {
         )
         .is_err());
     assert_eq!(session.diagnostics().processor_instances, 0);
-    config.max_working_bytes = 112;
+    config.max_working_bytes = 80;
     session.reconfigure(config);
     assert_eq!(
         session
@@ -620,7 +621,7 @@ fn authored_native_factory_reuses_instances_and_rejects_stale_output() {
         input
     );
     assert_eq!(session.diagnostics().processor_instances, 1);
-    assert_eq!(session.diagnostics().processor_bytes, 80);
+    assert_eq!(session.diagnostics().processor_bytes, 48);
     // The probe only omits Output on its second render in the same native
     // instance. A fresh process per frame would incorrectly succeed here.
     assert!(session
@@ -669,7 +670,7 @@ fn authored_native_factory_observes_mixed_execution_deadline() {
         std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("probe mode"),
         "hang"
     );
-    let graph = authored_probe_graph(true);
+    let graph = authored_filter_graph("MONDRIAN_OPENFX_SESSION_PROBE_BINARY", true);
     let key = graph
         .graph()
         .nodes
@@ -776,7 +777,7 @@ fn authored_native_factory_observes_scalar_and_timeline_owner_stops() {
         std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("probe mode"),
         "hang"
     );
-    let graph = authored_probe_graph(false);
+    let graph = authored_filter_graph("MONDRIAN_OPENFX_SESSION_PROBE_BINARY", false);
     let input = [[0.25, 1.5, -0.75, 0.5]];
     let mut session = EffectExecutionSession::default();
     let started = Instant::now();
@@ -864,4 +865,53 @@ fn authored_native_factory_observes_scalar_and_timeline_owner_stops() {
     let status = mondrian_effects::effect_plugin_runtime_status(key).expect("plugin status");
     assert!(!status.disabled);
     assert_eq!(status.last_error, None);
+}
+
+#[test]
+#[ignore = "set MONDRIAN_OPENFX_REFERENCE_BINARY to the pinned official Basic bundle"]
+fn authored_uhd_filter_fits_professional_working_grant() {
+    use mondrian_effects::{
+        EffectExecutionSession, EffectExecutionSessionConfig, EffectProcessorControl,
+    };
+    let graph = authored_filter_graph("MONDRIAN_OPENFX_REFERENCE_BINARY", false);
+    let width = 3840;
+    let height = 2160;
+    let count = width as usize * height as usize;
+    let required = count * 16 * 5; // Two executor rasters and three host rasters.
+    assert!(required < 768 * 1024 * 1024);
+    let mut input = vec![[1.5, -0.25, 0.75, 0.5]; count];
+    input[0] = [0.125, 2.5, 0.25, 0.75];
+    input[count - 1] = [0.875, 0.25, -0.5, 0.125];
+    let mut config = EffectExecutionSessionConfig {
+        max_working_bytes: required - 1,
+        max_processor_instances: 0,
+        max_processor_bytes: 0,
+        ..EffectExecutionSessionConfig::uncached(required - 1)
+    };
+    let mut session = EffectExecutionSession::new(config);
+    assert!(session
+        .apply_compiled_rgba_f32(
+            &input,
+            width,
+            height,
+            &graph,
+            0,
+            &mut EffectProcessorControl::uncancelled()
+        )
+        .is_err());
+    assert_eq!(session.diagnostics().processor_instances, 0);
+    config.max_working_bytes = 768 * 1024 * 1024;
+    session.reconfigure(config);
+    let output = session
+        .apply_compiled_rgba_f32(
+            &input,
+            width,
+            height,
+            &graph,
+            0,
+            &mut EffectProcessorControl::uncancelled(),
+        )
+        .expect("UHD native Filter within Professional grant");
+    assert_eq!(output, input);
+    assert_eq!(session.diagnostics().processor_instances, 0);
 }

@@ -409,7 +409,7 @@ mod tests {
         assert_eq!(
             OpenFxFilterSession::required_frame_storage(request.width, request.height)
                 .expect("frame charge"),
-            5 * 2 * 3 * 16
+            3 * 2 * 3 * 16
         );
         assert!(OpenFxFilterSession::required_frame_storage(0, 1).is_err());
         assert!(OpenFxFilterSession::required_frame_storage(u32::MAX, u32::MAX).is_err());

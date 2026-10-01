@@ -5,7 +5,8 @@
 #define HOST_DEMO_CLIP_INSTANCE_H
 
 #include "frame_state.h"
-#include <memory>
+#include <mutex>
+
 
 
 namespace MondrianOpenFx {
@@ -18,13 +19,10 @@ namespace MondrianOpenFx {
   class FrameImage : public OFX::Host::ImageEffect::Image
   {
   protected :
-    std::unique_ptr<OfxRGBAColourF[]> _ownedData;
-    OfxRGBAColourF *_data; // Output owns storage; Source borrows the session frame.
+    const FrameState& _frame;
+    OfxRGBAColourF *_data; // Borrowed only for this legal action.
   public :
     explicit FrameImage(FilterClipInstance &clip, OfxTime t, int view = 0);
-    OfxRGBAColourF* pixel(int x, int y) const;
-    const OfxRGBAColourF* rawData() const { return _data; }
-    void clearForFrame(double pixelAspectRatio);
     ~FrameImage();
   };
 
@@ -32,14 +30,14 @@ namespace MondrianOpenFx {
   protected:
     FilterEffectInstance *_effect;
     std::string       _name;
-    FrameImage          *_outputImage; ///< only set for output clips
     bool _outputFetched;
+    std::mutex _outputFetchMutex;
 
   public:
     FilterClipInstance(FilterEffectInstance* effect, OFX::Host::ImageEffect::ClipDescriptor* desc);
 
     virtual ~FilterClipInstance();
-    FrameImage* getOutputImage() { return _outputFetched ? _outputImage : nullptr; }
+    bool outputFetched() const { return _outputFetched; }
     const FrameState& frameState() const;
     void beginFrame();
     bool isOutput() const { return _name == "Output"; }

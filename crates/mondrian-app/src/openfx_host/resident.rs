@@ -124,7 +124,7 @@ pub struct OpenFxFilterSession {
 
 impl OpenFxFilterSession {
     /// Peak controlled frame storage for this session: two shared rasters,
-    /// native Source and Output storage, and the returned Float32 raster.
+    /// and the returned Float32 raster. Native image handles borrow mappings.
     ///
     /// This is a logical frame charge, counted once for shared physical pages.
     /// It excludes executable mappings, control metadata and arbitrary private
@@ -134,7 +134,7 @@ impl OpenFxFilterSession {
             .checked_mul(height as usize)
             .ok_or_else(|| invalid("frame dimensions overflow"))?;
         validate_frame(width, height, count)?
-            .checked_mul(5)
+            .checked_mul(3)
             .ok_or_else(|| invalid("native frame storage overflows"))
     }
 
@@ -498,7 +498,9 @@ fn write_response(stream: &mut TcpStream, response: &Response) -> Result<(), Ope
     })
 }
 
-fn map_frames(prepare: &Prepare) -> Result<(fs::File, memmap2::MmapMut, usize), OpenFxHostError> {
+fn map_frames(
+    prepare: &Prepare,
+) -> Result<(fs::File, memmap2::Mmap, memmap2::MmapMut), OpenFxHostError> {
     let count = (prepare.width as usize)
         .checked_mul(prepare.height as usize)
         .ok_or_else(|| invalid("frame dimensions overflow"))?;
@@ -514,8 +516,15 @@ fn map_frames(prepare: &Prepare) -> Result<(fs::File, memmap2::MmapMut, usize), 
     }
     // SAFETY: the parent keeps this exact file/extent and transfers exclusive
     // access through sequenced control messages. Native pointers never escape a call.
-    let map = unsafe { MmapOptions::new().len(bytes * 2).map_mut(&file) }.map_err(control_error)?;
-    Ok((file, map, bytes))
+    // The parent's immutable published input is copied before each request.
+    // Child Source pages are read-only; a violating native plugin is isolated
+    // by the supervised process without a per-frame hash or extra raster.
+    let source = unsafe { MmapOptions::new().len(bytes).map(&file) }.map_err(control_error)?;
+    // SAFETY: this validated disjoint Output range has the same sequenced owner
+    // and fixed file lifetime as Source; no parent access occurs during render.
+    let output = unsafe { MmapOptions::new().offset(bytes as u64).len(bytes).map_mut(&file) }
+        .map_err(control_error)?;
+    Ok((file, source, output))
 }
 
 /// Run a resident native session before media, graphics or application startup.
@@ -557,7 +566,7 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
             "native session preparation envelope does not match",
         ));
     }
-    let (_file, mut shared, bytes) = map_frames(&prepare)?;
+    let (_file, input, mut output) = map_frames(&prepare)?;
     verify_worker_binary(
         &prepare.binary_path,
         &prepare.bundle_path,
@@ -624,20 +633,19 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
                     last_frame: timing.last_frame,
                     pixel_aspect_ratio: timing.pixel_aspect_ratio,
                 };
-                let (input, output) = shared.split_at_mut(bytes);
                 let status = if let Some(instance) = session.as_mut() {
-                    instance.render(input, output, &info, &native)
+                    instance.render(&input, &mut output, &info, &native)
                 } else {
                     match NativeSession::create(
                         &binary,
                         &bundle,
                         &identifier,
-                        input,
+                        &input,
                         &info,
                         &native,
                     ) {
                         Ok(mut instance) => {
-                            let status = instance.render(input, output, &info, &native);
+                            let status = instance.render(&input, &mut output, &info, &native);
                             session = Some(instance);
                             status
                         }

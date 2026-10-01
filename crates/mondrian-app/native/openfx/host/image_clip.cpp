@@ -32,21 +32,15 @@
 namespace MondrianOpenFx {
   FrameImage::FrameImage(FilterClipInstance &clip, OfxTime time, int view)
     : OFX::Host::ImageEffect::Image(clip) /// this ctor will set basic props on the image
+    , _frame(clip.frameState())
     , _data(NULL)
   {
     const auto& state = clip.frameState();
     const int width = state.info.width;
     const int height = state.info.height;
-    if (clip.isOutput()) {
-      _ownedData = std::make_unique<OfxRGBAColourF[]>(size_t(width) * size_t(height));
-      _data = _ownedData.get();
-    } else {
-      // Source images are read-only in the OFX contract. The C property suite
-      // exposes a void pointer, but no extra raster copy is necessary for each
-      // fetch. This session's fixed extent and serialized native actions keep
-      // the input vector stable until every valid action-scoped image release.
-      _data = const_cast<OfxRGBAColourF*>(state.input.data());
-    }
+    // Each fetch owns an independent property handle; both clips borrow the
+    // active frame mapping, which outlives every legal action-scoped handle.
+    _data = clip.isOutput() ? state.output : const_cast<OfxRGBAColourF*>(state.input);
 
     // render scale x and y of 1.0
     setDoubleProperty(kOfxImageEffectPropRenderScale, 1.0, 0);
@@ -68,36 +62,15 @@ namespace MondrianOpenFx {
 
     // row bytes
     setIntProperty(kOfxImagePropRowBytes, -width * sizeof(OfxRGBAColourF));
+    _frame.imageHandles.fetch_add(1);
   }
 
-  OfxRGBAColourF* FrameImage::pixel(int x, int y) const
-  {
-    OfxRectI bounds = getBounds();
-    if ((x >= bounds.x1) && ( x< bounds.x2) && ( y >= bounds.y1) && ( y < bounds.y2) )
-    {
-      int rowBytes = getIntProperty(kOfxImagePropRowBytes);
-      int offset = (y - bounds.y1) * rowBytes + (x - bounds.x1) * sizeof(OfxRGBAColourF);
-      char* bottomRow = reinterpret_cast<char*>(_data + (bounds.y2 - bounds.y1 - 1) * (bounds.x2 - bounds.x1));
-      return reinterpret_cast<OfxRGBAColourF*>(bottomRow + offset);
-    }
-    return 0;
-  }
-
-  void FrameImage::clearForFrame(double pixelAspectRatio)
-  {
-    const auto bounds = getBounds();
-    const size_t count = size_t(bounds.x2 - bounds.x1) * size_t(bounds.y2 - bounds.y1);
-    std::fill(_data, _data + count, OfxRGBAColourF{0, 0, 0, 0});
-    setDoubleProperty(kOfxImagePropPixelAspectRatio, pixelAspectRatio);
-  }
-
-  FrameImage::~FrameImage() = default;
+  FrameImage::~FrameImage() { _frame.imageHandles.fetch_sub(1); }
 
   FilterClipInstance::FilterClipInstance(FilterEffectInstance* effect, OFX::Host::ImageEffect::ClipDescriptor *desc)
     : OFX::Host::ImageEffect::ClipInstance(effect, *desc)
     , _effect(effect)
     , _name(desc->getName())
-    , _outputImage(NULL)
     , _outputFetched(false)
   {
   }
@@ -110,15 +83,11 @@ namespace MondrianOpenFx {
   void FilterClipInstance::beginFrame()
   {
     _outputFetched = false;
-    if (_outputImage) {
-      _outputImage->clearForFrame(frameState().info.pixel_aspect_ratio);
-    }
+    // The caller supplied a new Output address for this frame. No image
+    // wrapper or native raster survives an action or owns mapped storage.
   }
 
-  FilterClipInstance::~FilterClipInstance()
-  {
-    if (_outputImage) { _outputImage->releaseReference(); }
-  }
+  FilterClipInstance::~FilterClipInstance() = default;
 
   /// Float32 is the only admitted image depth.
   const std::string &FilterClipInstance::getUnmappedBitDepth() const
@@ -233,33 +202,23 @@ namespace MondrianOpenFx {
   /// If bounds is not null, fetch the indicated section of the canonical image plane.
   OFX::Host::ImageEffect::Image* FilterClipInstance::getImage(OfxTime time, const OfxRectD *optionalBounds)
   {
-    if (!getConnected() || !std::isfinite(time) || time != frameState().info.frame) { return nullptr; }
-    if(_name == "Output") {
-      if(!_outputImage) {
-        // make a new ref counted image
-        _outputImage = new FrameImage(*this, 0);
-      }
-
-      _outputFetched = true;
-      // add another reference to the member image for this fetch
-      // as we have a ref count of 1 due to construction, this will
-      // cause the output image never to delete by the plugin
-      // when it releases the image
-      _outputImage->addReference();
-
-      // return it
-      return _outputImage;
+    const auto& frame = frameState();
+    if (!getConnected() || !frame.imagesAvailable || !frame.input ||
+        (isOutput() && (!frame.output || !frame.outputAvailable)) || !std::isfinite(time) || time != frame.info.frame) {
+      return nullptr;
     }
-    else {
-      // Fetch on demand for the input clip.
-      // It does get deleted after the plugin is done with it as we
-      // have not incremented the auto ref
-      //
-      // You should do somewhat more sophisticated image management
-      // than this.
-      FrameImage *image = new FrameImage(*this, time);
+    if (isOutput()) {
+      std::lock_guard<std::mutex> lock(_outputFetchMutex);
+      auto* image = new FrameImage(*this, time);
+      // Initialize only when the current render actually requests Output.
+      // An unfetched/denied frame never writes the caller's staging buffer.
+      if (!_outputFetched) {
+        std::fill(frame.output, frame.output + frame.pixelCount, OfxRGBAColourF{0, 0, 0, 0});
+        _outputFetched = true;
+      }
       return image;
     }
+    return new FrameImage(*this, time);
   }
 
 } // MondrianOpenFx

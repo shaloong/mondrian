@@ -124,3 +124,26 @@ cargo test -p mondrian-app --all-features --test openfx_host \
 This interrupts the five-second native action through the scalar Session with
 an owner deadline, then through the Timeline compositor with the owner token.
 Both produce an exact stopped result without quarantining the definition.
+
+The lifetime probe now requires independent overlapping Source and Output image
+handles, releases one and reads the other, then lets Basic fetch again. Native
+handles borrow the action's read-only Source/writable Output mappings. No image
+wrapper or native frame allocation is retained between actions. Output clears
+on its first fetch; an unfetched frame cannot publish an old raster. Factory
+admission now counts three host rasters, plus executor staging; the one-pixel
+boundary is 79/80 bytes, with 48 bytes charged to host storage.
+
+The same probe forbids Source fetches in Create/Destroy, BeginInstanceChanged
+and Begin/EndSequenceRender, and exercises legal user-edited InstanceChanged
+Source fetches. These checks cover actual action availability rather than only
+pointer refresh. The `leak_source` fault probe deliberately leaves one Source
+handle unreleased at Render return: the host rejects output and poisons the
+session so a second render cannot run. The authored UHD test uses the official Basic bundle:
+
+```sh
+cargo test -p mondrian-app --all-features --test openfx_host \
+  authored_uhd_filter_fits_professional_working_grant -- --ignored --nocapture
+```
+
+It rejects a one-byte-short 663,552,000-byte working grant, then renders the
+complete unclamped frame under 768 MiB, including distinct corner samples.

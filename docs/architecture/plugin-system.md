@@ -423,12 +423,18 @@ creates a mirror token or listener thread. Owner stops kill and reap the child
 before the shared mapping is released or a frame is returned; native hang
 qualification covers cancellation and a shorter owner deadline independently.
 
-Source image handles borrow the exclusive session input vector for their
-OFX action lifetime rather than allocating and copying a full raster per fetch.
-Only Output owns a separate image allocation, through RAII storage. The fixed
-extent and serialized native actions keep Source pointers stable. Multiple
-Source fetches therefore do not multiply raster storage; shared mapping,
-session input and retained output remain separate explicit allocations.
+Source and Output handles borrow the current mapped frame only during legal
+OFX actions. Each fetch creates an independent property handle, sharing raster
+storage without owning it. The child maps Source read-only and Output writable.
+RAII retires caller addresses on every initialization/render exit, including
+exceptions. Source can be fetched during Render and user-edited change actions;
+Output is available during Render only. Its first fetch clears the current
+staging range once under a mutex. Unfetched or rejected frames cannot reuse an
+old Output, and no cached image wrapper keeps a prior caller address. An atomic
+per-session live-handle count is checked at each image-enabled action boundary.
+An unreleased handle makes the session fail before publication; remaining
+callbacks cannot fetch images, and the supervised worker is retired instead of
+reusing the invalid instance.
 
 Shared-frame copies poll the owner at one-MiB intervals and again immediately
 before returning preparation or rendered output. Qualification also transfers
@@ -450,9 +456,8 @@ the host envelope, so this binding adds no input raster. Failures restore that
 stage before propagating the typed error; the caller's published frame remains
 unchanged. Session eviction, errors and generation barriers retire the child.
 
-The current controlled host-frame charge is five complete Float32 rasters:
-two shared mapping ranges, native session Source, native Output, and the
-returned output vector at peak. Shared physical pages are counted once. This
+The current controlled host-frame charge is three complete Float32 rasters:
+two shared mapping ranges and the returned output vector at peak. Shared physical pages are counted once. This
 charge is checked before worker creation, together with executor staging and
 live graph values. Heterogeneous preparation includes active recipe charges
 in cpu_required_working_bytes(), which Export's existing attempt contract
@@ -488,3 +493,11 @@ The heterogeneous preparer still rejects a CPU-only graph ending with a GPU
 upload and no GPU dispatch suffix; such a route must not be assumed to migrate
 native work to that executor. Production retained-native grants and additional
 format/vendor qualification remain outstanding.
+
+The pinned official Basic authored-UHD qualification executes a 3840x2160
+unclamped Float32 frame through the production factory. Two executor rasters
+plus three host rasters require 663,552,000 logical bytes; a one-byte-short
+working grant rejects, and a 768 MiB grant succeeds with all pixels and distinct
+corner samples preserved. Decoded input, metadata and arbitrary native heaps
+remain separately owned. This is active frame/pixel qualification, not proof of
+production retained-native grants, realtime throughput or DCI/8K support.

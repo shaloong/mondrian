@@ -74,6 +74,8 @@ int mondrian_openfx_session_create(
 #endif
     ;
 
+// Output is caller-owned staging storage, valid only when status is zero.
+// Native actions may modify staging on failure; publication belongs to Rust.
 int mondrian_openfx_session_render(
     struct MondrianOpenFxSession* session, const void* input, void* output,
     size_t frame_bytes, const struct MondrianOpenFxFrameInfo* frame_info,

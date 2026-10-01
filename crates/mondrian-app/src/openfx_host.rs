@@ -884,6 +884,7 @@ mod shared_frame_tests {
             "instance_required",
             "become_required",
             "unfetched",
+            "leak_source",
         ] {
             if !qualification_child(TEST, &[(MODE, mode)]) {
                 continue;
@@ -945,6 +946,20 @@ mod shared_frame_tests {
             }
             let mut session = created.expect("admitted probe session");
             let mut output = vec![0xa5; input.len()];
+            if mode == "leak_source" {
+                let source_before = input.clone();
+                assert_eq!(
+                    session.render(&input, &mut output, &info, &parameters(1.5)),
+                    5
+                );
+                assert_eq!(input, source_before);
+                assert_eq!(
+                    session.render(&input, &mut output, &info, &parameters(1.5)),
+                    2
+                );
+                return;
+            }
+
             assert_eq!(
                 session.render(&input, &mut output, &info, &parameters(1.5)),
                 0
