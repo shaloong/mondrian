@@ -502,11 +502,29 @@ impl GpuTimestampPassIntervalTimer {
         (R, GpuPassTimestampIntervalReceipt),
         crate::gpu_command::GpuPassTimestampCoverageError,
     > {
+        let (result, receipt) = self.record_optional(encoder, record)?;
+        Ok((
+            result,
+            receipt.ok_or(crate::gpu_command::GpuPassTimestampCoverageError::NoPass)?,
+        ))
+    }
+
+    /// Record a production transform which may be an exact resource alias.
+    ///
+    /// `None` proves this borrowed scope recorded no GPU commands or completion
+    /// map; it is not a measured zero-duration sample. Any real work requires a
+    /// consuming receipt, with the same coverage and query ownership rules.
+    pub fn record_optional<R>(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        record: impl FnOnce(&mut dyn crate::gpu_command::GpuCommandEncoder) -> R,
+    ) -> Result<
+        (R, Option<GpuPassTimestampIntervalReceipt>),
+        crate::gpu_command::GpuPassTimestampCoverageError,
+    > {
         if self.recording_in_flight {
             return Err(crate::gpu_command::GpuPassTimestampCoverageError::RecordingInFlight);
         }
-        // Keep the query allocation unavailable until a consuming read proves
-        // completion. Abandoning a receipt cannot permit query reuse in flight.
         self.recording_in_flight = true;
         let mut measured = GpuPassTimestampRecorder::new_interval(
             encoder,
@@ -514,7 +532,11 @@ impl GpuTimestampPassIntervalTimer {
             self.leading_copy_anchor.clone(),
         );
         let result = record(&mut measured);
-        Ok((result, measured.finish_interval()?))
+        let receipt = measured.finish_optional_interval()?;
+        if receipt.is_none() {
+            self.recording_in_flight = false;
+        }
+        Ok((result, receipt))
     }
 
     /// Consume this timer's receipt only after the exact submission completed.
@@ -1344,6 +1366,25 @@ mod tests {
         }
         let mut interval_timer =
             super::GpuTimestampPassIntervalTimer::new(&device, &queue, 2).unwrap();
+        for _ in 0..3 {
+            let mut empty = device.create_command_encoder(&Default::default());
+            let (alias, receipt) = interval_timer
+                .record_optional(&mut empty, |_| 42_u64)
+                .map_err(|error| anyhow::anyhow!("empty interval: {error:?}"))?;
+            assert_eq!(alias, 42);
+            assert!(receipt.is_none());
+            assert!(!interval_timer.recording_in_flight);
+        }
+        let mut map_timer = super::GpuTimestampPassIntervalTimer::new(&device, &queue, 1).unwrap();
+        let mut map_only = device.create_command_encoder(&Default::default());
+        assert!(matches!(
+            map_timer.record_optional(&mut map_only, |measured| {
+                measured.map_buffer_on_submit(&readback, wgpu::MapMode::Read, Box::new(|_| {}));
+            }),
+            Err(crate::gpu_command::GpuPassTimestampCoverageError::UnmeasuredStageBoundary)
+        ));
+        assert!(map_timer.recording_in_flight);
+        drop(map_only);
         for _ in 0..3 {
             let mut encoder = device.create_command_encoder(&Default::default());
             let (_, receipt) = interval_timer

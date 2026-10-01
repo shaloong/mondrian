@@ -237,6 +237,7 @@ pub struct GpuPassTimestampRecorder<'a> {
     leading_copy_anchor: GpuLeadingCopyTimestampAnchor,
     token: Option<GpuTimestampToken>,
     coverage: PassCoverage,
+    completion_map_requested: std::cell::Cell<bool>,
 }
 
 #[derive(Clone)]
@@ -372,6 +373,14 @@ impl PassCoverage {
         }
         self.error.map_or(Ok(self.next_query), Err)
     }
+
+    fn finish_optional_interval(self) -> Result<Option<u32>, GpuPassTimestampCoverageError> {
+        if self.next_query == 0 && !self.trailing_commands && self.error.is_none() {
+            Ok(None)
+        } else {
+            self.finish_interval().map(Some)
+        }
+    }
 }
 
 impl<'a> GpuPassTimestampRecorder<'a> {
@@ -388,6 +397,7 @@ impl<'a> GpuPassTimestampRecorder<'a> {
             leading_copy_anchor,
             token: Some(token),
             coverage: PassCoverage::new(capacity),
+            completion_map_requested: std::cell::Cell::new(false),
         }
     }
 
@@ -404,16 +414,23 @@ impl<'a> GpuPassTimestampRecorder<'a> {
             leading_copy_anchor,
             token: None,
             coverage,
+            completion_map_requested: std::cell::Cell::new(false),
         }
     }
 
-    pub(crate) fn finish_interval(
+    pub(crate) fn finish_optional_interval(
         self,
-    ) -> Result<GpuPassTimestampIntervalReceipt, GpuPassTimestampCoverageError> {
-        Ok(GpuPassTimestampIntervalReceipt {
-            query_set: self.query_set,
-            query_count: self.coverage.finish_interval()?,
-        })
+    ) -> Result<Option<GpuPassTimestampIntervalReceipt>, GpuPassTimestampCoverageError> {
+        // An identity alias must not hide a completion-bound CPU map behind
+        // the absence of render/compute work.
+        if self.completion_map_requested.get() {
+            return Err(GpuPassTimestampCoverageError::UnmeasuredStageBoundary);
+        }
+        Ok(
+            self.coverage.finish_optional_interval()?.map(|query_count| {
+                GpuPassTimestampIntervalReceipt { query_set: self.query_set, query_count }
+            }),
+        )
     }
 
     fn anchor_leading_copy(&mut self) {
@@ -566,6 +583,7 @@ impl GpuCommandEncoder for GpuPassTimestampRecorder<'_> {
         mode: wgpu::MapMode,
         callback: Box<dyn FnOnce(Result<(), wgpu::BufferAsyncError>) + Send + 'static>,
     ) {
+        self.completion_map_requested.set(true);
         self.encoder.map_buffer_on_submit(buffer, mode, .., callback);
     }
 
@@ -712,6 +730,16 @@ mod tests {
         assert_eq!(
             PassCoverage::new(8).finish_interval().unwrap_err(),
             Error::NoPass
+        );
+        assert_eq!(
+            PassCoverage::new(8).finish_optional_interval().unwrap(),
+            None
+        );
+        let mut copy_only = PassCoverage::new(8);
+        copy_only.unmeasured_command();
+        assert_eq!(
+            copy_only.finish_optional_interval().unwrap_err(),
+            Error::LeadingCommands
         );
         let mut exhausted = PassCoverage::new(2);
         exhausted.pass(false);

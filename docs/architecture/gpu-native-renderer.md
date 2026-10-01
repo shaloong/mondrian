@@ -1716,6 +1716,14 @@ sample counts, cache gates and GPU/CPU time budgets are unchanged. Color View
 and input-transform gates wait for all cold and warmup GPU submissions to
 complete before measurement; submitting warmup work alone is not completion.
 The reports retain this completion fact alongside the original warmup count.
+The input-transform gate uses the same complete pass interval on pass-boundary
+GPUs. Exact frame-contract identity is separately audited through that command
+recorder: no pass, copy, clear, query write or completion map is accepted as
+hidden work. Its report carries `AuditedNoGpuCommands` and a null GPU timing,
+never a synthetic zero or CPU duration. Executed matrix/OETF and input transforms
+retain all original samples and the 5 ms budget; missing or incomplete hardware
+timing still rejects qualification. No empty GPU submission is needed for an
+actual resource alias.
 
 Submitted query ownership remains live until actual work completion. The owner
 then submits query resolution/readback in a separate command buffer; GPU queue
