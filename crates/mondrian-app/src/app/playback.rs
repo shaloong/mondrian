@@ -2983,10 +2983,17 @@ mod tests {
                         if previous_generation.is_some() {
                             let loss =
                                 audio.output_lifecycle.last_loss.expect("retired stream receipt");
-                            assert_eq!(
-                                loss.reason,
-                                mondrian_media::RealtimeAudioOutputLossReason::DefaultDeviceChanged
-                            );
+                            // CoreAudio may fail the old native stream before
+                            // the owner's periodic default-identity poll. The
+                            // production owner preserves that observed failure;
+                            // the new physical device ID proves this transition.
+                            match loss.reason {
+                                mondrian_media::RealtimeAudioOutputLossReason::DefaultDeviceChanged => {}
+                                mondrian_media::RealtimeAudioOutputLossReason::BackendFailure => {
+                                    assert!(loss.final_output.stream_failed, "backend loss lacks a native failure");
+                                }
+                                reason => panic!("unexpected default-device retirement: {reason:?}"),
+                            }
                             assert_eq!(
                                 Some(loss.final_output.stream_generation),
                                 previous_generation
@@ -2997,7 +3004,7 @@ mod tests {
                             }
                             frozen_loss = Some(loss);
                         }
-                        if since.elapsed() >= Duration::from_millis(200) {
+                        if since.elapsed() >= Duration::from_secs(1) {
                             assert_eq!(audio.active_interval_underrun_frames, 0);
                             return (
                                 output.stream_generation,
@@ -3046,15 +3053,22 @@ mod tests {
                 wait_for_device(&mut state, Some(second_generation), Some(&original), true);
             assert_eq!(restored, original);
             observations.push(evidence);
+            let lifecycle = state.audio_playback_snapshot().output_lifecycle;
+            assert_eq!(lifecycle.lost_count, 2);
             assert_eq!(
-                state.audio_playback_snapshot().output_lifecycle.default_device_change_count,
+                lifecycle.default_device_change_count + lifecycle.backend_loss_count,
                 2
             );
+            assert_eq!(lifecycle.controlled_recycle_count, 0);
+            assert_eq!(lifecycle.device_selection_change_count, 0);
+            assert_eq!(lifecycle.deactivation_failed_count, 0);
         }));
+        let final_audio_snapshot = state.audio_playback_snapshot();
         let shutdown = state.shutdown_audio_playback_and_wait();
         let report = serde_json::json!({
             "classification": if result.is_ok() && shutdown.all_workers_terminated() { "Passed" } else { "Failed" },
             "observations": observations,
+            "final_audio_snapshot": format!("{final_audio_snapshot:?}"),
             "shutdown": shutdown,
             "limitation": "physical default-output round trip; no video or endurance qualification",
         });
