@@ -322,6 +322,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         if !residency_admission
                             .is_some_and(mondrian_playback::FrameStoreAdmission::is_admitted)
                         {
+                            // The Broker producer has resolved, but no resident
+                            // frame can satisfy its dependents. Release that
+                            // exact wait even when optional Prefetch retirement
+                            // is not an authoritative source failure.
+                            outcome.candidate_retry_required |=
+                                self.invalidate_evaluations_for_media_key(&result.key);
                             tracing::warn!(
                                 asset_id = %result.key.asset_id,
                                 source_sample = ?result.key.source_sample(),

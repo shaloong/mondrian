@@ -1277,6 +1277,15 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     );
                     remaining_prefetch_jobs = remaining_prefetch_jobs.saturating_sub(scheduled);
                     if nearest_owned && scheduled == nearest_requests {
+                        // The canonical plan ends before the activation. Near
+                        // that endpoint, require every remaining interval, not
+                        // nonexistent intervals beyond the plan's own bound.
+                        // Missing old-source pictures still prevent the open.
+                        let remaining_intervals = usize::try_from(
+                            activation_frame.saturating_sub(frame).saturating_sub(1),
+                        )
+                        .unwrap_or(usize::MAX);
+                        let coverage_frames = coverage_frames.min(remaining_intervals);
                         let mut coverage = self.plan_future_media_prefix_scoped(
                             snapshot,
                             proxy_demands,
@@ -1292,6 +1301,18 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         );
                         let resident_coverage = coverage.ready_media_frames == coverage_frames
                             && coverage.preservable_media_frames == coverage_frames;
+                        tracing::debug!(
+                            frame,
+                            activation_frame,
+                            coverage_frames,
+                            ready_frames = coverage.ready_media_frames,
+                            preservable_frames = coverage.preservable_media_frames,
+                            frontier = coverage.admission_limit_reached,
+                            missing_requests = coverage.requests.len(),
+                            remaining_prefetch_jobs,
+                            resident_coverage,
+                            "cold source worker coverage admission"
+                        );
                         source_coverage_guards = std::mem::take(&mut coverage.resident_guards);
                         let scheduled = self.admit_future_media_prefix(
                             coverage,

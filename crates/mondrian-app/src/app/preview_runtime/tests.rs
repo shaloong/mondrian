@@ -6486,6 +6486,110 @@ fn cold_preparation_coverage_uses_engine_rate_and_requires_bounded_observations(
 }
 
 #[test]
+fn cold_source_preparation_requires_only_the_remaining_old_source_intervals() {
+    for near_resident in [false, true] {
+        let (mut state, root) = state_with_sequential_invalid_video_assets();
+        let mut ids = Vec::new();
+        for name in ["third.mp4", "overlay.mp4"] {
+            let path = root.join(name);
+            std::fs::write(&path, b"invalid fixture").expect("fixture");
+            ids.push(commit_preview_test_media(
+                state.asset_library().expect("library"),
+                path.clone(),
+                rec709_video_media_info(std::fs::metadata(path).expect("metadata").len()),
+            ));
+        }
+        let mut sequence = state.active_sequence().expect("sequence").clone();
+        let tb = sequence.time_base();
+        sequence.video_tracks[0]
+            .add_clip(Clip::new(ids[0], tt(96, tb), tt(48, tb)).expect("third"))
+            .expect("insert third");
+        for position in [0, 48, 96] {
+            sequence.video_tracks[1]
+                .add_clip(Clip::new(ids[1], tt(position, tb), tt(48, tb)).expect("overlay"))
+                .expect("insert overlay");
+        }
+        state.test_set_sequence(Some(sequence));
+        state.play().expect("play");
+        let demand = state.pending_playback_frame_demand_identity().expect("priming demand");
+        state.observe_video_preroll_at_wall(demand, 1, 1, true, true, Instant::now());
+        deliver_test_current_frame(&mut state, mondrian_playback::FrameDeliveryKind::Ready);
+        assert!(!state.preview_execution_snapshot(Instant::now()).transport().is_priming());
+        let service = WindowPreviewAdapter::new_without_workers_for_test();
+        synchronize_visual_program_for_state(&service, &state);
+        let mut opened = test_preview_decode_diagnostics(
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewHardwareDecodeDecision::GpuResidentNative,
+            PreviewHardwareDecodeBlocker::None,
+        );
+        opened.elapsed_us = 20_000;
+        service.record_startup_preroll_decode(opened, 0);
+        let sequence = state.active_sequence().expect("sequence");
+        // Discover the edit outside the rolling window. The unstarted near
+        // work is then canceled, leaving the same exact activation memo.
+        schedule_media_prefetches_for_state(&service, &state, sequence, 70);
+        for key in service.scheduler.pending_keys() {
+            service.scheduler.cancel(&key);
+        }
+        let snapshot = state.preview_execution_snapshot(Instant::now());
+        let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+        let resolution = Resolution { width, height };
+        let near = future_media_prefix_keys_for_state(&service, &state, 94, 1, resolution);
+        let far = future_media_prefix_keys_for_state(&service, &state, 95, 1, resolution);
+        // Both physical workers are occupied by the existing composition.
+        // The new main source must open on the old main source's owner.
+        for key in near.iter().chain(far.iter()) {
+            service.future_media_window.borrow_mut().remember_playback_worker_affinity(
+                key.decode.source().clone(),
+                if key.asset_id == ids[1] {
+                    MediaPreviewWorkerLane::Playback
+                } else {
+                    MediaPreviewWorkerLane::NonPlayback
+                },
+            );
+        }
+        if near_resident {
+            for key in near.iter().filter(|key| key.asset_id != ids[1]) {
+                assert!(admit_test_media_frame(
+                    &mut service.frame_store.borrow_mut(),
+                    key.clone(),
+                    test_media_frame(4),
+                    MediaPreviewRequestPriority::Prefetch,
+                ));
+            }
+        }
+        let pending_overlay = near.iter().find(|key| key.asset_id == ids[1]).expect("overlay");
+        assert_eq!(
+            service.request_media_preview(
+                pending_overlay.clone(),
+                crate::app::preview_access_mode::MediaPreviewRequestIntent::Prefetch,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                None,
+                None,
+                PreviewDecodeAdaptiveHints::default(),
+            ),
+            request_scheduler::MediaPreviewRequestAdmission::Scheduled
+        );
+        assert_eq!(service.jobs.diagnostics().queued_prefetch_jobs, 1);
+        assert_eq!(
+            service.future_media_window.borrow_mut().cold_activation(94, 214),
+            Some(Some(96)),
+            "the same activation must remain authoritative at the edit endpoint"
+        );
+        schedule_media_prefetches_for_state(&service, &state, sequence, 94);
+        let cold = far.iter().find(|key| key.asset_id == ids[0]).expect("cold source");
+        assert_eq!(
+            service.scheduler.has_pending_key(cold),
+            near_resident,
+            "the last complete old-source interval permits cold work; a missing interval keeps priority"
+        );
+        service.shutdown();
+        drop(state);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+}
+
+#[test]
 fn distinct_initial_moving_sources_use_both_existing_session_owners() {
     for worker_count in [1, 2, 3] {
         let mut window = FutureMediaWindowCache::default();
@@ -13813,6 +13917,29 @@ fn speculative_residency_rejection_does_not_poison_current_generation() {
         let generation = service.scheduler.begin_generation();
         service.execution.borrow_mut().invalidate(|| generation);
         let key = test_media_key(903);
+        let sequence = Sequence::new("rejected-residency-producer");
+        let evaluation_key = FrameEvaluationKey {
+            sequence_id: sequence.id,
+            sequence_revision: sequence.revision,
+            author_generation: 0,
+            frame: 0,
+            width: 320,
+            height: 180,
+            runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+            display_color_space: ColorSpace::Srgb,
+            display_contract_identity: None,
+        };
+        let unrelated_evaluation = FrameEvaluationKey { frame: 1, ..evaluation_key };
+        for (evaluation, dependency) in [
+            (evaluation_key, key.clone()),
+            (unrelated_evaluation, test_media_key(905)),
+        ] {
+            service.evaluation_working_set.borrow_mut().insert_waiting(
+                evaluation,
+                MediaPreviewRequestPriority::Current,
+                Arc::from([EvaluationDependency::MediaProducer(dependency)]),
+            );
+        }
         let identity = PreviewProductionRuntime::<()>::test_frame_demand_identity();
         let demand = owns_current.then_some(identity);
         let priority = if owns_current {
@@ -13892,6 +14019,18 @@ fn speculative_residency_rejection_does_not_poison_current_generation() {
             .expect("decoded result whose actual payload exceeds its grant");
         let outcome =
             service.poll_finished_outcome_with_budget(8, Duration::from_millis(5), demand);
+        assert!(
+            outcome.candidate_retry_required,
+            "a resolved producer whose frame could not become resident must release its dependent wait"
+        );
+        let mut evaluations = service.evaluation_working_set.borrow_mut();
+        assert!(evaluations
+            .waiting_for(evaluation_key, MediaPreviewRequestPriority::Current)
+            .is_none());
+        assert!(evaluations
+            .waiting_for(unrelated_evaluation, MediaPreviewRequestPriority::Current)
+            .is_some());
+        drop(evaluations);
         let failure = service.media_execution_failures.borrow().get(&key).copied();
         if speculative {
             assert_eq!(
