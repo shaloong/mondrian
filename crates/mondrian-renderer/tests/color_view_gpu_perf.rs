@@ -224,6 +224,7 @@ struct ColorViewGpuPerfReport {
     height: u32,
     samples_per_view: usize,
     warmups_per_view: usize,
+    warmup_gpu_submissions_completed: bool,
     input_contract: &'static str,
     measured_region: &'static str,
     adapter: AdapterReport,
@@ -260,6 +261,7 @@ struct ColorTransformGpuPerfReport {
     height: u32,
     samples_per_transform: usize,
     warmups_per_transform: usize,
+    warmup_gpu_submissions_completed: bool,
     measured_region: &'static str,
     adapter: AdapterReport,
     runtime_cache: TransformRuntimeCacheReport,
@@ -507,7 +509,7 @@ async fn standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2() -> Result<
         eprintln!(
             "MONDRIAN_COLOR_VIEW_GPU_PERF_JSON={}",
             serde_json::json!({
-                "schema_version": 4,
+                "schema_version": 5,
                 "scenario": "renderer_color_view_4k_gpu_timestamp",
                 "skipped": "no real adapter with pass-boundary timestamp-query support"
             })
@@ -582,6 +584,14 @@ async fn standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2() -> Result<
         record_view_sample(&context, &mut runtime, &input, &standard_hlg_case, None)?;
         record_view_sample(&context, &mut runtime, &input, &aces_pq_case, None)?;
     }
+
+    // Cold and warmup samples intentionally have no query timer. Submission
+    // alone is not GPU warmup completion: drain this benchmark's queue before
+    // any measured pass begins, preserving the original workload and counts.
+    context
+        .device
+        .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+        .context("complete color-view cold and warmup GPU submissions")?;
 
     let standard_sdr_shader = runtime
         .shader_cache_mut()
@@ -680,12 +690,13 @@ async fn standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2() -> Result<
     };
     let info = context.adapter.get_info();
     let report = ColorViewGpuPerfReport {
-        schema_version: 4,
+        schema_version: 5,
         scenario: "renderer_color_view_4k_gpu_timestamp",
         width: WIDTH,
         height: HEIGHT,
         samples_per_view: sample_count,
         warmups_per_view: WARMUP_COUNT,
+        warmup_gpu_submissions_completed: true,
         input_contract:
             "GPU-resident RGBA32F Linear Rec.2020 spatially varying compositor output",
         measured_region:
@@ -778,7 +789,7 @@ async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> 
         eprintln!(
             "MONDRIAN_COLOR_TRANSFORM_GPU_PERF_JSON={}",
             serde_json::json!({
-                "schema_version": 2,
+                "schema_version": 3,
                 "scenario": "renderer_color_transform_4k_gpu_timestamp",
                 "skipped": "no real adapter with complete encoder timestamp-query support"
             })
@@ -878,6 +889,11 @@ async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> 
         }
     }
 
+    context
+        .device
+        .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+        .context("complete input-transform cold and warmup GPU submissions")?;
+
     let shaders = [
         None,
         Some(
@@ -955,12 +971,13 @@ async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> 
     let [identity, matrix_oetf, rec709_to_working, camera_log_to_working] = reports;
     let info = context.adapter.get_info();
     let report = ColorTransformGpuPerfReport {
-        schema_version: 2,
+        schema_version: 3,
         scenario: "renderer_color_transform_4k_gpu_timestamp",
         width: WIDTH,
         height: HEIGHT,
         samples_per_transform: sample_count,
         warmups_per_transform: WARMUP_COUNT,
+        warmup_gpu_submissions_completed: true,
         measured_region:
             "production transform dispatch; exact identity contracts alias the input with zero passes; executed OCIO passes exclude source initialization, upload, and timestamp readback",
         adapter: AdapterReport {
