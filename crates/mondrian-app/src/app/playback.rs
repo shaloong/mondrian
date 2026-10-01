@@ -2029,16 +2029,6 @@ impl AppState {
             observed_timestamp.min(deadline)
         });
         let kind = ticket.delivery_kind_at(visibility_timestamp);
-        if kind != FrameDeliveryKind::Ready {
-            tracing::debug!(
-                demand = ?ticket.identity(),
-                deadline = ?ticket.deadline(),
-                observed_timestamp = ?observed_timestamp,
-                visibility_timestamp = ?visibility_timestamp,
-                kind = ?kind,
-                "already-visible presentation exceeded its carried deadline"
-            );
-        }
         if !matches!(kind, FrameDeliveryKind::Ready | FrameDeliveryKind::Degraded) {
             return FramePresentationDisposition::LostAuthority;
         }
@@ -2094,16 +2084,6 @@ impl AppState {
         else {
             return FramePresentationDisposition::LostAuthority;
         };
-        if kind != FrameDeliveryKind::Ready {
-            tracing::debug!(
-                demand = ?ticket.identity(),
-                deadline = ?ticket.deadline(),
-                completion_timestamp = ?completion_timestamp,
-                carried_kind = ?ticket.delivery_kind_at(completion_timestamp),
-                kind = ?kind,
-                "frame presentation exceeded its carried deadline or audio phase budget"
-            );
-        }
         if kind == FrameDeliveryKind::Late {
             return self
                 .complete_frame_presentation_at_timestamp(
@@ -2305,6 +2285,15 @@ impl AppState {
             }
         };
         let accepted = application.accepted();
+        if accepted && application.delivery().kind() != FrameDeliveryKind::Ready {
+            tracing::debug!(
+                delivery = ?application.delivery(),
+                demand = ?application.demand(),
+                clock_phase = ?application.clock_phase(),
+                transport_before = ?application.transport_state_before(),
+                "Engine accepted a non-Ready Frame Delivery"
+            );
+        }
         let after = application.snapshot();
         if let Err(error) = self.playback_evidence.observe_delivery(application) {
             tracing::warn!(%error, "rejected Playback Evidence Frame Delivery");
