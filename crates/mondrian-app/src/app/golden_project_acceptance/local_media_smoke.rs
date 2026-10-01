@@ -17,7 +17,7 @@ use crate::app::ui_actions::*;
 use crate::app::AppState;
 use anyhow::{ensure, Context};
 use mondrian_core::{
-    timeline_data::FieldOrder, FramePosition, PictureInterpretationOverrides,
+    timeline_data::FieldOrder, ColorSpace, FramePosition, PictureInterpretationOverrides,
     ProjectColorEnvironment, ProjectSettings, Rational, Resolution, TimelineTime,
 };
 use mondrian_export::preset::{ExportPreset, TimelineExportRange};
@@ -85,6 +85,8 @@ pub struct LocalMediaSmokeSettings {
     pub phases: LocalMediaSmokePhases,
     /// One video source, or that source plus a full-duration alpha overlay.
     pub video_layers: u8,
+    /// Authored Program Output; source metadata and color interpretation remain unchanged.
+    pub program_color_space: ColorSpace,
 }
 
 impl LocalMediaSmokeSettings {
@@ -117,7 +119,25 @@ impl LocalMediaSmokeSettings {
             (1..=2).contains(&self.video_layers),
             "video layers must be 1 or 2"
         );
+        ensure!(
+            matches!(
+                self.program_color_space,
+                ColorSpace::Rec709 | ColorSpace::Rec2100Pq | ColorSpace::Rec2100Hlg
+            ),
+            "local profile requires explicit Rec.709, Rec.2100 PQ or Rec.2100 HLG Program Output"
+        );
         Ok(())
+    }
+
+    fn sequence_settings(self) -> SequenceSettings {
+        let mut settings = SequenceSettings {
+            resolution: self.resolution,
+            preview: SequencePreviewSettings { resolution_scale: 1.0, ..Default::default() },
+            frame_rate: self.frame_rate,
+            ..SequenceSettings::default()
+        };
+        settings.color.program_output.color_space = self.program_color_space;
+        settings
     }
 }
 
@@ -148,6 +168,7 @@ pub(super) fn run_proxy_control(
             frame_rate: Rational::FPS_24,
             phases: LocalMediaSmokePhases::All,
             video_layers: 2,
+            program_color_space: ColorSpace::Rec709,
         },
         true,
     )
@@ -190,13 +211,14 @@ fn run_profile(
         });
     let deadline = started + Duration::from_secs(hard_deadline_seconds);
     let profile = if proxy_control {
-        "local-media-proxy-control-three-phase-v2"
+        "local-media-proxy-control-three-phase-v3"
     } else {
-        "local-media-production-profile-v2"
+        "local-media-production-profile-v3"
     };
-    let mut report = json!({"schema_version":2,"profile":profile,"status":"NotRun","commercial_qualification":false,"duration_72h_qualified":false,"physical_surface_qualified":false,"physical_reference_output_qualified":false,"hdr_surface_qualified":false,"original_native_media_qualified":false,"proxy_control":proxy_control,"phase_seconds":phase_seconds,"hard_deadline_seconds":hard_deadline_seconds,"memory_stop_bytes":MEMORY_LIMIT,"maximum_artifacts_per_phase":MAXIMUM_ARTIFACTS,"maximum_retained_artifact_bytes_per_phase":MAXIMUM_RETAINED_ARTIFACT_BYTES,"program_resolution":settings.resolution,"video_layers":settings.video_layers,"selected_phases":settings.phases,"fixtures":[],"phases":[]});
+    let mut report = json!({"schema_version":3,"profile":profile,"status":"NotRun","commercial_qualification":false,"duration_72h_qualified":false,"physical_surface_qualified":false,"physical_reference_output_qualified":false,"hdr_surface_qualified":false,"original_native_media_qualified":false,"proxy_control":proxy_control,"phase_seconds":phase_seconds,"hard_deadline_seconds":hard_deadline_seconds,"memory_stop_bytes":MEMORY_LIMIT,"maximum_artifacts_per_phase":MAXIMUM_ARTIFACTS,"maximum_retained_artifact_bytes_per_phase":MAXIMUM_RETAINED_ARTIFACT_BYTES,"program_resolution":settings.resolution,"video_layers":settings.video_layers,"selected_phases":settings.phases,"fixtures":[],"phases":[]});
     report["program_frame_rate"] =
         json!({"numerator": settings.frame_rate.num, "denominator": settings.frame_rate.den});
+    report["requested_program_color_space"] = json!(settings.program_color_space);
     let mut leases = Vec::new();
     let mut paths = Vec::new();
     let admission = (|| -> anyhow::Result<()> {
@@ -377,15 +399,7 @@ fn run_phase(
                 Instant::now() < deadline,
                 "local smoke deadline elapsed before phase startup"
             );
-            let sequence_settings = SequenceSettings {
-                resolution: settings.resolution,
-                preview: SequencePreviewSettings {
-                    resolution_scale: 1.0,
-                    ..Default::default()
-                },
-                frame_rate: settings.frame_rate,
-                ..SequenceSettings::default()
-            };
+            let sequence_settings = settings.sequence_settings();
             let project_settings = ProjectSettings {
                 proxy_enabled: proxy_control,
                 cache_dir: Some(output.join("media-cache")),
@@ -398,6 +412,8 @@ fn run_phase(
                 ProjectColorEnvironment::default(),
                 project_settings,
             )?;
+            report["authored_program_color"] =
+                json!(state.active_sequence().context("Sequence")?.settings.color);
             runtime_cleanup.track(state.project_runtime_dir().map(Path::to_path_buf));
             let playback_rate = settings.frame_rate;
             let frames_per_second = u64::try_from(playback_rate.num)?;
@@ -1289,6 +1305,31 @@ mod tests {
             frame_rate: Rational::FPS_60,
             phases: LocalMediaSmokePhases::All,
             video_layers: 2,
+            program_color_space: ColorSpace::Rec709,
+        }
+    }
+
+    #[test]
+    fn explicit_smoke_output_uses_the_sequence_program_color_contract() {
+        for output in [
+            ColorSpace::Rec709,
+            ColorSpace::Rec2100Pq,
+            ColorSpace::Rec2100Hlg,
+        ] {
+            let settings =
+                LocalMediaSmokeSettings { program_color_space: output, ..test_settings(30) };
+            settings.validate().expect("bounded authored output");
+            let sequence = settings.sequence_settings();
+            let context = sequence
+                .root_program_color_context(&ProjectColorEnvironment::default())
+                .expect("ordinary production Program Output contract");
+            assert_eq!(
+                context.output_color_space(),
+                mondrian_core::OcioColorSpaceIdentity::Color(output)
+            );
+            assert_eq!(sequence.preview.resolution_scale, 1.0);
+            assert_eq!(sequence.resolution, settings.resolution);
+            assert_eq!(sequence.frame_rate, settings.frame_rate);
         }
     }
 
@@ -1331,6 +1372,20 @@ mod tests {
             test_settings(30)
         )
         .is_err());
+        let output = root.path().join("unsupported-program-output");
+        assert!(run(
+            root.path().to_path_buf(),
+            output.clone(),
+            LocalMediaSmokeSettings {
+                program_color_space: ColorSpace::DisplayP3,
+                ..test_settings(30)
+            },
+        )
+        .is_err());
+        assert!(
+            !output.exists(),
+            "unsupported output created phase resources"
+        );
     }
 
     #[test]

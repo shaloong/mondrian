@@ -15,7 +15,7 @@ fn main() -> anyhow::Result<()> {
     let mut args = std::env::args_os().skip(1);
     let root = args.next().context("expected fixture root; use --help")?;
     if root == "--help" {
-        println!("local_media_smoke <fixture-root> <new-output-dir> <seconds> <640x360|1920x1080|3840x2160> <24|30|60> <all|playback|export|recovery> <1|2>\n\nall: three production phases, 15–900 seconds each\nplayback: real Preview/Audio with seek/cache, 15–1800 seconds\nexport: continuous Export with Playback alone, 15–900 seconds\nrecovery: the same third phase alone, 15–900 seconds\nOutput cadence is explicit; original source resolution and cadence remain unchanged.\nlayers: full-duration video source count, quality remains Full\nExport remains active until observation ends; 256-artifact/2-GiB phase budgets fail closed.\nNot a commercial/HDR/physical Viewer qualification.");
+        println!("local_media_smoke <fixture-root> <new-output-dir> <seconds> <640x360|1920x1080|3840x2160> <24|30|60> <all|playback|export|recovery> <1|2> <rec709|pq|hlg>\n\nall: three production phases, 15–900 seconds each\nplayback: real Preview/Audio with seek/cache, 15–1800 seconds\nexport: continuous Export with Playback alone, 15–900 seconds\nrecovery: the same third phase alone, 15–900 seconds\nOutput cadence and Program Output are explicit; original source resolution, cadence and color metadata remain unchanged.\nlayers: full-duration video source count, quality remains Full\nExport remains active until observation ends; 256-artifact/2-GiB phase budgets fail closed.\nNot a commercial/HDR/physical Viewer qualification.");
         return Ok(());
     }
     let root = PathBuf::from(root);
@@ -45,6 +45,13 @@ fn main() -> anyhow::Result<()> {
     };
     let video_layers =
         args.next().context("expected video layers")?.to_string_lossy().parse::<u8>()?;
+    let program_color_space =
+        match args.next().context("expected Program Output: rec709, pq or hlg")?.to_str() {
+            Some("rec709") => mondrian_core::ColorSpace::Rec709,
+            Some("pq") => mondrian_core::ColorSpace::Rec2100Pq,
+            Some("hlg") => mondrian_core::ColorSpace::Rec2100Hlg,
+            _ => anyhow::bail!("expected Program Output: rec709, pq or hlg"),
+        };
     ensure!(args.next().is_none(), "unexpected argument");
     let report = mondrian_app::app::golden_project_acceptance::run_local_media_smoke(
         root,
@@ -55,6 +62,7 @@ fn main() -> anyhow::Result<()> {
             frame_rate,
             phases,
             video_layers,
+            program_color_space,
         },
     )?;
     println!("MONDRIAN_LOCAL_MEDIA_SMOKE={}", report.display());

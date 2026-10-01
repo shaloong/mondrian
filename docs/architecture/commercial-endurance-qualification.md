@@ -1456,8 +1456,10 @@ QC now passes one exact Instant through picture rescan and regulatory analysis.
 
 `cargo run --locked --profile validation -p mondrian-app --all-features
 --example local_media_smoke -j 2 -- "<fixture-root>" "<new-output-directory>"
-30 640x360 60 all 2` runs three bounded local production stages. Resolution,
-output cadence, phase selection and layer count are explicit. The same cadence
+30 640x360 60 all 2 rec709` runs three bounded local production stages. Resolution,
+output cadence, phase selection, layer count and Program Output (`rec709`, `pq`,
+`hlg`) are explicit. The color selection authors the existing Sequence contract,
+with no source reinterpretation or independent color authority. The same cadence
 binds the authored Sequence, Playback, two-second clips and frozen Export
 sampling; Export retains its existing 120-frame workload at every cadence.
 It never changes original source decode dimensions or cadence.

@@ -578,18 +578,21 @@ Output, the 32 GiB project scale, or commercial performance/endurance gates.
 Build with `cargo build --locked --profile validation -p mondrian-app
 --all-features --bin mondrian --example local_media_smoke -j 2`. Read the resulting executable's
 `--help` before running. Supply explicit fixture root, create-only output,
-seconds, output resolution, output frame rate, selected phases and video-layer count. Source-build
+seconds, output resolution, output frame rate, selected phases, video-layer count
+and Program Output (`rec709`, `pq` or `hlg`). Source-build
 examples may use the existing `MONDRIAN_PREVIEW_DEMUX_WORKER_PATH` and
 `MONDRIAN_MEDIA_PROBE_WORKER_PATH` overrides to select that same-profile
 `mondrian` worker executable. This does not qualify a packaged sealed runtime.
 
 ```text
-local_media_smoke <fixtures> <new-output> 300 1920x1080 60 all 2
-local_media_smoke <fixtures> <new-output> 1800 1920x1080 60 playback 1
-local_media_smoke <fixtures> <new-output> 300 1920x1080 60 export 2
-local_media_smoke <fixtures> <new-output> 300 1920x1080 60 recovery 2
-local_media_smoke <fixtures> <new-output> 30 3840x2160 30 playback 1
-local_media_smoke <fixtures> <new-output> 15 3840x2160 60 playback 1
+local_media_smoke <fixtures> <new-output> 300 1920x1080 60 all 2 rec709
+local_media_smoke <fixtures> <new-output> 1800 1920x1080 60 playback 1 rec709
+local_media_smoke <fixtures> <new-output> 300 1920x1080 60 export 2 rec709
+local_media_smoke <fixtures> <new-output> 300 1920x1080 60 recovery 2 rec709
+local_media_smoke <fixtures> <new-output> 30 3840x2160 30 playback 1 rec709
+local_media_smoke <fixtures> <new-output> 30 3840x2160 30 playback 1 pq
+local_media_smoke <fixtures> <new-output> 30 3840x2160 30 playback 1 hlg
+local_media_smoke <fixtures> <new-output> 15 3840x2160 60 playback 1 rec709
 ```
 
 Output resolution accepts 640x360, 1920x1080 or 3840x2160; output cadence
@@ -598,6 +601,13 @@ Timeline segments and frozen Export sampling. Each Export keeps the existing
 120-frame workload (five, four or two seconds respectively). Source cadence
 remains independent. A short single-layer 4K60 run does not qualify the full sealed
 HDR/effects/scopes matrix.
+
+The color argument authors the ordinary Sequence Program Output contract;
+it does not reinterpret source metadata or install a validation color transform.
+Reports retain both the requested output and the actual owner-derived Sequence
+color settings. Headless PQ/HLG playback does not qualify an HDR display surface
+or physical Viewer observations. Frozen Export keeps its independently authored
+delivery target.
 
 `all` runs the three production phases for 15–900 measured seconds each;
 `playback` runs Preview/Audio with seek/cache for 15–1800 seconds.
