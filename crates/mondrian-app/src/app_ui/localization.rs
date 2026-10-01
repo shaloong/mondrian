@@ -11,6 +11,7 @@ use unic_langid::LanguageIdentifier;
 const ZH_CN_CATALOG: &str = include_str!("../../locales/zh-CN.ftl");
 const EN_US_CATALOG: &str = include_str!("../../locales/en-US.ftl");
 static ZH_CN_RESOURCE: OnceLock<Result<Arc<FluentResource>, String>> = OnceLock::new();
+static PSEUDO_RESOURCE: OnceLock<Result<Arc<FluentResource>, String>> = OnceLock::new();
 static EN_US_RESOURCE: OnceLock<Result<Arc<FluentResource>, String>> = OnceLock::new();
 
 /// A supported product UI locale, independent of Project language metadata.
@@ -123,14 +124,9 @@ impl Localizer {
     /// Format one message with named Fluent arguments. Missing or invalid
     /// requested messages fall back to Chinese, then to the stable message ID.
     pub fn format(&self, message_id: &str, args: Option<&FluentArgs<'_>>) -> String {
-        let value = format_from(&self.requested, message_id, args)
+        format_from(&self.requested, message_id, args)
             .or_else(|| format_from(&self.fallback, message_id, args))
-            .unwrap_or_else(|| message_id.to_owned());
-        if self.locale == AppUiLocale::Pseudo {
-            pseudo_expand(&value)
-        } else {
-            value
-        }
+            .unwrap_or_else(|| message_id.to_owned())
     }
 
     /// Format one display-only text argument for a UI message.
@@ -138,6 +134,21 @@ impl Localizer {
         let mut args = FluentArgs::new();
         args.set(argument, value);
         self.format(message_id, Some(&args))
+    }
+}
+
+/// Shared product message ID for the exact Export lifecycle phase.
+pub(crate) fn export_progress_phase_message_id(
+    phase: mondrian_export::ExportProgressPhase,
+) -> &'static str {
+    use mondrian_export::ExportProgressPhase;
+    match phase {
+        ExportProgressPhase::Preparing => "export-job-preparing",
+        ExportProgressPhase::Rendering => "export-job-rendering",
+        ExportProgressPhase::Encoding => "export-job-encoding",
+        ExportProgressPhase::Packaging => "export-job-packaging",
+        ExportProgressPhase::Validating => "export-job-validating",
+        ExportProgressPhase::Publishing => "export-job-publishing",
     }
 }
 
@@ -170,12 +181,18 @@ fn build_bundle(
     let langid: LanguageIdentifier =
         tag.parse().map_err(|_| LocalizationError::InvalidLocale(tag.to_owned()))?;
     let cached = match locale {
-        AppUiLocale::ZhCn | AppUiLocale::Pseudo => &ZH_CN_RESOURCE,
+        AppUiLocale::ZhCn => &ZH_CN_RESOURCE,
+        AppUiLocale::Pseudo => &PSEUDO_RESOURCE,
         AppUiLocale::EnUs => &EN_US_RESOURCE,
     };
     let resource = cached
         .get_or_init(|| {
-            FluentResource::try_new(locale.catalog().to_owned())
+            let catalog = if locale == AppUiLocale::Pseudo {
+                pseudo_catalog(locale.catalog())?
+            } else {
+                locale.catalog().to_owned()
+            };
+            FluentResource::try_new(catalog)
                 .map(Arc::new)
                 .map_err(|(_, errors)| format!("{errors:?}"))
         })
@@ -205,17 +222,72 @@ fn format_from(
     errors.is_empty().then(|| text.into_owned())
 }
 
-fn pseudo_expand(text: &str) -> String {
-    let mut expanded = String::with_capacity(text.len().saturating_mul(2).saturating_add(6));
-    expanded.push('⟦');
-    for character in text.chars() {
-        expanded.push(character);
-        if character.is_alphabetic() {
-            expanded.push('·');
+// Expand catalog literals once; runtime arguments and Fluent expression
+// identities remain exact, including nested already-localized messages.
+fn pseudo_catalog(catalog: &str) -> Result<String, String> {
+    use fluent_syntax::ast::Entry;
+    let mut resource = fluent_syntax::parser::parse(catalog.to_owned())
+        .map_err(|(_, errors)| format!("{errors:?}"))?;
+    for entry in &mut resource.body {
+        match entry {
+            Entry::Message(message) => {
+                if let Some(value) = &mut message.value {
+                    pseudo_pattern(value, true);
+                }
+                for attribute in &mut message.attributes {
+                    pseudo_pattern(&mut attribute.value, true);
+                }
+            }
+            Entry::Term(term) => {
+                pseudo_pattern(&mut term.value, false);
+                for attribute in &mut term.attributes {
+                    pseudo_pattern(&mut attribute.value, false);
+                }
+            }
+            _ => {}
         }
     }
-    expanded.push('⟧');
-    expanded
+    Ok(fluent_syntax::serializer::serialize(&resource))
+}
+
+fn pseudo_pattern(pattern: &mut fluent_syntax::ast::Pattern<String>, boundaries: bool) {
+    use fluent_syntax::ast::PatternElement;
+    for element in &mut pattern.elements {
+        match element {
+            PatternElement::TextElement { value } => {
+                let mut expanded = String::with_capacity(value.len().saturating_mul(2));
+                for character in value.chars() {
+                    expanded.push(character);
+                    if character.is_alphabetic() {
+                        expanded.push('·');
+                    }
+                }
+                *value = expanded;
+            }
+            PatternElement::Placeable { expression } => pseudo_expression(expression),
+        }
+    }
+    if boundaries {
+        pattern
+            .elements
+            .insert(0, PatternElement::TextElement { value: "⟦".to_owned() });
+        pattern.elements.push(PatternElement::TextElement { value: "⟧".to_owned() });
+    }
+}
+
+fn pseudo_expression(expression: &mut fluent_syntax::ast::Expression<String>) {
+    use fluent_syntax::ast::{Expression, InlineExpression};
+    match expression {
+        Expression::Select { variants, .. } => {
+            for variant in variants {
+                pseudo_pattern(&mut variant.value, false);
+            }
+        }
+        Expression::Inline(InlineExpression::Placeable { expression }) => {
+            pseudo_expression(expression)
+        }
+        Expression::Inline(_) => {}
+    }
 }
 
 #[cfg(test)]
@@ -724,6 +796,46 @@ mod tests {
         assert_eq!(english.text("missing-message"), "missing-message");
         let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
         assert!(chinese.format("notification-import-complete", Some(&args)).contains('3'));
+    }
+
+    #[test]
+    fn pseudo_locale_preserves_opaque_arguments_and_nested_status_text() {
+        let pseudo = Localizer::new(AppUiLocale::Pseudo).expect("pseudo");
+        let status = pseudo.text("status-ready");
+        let accessible = pseudo.format_text("status-history-accessibility", "status", &status);
+        assert!(accessible.contains(&status), "{accessible}");
+        let detail = "E:/项目/Mixed Case/{clip}.mdp · 18446744073709551615";
+        let formatted = pseudo.format_text("export-status-error", "error", detail);
+        assert!(formatted.contains(detail), "{formatted}");
+    }
+
+    #[test]
+    fn pseudo_catalog_preserves_selectors_references_and_attributes() {
+        let catalog = "-shared = Ready\nnotice = { $count ->\n    [1] Single { $name } { -shared }\n   *[other] Many { $name } { -shared }\n    }\n    .tip = Hint { $name }\n";
+        let source = pseudo_catalog(catalog).expect("expand Fluent AST");
+        let resource = FluentResource::try_new(source).expect("valid transformed resource");
+        let mut bundle = FluentBundle::new(vec!["en-US".parse().expect("locale")]);
+        bundle.add_resource(Arc::new(resource)).expect("resource");
+        let name = "Untouched File.mdp";
+        for (count, literal) in [(1, "S·i·n·g·l·e·"), (2, "M·a·n·y·")] {
+            let mut args = FluentArgs::new();
+            args.set("count", count);
+            args.set("name", name);
+            let result = format_from(&bundle, "notice", Some(&args)).expect("selector resolves");
+            assert!(result.contains(literal), "{result}");
+            assert!(result.contains(name), "{result}");
+            assert!(result.contains("R·e·a·d·y·"), "term reference resolves");
+            let attribute = bundle
+                .get_message("notice")
+                .expect("message")
+                .get_attribute("tip")
+                .expect("attribute");
+            let mut errors = Vec::new();
+            let tip = bundle.format_pattern(attribute.value(), Some(&args), &mut errors);
+            assert!(errors.is_empty(), "{errors:?}");
+            assert!(tip.contains(name));
+            assert!(tip.contains("H·i·n·t·"));
+        }
     }
 
     #[test]

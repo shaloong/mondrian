@@ -907,3 +907,14 @@ export-diagnostic-warning-code = 警告：{ $code }
 export-broadcast-qc-summary = 广播 QC：{ $profile }@{ $edition } / { $verdict } / { $frames } 帧（{ $coverage }）/ 发现 { $findings }，保留 { $retained }，溢出 { $overflow } / 待验收项 { $obligations } / { $complete }
 export-color-assets-summary = 素材 { $count } / 问题 { $issues }
 export-color-health-summary = 色彩：{ $verdict } / { $frames } 帧 / 元数据 { $metadata } / 覆盖 { $overrides } / 策略假设 { $policy } / 数据纹理 { $data } / 拒绝 { $rejected } / { $assets } / 检查 { $checks } / 原因 { $causes } / 建议 { $actions } / 阶段 CPU 输入 { $cpu_in }、CPU 输出 { $cpu_out }、GPU { $gpu }、阻塞 { $blockers }、传输 { $transfer } / GPU 阻塞 着色器 { $shader }、资源 { $resource }、包装器 { $wrapper }、管线 { $pipeline } / 合成 浮点 { $float }、旧 RGBA8 { $legacy }、原因 { $reasons }
+
+# Runtime status bar and retained notification history
+status-ready = 就绪
+status-history-title = 最近通知
+status-history-empty = 暂无通知
+status-history-accessibility = 最近通知，当前状态：{ $status }
+status-export-pending = 导出队列处理中（{ $count }）
+status-export-frames = 正在导出帧 { $completed }/{ $total }（队列 { $count }）
+status-export-phase = 导出：{ $phase }（队列 { $count }）
+status-export-cancelling = 正在取消导出（队列 { $count }）
+status-export-active = 导出处理中

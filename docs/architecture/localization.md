@@ -170,3 +170,26 @@ References: [Project Fluent](https://projectfluent.org/),
 [the Rust Fluent bundle](https://docs.rs/fluent/latest/fluent/).
 
 Export queue broadcast QC and color health summaries use the captured UI locale, including verdicts, coverage, evidence counts, and completion state. Provider diagnostic codes remain untranslated argument values so reports retain stable lookup identifiers.
+
+
+## Runtime status projection and pseudo arguments
+
+The App shell projects ready/queued/running/cancelling Export statuses using its
+captured locale. Export panel and status bar share exact phase message IDs;
+rendered frame counts remain decimal strings so u64 progress never loses digits
+through floating-point formatting. A phase change stops presenting stale frame
+units. Notification-history title, empty text and accessible name also use the
+current locale. A locale refresh preserves the status button identity and its
+open history viewport. Existing App status/history bodies are still eager raw
+strings; the production inventory has 166 callers and requires a structured
+ID/argument migration before complete runtime-message coverage is claimed.
+
+Pseudo mode transforms Fluent pattern text in the catalog AST once, then caches
+the resulting resource separately. It does not expand formatted output:
+variables, selectors, references, numeric/function expressions and runtime
+arguments retain their identities. Select variant text and attributes expand
+without changing grammar. This preserves literal file paths, braces, exact
+numbers and already-formatted nested status text in accessible names. Generic
+widgets still consume formatted labels; the private App status composite owns
+a formatter with the same explicit locale snapshot as the root, with no global
+locale lookup during painting or playback refresh.

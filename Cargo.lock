@@ -2420,6 +2420,7 @@ dependencies = [
  "cc",
  "chrono",
  "fluent-bundle",
+ "fluent-syntax",
  "glam",
  "image",
  "libc",

@@ -178,6 +178,7 @@ libloading = { workspace = true }
 tempfile = { workspace = true }
 memmap2 = { workspace = true }
 fluent-bundle = { workspace = true }
+fluent-syntax = { workspace = true }
 unic-langid = { workspace = true }
 sys-locale = { workspace = true }
 uuid = { workspace = true }

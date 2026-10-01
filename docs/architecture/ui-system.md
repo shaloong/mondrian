@@ -2606,3 +2606,13 @@ height. Vertical content keeps its natural extent for scrolling.
 Product entrypoint guards parse Cargo TOML to check default-run, binary paths, validation feature gates, and test/benchmark exclusion. Whitespace and line endings are not route semantics.
 
 A panel with content-height rows fills a finite offered width during measurement, matching vertical ScrollView placement; unbounded measurements retain the theme preferred width. This keeps wrapping, row placement, and scroll extent consistent across viewport resizing.
+
+
+The App status composite localizes Export queue state, exact frame progress,
+history chrome and accessibility using the root's locale snapshot. Shared
+phase IDs prevent the Export panel and status bar from defining different
+lifecycle copy. Locale switching updates displayed status without replacing
+the status widget or clearing its open/scrolled history viewport. Pseudo
+formatting expands catalog AST text, preserving named argument data and
+already-localized nested strings. Eager App-produced status/history messages
+remain a separate pending migration to stable message IDs and arguments.

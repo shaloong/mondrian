@@ -65,7 +65,7 @@ use crate::app_ui::audio_device_catalog::AudioOutputDeviceCatalogState;
 use crate::app_ui::interpret_asset_dialog::AppUiInterpretAssetDraft;
 #[cfg(test)]
 use crate::app_ui::localization::AppUiLocale;
-use crate::app_ui::localization::Localizer;
+use crate::app_ui::localization::{export_progress_phase_message_id, Localizer};
 use crate::app_ui::menu_bar::MenuBar;
 use crate::app_ui::modal::ShellModal;
 use crate::app_ui::new_project_dialog::{default_project_file_name, AppUiNewProjectDraft};
@@ -202,6 +202,7 @@ struct StatusBar {
     bounds: Rect,
     model: StatusBarModel,
     history: Vec<StatusLogEntry>,
+    localizer: Localizer,
     history_open: bool,
     history_offset: usize,
     notifications: NotificationOverlay,
@@ -376,14 +377,14 @@ impl Widget for StatusBar {
             }
             ctx.encoder.draw_rect(panel, colors.popover, 8.0);
             ctx.encoder.draw_text(
-                "最近通知",
+                &self.localizer.text("status-history-title"),
                 font_size,
                 Point::new(panel.x + 12.0, panel.y + 10.0),
                 colors.popover_foreground,
             );
             if self.history.is_empty() {
                 ctx.encoder.draw_text(
-                    "暂无通知",
+                    &self.localizer.text("status-history-empty"),
                     font_size,
                     Point::new(panel.x + 12.0, panel.y + 36.0),
                     colors.muted_foreground,
@@ -424,7 +425,11 @@ impl Widget for StatusBar {
     fn accessibility(&self) -> Option<AccessibilityNode> {
         Some(
             AccessibilityNode::new(self.id, AccessibilityRole::Button)
-                .with_name(format!("最近通知，当前状态：{}", self.model.message))
+                .with_name(self.localizer.format_text(
+                    "status-history-accessibility",
+                    "status",
+                    &self.model.message,
+                ))
                 .with_state(AccessibilityState {
                     focusable: true,
                     pressed: Some(self.history_open),
@@ -459,40 +464,24 @@ pub(super) fn elide_text_to_width(text: &str, font_size: f32, max_width: f32) ->
     format!("{out}{suffix}")
 }
 
-fn status_bar_model(state: &AppState) -> StatusBarModel {
+fn status_bar_model(state: &AppState, localizer: &Localizer) -> StatusBarModel {
     let jobs = state.export_jobs_snapshot();
     let active_jobs = jobs.iter().filter(|job| !job.status.is_terminal()).collect::<Vec<_>>();
 
     let (message, is_error, is_busy) = if let Some((message, true)) = &state.status_hint {
         (message.clone(), true, false)
     } else if let Some(job) = active_jobs.first() {
-        let message = match &job.status {
-            JobStatus::Pending => format!("导出队列处理中（{}）", active_jobs.len()),
-            JobStatus::Running { phase } => match job.progress.detail {
-                ExportProgressDetail::Frames { completed, total }
-                    if *phase == ExportProgressPhase::Rendering =>
-                {
-                    format!(
-                        "正在导出帧 {completed}/{total}（队列 {}）",
-                        active_jobs.len()
-                    )
-                }
-                _ => format!(
-                    "{}（队列 {}）",
-                    export_phase_status_message(*phase),
-                    active_jobs.len()
-                ),
-            },
-            JobStatus::Cancelling { .. } => {
-                format!("正在取消导出（队列 {}）", active_jobs.len())
-            }
-            _ => "导出处理中".to_owned(),
-        };
+        let message = active_export_status_text(
+            &job.status,
+            &job.progress.detail,
+            active_jobs.len(),
+            localizer,
+        );
         (message, false, true)
     } else if let Some((message, is_error)) = &state.status_hint {
         (message.clone(), *is_error, false)
     } else {
-        ("就绪".to_owned(), false, false)
+        (localizer.text("status-ready"), false, false)
     };
     let context = state
         .active_sequence()
@@ -508,15 +497,36 @@ fn status_bar_model(state: &AppState) -> StatusBarModel {
     StatusBarModel { message, is_error, is_busy, context }
 }
 
-fn export_phase_status_message(phase: ExportProgressPhase) -> &'static str {
-    match phase {
-        ExportProgressPhase::Preparing => "正在准备导出",
-        ExportProgressPhase::Rendering => "正在渲染",
-        ExportProgressPhase::Encoding => "正在编码",
-        ExportProgressPhase::Packaging => "正在封装交付包",
-        ExportProgressPhase::Validating => "正在验证成品",
-        ExportProgressPhase::Publishing => "正在发布成品",
-    }
+fn active_export_status_text(
+    status: &JobStatus,
+    detail: &ExportProgressDetail,
+    count: usize,
+    localizer: &Localizer,
+) -> String {
+    let mut args = fluent_bundle::FluentArgs::new();
+    args.set("count", count as f64);
+    let message = match status {
+        JobStatus::Pending => "status-export-pending",
+        JobStatus::Running { phase } => match detail {
+            ExportProgressDetail::Frames { completed, total }
+                if *phase == ExportProgressPhase::Rendering =>
+            {
+                args.set("completed", completed.to_string());
+                args.set("total", total.to_string());
+                "status-export-frames"
+            }
+            _ => {
+                args.set(
+                    "phase",
+                    localizer.text(export_progress_phase_message_id(*phase)),
+                );
+                "status-export-phase"
+            }
+        },
+        JobStatus::Cancelling { .. } => "status-export-cancelling",
+        _ => "status-export-active",
+    };
+    localizer.format(message, Some(&args))
 }
 
 /// File dialog filter for timeline export output commands.
@@ -1100,13 +1110,17 @@ impl AppUiAppRoot {
         let mut menu_bar =
             MenuBar::for_app_state_with_shortcut_overrides(state, &preferences.shortcut_overrides);
         menu_bar.set_locale(preferences_model.locale);
+        let status_model = status_bar_model(
+            state,
+            &Localizer::new(preferences_model.locale).expect("bundled UI catalogs must be valid"),
+        );
         let mut root = Self::new_with_preferences(
             TitleBar::new(window_title_for_app_state(state), menu_bar),
             models,
             preferences_model,
             preferences.workspace_preset,
             preferences.custom_workspace_layout.clone(),
-            status_bar_model(state),
+            status_model,
         );
         root.status_bar.sync_history(&state.status_log);
         root.status_bar.notifications =
@@ -1181,6 +1195,8 @@ impl AppUiAppRoot {
                 bounds: Rect::ZERO,
                 model: status_bar_model,
                 history: Vec::new(),
+                localizer: Localizer::new(preferences_model.locale)
+                    .expect("bundled UI catalogs must be valid"),
                 history_open: false,
                 history_offset: 0,
                 notifications: NotificationOverlay::from_existing(
@@ -1385,7 +1401,7 @@ impl AppUiAppRoot {
         preview: Option<&dyn ViewerPreviewSource>,
     ) -> bool {
         let frame = state.current_frame().max(0);
-        self.status_bar.set_model(status_bar_model(state));
+        self.status_bar.set_model(status_bar_model(state, &self.localizer));
         self.status_bar.sync_history(&state.status_log);
         self.sync_notifications(state, self.preferences_model.locale);
         let mut viewer = ViewerPanelModel::from_app_state_with_preview_and_locale(
@@ -1470,7 +1486,6 @@ impl AppUiAppRoot {
         self.title_bar
             .menu_bar_mut()
             .refresh_for_app_state_with_shortcut_overrides(state, &preferences.shortcut_overrides);
-        self.status_bar.set_model(status_bar_model(state));
         self.status_bar.sync_history(&state.status_log);
         self.active_sequence = state.active_sequence().cloned();
         self.project_color_environment = state.project_color_environment().clone();
@@ -1482,6 +1497,11 @@ impl AppUiAppRoot {
             preferences.locale_preference.resolve(sys_locale::get_locale().as_deref())
         };
         let localizer = Localizer::new(locale).expect("bundled UI catalogs must be valid");
+        self.status_bar.set_model(status_bar_model(state, &localizer));
+        if self.status_bar.localizer.locale() != locale {
+            self.status_bar.localizer =
+                Localizer::new(locale).expect("bundled UI catalogs must be valid");
+        }
         let mut models =
             AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_preview_and_locale(
                 state,
@@ -3467,8 +3487,8 @@ mod tests {
     #[test]
     fn packaging_phase_has_a_product_status_message() {
         assert_eq!(
-            export_phase_status_message(ExportProgressPhase::Packaging),
-            "正在封装交付包"
+            export_progress_phase_message_id(ExportProgressPhase::Packaging),
+            "export-job-packaging"
         );
     }
 
@@ -4512,13 +4532,128 @@ mod tests {
     }
 
     #[test]
+    fn export_status_uses_selected_locale_and_preserves_exact_frame_counts() {
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English");
+        let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese");
+        for (phase, text) in [
+            (ExportProgressPhase::Preparing, "Preparing"),
+            (ExportProgressPhase::Rendering, "Rendering"),
+            (ExportProgressPhase::Encoding, "Encoding"),
+            (ExportProgressPhase::Packaging, "Packaging"),
+            (ExportProgressPhase::Validating, "Validating"),
+            (ExportProgressPhase::Publishing, "Publishing"),
+        ] {
+            let status = JobStatus::Running { phase };
+            let formatted =
+                active_export_status_text(&status, &ExportProgressDetail::None, 2, &english);
+            assert!(formatted.contains(text), "{formatted}");
+            assert!(formatted.contains('2'), "{formatted}");
+            assert_ne!(
+                formatted,
+                active_export_status_text(&status, &ExportProgressDetail::None, 2, &chinese)
+            );
+        }
+        let completed = u64::MAX - 1;
+        let total = u64::MAX;
+        let detail = ExportProgressDetail::Frames { completed, total };
+        let rendered = active_export_status_text(
+            &JobStatus::Running { phase: ExportProgressPhase::Rendering },
+            &detail,
+            2,
+            &english,
+        );
+        assert!(rendered.contains(&completed.to_string()), "{rendered}");
+        assert!(rendered.contains(&total.to_string()), "{rendered}");
+        let encoding = active_export_status_text(
+            &JobStatus::Running { phase: ExportProgressPhase::Encoding },
+            &detail,
+            2,
+            &english,
+        );
+        assert!(encoding.contains("Encoding"));
+        assert!(
+            !encoding.contains(&completed.to_string()),
+            "stale frame units must not describe encoding"
+        );
+        assert!(active_export_status_text(
+            &JobStatus::Pending,
+            &ExportProgressDetail::None,
+            2,
+            &english
+        )
+        .contains("Export queued"));
+        assert!(active_export_status_text(
+            &JobStatus::Cancelling { phase: ExportProgressPhase::Rendering },
+            &detail,
+            2,
+            &english
+        )
+        .contains("Cancelling export"));
+    }
+
+    #[test]
+    fn status_locale_refresh_preserves_history_viewport_and_widget_identity() {
+        use crate::app_ui::localization::AppUiLocalePreference;
+        let mut state = AppState::new();
+        for index in 0..12 {
+            state.set_status_hint(format!("Activity {index}"), false);
+        }
+        state.clear_status_hint();
+        let mut preferences = AppUiPreferences {
+            locale_preference: AppUiLocalePreference::ZhCn,
+            ..Default::default()
+        };
+        let mut root = AppUiAppRoot::from_app_state_with_preferences(&state, &preferences);
+        root.status_bar.history_open = true;
+        root.status_bar.history_offset = 3;
+        let widget_id = root.status_bar.id;
+        let history = root.status_bar.history.clone();
+        for (preference, locale) in [
+            (AppUiLocalePreference::EnUs, AppUiLocale::EnUs),
+            (AppUiLocalePreference::Pseudo, AppUiLocale::Pseudo),
+            (AppUiLocalePreference::ZhCn, AppUiLocale::ZhCn),
+        ] {
+            preferences.locale_preference = preference;
+            root.refresh_from_app_state_with_preferences(&state, &preferences);
+            assert_eq!(root.status_bar.id, widget_id);
+            assert_eq!(root.status_bar.history, history);
+            assert!(root.status_bar.history_open);
+            assert_eq!(root.status_bar.history_offset, 3);
+            assert_eq!(root.status_bar.localizer.locale(), locale);
+            assert_eq!(
+                root.status_bar.model.message,
+                root.localizer.text("status-ready")
+            );
+            let name = root
+                .status_bar
+                .accessibility()
+                .expect("status button")
+                .name
+                .expect("accessible name");
+            assert!(name.contains(&root.status_bar.model.message));
+            if locale == AppUiLocale::EnUs {
+                assert!(name.contains("Recent notifications"));
+                assert_eq!(root.status_bar.model.message, "Ready");
+            }
+            root.refresh_playback_frame_from_app_state(&state, None);
+            assert_eq!(
+                root.status_bar.model.message,
+                root.localizer.text("status-ready")
+            );
+        }
+    }
+
+    #[test]
     fn status_bar_model_prefers_active_sequence_context() {
         let mut state = AppState::new();
         state.test_set_project_path(PathBuf::from("E:/projects/rough-cut.mdp"));
         state.test_set_sequence(Some(mondrian_timeline::sequence::Sequence::new("Cut 01")));
         state.set_status_hint("Project saved", false);
 
-        let model = status_bar_model(&state);
+        let model = status_bar_model(
+            &state,
+            &Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog"),
+        );
 
         assert_eq!(model.message, "Project saved");
         assert!(!model.is_error);

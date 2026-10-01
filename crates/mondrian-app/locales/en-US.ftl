@@ -952,3 +952,14 @@ export-diagnostic-warning-code = Warning: { $code }
 export-broadcast-qc-summary = Broadcast QC: { $profile }@{ $edition } / { $verdict } / { $frames } frames ({ $coverage }) / findings { $findings }, retained { $retained }, overflow { $overflow } / obligations { $obligations } / { $complete }
 export-color-assets-summary = assets { $count } / issues { $issues }
 export-color-health-summary = Color: { $verdict } / { $frames } frames / metadata { $metadata } / overrides { $overrides } / policy { $policy } / data { $data } / rejected { $rejected } / { $assets } / checks { $checks } / causes { $causes } / actions { $actions } / stages CPU input { $cpu_in }, CPU output { $cpu_out }, GPU { $gpu }, blockers { $blockers }, transfer { $transfer } / GPU blockers shader { $shader }, resource { $resource }, wrapper { $wrapper }, pipeline { $pipeline } / composites float { $float }, legacy { $legacy }, reasons { $reasons }
+
+# Runtime status bar and retained notification history
+status-ready = Ready
+status-history-title = Recent notifications
+status-history-empty = No notifications
+status-history-accessibility = Recent notifications. Current status: { $status }
+status-export-pending = Export queued ({ $count })
+status-export-frames = Exporting frame { $completed }/{ $total } ({ $count } queued)
+status-export-phase = Export: { $phase } ({ $count } queued)
+status-export-cancelling = Cancelling export ({ $count } queued)
+status-export-active = Export in progress

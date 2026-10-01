@@ -214,7 +214,8 @@ pub use crate::app_ui::inspector_source_timing::{
     InspectorSourceTimingMode, InspectorSourceTimingModel,
 };
 use crate::app_ui::localization::{
-    builtin_effect_message_id, effect_category_message_id, AppUiLocale, Localizer,
+    builtin_effect_message_id, effect_category_message_id, export_progress_phase_message_id,
+    AppUiLocale, Localizer,
 };
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 use crate::app_ui::shortcuts::shortcut_label_for_action;
@@ -7351,17 +7352,6 @@ fn export_job_status_label(
             localizer.format_text("export-job-failed", "detail", &failure.detail)
         }
         JobStatus::Cancelled => localizer.text("export-job-cancelled"),
-    }
-}
-
-fn export_progress_phase_message_id(phase: ExportProgressPhase) -> &'static str {
-    match phase {
-        ExportProgressPhase::Preparing => "export-job-preparing",
-        ExportProgressPhase::Rendering => "export-job-rendering",
-        ExportProgressPhase::Encoding => "export-job-encoding",
-        ExportProgressPhase::Packaging => "export-job-packaging",
-        ExportProgressPhase::Validating => "export-job-validating",
-        ExportProgressPhase::Publishing => "export-job-publishing",
     }
 }
 
