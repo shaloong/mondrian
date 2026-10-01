@@ -6364,6 +6364,7 @@ fn lower_ocio_program_source_for_wgpu(shader_plan: &OcioGpuShaderPlan) -> Result
     let source = strip_glsl_version_directives(&bundle.shader_text);
     let source = lower_redundant_nested_component_swizzles(&source);
     let source = lower_ocio_tetrahedral_lut_blocks(&source, bundle);
+    let source = lower_ocio_identity_curve_channels(&source, bundle);
     let source = lower_mondrian_standard_pq_hlg_inverse_lut(&source, shader_plan);
     let legacy_sampler_1d_names = legacy_sampler_names_for_kind(
         &source,
@@ -6428,11 +6429,19 @@ fn lower_ocio_tetrahedral_lut_blocks(source: &str, bundle: &OcioGpuShaderBundle)
         replacements.push((
             start,
             end,
-            branchless_tetrahedral_lut_block(
-                &texture.texture_name,
-                &texture.sampler_name,
-                texture.edge_len,
-            ),
+            if tetrahedral_lut_has_independent_red_axis(texture) {
+                independent_red_tetrahedral_lut_block(
+                    &texture.texture_name,
+                    &texture.sampler_name,
+                    texture.edge_len,
+                )
+            } else {
+                branchless_tetrahedral_lut_block(
+                    &texture.texture_name,
+                    &texture.sampler_name,
+                    texture.edge_len,
+                )
+            },
         ));
     }
 
@@ -6441,6 +6450,116 @@ fn lower_ocio_tetrahedral_lut_blocks(source: &str, bundle: &OcioGpuShaderBundle)
         lowered.replace_range(start..end, &replacement);
     }
     lowered
+}
+
+fn lower_ocio_identity_curve_channels(source: &str, bundle: &OcioGpuShaderBundle) -> String {
+    let mut lowered = source.to_owned();
+    for texture in &bundle.textures_2d {
+        if texture.dimensions != OcioGpuTextureDimensions::Texture1D
+            || texture.interpolation != OcioGpuTextureInterpolation::Linear
+            || texture.channel != OcioGpuTextureChannel::Rgb
+            || texture.width < 2
+            || texture.height != 2
+        {
+            continue;
+        }
+        let width = texture.width as usize;
+        let last = width - 1;
+        if texture.values.len() / 3 <= width {
+            continue;
+        }
+        // Recognize the exact normalized, clamped OCIO addressing function.
+        // Only row zero plus the duplicated endpoint in row one is reachable.
+        let helper = format!(
+            "vec2 {name}_computePos(float f)\n{{\n  float dep = clamp(f, 0.0, 1.0) * {last}.;\n  vec2 retVal;\n  retVal.y = floor(dep / {last}.);\n  retVal.x = dep - retVal.y * {last}.;\n  retVal.x = (retVal.x + 0.5) / {width}.;\n  retVal.y = (retVal.y + 0.5) / 2.;\n  return retVal;\n}}",
+            name = texture.texture_name,
+        );
+        if !source.contains(&helper) {
+            continue;
+        }
+        for (channel, name) in ["r", "g", "b"].into_iter().enumerate() {
+            let identity = (0..=width).all(|index| {
+                let expected = (index.min(last) as f64 / last as f64) as f32;
+                texture.values[index * 3 + channel].to_bits() == expected.to_bits()
+            });
+            if identity {
+                let original = format!(
+                    "mondrian_ocio_pixel.{name} = texture({sampler}, {texture}_computePos(mondrian_ocio_pixel.{name})).{name};",
+                    sampler = texture.sampler_name,
+                    texture = texture.texture_name,
+                );
+                let replacement = format!(
+                    "mondrian_ocio_pixel.{name} = clamp(mondrian_ocio_pixel.{name}, 0.0, 1.0); // Proven identity LUT channel"
+                );
+                lowered = lowered.replace(&original, &replacement);
+            }
+        }
+    }
+    lowered
+}
+
+// The recognized OCIO block samples RGB coordinates in texture BGR order.
+// Prove every texel: R/B are identity axes and G is independent of R. The
+// tetrahedral interpolant then reduces to the original three B/G corners;
+// no LUT sample, resolution, interpolation policy or color meaning changes.
+fn tetrahedral_lut_has_independent_red_axis(
+    texture: &mondrian_core::OcioGpuTexture3DBinding,
+) -> bool {
+    let edge = texture.edge_len as usize;
+    let Some(expected_values) = edge.checked_pow(3).and_then(|count| count.checked_mul(3)) else {
+        return false;
+    };
+    if edge < 2 || texture.value_count != expected_values || texture.values.len() != expected_values
+    {
+        return false;
+    }
+    let denominator = (edge - 1) as f64;
+    for (index, pixel) in texture.values.chunks_exact(3).enumerate() {
+        let blue = index % edge;
+        let green = (index / edge) % edge;
+        let red = index / (edge * edge);
+        let expected_red = (red as f64 / denominator) as f32;
+        let expected_blue = (blue as f64 / denominator) as f32;
+        let reference_green = texture.values[(green * edge + blue) * 3 + 1];
+        if pixel[0].to_bits() != expected_red.to_bits()
+            || pixel[2].to_bits() != expected_blue.to_bits()
+            || !pixel[1].is_finite()
+            || pixel[1].to_bits() != reference_green.to_bits()
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn independent_red_tetrahedral_lut_block(
+    texture_name: &str,
+    sampler_name: &str,
+    edge_len: u32,
+) -> String {
+    let scale = edge_len - 1;
+    let edge = f64::from(edge_len);
+    let inverse_edge = 1.0 / edge;
+    format!(
+        r#"  // Proven red-independent tetrahedral lowering for {texture_name}
+  {{
+    vec2 coords = mondrian_ocio_pixel.bg * vec2({scale}.0);
+    vec2 base = floor(coords);
+    vec2 frac = coords - base;
+    vec3 baseInd = vec3((base + vec2(0.5)) / vec2({edge:.17}), {half_texel:.17});
+    float maxFrac = max(frac.x, frac.y);
+    float minFrac = min(frac.x, frac.y);
+    vec3 texel = vec3({inverse_edge:.17}, {inverse_edge:.17}, 0.0);
+    float v1 = texture({sampler_name}, baseInd).g;
+    float v2 = texture({sampler_name}, baseInd + vec3(step(vec2(maxFrac), frac), 0.0) * texel).g;
+    float v3 = texture({sampler_name}, baseInd + texel).g;
+    float green = ((maxFrac - minFrac) * v2) + ((1.0 - maxFrac) * v1) + (minFrac * v3);
+    mondrian_ocio_pixel.rgb = vec3(clamp(mondrian_ocio_pixel.r, 0.0, 1.0), green,
+                                 clamp(mondrian_ocio_pixel.b, 0.0, 1.0));
+  }}
+"#,
+        half_texel = 0.5 / edge,
+    )
 }
 
 fn lower_mondrian_standard_pq_hlg_inverse_lut(
@@ -10283,6 +10402,28 @@ mod tests {
         assert_eq!(plan.bundle().dst_color_space, format!("{display}/{view}"));
         assert_eq!(plan.bundle().language, GpuLanguage::Glsl4_0);
         assert!(plan.shader_hash != 0);
+        let texture = &plan.bundle().textures_3d[0];
+        assert!(tetrahedral_lut_has_independent_red_axis(texture));
+        let lowered = lower_ocio_program_source_for_wgpu(&plan).expect("lower Standard SDR");
+        assert!(lowered.contains("Proven red-independent tetrahedral lowering"));
+        assert_eq!(lowered.matches("Proven identity LUT channel").count(), 2);
+        let mut curve_drifted = (*plan).clone();
+        std::sync::Arc::make_mut(&mut curve_drifted.bundle).textures_2d[0].values[0] += 0.001;
+        let curve_drifted_lowered = lower_ocio_program_source_for_wgpu(&curve_drifted)
+            .expect("nonidentity channel retains the original LUT");
+        assert_eq!(
+            curve_drifted_lowered.matches("Proven identity LUT channel").count(),
+            1
+        );
+        for index in [
+            0,
+            texture.edge_len as usize * texture.edge_len as usize * 3 + 1,
+            2,
+        ] {
+            let mut drifted = texture.clone();
+            drifted.values[index] += 0.001;
+            assert!(!tetrahedral_lut_has_independent_red_axis(&drifted));
+        }
     }
 
     #[test]

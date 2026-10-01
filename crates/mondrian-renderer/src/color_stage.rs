@@ -8791,7 +8791,7 @@ mod tests {
     }
 
     fn standard_view_parity_working_frame() -> CpuColorFrame {
-        let data = vec![
+        let mut data = vec![
             [-0.05, 0.0, 0.001, 1.0],
             [0.001, 0.001, 0.001, 0.875],
             [0.18, 0.18, 0.18, 0.75],
@@ -8801,7 +8801,11 @@ mod tests {
             [0.0, 0.0, 1.0, 0.25],
             [4.0, 2.0, 0.5, 0.125],
             [16.0, 16.0, 16.0, 1.0],
+            [0.4, 0.3, 0.2, 0.0],
         ];
+        // Reuse the dense finite HDR/negative/partial-alpha corpus for every
+        // Standard target, including SDR; the original precision budgets apply.
+        data.extend_from_slice(&pq_accuracy_working_frame().rgba_f32().data);
         CpuColorFrame::working(WorkingRgbaF32Frame {
             width: u32::try_from(data.len()).expect("parity corpus width"),
             height: 1,
