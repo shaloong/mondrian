@@ -20,6 +20,8 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
+mod constant_arrays;
+
 /// Full, domain-separated identity used to authorize OCIO GPU cache reuse.
 ///
 /// Public `u64` keys in the OCIO contracts are retained as compact diagnostics.
@@ -5691,12 +5693,13 @@ fn translate_naga_shader_stage(
 
     let mut frontend = naga::front::glsl::Frontend::default();
     let options = naga::front::glsl::Options::from(stage.to_naga());
-    let module = frontend.parse(&options, shader_text).map_err(|err| {
+    let mut module = frontend.parse(&options, shader_text).map_err(|err| {
         OcioGpuShaderTranslationFailure::ParseFailed {
             message: err.emit_to_string_with_path(shader_text, "ocio-wrapper.glsl"),
         }
     })?;
 
+    constant_arrays::remove_read_only_spills(&mut module);
     let mut validator = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::empty(),

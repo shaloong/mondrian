@@ -29,6 +29,15 @@ not a product-level App/Export Interface. The hidden `color::qualification`
 Adapter exposes exact internals only to ignored real-device gates that must
 measure cache reuse and resource residency. Production code cannot use it.
 
+Generated OCIO programs use the same validated Naga IR for all GPU backends.
+The translator removes frontend-generated scalar-array copies only when their
+initializer is an immutable constant and every use is a scalar read with no
+write or pointer escape. Dynamic indices and the original constant payload are
+preserved; authored arrays, whole-array value copies, and unsupported side
+effects retain their original storage. This prevents per-pixel copies of OCIO
+lookup tables without changing processors, resource bindings, precision, or
+color authority. The resulting IR still passes the ordinary full validator.
+
 ## Viewer execution retirement
 
 `ViewerGpuExecutionRuntime::into_retirement` consumes recording/upload authority
