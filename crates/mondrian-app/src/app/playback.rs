@@ -2939,6 +2939,137 @@ mod tests {
         assert!(shutdown.all_workers_terminated(), "{shutdown:?}");
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires two physical CoreAudio outputs and operator default-device changes; emits a quiet test tone"]
+    fn physical_coreaudio_default_device_change_retires_stream_and_restores_clock() {
+        fn wait_for_device(
+            state: &mut AppState,
+            previous_generation: Option<u64>,
+            original_device: Option<&mondrian_media::RealtimeAudioOutputDeviceId>,
+            returning: bool,
+        ) -> (
+            u64,
+            mondrian_media::RealtimeAudioOutputDeviceId,
+            serde_json::Value,
+        ) {
+            let timeout = if previous_generation.is_some() { 60 } else { 5 };
+            let deadline = Instant::now() + Duration::from_secs(timeout);
+            let mut previous_callback = None;
+            let mut stable_since = None;
+            let mut frozen_loss = None;
+            loop {
+                state.advance_playback_clock_at(Instant::now());
+                state.pump_audio_output().expect("physical default-device poll");
+                let audio = state.audio_playback_snapshot();
+                if let Some(output) = audio.output {
+                    if let Some((generation, count)) = previous_callback
+                        && generation == output.stream_generation
+                    {
+                        assert!(output.callback_count >= count, "callback counter regressed");
+                    }
+                    previous_callback = Some((output.stream_generation, output.callback_count));
+                    let device = state.latest_audio_output_device_evidence().unwrap();
+                    let expected_device = original_device
+                        .is_none_or(|original| (device.device_id == *original) == returning);
+                    let recovered = output.active
+                        && !output.stream_failed
+                        && output.active_callback_consumed_frames >= 4_800
+                        && previous_generation.is_none_or(|old| output.stream_generation > old)
+                        && expected_device
+                        && state.playback_clock_master() == Some(ClockMaster::AudioDevice);
+                    if recovered {
+                        let since = *stable_since.get_or_insert_with(Instant::now);
+                        if previous_generation.is_some() {
+                            let loss =
+                                audio.output_lifecycle.last_loss.expect("retired stream receipt");
+                            assert_eq!(
+                                loss.reason,
+                                mondrian_media::RealtimeAudioOutputLossReason::DefaultDeviceChanged
+                            );
+                            assert_eq!(
+                                Some(loss.final_output.stream_generation),
+                                previous_generation
+                            );
+                            assert!(!loss.final_output.active);
+                            if let Some(frozen) = frozen_loss {
+                                assert_eq!(loss, frozen, "retired callback evidence changed");
+                            }
+                            frozen_loss = Some(loss);
+                        }
+                        if since.elapsed() >= Duration::from_millis(200) {
+                            assert_eq!(audio.active_interval_underrun_frames, 0);
+                            return (
+                                output.stream_generation,
+                                device.device_id.clone(),
+                                serde_json::json!({
+                                    "device_id": device.device_id,
+                                    "device_name": device.device_name,
+                                    "host": device.host_name,
+                                    "sample_rate": output.contract.sample_rate,
+                                    "channels": output.contract.channels(),
+                                    "stream_generation": output.stream_generation,
+                                    "callback_count": output.callback_count,
+                                    "consumed_frames": output.active_callback_consumed_frames,
+                                    "default_device_change_count": audio.output_lifecycle.default_device_change_count,
+                                    "clock_master": "AudioDevice",
+                                    "snapshot": format!("{audio:?}"),
+                                }),
+                            );
+                        }
+                    } else {
+                        stable_since = None;
+                        frozen_loss = None;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "default-device recovery timed out: {audio:?}"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        let (mut state, root, _) = live_audio_fixture(150);
+        let mut observations = Vec::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.play().expect("physical play");
+            let (first_generation, original, evidence) =
+                wait_for_device(&mut state, None, None, false);
+            observations.push(evidence);
+            println!("COREAUDIO_DEFAULT_CHANGE_READY: select a different system default output");
+            let (second_generation, changed, evidence) =
+                wait_for_device(&mut state, Some(first_generation), Some(&original), false);
+            assert_ne!(changed, original);
+            observations.push(evidence);
+            println!("COREAUDIO_DEFAULT_RETURN_READY: restore the original system default output");
+            let (_, restored, evidence) =
+                wait_for_device(&mut state, Some(second_generation), Some(&original), true);
+            assert_eq!(restored, original);
+            observations.push(evidence);
+            assert_eq!(
+                state.audio_playback_snapshot().output_lifecycle.default_device_change_count,
+                2
+            );
+        }));
+        let shutdown = state.shutdown_audio_playback_and_wait();
+        let report = serde_json::json!({
+            "classification": if result.is_ok() && shutdown.all_workers_terminated() { "Passed" } else { "Failed" },
+            "observations": observations,
+            "shutdown": shutdown,
+            "limitation": "physical default-output round trip; no video or endurance qualification",
+        });
+        println!("{}", serde_json::to_string(&report).unwrap());
+        if let Some(path) = std::env::var_os("MONDRIAN_LIVE_AUDIO_EVIDENCE") {
+            std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        }
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+        assert!(shutdown.all_workers_terminated(), "{shutdown:?}");
+    }
+
     #[test]
     fn endurance_shutdown_consumes_the_app_states_actual_audio_owner() {
         let mut state = AppState::new();
