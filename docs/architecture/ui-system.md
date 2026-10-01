@@ -2703,5 +2703,22 @@ restoration. Author admission and evaluation remain in Core/editor transactions.
 
 Sequence dimensions/start frames and export dimension, bitrate, CRF, GOP and
 palette fields use Integer input storage instead of floating value adapters.
-Audio Processor Rack and Mixer numeric adapters still narrow their canonical
-f64 values through f32 and remain a separate precision migration requirement.
+Audio Processor Rack, Mixer trim/fader/route gain, Component volume and pan
+retain their canonical f64 values through numeric controls and typed Actions.
+Rack Integer controls parse integers directly and remain inside the contiguous
+exact-integer domain supported by canonical audio f64 storage. Fractional or
+inexact Integer values are rejected rather than rounded by the Action adapter.
+Existing automation and lock admission remain authoritative.
+
+Pan percent and fade-second adapters retain their canonical baseline: Escape
+restores the original pan scalar or exact rational fade, including sub-millisecond
+sample durations, without a lossy unit round trip or unintended fade removal.
+
+Audio fade inputs use f64 seconds until the existing explicit millisecond
+quantization seam creates canonical TimelineTime. Long durations therefore do
+not lose millisecond resolution through f32. This changes presentation/input
+precision, not the audio DSP working format or temporal interpretation.
+
+Acceptance covers actual Rack and Mixer author commits with exact Undo/Redo,
+real Rack text entry for Double/Integer, invalid fraction/non-finite rejection,
+and a day-long fade retaining its final millisecond.

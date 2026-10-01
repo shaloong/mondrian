@@ -6666,6 +6666,246 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
 }
 
 #[test]
+fn audio_rack_numeric_widget_preserves_double_and_rejects_fractional_integer_input() {
+    use mondrian_timeline::audio::{
+        AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID, BUILTIN_SAMPLE_DELAY_DEFINITION_ID,
+    };
+    let mut sequence = Sequence::new("Precise Rack");
+    let track_id = sequence.audio_tracks[0].id;
+    let clip = Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("clip");
+    let clip_id = clip.id;
+    sequence
+        .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+        .expect("audio clip");
+    let scope_id = sequence.audio_tracks[0].clips[0].audio_components[0].processing.scope_id;
+    let scope = sequence
+        .audio_program
+        .processing_scopes
+        .iter_mut()
+        .find(|scope| scope.id == scope_id)
+        .expect("scope");
+    for definition in [
+        BUILTIN_GAIN_DEFINITION_ID,
+        BUILTIN_SAMPLE_DELAY_DEFINITION_ID,
+    ] {
+        scope
+            .processors
+            .processors
+            .push(AudioProcessorInstance::built_in(definition, 1));
+    }
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    for (index, text, expected) in [
+        (0, "-6.123456789123456", -6.123456789123456_f64),
+        (1, "192000", 192000.0),
+    ] {
+        let sequence = state.active_sequence().expect("sequence");
+        let racks = clip_processing_scope_racks(
+            sequence,
+            sequence.find_clip(clip_id).expect("clip"),
+            &chinese_localizer(),
+        );
+        let rack = &racks[0];
+        let processor = &rack.processors[index];
+        let parameter = &processor.parameters[0];
+        let mut widget = audio_processor_static_parameter_control(
+            rack,
+            processor,
+            parameter,
+            parameter.schema.numeric.expect("numeric"),
+            true,
+        );
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        widget.event(
+            &UiEvent::MouseDown {
+                position: Point::new(190.0, 14.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        if index == 1 {
+            widget.event(
+                &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+                &mut ctx,
+            );
+            widget.event(&UiEvent::TextInput("12.4".to_owned()), &mut ctx);
+            assert!(actions.borrow().is_empty());
+            assert!(
+                audio_processor_set_static_parameter_action(rack, processor, parameter, 12.4)
+                    .is_none()
+            );
+            assert!(audio_processor_set_static_parameter_action(
+                rack,
+                processor,
+                parameter,
+                f64::INFINITY
+            )
+            .is_none());
+        }
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        widget.event(&UiEvent::TextInput(text.to_owned()), &mut ctx);
+        assert_eq!(actions.borrow().len(), 1);
+        state.dispatch_action(actions.borrow()[0].clone()).expect("author parameter");
+        let snapshot = |state: &AppState| {
+            let sequence = state.active_sequence().expect("sequence");
+            clip_processing_scope_racks(
+                sequence,
+                sequence.find_clip(clip_id).expect("clip"),
+                &chinese_localizer(),
+            )[0]
+            .processors[index]
+                .parameters[0]
+                .static_value
+        };
+        assert_eq!(snapshot(&state), expected);
+        assert!(state.undo_timeline().expect("undo"));
+        assert_eq!(snapshot(&state), parameter.static_value);
+        assert!(state.redo_timeline().expect("redo"));
+        assert_eq!(snapshot(&state), expected);
+    }
+}
+
+#[test]
+fn audio_unit_controls_cancel_to_exact_canonical_baseline() {
+    let selection = Some(SelectedClipRef {
+        track_id: TrackId::new(),
+        is_video_track: false,
+        clip_id: ClipId::new(),
+    });
+    let edit_id = AudioComponentEditId::new();
+    let pan = 0.0006999300069993001_f64;
+    assert_ne!((pan * 100.0) / 100.0, pan);
+    for (baseline, expected, mut widget) in [
+        (
+            pan * 100.0,
+            AudioComponentMutation::SetPan { value: pan },
+            numeric_slider_input_control(
+                pan * 100.0,
+                -100.0,
+                100.0,
+                Some(1.0),
+                0,
+                true,
+                move |value| inspector_audio_pan_action(selection, edit_id, pan, value),
+            ),
+        ),
+        {
+            let fade = AudioFade {
+                duration: TimelineTime::new(23, 48000).expect("sample duration"),
+                curve: AudioFadeCurve::ConstantGain,
+            };
+            (
+                fade.duration.to_f64(),
+                AudioComponentMutation::SetFadeIn { value: Some(fade) },
+                numeric_slider_input_control(
+                    fade.duration.to_f64(),
+                    0.0,
+                    1.0,
+                    Some(0.01),
+                    3,
+                    true,
+                    move |value| {
+                        inspector_audio_fade_duration_action(
+                            selection,
+                            edit_id,
+                            true,
+                            value,
+                            Some(fade),
+                        )
+                    },
+                ),
+            )
+        },
+    ] {
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        widget.event(
+            &UiEvent::MouseDown {
+                position: Point::new(190.0, 14.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        widget.event(&UiEvent::TextInput("0.5".to_owned()), &mut ctx);
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(actions.borrow().len(), 2, "baseline {baseline}");
+        let Action::Custom { payload, .. } = actions.borrow().last().expect("restore").clone()
+        else {
+            panic!("typed component command");
+        };
+        let request: mondrian_timeline::AudioComponentEditRequest =
+            serde_json::from_value(payload).expect("decode");
+        assert_eq!(request.mutation, expected);
+    }
+}
+
+#[test]
+fn long_audio_fade_input_preserves_the_declared_millisecond_grid() {
+    let selection = SelectedClipRef {
+        track_id: TrackId::new(),
+        is_video_track: false,
+        clip_id: ClipId::new(),
+    };
+    let action = inspector_audio_fade_duration_action(
+        Some(selection),
+        AudioComponentEditId::new(),
+        true,
+        86400.001,
+        None,
+    )
+    .expect("fade action");
+    let Action::Custom { payload, .. } = action else {
+        panic!("component action");
+    };
+    let request: mondrian_timeline::AudioComponentEditRequest =
+        serde_json::from_value(payload).expect("decode");
+    let AudioComponentMutation::SetFadeIn { value: Some(fade) } = request.mutation else {
+        panic!("fade");
+    };
+    assert_eq!(
+        fade.duration,
+        TimelineTime::new(86_400_001, 1000).expect("exact duration")
+    );
+}
+
+#[test]
 fn inspector_audio_actions_keep_logical_selection_separate_from_asset_rebind() {
     let selection = SelectedClipRef {
         track_id: TrackId::new(),
@@ -6715,13 +6955,8 @@ fn inspector_audio_actions_keep_logical_selection_separate_from_asset_rebind() {
         AudioComponentMutation::SetVolumeDb { value: -3.5 }
     );
 
-    let zero_fade_action = inspector_audio_fade_duration_action(
-        Some(selection),
-        edit_id,
-        true,
-        0.0,
-        AudioFadeCurve::EqualPower,
-    );
+    let zero_fade_action =
+        inspector_audio_fade_duration_action(Some(selection), edit_id, true, 0.0, None);
     let Some(Action::Custom { payload, .. }) = zero_fade_action else {
         panic!("expected typed zero-fade action");
     };

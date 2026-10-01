@@ -1899,7 +1899,8 @@ fn open_endurance_project_read_handle(path: &Path) -> std::io::Result<fs::File> 
 mod persistence_lifecycle_tests {
     use super::*;
     use crate::app::project_runtime::{
-        claim_project_runtime_lease_for_test, TEST_PROJECT_RUNTIME_NAMESPACE_ENV,
+        claim_project_runtime_lease_for_test, test_project_runtime_namespace,
+        TEST_PROJECT_RUNTIME_NAMESPACE_ENV,
     };
     use mondrian_project::save_project_archive;
     use std::collections::BTreeSet;
@@ -2541,7 +2542,7 @@ mod persistence_lifecycle_tests {
             .env(CRASH_HELPER_STAGE_ENV, stage.to_string())
             .env(
                 TEST_PROJECT_RUNTIME_NAMESPACE_ENV,
-                std::process::id().to_string(),
+                test_project_runtime_namespace().expect("parent test runtime namespace"),
             );
         if let Some(previous_name) = previous_name {
             command.env(CRASH_HELPER_PREVIOUS_NAME_ENV, previous_name);

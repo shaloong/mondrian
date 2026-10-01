@@ -241,12 +241,16 @@ pub(crate) struct MediaAssetMutationExecution {
 
 impl MediaAssetMutationExecution {
     pub(crate) fn new() -> Self {
+        Self::with_probe_helper(super::packaged_worker::discover_media_probe_worker())
+    }
+
+    fn with_probe_helper(probe_helper_executable: Option<PathBuf>) -> Self {
         let (result_tx, result_rx) = mpsc::sync_channel(MEDIA_ASSET_MUTATION_RESULT_CAPACITY);
         let inner = Arc::new(MediaAssetMutationInner {
             state: Mutex::new(MediaAssetMutationState::default()),
             available: Condvar::new(),
             shutdown: AtomicBool::new(false),
-            probe_helper_executable: super::packaged_worker::discover_media_probe_worker(),
+            probe_helper_executable,
             result_tx,
         });
         let worker_inner = Arc::clone(&inner);
@@ -1019,7 +1023,9 @@ mod tests {
     #[test]
     fn operation_execution_publication_and_terminal_remain_observable() {
         let root = unique_root("observable");
-        let execution = MediaAssetMutationExecution::new();
+        // This verifies worker publication and terminal revisions, not external
+        // helper startup latency. Use the real missing-helper failure path.
+        let execution = MediaAssetMutationExecution::with_probe_helper(None);
         assert!(!execution.poll_changed());
         execution.bind_project(Some(ProjectId::new()));
         assert!(execution.poll_changed());

@@ -94,11 +94,11 @@ pub(super) fn audio_mixer_panel(
         section = section.with_row(PropertyRow::new(
             localizer.text("mixer-input-trim"),
             numeric_slider_input_control_with_hard_range(
-                channel.input_trim_db as f32,
+                channel.input_trim_db,
                 -60.0,
                 12.0,
-                AUDIO_GAIN_DB_MIN as f32,
-                AUDIO_GAIN_DB_MAX as f32,
+                AUDIO_GAIN_DB_MIN,
+                AUDIO_GAIN_DB_MAX,
                 Some(0.1),
                 1,
                 channel.is_editable,
@@ -111,11 +111,11 @@ pub(super) fn audio_mixer_panel(
                 section = section.with_row(PropertyRow::new(
                     localizer.text("mixer-fader"),
                     numeric_slider_input_control_with_hard_range(
-                        value_db as f32,
+                        value_db,
                         -60.0,
                         12.0,
-                        AUDIO_GAIN_DB_MIN as f32,
-                        AUDIO_GAIN_DB_MAX as f32,
+                        AUDIO_GAIN_DB_MIN,
+                        AUDIO_GAIN_DB_MAX,
                         Some(0.1),
                         1,
                         channel.is_editable,
@@ -244,11 +244,11 @@ pub(super) fn audio_mixer_panel(
                     route_section = route_section.with_row(PropertyRow::new(
                         localizer.text("mixer-level"),
                         numeric_slider_input_control_with_hard_range(
-                            value_db as f32,
+                            value_db,
                             -60.0,
                             12.0,
-                            AUDIO_GAIN_DB_MIN as f32,
-                            AUDIO_GAIN_DB_MAX as f32,
+                            AUDIO_GAIN_DB_MIN,
+                            AUDIO_GAIN_DB_MAX,
                             Some(0.1),
                             1,
                             route.is_editable,
@@ -505,6 +505,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
     if !model.audio_components.is_empty() {
         for (index, component) in model.audio_components.iter().enumerate() {
             let edit_id = component.edit_id;
+            let original_pan = component.pan;
             let volume_static_editable = can_edit
                 && component.volume_automation.as_ref().is_none_or(|curve| !curve.is_automated());
             let pan_static_editable = can_edit
@@ -536,11 +537,11 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 .with_row(PropertyRow::new(
                     localizer.text("inspector-audio-volume"),
                     numeric_slider_input_control_with_hard_range(
-                        component.volume_db as f32,
+                        component.volume_db,
                         -60.0,
                         12.0,
-                        AUDIO_GAIN_DB_MIN as f32,
-                        AUDIO_GAIN_DB_MAX as f32,
+                        AUDIO_GAIN_DB_MIN,
+                        AUDIO_GAIN_DB_MAX,
                         Some(0.1),
                         1,
                         volume_static_editable,
@@ -548,7 +549,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                             audio_component_mutation_action(
                                 selected_clip,
                                 edit_id,
-                                AudioComponentMutation::SetVolumeDb { value: f64::from(value) },
+                                AudioComponentMutation::SetVolumeDb { value },
                             )
                         },
                     ),
@@ -556,18 +557,14 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 .with_row(PropertyRow::new(
                     localizer.text("inspector-audio-pan"),
                     numeric_slider_input_control(
-                        (component.pan * 100.0) as f32,
+                        original_pan * 100.0,
                         -100.0,
                         100.0,
                         Some(1.0),
                         0,
                         pan_static_editable,
                         move |value| {
-                            audio_component_mutation_action(
-                                selected_clip,
-                                edit_id,
-                                AudioComponentMutation::SetPan { value: f64::from(value) / 100.0 },
-                            )
+                            inspector_audio_pan_action(selected_clip, edit_id, original_pan, value)
                         },
                     ),
                 ));
@@ -655,15 +652,17 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 can_edit,
                 localizer,
             );
-            let max_fade_seconds = component.clip_duration.to_f64().max(0.0) as f32;
+            let original_fade_in = component.fade_in;
+            let original_fade_out = component.fade_out;
+            let max_fade_seconds = component.clip_duration.to_f64().max(0.0);
             let fade_in_curve =
                 component.fade_in.map(|fade| fade.curve).unwrap_or(AudioFadeCurve::EqualPower);
             let fade_out_curve =
                 component.fade_out.map(|fade| fade.curve).unwrap_or(AudioFadeCurve::EqualPower);
             let fade_in_seconds =
-                component.fade_in.map(|fade| fade.duration.to_f64() as f32).unwrap_or(0.0);
+                component.fade_in.map(|fade| fade.duration.to_f64()).unwrap_or(0.0);
             let fade_out_seconds =
-                component.fade_out.map(|fade| fade.duration.to_f64() as f32).unwrap_or(0.0);
+                component.fade_out.map(|fade| fade.duration.to_f64()).unwrap_or(0.0);
             section = section
                 .with_row(PropertyRow::new(
                     localizer.text("inspector-audio-fade-in"),
@@ -680,7 +679,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                                 edit_id,
                                 true,
                                 value,
-                                fade_in_curve,
+                                original_fade_in,
                             )
                         },
                     ),
@@ -716,7 +715,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                                 edit_id,
                                 false,
                                 value,
-                                fade_out_curve,
+                                original_fade_out,
                             )
                         },
                     ),
@@ -1690,28 +1689,14 @@ pub(super) fn with_audio_processor_rack_sections(
                         ),
                     ));
                 } else if let Some(numeric) = parameter.schema.numeric {
-                    let rack_for_parameter = rack.clone();
-                    let processor_for_parameter = processor.clone();
-                    let parameter_for_action = parameter.clone();
                     section = section.with_row(PropertyRow::new(
                         label.clone(),
-                        numeric_slider_input_control_with_hard_range(
-                            parameter.static_value as f32,
-                            numeric.soft_range.min as f32,
-                            numeric.soft_range.max as f32,
-                            numeric.hard_range.min as f32,
-                            numeric.hard_range.max as f32,
-                            numeric.step.map(|step| step as f32),
-                            audio_processor_parameter_decimals(numeric.step),
-                            rack_can_edit && parameter.is_static_editable(),
-                            move |value| {
-                                audio_processor_set_static_parameter_action(
-                                    &rack_for_parameter,
-                                    &processor_for_parameter,
-                                    &parameter_for_action,
-                                    value,
-                                )
-                            },
+                        audio_processor_static_parameter_control(
+                            rack,
+                            processor,
+                            parameter,
+                            numeric,
+                            rack_can_edit,
                         ),
                     ));
                 } else {
@@ -1808,6 +1793,58 @@ pub(super) fn audio_automation_curve_control(model: &AudioAutomationCurveModel) 
     )
 }
 
+pub(super) fn audio_processor_static_parameter_control(
+    rack: &AudioProcessorRackModel,
+    processor: &crate::app_ui::audio_processor_rack::AudioProcessorInstanceModel,
+    parameter: &crate::app_ui::audio_processor_rack::AudioProcessorParameterModel,
+    numeric: mondrian_core::automation::ParameterNumericContract,
+    can_edit: bool,
+) -> Box<dyn Widget> {
+    let rack_for_action = rack.clone();
+    let processor_for_action = processor.clone();
+    let parameter_for_action = parameter.clone();
+    let action = move |value| {
+        audio_processor_set_static_parameter_action(
+            &rack_for_action,
+            &processor_for_action,
+            &parameter_for_action,
+            value,
+        )
+    };
+    let enabled = can_edit && parameter.is_static_editable();
+    if parameter.schema.value_type == PropertyValueType::Int {
+        use crate::app_ui::audio_processor_rack::MAX_EXACT_AUDIO_INTEGER;
+        let hard_min = numeric.hard_range.min.ceil().max(-MAX_EXACT_AUDIO_INTEGER) as i64;
+        let hard_max = numeric.hard_range.max.floor().min(MAX_EXACT_AUDIO_INTEGER) as i64;
+        let min = (numeric.soft_range.min.ceil() as i64).clamp(hard_min, hard_max);
+        let max = (numeric.soft_range.max.floor() as i64).clamp(hard_min, hard_max).max(min);
+        let step = numeric.step.map_or(1, |value| value.round().max(1.0) as i64);
+        numeric_slider_input_control_with_hard_range(
+            parameter.static_value as i64,
+            min,
+            max,
+            hard_min,
+            hard_max,
+            Some(step),
+            0,
+            enabled,
+            move |value: i64| action(value as f64),
+        )
+    } else {
+        numeric_slider_input_control_with_hard_range(
+            parameter.static_value,
+            numeric.soft_range.min,
+            numeric.soft_range.max,
+            numeric.hard_range.min,
+            numeric.hard_range.max,
+            numeric.step,
+            audio_processor_parameter_decimals(numeric.step),
+            enabled,
+            action,
+        )
+    }
+}
+
 pub(super) fn numeric_slider_input_control<T: mondrian_ui_widgets::NumberInputValue, R>(
     value: T,
     min: T,
@@ -1900,23 +1937,42 @@ pub(super) fn inspector_audio_source_action(
     )
 }
 
+/// Map percent edits back to canonical pan, retaining the exact focus baseline.
+pub(super) fn inspector_audio_pan_action(
+    selection: Option<SelectedClipRef>,
+    edit_id: AudioComponentEditId,
+    original: f64,
+    percent: f64,
+) -> Option<Action> {
+    let value = if percent == original * 100.0 {
+        original
+    } else {
+        percent / 100.0
+    };
+    audio_component_mutation_action(selection, edit_id, AudioComponentMutation::SetPan { value })
+}
+
 const INSPECTOR_AUDIO_FADE_TIMESCALE: u32 = 1_000;
 
 pub(super) fn inspector_audio_fade_duration_action(
     selection: Option<SelectedClipRef>,
     edit_id: AudioComponentEditId,
     fade_in: bool,
-    seconds: f32,
-    curve: AudioFadeCurve,
+    seconds: f64,
+    original: Option<AudioFade>,
 ) -> Option<Action> {
     if !seconds.is_finite() {
         return None;
     }
-    let fade = if seconds <= 0.0 {
+    let baseline = original.map(|fade| fade.duration.to_f64()).unwrap_or(0.0);
+    let curve = original.map(|fade| fade.curve).unwrap_or(AudioFadeCurve::EqualPower);
+    let fade = if seconds == baseline {
+        original
+    } else if seconds <= 0.0 {
         None
     } else {
         let Ok(duration) =
-            TimelineTime::from_f64_quantized(f64::from(seconds), INSPECTOR_AUDIO_FADE_TIMESCALE)
+            TimelineTime::from_f64_quantized(seconds, INSPECTOR_AUDIO_FADE_TIMESCALE)
         else {
             return None;
         };

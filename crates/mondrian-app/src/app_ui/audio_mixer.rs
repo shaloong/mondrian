@@ -683,7 +683,7 @@ pub(crate) fn set_route_enabled_action(
     })
 }
 
-pub(crate) fn set_route_gain_action(route: &AudioMixerRouteModel, value_db: f32) -> Option<Action> {
+pub(crate) fn set_route_gain_action(route: &AudioMixerRouteModel, value_db: f64) -> Option<Action> {
     let value = normalized_gain(value_db)?;
     (route.is_editable && matches!(route.gain, AudioMixerGainModel::Static { .. })).then(|| {
         audio_routing_edit_action(AudioRoutingEditRequest {
@@ -702,7 +702,7 @@ pub(crate) fn remove_route_action(route: &AudioMixerRouteModel) -> Option<Action
 
 pub(crate) fn set_input_trim_action(
     channel: &AudioMixerChannelModel,
-    value_db: f32,
+    value_db: f64,
 ) -> Option<Action> {
     let value = normalized_gain(value_db)?;
     channel.is_editable.then(|| {
@@ -713,7 +713,7 @@ pub(crate) fn set_input_trim_action(
     })
 }
 
-pub(crate) fn set_fader_action(channel: &AudioMixerChannelModel, value_db: f32) -> Option<Action> {
+pub(crate) fn set_fader_action(channel: &AudioMixerChannelModel, value_db: f64) -> Option<Action> {
     let value = normalized_gain(value_db)?;
     (channel.is_editable && matches!(channel.fader, AudioMixerGainModel::Static { .. })).then(
         || {
@@ -737,8 +737,7 @@ pub(crate) fn set_track_solo_action(track_id: TrackId, soloed: bool) -> Action {
     audio_track_solo_action(AudioTrackSoloPayload { track_id, soloed })
 }
 
-fn normalized_gain(value: f32) -> Option<f64> {
-    let value = f64::from(value);
+fn normalized_gain(value: f64) -> Option<f64> {
     (value.is_finite() && (AUDIO_GAIN_DB_MIN..=AUDIO_GAIN_DB_MAX).contains(&value)).then_some(value)
 }
 
@@ -755,6 +754,53 @@ mod tests {
 
     fn chinese() -> Localizer {
         Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog")
+    }
+
+    #[test]
+    fn mixer_gain_actions_preserve_precision_through_author_undo() {
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(Sequence::new("Precise Mixer")));
+        let precise = -6.123456789123456_f64;
+        let snapshot = |state: &AppState, field: usize| {
+            let model = AudioMixerPanelModel::from_app_state(state, &chinese());
+            let channel = &model.channels[0];
+            if field == 0 {
+                channel.input_trim_db
+            } else {
+                let gain = if field == 1 {
+                    channel.fader
+                } else {
+                    channel.outbound_routes[0].gain
+                };
+                match gain {
+                    AudioMixerGainModel::Static { value_db } => value_db,
+                    _ => panic!("static gain"),
+                }
+            }
+        };
+        for field in 0..3 {
+            let model = AudioMixerPanelModel::from_app_state(&state, &chinese());
+            let channel = &model.channels[0];
+            let action = match field {
+                0 => set_input_trim_action(channel, precise),
+                1 => set_fader_action(channel, precise),
+                _ => set_route_gain_action(&channel.outbound_routes[0], precise),
+            }
+            .expect("gain action");
+            let before = snapshot(&state, field);
+            state.dispatch_action(action).expect("author gain");
+            assert_eq!(snapshot(&state, field), precise);
+            assert!(state.undo_timeline().expect("undo"));
+            assert_eq!(snapshot(&state, field), before);
+            assert!(state.redo_timeline().expect("redo"));
+            assert_eq!(snapshot(&state, field), precise);
+            assert!(set_input_trim_action(channel, f64::NAN).is_none());
+            assert!(set_fader_action(channel, f64::INFINITY).is_none());
+            assert!(
+                set_route_gain_action(&channel.outbound_routes[0], AUDIO_GAIN_DB_MIN - 1.0)
+                    .is_none()
+            );
+        }
     }
 
     #[test]

@@ -38,6 +38,9 @@ use crate::app::ui_actions::{
     audio_processor_insert_built_in_action, audio_processor_rack_edit_action,
 };
 
+/// Maximum magnitude in the contiguous exact-integer domain of canonical audio f64 values.
+pub(crate) const MAX_EXACT_AUDIO_INTEGER: f64 = (1_u64 << f64::MANTISSA_DIGITS) as f64;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AudioProcessorInsertOptionModel {
     pub(crate) label: String,
@@ -72,13 +75,14 @@ impl AudioProcessorParameterModel {
         self.keyframe_count == 0 && self.schema.numeric.is_some()
     }
 
-    fn normalized_static_value(&self, value: f32) -> Option<f64> {
-        let mut value = f64::from(value);
+    fn normalized_static_value(&self, value: f64) -> Option<f64> {
         if !value.is_finite() {
             return None;
         }
-        if self.schema.value_type == PropertyValueType::Int {
-            value = value.round();
+        if self.schema.value_type == PropertyValueType::Int
+            && (value.fract() != 0.0 || value.abs() > MAX_EXACT_AUDIO_INTEGER)
+        {
+            return None;
         }
         let contract = self.schema.numeric?;
         (value >= contract.hard_range.min && value <= contract.hard_range.max).then_some(value)
@@ -558,7 +562,7 @@ pub(crate) fn set_static_parameter_action(
     rack: &AudioProcessorRackModel,
     processor: &AudioProcessorInstanceModel,
     parameter: &AudioProcessorParameterModel,
-    value: f32,
+    value: f64,
 ) -> Option<Action> {
     if !rack.is_editable || !parameter.is_static_editable() {
         return None;
@@ -708,6 +712,43 @@ mod tests {
             .edit_disabled_reason
             .as_deref()
             .is_some_and(|reason| reason.contains("已锁定")));
+    }
+
+    #[test]
+    fn static_parameter_action_preserves_canonical_double_precision() {
+        let (sequence, _) = sequence_with_gain_scope();
+        let racks =
+            clip_processing_scope_racks(&sequence, &sequence.audio_tracks[0].clips[0], &chinese());
+        let rack = &racks[0];
+        let processor = &rack.processors[0];
+        let parameter = &processor.parameters[0];
+        let action = set_static_parameter_action(rack, processor, parameter, -6.123456789123456)
+            .expect("value");
+        let Some(ProductAction::Audio(AudioProductAction::EditProcessorRack(request))) =
+            ProductAction::decode_external(&action).expect("decode")
+        else {
+            panic!("rack edit");
+        };
+        let AudioProcessorRackEdit::SetParameterStaticValue { value, .. } = request.edit else {
+            panic!("static value");
+        };
+        assert_eq!(value, -6.123456789123456_f64);
+        let mut state = crate::app::AppState::new();
+        state.test_set_sequence(Some(sequence));
+        let snapshot = |state: &crate::app::AppState| {
+            let sequence = state.active_sequence().expect("sequence");
+            clip_processing_scope_racks(sequence, &sequence.audio_tracks[0].clips[0], &chinese())[0]
+                .processors[0]
+                .parameters[0]
+                .static_value
+        };
+        let before = snapshot(&state);
+        state.dispatch_action(action).expect("author value");
+        assert_eq!(snapshot(&state), value);
+        assert!(state.undo_timeline().expect("undo"));
+        assert_eq!(snapshot(&state), before);
+        assert!(state.redo_timeline().expect("redo"));
+        assert_eq!(snapshot(&state), value);
     }
 
     #[test]

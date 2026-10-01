@@ -463,6 +463,19 @@ clears all nested ancestry. Project restore preserves the current target when
 it still belongs to the restored collection and otherwise uses that restored
 document's validated active fallback.
 
+## Test runtime isolation
+
+Media Asset mutation revision/publication tests bind the real missing-helper
+failure path explicitly, so worker state-machine evidence does not depend on
+FFmpeg helper discovery or external process startup latency. Production execution
+still discovers and invokes the packaged probe helper.
+
+App unit tests allocate a process-unique runtime namespace, independent of recycled
+operating-system PIDs. Recovery crash subprocesses explicitly inherit that namespace
+so they exercise the same durable authority as their parent. Existing unmarked
+runtime parents remain inert; test isolation never grants ownership to abandoned
+fixtures or weakens production directory validation.
+
 ## Asset Library
 
 The project runtime contains one immutable
