@@ -2,6 +2,7 @@
 
 use super::product_action::{TimelineInOutPointKind, TimelineSetInOutPointPayload};
 use super::AppState;
+use crate::app::AppMessage;
 use mondrian_core::{FrameRounding, MondrianError, TimelineTime, TimelineTimeRange};
 use mondrian_timeline::{
     apply_range_edit, assess_range_edit, RangeEditAutomationPolicy, RangeEditKind,
@@ -172,18 +173,16 @@ fn range_edit_description(kind: RangeEditKind) -> &'static str {
     }
 }
 
-fn range_edit_status(kind: RangeEditKind, outcome: &RangeEditOutcome) -> String {
+fn range_edit_status(kind: RangeEditKind, outcome: &RangeEditOutcome) -> crate::app::AppMessage {
     let verb = match kind {
-        RangeEditKind::Lift => "Lift",
-        RangeEditKind::Extract => "Extract",
+        RangeEditKind::Lift => "status-range-lifted",
+        RangeEditKind::Extract => "status-range-extracted",
     };
-    format!(
-        "{verb} 完成：移除 {} 个片段，修剪 {} 个片段，分割 {} 个片段，移动 {} 个片段",
-        outcome.removed_clip_ids.len(),
-        outcome.trimmed_clip_ids.len(),
-        outcome.split_clips.len(),
-        outcome.shifted_clip_ids.len()
-    )
+    AppMessage::new(verb)
+        .with_count("removed", outcome.removed_clip_ids.len())
+        .with_count("trimmed", outcome.trimmed_clip_ids.len())
+        .with_count("split", outcome.split_clips.len())
+        .with_count("shifted", outcome.shifted_clip_ids.len())
 }
 
 fn range_edit_error(reason: impl Into<String>) -> MondrianError {

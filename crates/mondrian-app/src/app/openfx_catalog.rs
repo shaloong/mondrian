@@ -1,5 +1,6 @@
 //! Machine-local OpenFX Filter installation and startup restoration.
 
+use crate::app::AppMessage;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
@@ -56,7 +57,7 @@ impl AppState {
             .requests
             .try_send(CatalogRequest { path, purpose: CatalogPurpose::Install })
             .map_err(|error| catalog_error(error.to_string()))?;
-        self.set_status_hint("正在扫描 OpenFX Filter…", false);
+        self.set_status_hint(AppMessage::new("status-openfx-scanning"), false);
         Ok(())
     }
 
@@ -66,7 +67,11 @@ impl AppState {
             return;
         }
         if let Err(error) = self.start_openfx_catalog() {
-            self.set_status_hint(format!("OpenFX 恢复无法启动：{error}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-openfx-restore-failed")
+                    .with_text("error", error.to_string()),
+                true,
+            );
             return;
         }
         let Some(catalog) = self.openfx_catalog.as_mut() else {
@@ -84,7 +89,7 @@ impl AppState {
             }
         }
         if catalog.restores_remaining == 0 {
-            self.set_status_hint("OpenFX 恢复无法排队", true);
+            self.set_status_hint(AppMessage::new("status-openfx-restore-queue-failed"), true);
         }
     }
 
@@ -147,22 +152,24 @@ impl AppState {
                                 self.completed_openfx_installs.push(result.path);
                                 if rejected.is_empty() {
                                     self.set_status_hint(
-                                        format!("已安装 {installed} 个 OpenFX Filter"),
+                                        AppMessage::new("status-openfx-installed")
+                                            .with_count("installed", installed),
                                         false,
                                     );
                                 } else {
                                     self.set_status_hint(
-                                        format!(
-                                            "已安装 {installed} 个 OpenFX Filter；{} 个插件不受当前宿主支持",
-                                            rejected.len()
-                                        ),
+                                        AppMessage::new("status-openfx-installed-partial")
+                                            .with_count("installed", installed)
+                                            .with_count("unsupported", rejected.len()),
                                         true,
                                     );
                                 }
                             }
-                            Err(reason) => {
-                                self.set_status_hint(format!("OpenFX 安装失败：{reason}"), true)
-                            }
+                            Err(reason) => self.set_status_hint(
+                                AppMessage::new("status-openfx-install-failed")
+                                    .with_text("reason", reason.clone()),
+                                true,
+                            ),
                         },
                         CatalogPurpose::Restore => {
                             catalog.restores_remaining =
@@ -183,10 +190,9 @@ impl AppState {
                             if catalog.restores_remaining == 0 {
                                 if catalog.restore_failures > 0 {
                                     self.set_status_hint(
-                                        format!(
-                                            "OpenFX 恢复完成：{} 个 Filter 可用，{} 个失败；可重新选择安装文件",
-                                            catalog.restored, catalog.restore_failures
-                                        ),
+                                        AppMessage::new("status-openfx-restored-partial")
+                                            .with_count("available", catalog.restored)
+                                            .with_count("failed", catalog.restore_failures),
                                         true,
                                     );
                                 } else if catalog.restored > 0
@@ -196,7 +202,8 @@ impl AppState {
                                         .is_some_and(|(_, is_error)| *is_error)
                                 {
                                     self.set_status_hint(
-                                        format!("已恢复 {} 个 OpenFX Filter", catalog.restored),
+                                        AppMessage::new("status-openfx-restored")
+                                            .with_count("count", catalog.restored),
                                         false,
                                     );
                                 }
@@ -217,7 +224,7 @@ impl AppState {
             if catalog.worker.take().is_some_and(|worker| worker.join().is_err())
                 || catalog.restores_remaining > 0
             {
-                self.set_status_hint("OpenFX 扫描任务异常结束；请重新选择插件", true);
+                self.set_status_hint(AppMessage::new("status-openfx-scan-failed"), true);
                 changed = true;
             }
         } else {

@@ -3,6 +3,8 @@
 //! Developer binaries own native window setup and event-loop plumbing. This
 //! module owns the reusable root widget composition above the dock/panel layer.
 
+#[cfg(test)]
+use crate::app::AppMessage;
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::{Action, AuthoringSessionId};
 use mondrian_export::queue::{ExportProgressDetail, ExportProgressPhase, JobStatus};
@@ -213,6 +215,10 @@ impl StatusBar {
         self.model = model;
     }
 
+    fn history_entry_text(&self, entry: &StatusLogEntry) -> String {
+        self.localizer.message(&entry.message)
+    }
+
     fn sync_history(&mut self, history: &[StatusLogEntry]) {
         if self.history != history {
             self.history = history.to_vec();
@@ -393,7 +399,11 @@ impl Widget for StatusBar {
                 for (index, entry) in
                     self.history.iter().rev().skip(self.history_offset).take(8).enumerate()
                 {
-                    let text = elide_text_to_width(&entry.message, font_size, panel.width - 24.0);
+                    let text = elide_text_to_width(
+                        &self.history_entry_text(entry),
+                        font_size,
+                        panel.width - 24.0,
+                    );
                     ctx.encoder.draw_text(
                         &text,
                         font_size,
@@ -469,7 +479,7 @@ fn status_bar_model(state: &AppState, localizer: &Localizer) -> StatusBarModel {
     let active_jobs = jobs.iter().filter(|job| !job.status.is_terminal()).collect::<Vec<_>>();
 
     let (message, is_error, is_busy) = if let Some((message, true)) = &state.status_hint {
-        (message.clone(), true, false)
+        (localizer.message(message), true, false)
     } else if let Some(job) = active_jobs.first() {
         let message = active_export_status_text(
             &job.status,
@@ -479,7 +489,7 @@ fn status_bar_model(state: &AppState, localizer: &Localizer) -> StatusBarModel {
         );
         (message, false, true)
     } else if let Some((message, is_error)) = &state.status_hint {
-        (message.clone(), *is_error, false)
+        (localizer.message(message), *is_error, false)
     } else {
         (localizer.text("status-ready"), false, false)
     };
@@ -492,7 +502,7 @@ fn status_bar_model(state: &AppState, localizer: &Localizer) -> StatusBarModel {
                 .and_then(|path| path.file_stem())
                 .map(|stem| stem.to_string_lossy().into_owned())
         })
-        .unwrap_or_else(|| "没有项目".to_owned());
+        .unwrap_or_else(|| localizer.text("status-no-project"));
 
     StatusBarModel { message, is_error, is_busy, context }
 }
@@ -4596,7 +4606,10 @@ mod tests {
         use crate::app_ui::localization::AppUiLocalePreference;
         let mut state = AppState::new();
         for index in 0..12 {
-            state.set_status_hint(format!("Activity {index}"), false);
+            state.set_status_hint(
+                AppMessage::new("status-clap-installed").with_count("count", index),
+                false,
+            );
         }
         state.clear_status_hint();
         let mut preferences = AppUiPreferences {
@@ -4617,6 +4630,14 @@ mod tests {
             root.refresh_from_app_state_with_preferences(&state, &preferences);
             assert_eq!(root.status_bar.id, widget_id);
             assert_eq!(root.status_bar.history, history);
+            let entry = &root.status_bar.history[5];
+            let body = root.status_bar.history_entry_text(entry);
+            assert_eq!(body, root.localizer.message(&entry.message));
+            let initial =
+                Localizer::new(AppUiLocale::ZhCn).expect("Chinese").message(&entry.message);
+            if locale != AppUiLocale::ZhCn {
+                assert_ne!(body, initial);
+            }
             assert!(root.status_bar.history_open);
             assert_eq!(root.status_bar.history_offset, 3);
             assert_eq!(root.status_bar.localizer.locale(), locale);
@@ -4644,18 +4665,80 @@ mod tests {
     }
 
     #[test]
+    fn locale_switch_reformats_current_error_and_retained_success_without_author_edits() {
+        use crate::app_ui::localization::AppUiLocalePreference;
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(Sequence::new("Cut 01")));
+        let path = "E:/项目/Mixed Case/{clip}.mdp";
+        state.set_status_hint(
+            AppMessage::new("status-packaged").with_text("path", path),
+            false,
+        );
+        state.set_status_hint(
+            AppMessage::new("status-save-failed").with_text("error", "disk full"),
+            true,
+        );
+        let generation = state.project_author_generation();
+        let hint = state.status_hint.clone();
+        let history = state.status_log.clone();
+        let mut preferences = AppUiPreferences::default();
+        let mut root = AppUiAppRoot::from_app_state_with_preferences(&state, &preferences);
+        root.status_bar.history_open = true;
+        let widget_id = root.status_bar.id;
+        for (preference, locale) in [
+            (AppUiLocalePreference::EnUs, AppUiLocale::EnUs),
+            (AppUiLocalePreference::Pseudo, AppUiLocale::Pseudo),
+            (AppUiLocalePreference::ZhCn, AppUiLocale::ZhCn),
+        ] {
+            preferences.locale_preference = preference;
+            root.refresh_from_app_state_with_preferences(&state, &preferences);
+            let localizer = Localizer::new(locale).expect("catalog");
+            let current = &hint.as_ref().expect("error fact").0;
+            assert_eq!(root.status_bar.model.message, localizer.message(current));
+            assert!(root.status_bar.model.is_error);
+            assert!(!root.status_bar.model.is_busy);
+            let first = &root.status_bar.history[0];
+            assert_eq!(
+                root.status_bar.history_entry_text(first),
+                localizer.message(&first.message)
+            );
+            assert!(root.status_bar.history_entry_text(first).contains(path));
+            if locale == AppUiLocale::EnUs {
+                assert!(root.status_bar.model.message.contains("Could not save project"));
+                assert!(root.status_bar.history_entry_text(first).contains("Project packaged"));
+            }
+            assert_eq!(state.project_author_generation(), generation);
+            assert_eq!(state.status_hint, hint);
+            assert_eq!(state.status_log, history);
+            assert_eq!(root.status_bar.history, history);
+            assert_eq!(root.status_bar.id, widget_id);
+            assert!(root.status_bar.history_open);
+            root.refresh_playback_frame_from_app_state(&state, None);
+            assert_eq!(root.status_bar.model.message, localizer.message(current));
+        }
+    }
+
+    #[test]
     fn status_bar_model_prefers_active_sequence_context() {
         let mut state = AppState::new();
         state.test_set_project_path(PathBuf::from("E:/projects/rough-cut.mdp"));
         state.test_set_sequence(Some(mondrian_timeline::sequence::Sequence::new("Cut 01")));
-        state.set_status_hint("Project saved", false);
+        state.set_status_hint(
+            AppMessage::new("status-opaque-detail").with_text("detail", "Project saved"),
+            false,
+        );
 
         let model = status_bar_model(
             &state,
             &Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog"),
         );
 
-        assert_eq!(model.message, "Project saved");
+        assert_eq!(
+            model.message,
+            crate::app_ui::localization::chinese_product_message(
+                &state.status_hint.as_ref().expect("status").0
+            )
+        );
         assert!(!model.is_error);
         assert!(!model.is_busy);
         assert_eq!(model.context, "Cut 01");
@@ -4851,7 +4934,11 @@ mod tests {
     fn status_history_opens_scrolls_and_closes_without_blocking_editing() {
         let mut state = AppState::new();
         for index in 0..12 {
-            state.set_status_hint(format!("Activity {index}"), index == 11);
+            state.set_status_hint(
+                AppMessage::new("status-opaque-detail")
+                    .with_text("detail", format!("Activity {index}")),
+                index == 11,
+            );
         }
         let mut root = AppUiAppRoot::from_app_state(&state);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
@@ -4922,7 +5009,7 @@ mod tests {
         state.notifications.publish(
             "save:before-root",
             crate::app::notifications::AppNotificationSeverity::Success,
-            crate::app::AppMessage::new("notification-save-complete"),
+            AppMessage::new("notification-save-complete"),
         );
         let mut root = AppUiAppRoot::from_app_state(&state);
         assert!(root.next_notification_deadline().is_none());
@@ -4930,7 +5017,7 @@ mod tests {
         state.notifications.publish(
             "save:after-root",
             crate::app::notifications::AppNotificationSeverity::Success,
-            crate::app::AppMessage::new("notification-save-complete"),
+            AppMessage::new("notification-save-complete"),
         );
         root.refresh_from_app_state(&state);
         let deadline = root.next_notification_deadline().expect("visible terminal toast");
@@ -4946,7 +5033,7 @@ mod tests {
         state.notifications.publish(
             "save:first-session",
             crate::app::notifications::AppNotificationSeverity::Success,
-            crate::app::AppMessage::new("notification-save-complete"),
+            AppMessage::new("notification-save-complete"),
         );
         root.refresh_from_app_state(&state);
         assert!(root.next_notification_deadline().is_some());
@@ -4962,7 +5049,10 @@ mod tests {
         let mut state = AppState::new();
         state.test_set_sequence(Some(mondrian_timeline::Sequence::new("rough-cut")));
         state.test_set_project_path(PathBuf::from("E:/projects/rough-cut.mdp"));
-        state.set_status_hint("Import failed", true);
+        state.set_status_hint(
+            AppMessage::new("status-opaque-detail").with_text("detail", "Import failed"),
+            true,
+        );
 
         root.refresh_from_app_state(&state);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));

@@ -902,6 +902,8 @@ pub fn qualify_app_ui_host_startup_ownership(
         let fault_label = format!("{fault:?}");
         let marker = format!("Host owning-startup identity: {fault_label}");
         let mut app_state = AppState::new();
+        let marker =
+            crate::app::AppMessage::new("status-opaque-detail").with_text("detail", marker);
         app_state.set_status_hint(marker.clone(), false);
         let original_event_bus = Arc::clone(&app_state.event_bus);
         let path = std::env::temp_dir().join(format!(
@@ -947,7 +949,11 @@ pub fn qualify_app_ui_host_startup_ownership(
     let opaque_drops_before =
         HOST_OPAQUE_QUALIFICATION_DROPS.load(std::sync::atomic::Ordering::SeqCst);
     let mut opaque_app = AppState::new();
-    opaque_app.set_status_hint("Host opaque startup identity", false);
+    opaque_app.set_status_hint(
+        crate::app::AppMessage::new("status-opaque-detail")
+            .with_text("detail", "Host opaque startup identity"),
+        false,
+    );
     let opaque_event_bus = Arc::clone(&opaque_app.event_bus);
     let opaque_failure = match AppUiHost::try_new_with_startup_fault(
         opaque_app,

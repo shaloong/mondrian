@@ -32,6 +32,16 @@ impl AppMessage {
         self
     }
 
+    /// Add an exact count, retaining numeric plural rules when representable.
+    pub fn with_count(mut self, name: &'static str, value: usize) -> Self {
+        let value = match i64::try_from(value) {
+            Ok(value) => AppMessageValue::Number(value),
+            Err(_) => AppMessageValue::Text(value.to_string()),
+        };
+        self.args.insert(name, value);
+        self
+    }
+
     /// Add a nested product message without freezing its current language.
     pub fn with_message(mut self, name: &'static str, value: AppMessage) -> Self {
         self.args.insert(name, AppMessageValue::Message(Box::new(value)));

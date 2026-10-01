@@ -3,6 +3,7 @@
 //! UI Adapters submit the closed product action; Timeline Modules own Channel
 //! Strip/Rack mutation and validation; App owns transaction and execution refresh.
 
+use crate::app::AppMessage;
 use mondrian_audio::{
     AudioProcessingMode, AudioRenderContract, ClapPluginDescriptor, Vst3PluginDescriptor,
 };
@@ -66,7 +67,7 @@ impl AppState {
                     .install_library(payload.path)
                     .map_err(|error| clap_unavailable(error.to_string()))?;
                 self.set_status_hint(
-                    format!("已安装 {} 个 CLAP 处理器", descriptors.len()),
+                    AppMessage::new("status-clap-installed").with_count("count", descriptors.len()),
                     false,
                 );
                 if !descriptors.is_empty() && self.active_sequence().is_some() {
@@ -117,7 +118,7 @@ impl AppState {
                     .install_plugin(payload.path)
                     .map_err(|error| vst3_unavailable(error.to_string()))?;
                 self.set_status_hint(
-                    format!("已安装 {} 个 VST3 处理器", descriptors.len()),
+                    AppMessage::new("status-vst3-installed").with_count("count", descriptors.len()),
                     false,
                 );
                 if !descriptors.is_empty() && self.active_sequence().is_some() {

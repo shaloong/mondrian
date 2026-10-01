@@ -5,6 +5,7 @@
 //! Effects analysis. Completed results re-enter authoring only through one
 //! revision-checked Sequence transaction.
 
+use crate::app::AppMessage;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
@@ -957,7 +958,11 @@ impl AppState {
                         VisualTrackingPhase::Failed,
                         Some(detail.clone()),
                     );
-                    self.set_status_hint(format!("跟踪失败：{detail}"), true);
+                    self.set_status_hint(
+                        AppMessage::new("status-tracking-failed")
+                            .with_text("detail", detail.clone()),
+                        true,
+                    );
                     changed = true;
                 }
                 TrackingWorkerEvent::Completed {
@@ -1011,9 +1016,9 @@ impl AppState {
                             );
                             self.set_status_hint(
                                 if cache_hit {
-                                    "跟踪缓存已应用"
+                                    AppMessage::new("status-tracking-cached")
                                 } else {
-                                    "跟踪完成"
+                                    AppMessage::new("status-tracking-complete")
                                 },
                                 false,
                             );

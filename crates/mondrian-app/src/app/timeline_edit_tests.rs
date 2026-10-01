@@ -178,7 +178,9 @@ fn commit_receipt_reports_an_unretained_project_edit() {
 
     assert!(
         state.status_hint.as_ref().is_some_and(|(message, is_error)| {
-            *is_error && message.contains("编辑已提交但未保留撤销记录")
+            *is_error
+                && crate::app_ui::localization::chinese_product_message(message)
+                    .contains("编辑已提交但未保留撤销记录")
         })
     );
 }

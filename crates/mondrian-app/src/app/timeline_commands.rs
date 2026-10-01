@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::AppMessage;
 
 fn sequence_time_from_frame(
     frame: i64,
@@ -435,10 +436,7 @@ impl AppState {
         commit: mondrian_editor_state::AuthoringCommit,
     ) {
         if !commit.undo_retained {
-            self.set_status_hint(
-                "编辑已提交但未保留撤销记录；此前撤销段已清除以避免跨越未记录状态",
-                true,
-            );
+            self.set_status_hint(AppMessage::new("status-history-retired"), true);
         }
 
         let mut invalidated_sequence_ids =
@@ -583,7 +581,10 @@ impl AppState {
             }
         })?;
         let folder_id = library.create_folder(name, parent_id)?;
-        self.set_status_hint(format!("已新建文件夹：{}", name), false);
+        self.set_status_hint(
+            AppMessage::new("status-folder-created").with_text("name", name),
+            false,
+        );
         Ok(folder_id)
     }
 
@@ -708,7 +709,10 @@ impl AppState {
         self.event_bus
             .publish(mondrian_core::events::AppEvent::AssetImported { asset_id });
         if announce {
-            self.set_status_hint(format!("已新建：{}", asset_name), false);
+            self.set_status_hint(
+                AppMessage::new("status-asset-created").with_text("name", asset_name.clone()),
+                false,
+            );
         }
         Ok((asset_id, asset_name))
     }
@@ -765,7 +769,10 @@ impl AppState {
             .unwrap_or_else(|| "纯色层".to_string());
         self.event_bus
             .publish(mondrian_core::events::AppEvent::AssetImported { asset_id });
-        self.set_status_hint(format!("已新建：{}", asset_name), false);
+        self.set_status_hint(
+            AppMessage::new("status-asset-created").with_text("name", asset_name.clone()),
+            false,
+        );
         Ok(asset_id)
     }
 
@@ -792,7 +799,10 @@ impl AppState {
         );
         let clip_id =
             self.drop_dragging_asset_to_video_track_with_mode(track_id, start_frame, overlap_mode)?;
-        self.set_status_hint(format!("已创建调整图层：{}", asset_name), false);
+        self.set_status_hint(
+            AppMessage::new("status-adjustment-created").with_text("name", asset_name.clone()),
+            false,
+        );
         Ok(clip_id)
     }
 
@@ -864,7 +874,10 @@ impl AppState {
                 Ok((sequence_id, clip_id))
             })?;
 
-        self.set_status_hint(format!("已创建纯色层: {}", asset_name), false);
+        self.set_status_hint(
+            AppMessage::new("status-solid-created").with_text("name", asset_name.clone()),
+            false,
+        );
         Ok(clip_id)
     }
 

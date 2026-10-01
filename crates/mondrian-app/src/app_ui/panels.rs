@@ -2829,7 +2829,7 @@ pub struct ExportPanelModel {
     /// Explicit provider/QC selection frozen independently from UI rendering.
     pub regulatory_pse: Option<crate::app::exporting::ImportedRegulatoryPseConfiguration>,
     pub delivery_error: Option<String>,
-    pub status: Option<(String, bool)>,
+    pub status: Option<(crate::app::AppMessage, bool)>,
     pub jobs: Vec<ExportJobModel>,
     pub can_clear_terminal_history: bool,
 }
@@ -3178,11 +3178,11 @@ impl ExportPanelModel {
         } else if let Some(error) = &self.ancillary_error {
             localizer.format_text("export-status-anc-failed", "error", error)
         } else if let Some((message, true)) = &self.status {
-            localizer.format_text("export-status-error", "error", message)
+            localizer.format_text("export-status-error", "error", &localizer.message(message))
         } else if self.output_path.trim().is_empty() {
             localizer.text("export-status-select-output")
         } else if let Some((message, false)) = &self.status {
-            message.clone()
+            localizer.message(message)
         } else {
             localizer.text("export-status-ready")
         }

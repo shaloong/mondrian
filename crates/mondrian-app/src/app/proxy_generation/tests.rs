@@ -1275,7 +1275,9 @@ fn app_poll_projects_only_executed_background_failure() {
     assert!(state.poll_proxy_generation());
     assert!(
         state.status_hint.as_ref().is_some_and(|(message, is_error)| {
-            *is_error && message.contains("synthetic worker failure")
+            *is_error
+                && crate::app_ui::localization::chinese_product_message(message)
+                    .contains("synthetic worker failure")
         })
     );
     assert!(state

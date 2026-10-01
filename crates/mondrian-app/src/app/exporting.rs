@@ -6,6 +6,7 @@ mod regulatory_pse;
 pub use regulatory_pse::ImportedRegulatoryPseConfiguration;
 
 use super::*;
+use crate::app::AppMessage;
 use mondrian_core::{JobId, MondrianError, Result};
 use mondrian_export::delivery::resolve_export_delivery;
 use mondrian_export::prepare_timeline_export_dependencies_with_audio_selection;
@@ -215,18 +216,24 @@ impl AppState {
         let config = match self.build_timeline_export_config(request) {
             Ok(config) => config,
             Err(reason) => {
-                self.set_status_hint(format!("导出失败：{reason}"), true);
+                self.set_status_hint(
+                    AppMessage::new("status-export-failed").with_text("reason", reason.clone()),
+                    true,
+                );
                 return Err(export_error("enqueue_timeline_export", reason));
             }
         };
         let output_path = config.output_path.display().to_string();
         let job_id = self.render_queue.enqueue(RenderJob::new(config)).map_err(|error| {
             let reason = error.to_string();
-            self.set_status_hint(format!("导出失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-export-failed").with_text("reason", reason.clone()),
+                true,
+            );
             export_error("enqueue_timeline_export", reason)
         })?;
         let _ = self.refresh_internal_execution_resource_decision();
-        self.set_status_hint("已加入导出队列", false);
+        self.set_status_hint(AppMessage::new("status-export-queued"), false);
         tracing::info!(%job_id, "导出任务已加入队列: {output_path}");
         Ok(job_id)
     }
@@ -335,7 +342,11 @@ impl AppState {
             match &job.status {
                 JobStatus::Completed => {
                     let path = job.output_path.display().to_string();
-                    self.set_status_hint(format!("导出完成：{path}"), false);
+                    self.set_status_hint(
+                        AppMessage::new("status-export-complete")
+                            .with_text("path", path.to_string()),
+                        false,
+                    );
                     self.notifications.publish(
                         key,
                         super::notifications::AppNotificationSeverity::Success,
@@ -344,7 +355,11 @@ impl AppState {
                     );
                 }
                 JobStatus::Failed(failure) => {
-                    self.set_status_hint(format!("导出失败：{failure}"), true);
+                    self.set_status_hint(
+                        AppMessage::new("status-export-failed")
+                            .with_text("reason", failure.to_string()),
+                        true,
+                    );
                     self.notifications.publish(
                         key,
                         super::notifications::AppNotificationSeverity::Error,
@@ -352,7 +367,9 @@ impl AppState {
                             .with_text("reason", failure.detail.clone()),
                     );
                 }
-                JobStatus::Cancelled => self.set_status_hint("导出已取消", false),
+                JobStatus::Cancelled => {
+                    self.set_status_hint(AppMessage::new("status-export-canceled"), false)
+                }
                 JobStatus::Pending | JobStatus::Running { .. } | JobStatus::Cancelling { .. } => {}
             }
         }

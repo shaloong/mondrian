@@ -154,6 +154,12 @@ impl Localizer {
     }
 }
 
+/// Render retained product facts explicitly for Chinese UI assertions in App tests.
+#[cfg(test)]
+pub(crate) fn chinese_product_message(message: &crate::app::AppMessage) -> String {
+    Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog").message(message)
+}
+
 /// Shared product message ID for the exact Export lifecycle phase.
 pub(crate) fn export_progress_phase_message_id(
     phase: mondrian_export::ExportProgressPhase,
@@ -816,6 +822,57 @@ mod tests {
     }
 
     #[test]
+    fn import_summary_variants_localize_counts_without_empty_interpolations() {
+        use crate::app::AppMessage;
+        for (id, proxies, failed) in [
+            ("status-import-summary", 0, 0),
+            ("status-import-summary-proxies", 1, 0),
+            ("status-import-summary-partial", 0, 1),
+            ("status-import-summary-proxies-partial", 1, 1),
+        ] {
+            for count in [1, 2] {
+                let message = AppMessage::new(id)
+                    .with_count("imported", count)
+                    .with_count("proxies", proxies * count)
+                    .with_count("failed", failed * count);
+                for locale in [AppUiLocale::ZhCn, AppUiLocale::EnUs, AppUiLocale::Pseudo] {
+                    let localizer = Localizer::new(locale).expect("catalog");
+                    let text = localizer.message(&message);
+                    assert!(!text.contains("status-import-"), "unresolved: {text}");
+                    assert!(
+                        !text.contains("\u{2068}\u{2069}"),
+                        "empty interpolation: {text}"
+                    );
+                    if locale == AppUiLocale::EnUs {
+                        if count == 1 {
+                            assert!(text.contains("Imported one media file"));
+                        } else {
+                            assert!(text.contains("media files") && text.contains('2'));
+                        }
+                        assert_eq!(text.contains("generating"), proxies > 0);
+                        assert_eq!(text.contains("failed"), failed > 0);
+                        if proxies > 0 {
+                            assert!(text.contains(if count == 1 {
+                                "one proxy"
+                            } else {
+                                "proxies"
+                            }));
+                        }
+                        if failed > 0 && count == 1 {
+                            assert!(text.contains("one failed"));
+                        }
+                    }
+                }
+            }
+        }
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English");
+        assert_eq!(
+            english.message(&AppMessage::new("status-import-summary").with_count("imported", 1)),
+            "Imported one media file"
+        );
+    }
+
+    #[test]
     fn product_message_resolves_nested_copy_on_each_locale_projection() {
         use crate::app::AppMessage;
         let nested = AppMessage::new("notification-import-complete").with_number("count", 1);
@@ -850,6 +907,9 @@ mod tests {
                 let message = AppMessage::new("export-status-error").with_number("error", value);
                 assert!(localizer.message(&message).contains(&value.to_string()));
             }
+            let largest_count =
+                AppMessage::new("export-status-error").with_count("error", usize::MAX);
+            assert!(localizer.message(&largest_count).contains(&usize::MAX.to_string()));
             let message = AppMessage::new("export-status-error").with_text("error", detail);
             assert!(localizer.message(&message).contains(detail));
         }

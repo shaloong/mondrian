@@ -1,6 +1,7 @@
 //! Product authoring operations for generated Basic Title Clips.
 
 use super::*;
+use crate::app::AppMessage;
 use mondrian_core::default_basic_title_font_family;
 
 const DEFAULT_BASIC_TITLE_DURATION_SECS: f64 = 5.0;
@@ -88,7 +89,7 @@ impl AppState {
                 Ok((sequence.id, clip_id))
             })?;
         self.select_clip_by_id(clip_id);
-        self.set_status_hint("已创建基础标题", false);
+        self.set_status_hint(AppMessage::new("status-title-created"), false);
         Ok(clip_id)
     }
 }

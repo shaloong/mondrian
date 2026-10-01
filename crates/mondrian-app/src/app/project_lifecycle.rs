@@ -1,4 +1,3 @@
-#[cfg(any(test, feature = "validation"))]
 use super::endurance_machine_plan::{
     EnduranceMachineFileBinding, PreparedCommercialEnduranceMachinePlan,
 };
@@ -27,6 +26,8 @@ use super::project_runtime::{
     project_runtime_root_for_project, ProjectRuntimeLease,
 };
 use super::*;
+#[cfg(any(test, feature = "validation"))]
+use crate::app::AppMessage;
 use anyhow::Context;
 #[cfg(test)]
 use mondrian_project::load_project_archive;
@@ -406,7 +407,11 @@ impl AppState {
             }
             for completion in completions {
                 if let Err(error) = self.apply_persistence_completion(completion) {
-                    self.set_status_hint(format!("项目持久化完成失败：{error}"), true);
+                    self.set_status_hint(
+                        AppMessage::new("status-persistence-failed")
+                            .with_text("error", error.to_string()),
+                        true,
+                    );
                 }
             }
         }
@@ -496,7 +501,7 @@ impl AppState {
             .map_err(anyhow::Error::msg)?;
         self.pending_project_close =
             Some(PendingProjectClose { session_id, ticket, required_manual_save });
-        self.set_status_hint("正在完成后台保存并安全关闭项目…", false);
+        self.set_status_hint(AppMessage::new("status-closing"), false);
         Ok(true)
     }
 
@@ -547,7 +552,10 @@ impl AppState {
             let reason =
                 "active Authoring Session changed while Project close was quiescing".to_owned();
             self.retain_project_close_fault(pending.session_id, reason.clone());
-            self.set_status_hint(format!("项目关闭失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-close-failed").with_text("reason", reason.clone()),
+                true,
+            );
             return ProjectClosePoll::Faulted(reason);
         }
 
@@ -577,16 +585,27 @@ impl AppState {
                                 "{reason}; additionally failed to resume persistence admission: {resume_error}"
                             );
                             self.retain_project_close_fault(pending.session_id, combined.clone());
-                            self.set_status_hint(format!("项目关闭失败：{combined}"), true);
+                            self.set_status_hint(
+                                AppMessage::new("status-close-failed")
+                                    .with_text("reason", combined.to_string()),
+                                true,
+                            );
                             return ProjectClosePoll::Faulted(combined);
                         }
-                        self.set_status_hint(format!("保存后关闭已取消：{reason}"), true);
+                        self.set_status_hint(
+                            AppMessage::new("status-close-save-canceled")
+                                .with_text("reason", reason.clone()),
+                            true,
+                        );
                         return ProjectClosePoll::SaveRejected(reason);
                     }
                 }
                 if let Err(reason) = self.project_persistence.retire(token) {
                     self.retain_project_close_fault(pending.session_id, reason.clone());
-                    self.set_status_hint(format!("项目关闭失败：{reason}"), true);
+                    self.set_status_hint(
+                        AppMessage::new("status-close-failed").with_text("reason", reason.clone()),
+                        true,
+                    );
                     return ProjectClosePoll::Faulted(reason);
                 }
                 self.retain_current_project_library_generation();
@@ -597,7 +616,10 @@ impl AppState {
             }
             Err(reason) => {
                 self.retain_project_close_fault(pending.session_id, reason.clone());
-                self.set_status_hint(format!("项目关闭失败：{reason}"), true);
+                self.set_status_hint(
+                    AppMessage::new("status-close-failed").with_text("reason", reason.clone()),
+                    true,
+                );
                 ProjectClosePoll::Faulted(reason)
             }
         }
@@ -1123,7 +1145,7 @@ impl AppState {
                     ProjectPersistencePurpose::Manual { .. },
                     Ok(PersistenceCompletionDisposition::Applied),
                 ) => {
-                    self.set_status_hint("项目已耐久保存", false);
+                    self.set_status_hint(AppMessage::new("status-saved"), false);
                     self.notifications.publish(
                         notification_key,
                         super::notifications::AppNotificationSeverity::Success,
@@ -1135,7 +1157,8 @@ impl AppState {
                     Ok(PersistenceCompletionDisposition::AppliedWithRecoveryWarning { reason }),
                 ) => {
                     self.set_status_hint(
-                        format!("项目已耐久保存，但恢复点清理失败：{reason}"),
+                        AppMessage::new("status-saved-cleanup-failed")
+                            .with_text("reason", reason.clone()),
                         true,
                     );
                     self.notifications.publish(
@@ -1157,7 +1180,8 @@ impl AppState {
                     Ok(PersistenceCompletionDisposition::AppliedWithRecoveryWarning { reason }),
                 ) => {
                     self.set_status_hint(
-                        format!("自动保存完成，但恢复点清理状态异常：{reason}"),
+                        AppMessage::new("status-autosaved-cleanup-failed")
+                            .with_text("reason", reason.clone()),
                         true,
                     );
                     self.notifications.publish(
@@ -1168,7 +1192,10 @@ impl AppState {
                     );
                 }
                 (ProjectPersistencePurpose::Manual { .. }, Err(error)) => {
-                    self.set_status_hint(format!("保存项目失败：{error}"), true);
+                    self.set_status_hint(
+                        AppMessage::new("status-save-failed").with_text("error", error.to_string()),
+                        true,
+                    );
                     self.notifications.publish(
                         notification_key,
                         super::notifications::AppNotificationSeverity::Error,
@@ -1177,7 +1204,11 @@ impl AppState {
                     );
                 }
                 (ProjectPersistencePurpose::Autosave { .. }, Err(error)) => {
-                    self.set_status_hint(format!("自动保存失败：{error}"), true);
+                    self.set_status_hint(
+                        AppMessage::new("status-autosave-failed")
+                            .with_text("error", error.to_string()),
+                        true,
+                    );
                     self.notifications.publish(
                         autosave_notification_key,
                         super::notifications::AppNotificationSeverity::Error,
@@ -1372,7 +1403,11 @@ impl AppState {
         match self.submit_autosave(10, 7) {
             Ok(_) => true,
             Err(error) => {
-                self.set_status_hint(format!("无法启动自动保存：{error}"), true);
+                self.set_status_hint(
+                    AppMessage::new("status-autosave-start-failed")
+                        .with_text("error", error.to_string()),
+                    true,
+                );
                 true
             }
         }
@@ -1395,23 +1430,25 @@ impl AppState {
         deadline: Instant,
     ) -> anyhow::Result<()> {
         let completion = self.wait_for_persistence_completion_until(request_id, deadline)?;
-        let result = match self
-            .apply_persistence_completion(completion)
-            .map_err(anyhow::Error::msg)?
-        {
-            PersistenceCompletionDisposition::Applied => Ok(()),
-            PersistenceCompletionDisposition::AppliedWithRecoveryWarning { reason } => {
-                self.set_status_hint(format!("项目已耐久保存，但恢复点清理失败：{reason}"), true);
-                Ok(())
-            }
-            PersistenceCompletionDisposition::SatisfiedByNewerPublication => Ok(()),
-            PersistenceCompletionDisposition::IgnoredSupersededDestination => {
-                anyhow::bail!("项目耐久保存目标在完成前已被较新的 Save As 请求取代")
-            }
-            PersistenceCompletionDisposition::IgnoredStaleSession => {
-                anyhow::bail!("项目持久化完成不再属于当前会话代际")
-            }
-        };
+        let result =
+            match self.apply_persistence_completion(completion).map_err(anyhow::Error::msg)? {
+                PersistenceCompletionDisposition::Applied => Ok(()),
+                PersistenceCompletionDisposition::AppliedWithRecoveryWarning { reason } => {
+                    self.set_status_hint(
+                        AppMessage::new("status-saved-cleanup-failed")
+                            .with_text("reason", reason.clone()),
+                        true,
+                    );
+                    Ok(())
+                }
+                PersistenceCompletionDisposition::SatisfiedByNewerPublication => Ok(()),
+                PersistenceCompletionDisposition::IgnoredSupersededDestination => {
+                    anyhow::bail!("项目耐久保存目标在完成前已被较新的 Save As 请求取代")
+                }
+                PersistenceCompletionDisposition::IgnoredStaleSession => {
+                    anyhow::bail!("项目持久化完成不再属于当前会话代际")
+                }
+            };
         anyhow::ensure!(
             Instant::now() < deadline,
             "project persistence completed after its original deadline"

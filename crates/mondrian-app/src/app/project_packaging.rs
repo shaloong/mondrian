@@ -4,6 +4,7 @@
 //! copying and publishes a complete directory atomically. Opening a moved
 //! package additionally requires rebinding its exact source references.
 
+use crate::app::AppMessage;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -206,7 +207,7 @@ impl AppState {
             target,
             worker: Some(worker),
         });
-        self.set_status_hint("正在打包项目…", false);
+        self.set_status_hint(AppMessage::new("status-packaging"), false);
         Ok(())
     }
 
@@ -216,7 +217,7 @@ impl AppState {
             return false;
         };
         task.cancel.store(true, Ordering::Release);
-        self.set_status_hint("正在取消项目打包…", false);
+        self.set_status_hint(AppMessage::new("status-package-canceling"), false);
         true
     }
 
@@ -236,7 +237,11 @@ impl AppState {
                 self.portable_package_export = None;
                 match result {
                     Ok(()) => {
-                        self.set_status_hint(format!("项目打包完成：{}", target.display()), false);
+                        self.set_status_hint(
+                            AppMessage::new("status-packaged")
+                                .with_text("path", (target.display()).to_string()),
+                            false,
+                        );
                         self.notifications.publish(
                             format!("portable-package:{}", target.display()),
                             super::notifications::AppNotificationSeverity::Success,
@@ -245,11 +250,15 @@ impl AppState {
                         );
                     }
                     Err(error) if error.is::<PortableExportCanceled>() => {
-                        self.set_status_hint("已取消项目打包", false)
+                        self.set_status_hint(AppMessage::new("status-package-canceled"), false)
                     }
                     Err(error) => {
                         let reason = format!("{error:#}");
-                        self.set_status_hint(format!("项目打包未完成：{reason}"), true);
+                        self.set_status_hint(
+                            AppMessage::new("status-package-failed")
+                                .with_text("reason", reason.clone()),
+                            true,
+                        );
                         self.notifications.publish(
                             format!("portable-package:{}", target.display()),
                             super::notifications::AppNotificationSeverity::Error,
@@ -263,7 +272,7 @@ impl AppState {
             Err(mpsc::TryRecvError::Disconnected) => {
                 let target = task.target.clone();
                 self.portable_package_export = None;
-                self.set_status_hint("项目打包工作线程意外终止", true);
+                self.set_status_hint(AppMessage::new("status-package-worker-failed"), true);
                 self.notifications.publish(
                     format!("portable-package:{}", target.display()),
                     super::notifications::AppNotificationSeverity::Error,
@@ -290,11 +299,13 @@ impl AppState {
                 task.last_percent = percent;
                 task.last_phase = phase;
                 let status = match phase {
-                    1 => format!("正在复制项目资源… {percent}%"),
-                    2 => format!("正在校验项目资源… {percent}%"),
-                    3 => "正在写入工程快照…".to_owned(),
-                    4 => "正在发布项目包…".to_owned(),
-                    _ => "正在分析项目依赖…".to_owned(),
+                    1 => AppMessage::new("status-package-copying")
+                        .with_text("percent", percent.to_string()),
+                    2 => AppMessage::new("status-package-validating")
+                        .with_text("percent", percent.to_string()),
+                    3 => AppMessage::new("status-package-writing"),
+                    4 => AppMessage::new("status-package-publishing"),
+                    _ => AppMessage::new("status-package-analyzing"),
                 };
                 self.set_status_hint(status, false);
                 true

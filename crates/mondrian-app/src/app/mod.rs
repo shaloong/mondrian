@@ -409,8 +409,8 @@ pub enum AppClipboardKind {
 /// One user-visible runtime status message retained for diagnostics panels.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusLogEntry {
-    /// Human-readable status message.
-    pub message: String,
+    /// Language-neutral message resolved by the current UI locale.
+    pub message: AppMessage,
     /// Whether the message represents an error.
     pub is_error: bool,
 }
@@ -514,7 +514,7 @@ pub struct AppState {
     pub export_draft: TimelineExportDraft,
 
     // 底部状态栏提示（message, is_error）
-    pub status_hint: Option<(String, bool)>,
+    pub status_hint: Option<(AppMessage, bool)>,
     /// Bounded history of user-visible status messages for diagnostics panels.
     pub status_log: Vec<StatusLogEntry>,
     /// Bounded, language-neutral facts for nonblocking terminal notifications.
@@ -712,8 +712,8 @@ impl AppState {
         }
     }
 
-    pub fn set_status_hint(&mut self, message: impl Into<String>, is_error: bool) {
-        let message = message.into();
+    /// Publish a language-neutral current status and retain its bounded history.
+    pub fn set_status_hint(&mut self, message: AppMessage, is_error: bool) {
         self.status_hint = Some((message.clone(), is_error));
         self.push_status_log(message, is_error);
     }
@@ -722,10 +722,7 @@ impl AppState {
         self.status_hint = None;
     }
 
-    fn push_status_log(&mut self, message: String, is_error: bool) {
-        if message.trim().is_empty() {
-            return;
-        }
+    fn push_status_log(&mut self, message: AppMessage, is_error: bool) {
         if self
             .status_log
             .last()
@@ -1232,7 +1229,10 @@ impl AppState {
                 && terminal.evidence.generation == current_generation
                 && let Some(detail) = terminal.failure_detail
             {
-                self.set_status_hint(format!("代理生成失败：{detail}"), true);
+                self.set_status_hint(
+                    AppMessage::new("status-proxy-failed").with_text("detail", detail.clone()),
+                    true,
+                );
             }
         }
         let _ = self.refresh_internal_execution_resource_decision();
@@ -1277,7 +1277,11 @@ impl AppState {
                 Ok(Some(commit)) => self.consume_authoring_commit(commit),
                 Ok(None) => {}
                 Err(error) => {
-                    self.set_status_hint(format!("切换代理模式失败：{error}"), true);
+                    self.set_status_hint(
+                        AppMessage::new("status-proxy-switch-failed")
+                            .with_text("error", error.to_string()),
+                        true,
+                    );
                 }
             }
         }
@@ -1307,30 +1311,50 @@ mod status_log_tests {
     fn set_status_hint_records_bounded_status_log_without_duplicate_tail() {
         let mut state = AppState::new();
 
-        state.set_status_hint("Ready", false);
-        state.set_status_hint("Ready", false);
-        state.set_status_hint("Failed", true);
+        state.set_status_hint(
+            AppMessage::new("status-opaque-detail").with_text("detail", "Ready"),
+            false,
+        );
+        state.set_status_hint(
+            AppMessage::new("status-opaque-detail").with_text("detail", "Ready"),
+            false,
+        );
+        state.set_status_hint(
+            AppMessage::new("status-opaque-detail").with_text("detail", "Failed"),
+            true,
+        );
 
         assert_eq!(
             state.status_log,
             vec![
-                StatusLogEntry { message: "Ready".to_owned(), is_error: false },
-                StatusLogEntry { message: "Failed".to_owned(), is_error: true },
+                StatusLogEntry {
+                    message: AppMessage::new("status-opaque-detail").with_text("detail", "Ready"),
+                    is_error: false
+                },
+                StatusLogEntry {
+                    message: AppMessage::new("status-opaque-detail").with_text("detail", "Failed"),
+                    is_error: true
+                },
             ]
         );
 
         for index in 0..(MAX_STATUS_LOG_ENTRIES + 4) {
-            state.set_status_hint(format!("Message {index}"), false);
+            state.set_status_hint(
+                AppMessage::new("status-opaque-detail")
+                    .with_text("detail", format!("Message {index}")),
+                false,
+            );
         }
 
         assert_eq!(state.status_log.len(), MAX_STATUS_LOG_ENTRIES);
         assert_eq!(
             state.status_log.first().expect("first status").message,
-            "Message 4"
+            AppMessage::new("status-opaque-detail").with_text("detail", "Message 4")
         );
         assert_eq!(
             state.status_log.last().expect("last status").message,
-            format!("Message {}", MAX_STATUS_LOG_ENTRIES + 3)
+            AppMessage::new("status-opaque-detail")
+                .with_text("detail", format!("Message {}", MAX_STATUS_LOG_ENTRIES + 3))
         );
     }
 
@@ -1338,12 +1362,18 @@ mod status_log_tests {
     fn clear_status_hint_preserves_status_log_history() {
         let mut state = AppState::new();
 
-        state.set_status_hint("Saved", false);
+        state.set_status_hint(
+            AppMessage::new("status-opaque-detail").with_text("detail", "Saved"),
+            false,
+        );
         state.clear_status_hint();
 
         assert!(state.status_hint.is_none());
         assert_eq!(state.status_log.len(), 1);
-        assert_eq!(state.status_log[0].message, "Saved");
+        assert_eq!(
+            state.status_log[0].message,
+            AppMessage::new("status-opaque-detail").with_text("detail", "Saved")
+        );
     }
 }
 

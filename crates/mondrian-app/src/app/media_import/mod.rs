@@ -5,6 +5,7 @@
 //! physical-media Adapter owns probing and the serialized Asset Library
 //! commit, and `AppState` owns presentation plus product follow-up actions.
 
+use crate::app::AppMessage;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -165,7 +166,10 @@ impl AppState {
 
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
-            self.set_status_hint(format!("导入失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-import-failed").with_text("reason", reason.clone()),
+                true,
+            );
             MondrianError::WorkflowStepFailed { step_id: "import_media".to_string(), reason }
         })?;
 
@@ -173,7 +177,10 @@ impl AppState {
             && !library.folder_exists(folder_id)?
         {
             let reason = format!("目标素材文件夹不存在：{folder_id}");
-            self.set_status_hint(format!("导入失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-import-failed").with_text("reason", reason.clone()),
+                true,
+            );
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "import_media".to_string(),
                 reason,
@@ -182,7 +189,10 @@ impl AppState {
 
         let admission = self.media_import.admit_batch(paths, folder_id).map_err(|error| {
             let reason = error.to_string();
-            self.set_status_hint(format!("导入失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-import-failed").with_text("reason", reason.clone()),
+                true,
+            );
             MondrianError::WorkflowStepFailed { step_id: "import_media".to_string(), reason }
         })?;
         self.media_import_batches.insert(
@@ -190,7 +200,10 @@ impl AppState {
             PendingMediaImportBatch::new(admission.generation, admission.total),
         );
         let _ = self.refresh_internal_execution_resource_decision();
-        self.set_status_hint(format!("正在导入 {} 个媒体文件...", admission.total), false);
+        self.set_status_hint(
+            AppMessage::new("status-import-started").with_count("count", admission.total),
+            false,
+        );
         Ok(())
     }
 
@@ -236,7 +249,7 @@ impl AppState {
             self.media_import_batches.remove(&batch_id.get());
             self.pending_timeline_file_drops.remove(&batch_id.get());
             let _ = self.refresh_internal_execution_resource_decision();
-            self.set_status_hint("媒体导入已取消".to_owned(), false);
+            self.set_status_hint(AppMessage::new("status-import-canceled"), false);
         }
         canceled
     }
@@ -273,7 +286,9 @@ impl AppState {
 
         if batch.completed < batch.total {
             self.set_status_hint(
-                format!("正在导入媒体文件 {}/{}...", batch.completed, batch.total),
+                AppMessage::new("status-import-progress")
+                    .with_count("completed", batch.completed)
+                    .with_count("total", batch.total),
                 false,
             );
             self.media_import_batches.insert(result.batch_id, batch);
@@ -309,7 +324,7 @@ impl AppState {
                 self.report_timeline_drop_failure(result.batch_id, error.to_string());
             }
             MediaImportPublicationOutcome::Canceled => {
-                self.set_status_hint("文件放置已取消".to_owned(), false);
+                self.set_status_hint(AppMessage::new("status-drop-canceled"), false);
             }
             MediaImportPublicationOutcome::Imported(_) => {
                 self.report_timeline_drop_failure(result.batch_id, "媒体已提前导入");
@@ -319,10 +334,12 @@ impl AppState {
 
     fn report_timeline_drop_failure(&mut self, batch_id: u64, reason: impl Into<String>) {
         use super::notifications::AppNotificationSeverity;
-        use crate::app::AppMessage;
 
         let reason = reason.into();
-        self.set_status_hint(format!("文件放置失败：{reason}"), true);
+        self.set_status_hint(
+            AppMessage::new("status-drop-failed").with_text("reason", reason.clone()),
+            true,
+        );
         self.notifications.publish(
             format!("timeline_drop:{batch_id}"),
             AppNotificationSeverity::Error,
@@ -391,16 +408,20 @@ impl AppState {
 
     fn finish_media_import_batch(&mut self, batch_id: u64, batch: PendingMediaImportBatch) {
         use super::notifications::AppNotificationSeverity;
-        use crate::app::AppMessage;
 
         let notification_key = format!("media_import:{batch_id}");
         if batch.imported > 0 {
-            let mut message = format!("已导入 {} 个媒体文件", batch.imported);
-            if batch.proxy_started > 0 {
-                message.push_str(&format!("，{} 个后台生成代理", batch.proxy_started));
-            }
+            let summary_id = match (batch.proxy_started > 0, !batch.failures.is_empty()) {
+                (false, false) => "status-import-summary",
+                (true, false) => "status-import-summary-proxies",
+                (false, true) => "status-import-summary-partial",
+                (true, true) => "status-import-summary-proxies-partial",
+            };
+            let message = AppMessage::new(summary_id)
+                .with_count("imported", batch.imported)
+                .with_count("proxies", batch.proxy_started)
+                .with_count("failed", batch.failures.len());
             if !batch.failures.is_empty() {
-                message.push_str(&format!("，{} 个失败", batch.failures.len()));
                 tracing::warn!(
                     target: "mondrian::action",
                     "media import completed with failures: {}",
@@ -435,7 +456,10 @@ impl AppState {
             .first()
             .cloned()
             .unwrap_or_else(|| "未导入任何媒体文件".to_string());
-        self.set_status_hint(format!("导入失败：{reason}"), true);
+        self.set_status_hint(
+            AppMessage::new("status-import-failed").with_text("reason", reason.clone()),
+            true,
+        );
         self.notifications.publish(
             notification_key,
             AppNotificationSeverity::Error,

@@ -4,6 +4,7 @@
 //! owns the reusable application/UI state bridge: root widget, `AppState`, and
 //! refresh policy after widget-dispatched actions.
 
+use crate::app::AppMessage;
 use std::cell::{Cell, Ref, RefCell};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1186,9 +1187,11 @@ impl AppUiHost {
                 persist_app_ui_preferences_to(&self.preferences_path, &self.preferences)
             {
                 tracing::warn!(%error, "failed to save selected OpenFX bundle");
-                self.app_state
-                    .borrow_mut()
-                    .set_status_hint(format!("插件已安装，但无法保存重启恢复信息：{error}"), true);
+                self.app_state.borrow_mut().set_status_hint(
+                    AppMessage::new("status-plugin-preferences-failed")
+                        .with_text("error", error.to_string()),
+                    true,
+                );
             }
         }
         if persistence_changed {
@@ -1297,7 +1300,8 @@ impl AppUiHost {
                 self.quiescing_close_action = None;
                 self.refresh_recovery_candidates();
                 self.app_state.borrow_mut().set_status_hint(
-                    format!("项目已关闭，但参考输出设备未能确认释放：{reason}"),
+                    AppMessage::new("status-reference-release-failed")
+                        .with_text("reason", reason.clone()),
                     true,
                 );
                 self.mark_dirty();
@@ -1502,9 +1506,11 @@ impl AppUiHost {
                 }
                 Err(err) => {
                     tracing::warn!("custom UI shell action failed: {err}");
-                    self.app_state
-                        .borrow_mut()
-                        .set_status_hint(format!("UI shell action failed: {err}"), true);
+                    self.app_state.borrow_mut().set_status_hint(
+                        AppMessage::new("status-shell-action-failed")
+                            .with_text("err", err.to_string()),
+                        true,
+                    );
                     self.mark_dirty();
                     needs_layout = true;
                     continue;
@@ -1580,7 +1586,9 @@ impl AppUiHost {
             return false;
         }
         if !self.app_state.borrow().has_open_project() {
-            self.app_state.borrow_mut().set_status_hint("当前没有可捕获的项目 Viewer", true);
+            self.app_state
+                .borrow_mut()
+                .set_status_hint(AppMessage::new("status-gallery-no-viewer"), true);
             return true;
         }
         let name = format!(
@@ -1595,13 +1603,16 @@ impl AppUiHost {
             let result = self.app_state.borrow_mut().dispatch_action(action);
             match result {
                 Ok(()) => {
-                    self.app_state.borrow_mut().set_status_hint("Gallery Still 已捕获", false);
+                    self.app_state
+                        .borrow_mut()
+                        .set_status_hint(AppMessage::new("status-gallery-captured"), false);
                     self.preview_service.clear_viewer_cpu_fallback();
                 }
-                Err(error) => self
-                    .app_state
-                    .borrow_mut()
-                    .set_status_hint(format!("Gallery Still 捕获失败：{error}"), true),
+                Err(error) => self.app_state.borrow_mut().set_status_hint(
+                    AppMessage::new("status-gallery-capture-failed")
+                        .with_text("error", error.to_string()),
+                    true,
+                ),
             }
             self.mark_dirty();
         } else {
@@ -1611,7 +1622,7 @@ impl AppUiHost {
             );
             self.app_state
                 .borrow_mut()
-                .set_status_hint("正在准备精确 Gallery Still…", false);
+                .set_status_hint(AppMessage::new("status-gallery-preparing"), false);
             self.mark_dirty();
         }
         true
@@ -1629,13 +1640,16 @@ impl AppUiHost {
         let result = self.app_state.borrow_mut().dispatch_action(action);
         match result {
             Ok(()) => {
-                self.app_state.borrow_mut().set_status_hint("Gallery Still 已捕获", false);
+                self.app_state
+                    .borrow_mut()
+                    .set_status_hint(AppMessage::new("status-gallery-captured"), false);
                 self.preview_service.clear_viewer_cpu_fallback();
             }
-            Err(error) => self
-                .app_state
-                .borrow_mut()
-                .set_status_hint(format!("Gallery Still 捕获失败：{error}"), true),
+            Err(error) => self.app_state.borrow_mut().set_status_hint(
+                AppMessage::new("status-gallery-capture-failed")
+                    .with_text("error", error.to_string()),
+                true,
+            ),
         }
         self.mark_dirty();
     }
@@ -1672,7 +1686,7 @@ impl AppUiHost {
         if let Err(err) = persist_app_ui_preferences_to(&self.preferences_path, &self.preferences) {
             tracing::warn!("failed to persist app UI workspace preference: {err}");
             self.app_state.borrow_mut().set_status_hint(
-                format!("Workspace preference could not be saved: {err}"),
+                AppMessage::new("status-workspace-save-failed").with_text("err", err.to_string()),
                 true,
             );
             self.mark_dirty();
@@ -1703,9 +1717,11 @@ impl AppUiHost {
                 }
                 Err(err) => {
                     tracing::warn!("startup local shell action failed: {err}");
-                    self.app_state
-                        .borrow_mut()
-                        .set_status_hint(format!("Startup action failed: {err}"), true);
+                    self.app_state.borrow_mut().set_status_hint(
+                        AppMessage::new("status-startup-action-failed")
+                            .with_text("err", err.to_string()),
+                        true,
+                    );
                     self.mark_dirty();
                 }
             }
@@ -1730,9 +1746,11 @@ impl AppUiHost {
             Ok(None) => {}
             Err(err) => {
                 tracing::warn!("startup shell action failed: {err}");
-                self.app_state
-                    .borrow_mut()
-                    .set_status_hint(format!("Startup action failed: {err}"), true);
+                self.app_state.borrow_mut().set_status_hint(
+                    AppMessage::new("status-startup-action-failed")
+                        .with_text("err", err.to_string()),
+                    true,
+                );
                 self.mark_dirty();
             }
         }
@@ -1772,9 +1790,11 @@ impl AppUiHost {
                     persist_app_ui_preferences_to(&self.preferences_path, &self.preferences)
             {
                 tracing::warn!(%error, "failed to save selected native plugin");
-                self.app_state
-                    .borrow_mut()
-                    .set_status_hint(format!("插件已安装，但无法保存重启恢复信息：{error}"), true);
+                self.app_state.borrow_mut().set_status_hint(
+                    AppMessage::new("status-plugin-preferences-failed")
+                        .with_text("error", error.to_string()),
+                    true,
+                );
             }
             let current_project_path =
                 self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
@@ -1795,7 +1815,7 @@ impl AppUiHost {
 
     fn set_unreported_action_error_status(
         &self,
-        previous_status_hint: Option<(String, bool)>,
+        previous_status_hint: Option<(crate::app::AppMessage, bool)>,
         err: &mondrian_core::MondrianError,
     ) {
         let mut state = self.app_state.borrow_mut();
@@ -1803,7 +1823,10 @@ impl AppUiHost {
         let has_new_error = current_status_hint.as_ref().is_some_and(|(_, is_error)| *is_error)
             && current_status_hint != previous_status_hint;
         if !has_new_error {
-            state.set_status_hint(format!("操作失败：{err}"), true);
+            state.set_status_hint(
+                AppMessage::new("status-action-failed").with_text("err", err.to_string()),
+                true,
+            );
         }
     }
 
@@ -1812,9 +1835,10 @@ impl AppUiHost {
         self.sync_startup_recent_projects();
         if let Err(err) = persist_app_ui_preferences_to(&self.preferences_path, &self.preferences) {
             tracing::warn!("failed to persist app UI recent projects: {err}");
-            self.app_state
-                .borrow_mut()
-                .set_status_hint(format!("Recent projects could not be saved: {err}"), true);
+            self.app_state.borrow_mut().set_status_hint(
+                AppMessage::new("status-recent-save-failed").with_text("err", err.to_string()),
+                true,
+            );
             self.mark_dirty();
         }
     }
@@ -1883,9 +1907,10 @@ impl AppUiHost {
                     }
                     PreferencesUpdate::ShortcutDisabled(payload) => {
                         if !is_known_shortcut_id(&payload.id) {
-                            self.app_state
-                                .borrow_mut()
-                                .set_status_hint("Shortcut preference is no longer valid", true);
+                            self.app_state.borrow_mut().set_status_hint(
+                                AppMessage::new("status-shortcut-preference-invalid"),
+                                true,
+                            );
                             self.mark_dirty();
                             return true;
                         }
@@ -1899,16 +1924,18 @@ impl AppUiHost {
                     }
                     PreferencesUpdate::ShortcutRebound(payload) => {
                         if !is_known_shortcut_id(&payload.id) {
-                            self.app_state
-                                .borrow_mut()
-                                .set_status_hint("Shortcut preference is no longer valid", true);
+                            self.app_state.borrow_mut().set_status_hint(
+                                AppMessage::new("status-shortcut-preference-invalid"),
+                                true,
+                            );
                             self.mark_dirty();
                             return true;
                         }
                         let Some(key) = AppUiShortcutKey::from_preference_name(&payload.key) else {
-                            self.app_state
-                                .borrow_mut()
-                                .set_status_hint("Shortcut key is no longer valid", true);
+                            self.app_state.borrow_mut().set_status_hint(
+                                AppMessage::new("status-shortcut-key-invalid"),
+                                true,
+                            );
                             self.mark_dirty();
                             return true;
                         };
@@ -1929,9 +1956,11 @@ impl AppUiHost {
                     persist_app_ui_preferences_to(&self.preferences_path, &self.preferences)
                 {
                     tracing::warn!("failed to persist app UI preferences: {err}");
-                    self.app_state
-                        .borrow_mut()
-                        .set_status_hint(format!("Preferences could not be saved: {err}"), true);
+                    self.app_state.borrow_mut().set_status_hint(
+                        AppMessage::new("status-preferences-save-failed")
+                            .with_text("err", err.to_string()),
+                        true,
+                    );
                 }
                 self.refresh_window_preview_state();
                 let window_preview_state = self.window_preview_state.borrow().clone();
@@ -1949,9 +1978,11 @@ impl AppUiHost {
             }
             Err(err) => {
                 tracing::warn!("invalid app UI preferences action: {err}");
-                self.app_state
-                    .borrow_mut()
-                    .set_status_hint(format!("Preferences action failed: {err}"), true);
+                self.app_state.borrow_mut().set_status_hint(
+                    AppMessage::new("status-preferences-action-failed")
+                        .with_text("err", err.to_string()),
+                    true,
+                );
                 self.mark_dirty();
                 true
             }
@@ -1982,9 +2013,11 @@ impl AppUiHost {
             }
             Err(err) => {
                 tracing::warn!("invalid app UI asset browser action: {err}");
-                self.app_state
-                    .borrow_mut()
-                    .set_status_hint(format!("Asset browser action failed: {err}"), true);
+                self.app_state.borrow_mut().set_status_hint(
+                    AppMessage::new("status-asset-browser-action-failed")
+                        .with_text("err", err.to_string()),
+                    true,
+                );
                 self.mark_dirty();
                 true
             }
@@ -2066,9 +2099,11 @@ impl AppUiHost {
                     Ok(request_id) => request_id,
                     Err(err) => {
                         tracing::warn!("closing project after save failed: {err}");
-                        self.app_state
-                            .borrow_mut()
-                            .set_status_hint(format!("保存项目失败：{err}"), true);
+                        self.app_state.borrow_mut().set_status_hint(
+                            AppMessage::new("status-save-failed")
+                                .with_text("error", err.to_string()),
+                            true,
+                        );
                         self.mark_dirty();
                         return true;
                     }
@@ -2127,7 +2162,8 @@ impl AppUiHost {
                         self.root.close_pending_close_dialog();
                         self.refresh_recovery_candidates();
                         self.app_state.borrow_mut().set_status_hint(
-                            format!("项目已关闭，但参考输出设备未能确认释放：{err}"),
+                            AppMessage::new("status-reference-release-failed")
+                                .with_text("reason", err.to_string()),
                             true,
                         );
                         self.mark_dirty();
@@ -2135,9 +2171,11 @@ impl AppUiHost {
                     }
                     self.waveform_service
                         .set_library(self.app_state.borrow().asset_library_handle());
-                    self.app_state
-                        .borrow_mut()
-                        .set_status_hint(format!("无法放弃失败的项目关闭操作：{err}"), true);
+                    self.app_state.borrow_mut().set_status_hint(
+                        AppMessage::new("status-close-abandon-failed")
+                            .with_text("err", err.to_string()),
+                        true,
+                    );
                     self.mark_dirty();
                 }
             }
@@ -2167,9 +2205,10 @@ impl AppUiHost {
                 tracing::warn!("guarded Project close failed to start: {err}");
                 self.waveform_service
                     .set_library(self.app_state.borrow().asset_library_handle());
-                self.app_state
-                    .borrow_mut()
-                    .set_status_hint(format!("无法开始安全关闭项目：{err}"), true);
+                self.app_state.borrow_mut().set_status_hint(
+                    AppMessage::new("status-close-start-failed").with_text("err", err.to_string()),
+                    true,
+                );
                 self.mark_dirty();
             }
         }
@@ -3779,8 +3818,11 @@ mod tests {
         let state = host.app_state();
         let (message, is_error) = state.status_hint.as_ref().expect("status hint");
         assert!(*is_error);
-        assert!(message.contains("操作失败"));
-        assert!(message.contains("unknown app UI action"));
+        assert!(crate::app_ui::localization::chinese_product_message(message).contains("操作失败"));
+        assert!(
+            crate::app_ui::localization::chinese_product_message(message)
+                .contains("unknown app UI action")
+        );
         assert!(err.to_string().contains("unknown app UI action"));
     }
 
@@ -3788,7 +3830,10 @@ mod tests {
     fn editor_action_error_keeps_specific_status_hint_from_app_state() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let mut state = AppState::new();
-        state.set_status_hint("Previous failure", true);
+        state.set_status_hint(
+            AppMessage::new("status-opaque-detail").with_text("detail", "Previous failure"),
+            true,
+        );
         let mut host = AppUiHost::new_with_preferences_path(
             state,
             AppUiPreferences::default(),
@@ -3802,8 +3847,11 @@ mod tests {
         let state = host.app_state();
         let (message, is_error) = state.status_hint.as_ref().expect("status hint");
         assert!(*is_error);
-        assert_ne!(message, "Previous failure");
-        assert!(message.contains("导入失败"));
+        assert_ne!(
+            message,
+            &AppMessage::new("status-opaque-detail").with_text("detail", "Previous failure")
+        );
+        assert!(crate::app_ui::localization::chinese_product_message(message).contains("导入失败"));
     }
 
     fn saved_workspace_app_state(name: &str) -> AppState {
@@ -4955,7 +5003,11 @@ mod tests {
     fn validation_host_native_ui_owners_close_with_the_same_app() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let mut state = AppState::new();
-        state.set_status_hint("native UI closure identity", false);
+        state.set_status_hint(
+            AppMessage::new("status-opaque-detail")
+                .with_text("detail", "native UI closure identity"),
+            false,
+        );
         let mut host = AppUiHost::new(state);
         assert!(host.audio_device_catalog.request_refresh());
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -5690,7 +5742,9 @@ mod tests {
         assert_eq!(commands, AppUiShellCommands::default());
         assert!(
             host.app_state().status_hint.as_ref().is_some_and(|(message, is_error)| {
-                *is_error && message.contains("missing_command")
+                *is_error
+                    && crate::app_ui::localization::chinese_product_message(message)
+                        .contains("missing_command")
             })
         );
     }
@@ -5787,11 +5841,11 @@ mod tests {
 
         assert_eq!(commands, AppUiShellCommands::default());
         assert_eq!(host.app_state().pending_media_import_batches(), 1);
-        assert!(host
-            .app_state()
-            .status_hint
-            .as_ref()
-            .is_some_and(|(message, is_error)| !*is_error && message.contains("正在导入")));
+        assert!(host.app_state().status_hint.as_ref().is_some_and(
+            |(message, is_error)| !*is_error
+                && crate::app_ui::localization::chinese_product_message(message)
+                    .contains("正在导入")
+        ));
 
         poll_host_background_tasks_until_imports_idle(&mut host);
 
@@ -5804,11 +5858,11 @@ mod tests {
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].name, "dialog-tone.wav");
         assert_eq!(assets[0].folder_id.as_deref(), Some(folder_id.as_str()));
-        assert!(host
-            .app_state()
-            .status_hint
-            .as_ref()
-            .is_some_and(|(message, is_error)| !*is_error && message.contains("已导入 1")));
+        assert!(host.app_state().status_hint.as_ref().is_some_and(
+            |(message, is_error)| !*is_error
+                && message.id == "status-import-summary"
+                && message.args.get("imported") == Some(&crate::app::AppMessageValue::Number(1))
+        ));
 
         let _ = std::fs::remove_dir_all(library_root);
         let _ = std::fs::remove_dir_all(media_root);
@@ -5997,7 +6051,9 @@ mod tests {
             .app_state()
             .status_hint
             .as_ref()
-            .is_some_and(|(message, is_error)| !*is_error && message.contains("Rushes")));
+            .is_some_and(|(message, is_error)| !*is_error
+                && crate::app_ui::localization::chinese_product_message(message)
+                    .contains("Rushes")));
 
         let _ = std::fs::remove_dir_all(root);
     }

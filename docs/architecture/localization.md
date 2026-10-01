@@ -180,9 +180,13 @@ rendered frame counts remain decimal strings so u64 progress never loses digits
 through floating-point formatting. A phase change stops presenting stale frame
 units. Notification-history title, empty text and accessible name also use the
 current locale. A locale refresh preserves the status button identity and its
-open history viewport. Existing App status/history bodies are still eager raw
-strings; the production inventory has 166 callers and requires a structured
-ID/argument migration before complete runtime-message coverage is claimed.
+open history viewport. App status hints and history now retain `AppMessage`
+facts instead of rendered strings. All status publication paths, including Host
+failures and async terminal results, use catalog IDs and named arguments. The
+non-test-module migration inventory contains 159 calls, including qualification
+helpers. Native error evidence remains opaque data; internal diagnostic reason
+strings need further typed codes before a completely English diagnostic UI can
+be claimed.
 
 Pseudo mode transforms Fluent pattern text in the catalog AST once, then caches
 the resulting resource separately. It does not expand formatted output:
@@ -198,7 +202,7 @@ locale lookup during painting or playback refresh.
 ## Shared product message data
 
 `app::AppMessage` and `AppMessageValue` own the stable catalog key and named
-arguments for product notifications and the forthcoming typed status history.
+arguments for product notifications, current status, and retained status history.
 The notification-specific message/value types have been removed, with no alpha
 compatibility aliases. A deterministic argument map gives equal messages equal
 identity regardless of builder insertion order; assigning an existing argument
@@ -206,7 +210,8 @@ replaces its value. The message tree contains text, signed integer, and nested
 message arguments. A nested operation or phase label remains locale-independent
 until projection, rather than becoming a translated string inside App state.
 
-`Localizer::message` is the common projection used by toasts. It resolves nested
+`Localizer::message` is the common projection used by toasts, status chrome,
+the Export panel, and each visible retained-history row. It resolves nested
 messages using that same captured UI locale and leaves opaque text intact. Fluent
 numbers are used within the exactly representable integer range through 2^53;
 larger signed integers are passed as decimal text to preserve their exact value.
@@ -215,6 +220,23 @@ Pseudo localization expands catalog text nodes, including nested messages, once;
 it does not expand runtime path/error arguments again. Locale changes can resolve
 the same message facts repeatedly without modifying them or notification IDs.
 
-This shared contract is implemented and notifications consume it. App status
-hints and history still store eager strings; migrating their producers remains
-required before complete status/history localization can be claimed.
+`AppState::set_status_hint` accepts only `AppMessage`; there is no raw-string
+conversion or compatibility formatter. History retains the last 64 facts and
+deduplicates identical adjacent message data and severity. Language switching
+never adds records or changes their severity. Clearing the current hint retains
+history. User data (paths, asset/folder names and qualification markers) is
+represented explicitly as text arguments; product-owned labels such as the
+root library destination and drag target lane are nested messages.
+
+Media import summary chooses a complete message for plain completion, background
+proxies, partial failure, or both. It omits irrelevant zero counts and empty
+interpolations; numeric selectors provide English singular/plural copy. `with_count` retains the exact `usize`
+value, using decimal text when it cannot fit a signed numeric argument. Packaging
+progress, native catalog restore and range-edit counts remain structured facts.
+No catalog lookup occurs in authoring commands or background workers.
+
+Locale switching is verified against the retained root widget, open/scrolled
+history, current error priority, opaque path values, and unchanged author
+state/generation. The real async import test projects its terminal fact in
+English after the import completes. Additional product diagnostic bodies beyond
+these localized context messages remain a separate coverage requirement.

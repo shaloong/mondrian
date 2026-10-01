@@ -2614,8 +2614,9 @@ phase IDs prevent the Export panel and status bar from defining different
 lifecycle copy. Locale switching updates displayed status without replacing
 the status widget or clearing its open/scrolled history viewport. Pseudo
 formatting expands catalog AST text, preserving named argument data and
-already-localized nested strings. Eager App-produced status/history messages
-remain a separate pending migration to stable message IDs and arguments.
+already-localized nested strings. App-produced status/history messages now
+retain stable IDs and named arguments; each visible history row resolves in the
+current locale without changing the underlying history facts.
 
 
 ### Common notification message projection
@@ -2626,4 +2627,11 @@ labels are resolved with the toast's current captured locale. Exact integers
 outside Fluent's precise numeric range remain decimal text. Notification feed
 identity, bounded retention, timeout and locale-change behavior are unchanged.
 The former notification-only message/value APIs are removed rather than retained
-as compatibility aliases. Status/history producer migration remains outstanding.
+as compatibility aliases. Current status and bounded history retain the same
+message facts. `set_status_hint` has no raw-string overload; the status bar and
+Export panel project the fact with their captured formatter, and history rows
+resolve at paint time. A language change preserves widget identity, author state,
+open history and scroll position. Failed status continues to outrank Export
+progress, and adjacent fact/severity duplicate suppression remains bounded.
+Product labels nested inside status messages resolve with that same locale;
+user-authored names and native failure evidence remain unchanged text data.

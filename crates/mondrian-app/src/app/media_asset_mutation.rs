@@ -5,6 +5,7 @@
 //! ordered worker. Only the app event-loop poll owns commit authority, after
 //! rechecking Project generation and cancellation.
 
+use crate::app::AppMessage;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -886,11 +887,9 @@ impl AppState {
                     MediaAssetMutationKind::Relink => {
                         self.reconcile_audio_after_committed_authoring_change("media_asset_relink");
                         self.set_status_hint(
-                            format!(
-                                "已重新链接素材：{} → {}",
-                                request.asset_name,
-                                request.source_path.display()
-                            ),
+                            AppMessage::new("status-relinked")
+                                .with_text("name", request.asset_name.to_string())
+                                .with_text("path", (request.source_path.display()).to_string()),
                             false,
                         );
                     }
@@ -899,7 +898,8 @@ impl AppState {
                             "media_asset_refresh_components",
                         );
                         self.set_status_hint(
-                            format!("已刷新 {} 的音频流候选", request.asset_name),
+                            AppMessage::new("status-audio-streams-refreshed")
+                                .with_text("name", request.asset_name.to_string()),
                             false,
                         );
                     }
@@ -908,10 +908,9 @@ impl AppState {
                             "media_asset_interpretation",
                         );
                         self.set_status_hint(
-                            format!(
-                                "已将 {} 的音频 Component 映射到流 #{}",
-                                request.asset_name, stream_index
-                            ),
+                            AppMessage::new("status-audio-rebound")
+                                .with_text("name", request.asset_name.to_string())
+                                .with_text("stream", stream_index.to_string()),
                             false,
                         );
                     }
@@ -929,11 +928,13 @@ impl AppState {
                     "media Asset mutation failed"
                 );
                 let label = match request.kind {
-                    MediaAssetMutationKind::Relink => "重新链接素材",
-                    MediaAssetMutationKind::RefreshAudioComponents => "音频 Component 探测",
-                    MediaAssetMutationKind::RebindAudioComponent { .. } => "音频 Component 重绑定",
+                    MediaAssetMutationKind::Relink => "status-relink-failed",
+                    MediaAssetMutationKind::RefreshAudioComponents => "status-audio-probe-failed",
+                    MediaAssetMutationKind::RebindAudioComponent { .. } => {
+                        "status-audio-rebind-failed"
+                    }
                 };
-                self.set_status_hint(format!("{label}失败：{reason}"), true);
+                self.set_status_hint(AppMessage::new(label).with_text("reason", reason), true);
             }
         }
     }

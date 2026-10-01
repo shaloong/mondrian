@@ -963,3 +963,166 @@ status-export-frames = Exporting frame { $completed }/{ $total } ({ $count } que
 status-export-phase = Export: { $phase } ({ $count } queued)
 status-export-cancelling = Cancelling export ({ $count } queued)
 status-export-active = Export in progress
+
+# Runtime status messages
+status-saving = Saving project…
+status-open-failed = Could not open project: { $reason }
+status-opened = Project opened
+status-save-as-failed = Could not start Save As: { $reason }
+status-save-as-started = Saving project as { $path }…
+status-create-project-failed = Could not create project: { $reason }
+status-created-project = Project created: { $path }
+status-recovery-failed = Could not recover autosave: { $reason }
+status-recovered = Recovered autosave: { $path }
+status-import-failed = Import failed: { $reason }
+status-relink-failed = Could not relink asset: { $reason }
+status-relink-analyzing = Analyzing relinked media…
+status-audio-probe-failed = Could not probe audio components: { $reason }
+status-audio-probe-started = Refreshing available audio streams…
+status-audio-rebind-failed = Could not rebind audio component: { $reason }
+status-audio-rebind-started = Validating audio component binding…
+status-rename-asset-failed = Could not rename asset: { $reason }
+status-renamed-asset = Asset renamed: { $name }
+status-interpret-failed = Could not interpret asset: { $reason }
+status-interpreted = Asset interpretation updated: { $asset_name }
+status-rename-folder-failed = Could not rename folder: { $reason }
+status-renamed-folder = Folder renamed: { $name }
+status-proxy-mode-failed = Could not set proxy mode: { $reason }
+status-proxy-enable-failed = Could not enable proxy: { $reason }
+status-proxy-enabled = Proxy mode enabled: { $name }
+status-proxy-disabled = Proxy mode disabled: { $name }
+status-remove-assets-failed = Could not remove library selection: { $reason }
+status-removed-asset = Asset removed from library: { $name }
+status-removed-folder = Folder deleted: { $name }
+status-removed-selection = Removed { $assets } assets and deleted { $folders } folders
+status-move-assets-failed = Could not move library selection: { $reason }
+status-moved-asset = Asset moved: { $name } → { $target_name }
+status-moved-folder = Folder moved: { $name } → { $target_name }
+status-moved-selection = Moved { $assets } assets and { $folders } folders → { $target_name }
+status-cross-dissolve-created = Cross dissolve created
+status-cross-dissolve-failed = Could not create cross dissolve: { $error }
+status-transition-update-failed = Could not update video transition: { $error }
+status-preview-resolution = Preview resolution: { $scale }
+status-asset-prepare-failed = Could not prepare asset: { $reason }
+status-drag-ready = Ready to drag { $name } (drop onto { $lane })
+status-clap-installed = CLAP processors installed: { $count }
+status-vst3-installed = VST3 processors installed: { $count }
+status-title-created = Basic title created
+status-export-failed = Export failed: { $reason }
+status-export-queued = Added to export queue
+status-export-complete = Export completed: { $path }
+status-export-canceled = Export canceled
+status-relinked = Asset relinked: { $name } → { $path }
+status-audio-streams-refreshed = Audio streams refreshed: { $name }
+status-audio-rebound = Audio component of { $name } mapped to stream #{ $stream }
+status-proxy-failed = Proxy generation failed: { $detail }
+status-proxy-switch-failed = Could not switch proxy mode: { $error }
+status-native-audio-unavailable = Native audio host unavailable; saved plugins could not be restored
+status-native-audio-restore-failed = Could not start native audio plugin restore: { $error }
+status-audio-restored-partial = Audio plugins restored: { $available } libraries available, { $failed } failed; select failed plugin files to retry
+status-audio-restored = Audio plugin libraries restored: { $count }
+status-openfx-scanning = Scanning OpenFX filters…
+status-openfx-restore-failed = Could not start OpenFX restore: { $error }
+status-openfx-restore-queue-failed = Could not queue OpenFX restore
+status-openfx-installed = OpenFX filters installed: { $installed }
+status-openfx-installed-partial = Installed { $installed } OpenFX filters; { $unsupported } plugins are unsupported by this host
+status-openfx-install-failed = OpenFX installation failed: { $reason }
+status-openfx-restored-partial = OpenFX restored: { $available } filters available, { $failed } failed; select installation files to retry
+status-openfx-restored = OpenFX filters restored: { $count }
+status-openfx-scan-failed = OpenFX scan stopped unexpectedly; select the plugin again
+status-audio-prepare-failed = Could not prepare audio processing: { $error }
+status-persistence-failed = Could not finish project persistence: { $error }
+status-closing = Finishing save and safely closing project…
+status-close-failed = Could not close project: { $reason }
+status-close-save-canceled = Close after save canceled: { $reason }
+status-saved = Project saved
+status-saved-cleanup-failed = Project saved; recovery cleanup failed: { $reason }
+status-autosaved-cleanup-failed = Autosave completed; recovery cleanup failed: { $reason }
+status-save-failed = Could not save project: { $error }
+status-autosave-failed = Autosave failed: { $error }
+status-autosave-start-failed = Could not start autosave: { $error }
+status-packaging = Packaging project…
+status-package-canceling = Canceling project packaging…
+status-packaged = Project packaged: { $path }
+status-package-canceled = Project packaging canceled
+status-package-failed = Project packaging failed: { $reason }
+status-package-worker-failed = Project packaging worker stopped unexpectedly
+status-package-copying = Copying project resources… { $percent }%
+status-package-validating = Validating project resources… { $percent }%
+status-package-writing = Writing project snapshot…
+status-package-publishing = Publishing project package…
+status-package-analyzing = Analyzing project dependencies…
+status-drop-probing = Probing media dropped onto track…
+status-drop-placed = File imported into library and placed on track
+status-placement-failed = Could not place asset: { $error }
+status-asset-placed = Asset added to timeline
+status-history-retired = Edit committed without undo history; earlier history was cleared to avoid crossing an unrecorded edit
+status-folder-created = Folder created: { $name }
+status-asset-created = Asset created: { $name }
+status-adjustment-created = Adjustment layer created: { $name }
+status-solid-created = Solid color layer created: { $name }
+status-precomposed = Nested sequence created: “{ $name }”
+status-clips-linked = Selected clips linked
+status-clips-unlinked = Selected clips unlinked
+status-cross-dissolve-shortened = Cross dissolve shortened to available source handles
+status-transition-shortened = Video transition shortened to available source handles
+status-tracking-failed = Tracking failed: { $detail }
+status-tracking-cached = Tracking cache applied
+status-tracking-complete = Tracking completed
+status-plugin-preferences-failed = Plugin installed; restart recovery information could not be saved: { $error }
+status-reference-release-failed = Project closed; reference output device release could not be confirmed: { $reason }
+status-shell-action-failed = UI action failed: { $err }
+status-gallery-no-viewer = No project Viewer available to capture
+status-gallery-captured = Gallery still captured
+status-gallery-capture-failed = Could not capture gallery still: { $error }
+status-gallery-preparing = Preparing exact gallery still…
+status-workspace-save-failed = Could not save workspace preference: { $err }
+status-startup-action-failed = Startup action failed: { $err }
+status-action-failed = Action failed: { $err }
+status-recent-save-failed = Could not save recent projects: { $err }
+status-shortcut-preference-invalid = Shortcut preference is no longer valid
+status-shortcut-key-invalid = Shortcut key is no longer valid
+status-preferences-save-failed = Could not save preferences: { $err }
+status-preferences-action-failed = Preferences action failed: { $err }
+status-asset-browser-action-failed = Asset browser action failed: { $err }
+status-close-abandon-failed = Could not abandon failed project close: { $err }
+status-close-start-failed = Could not safely close project: { $err }
+status-import-started =
+    { $count ->
+        [one] Importing one media file…
+       *[other] Importing { $count } media files…
+    }
+status-import-canceled = Media import canceled
+status-import-progress = Importing media file { $completed }/{ $total }…
+status-drop-canceled = File placement canceled
+status-drop-failed = File placement failed: { $reason }
+
+status-proxy-generating = Proxy mode enabled: { $name } (generating in background)
+status-proxy-regenerating = Proxy mode enabled: { $name } (stale proxy; regenerating in background)
+status-audio-track = audio track
+status-video-track = video track
+status-import-summary =
+    { $imported ->
+        [one] Imported one media file
+       *[other] Imported { $imported } media files
+    }
+status-import-summary-proxies =
+    { status-import-summary }; { $proxies ->
+        [one] generating one proxy in background
+       *[other] generating { $proxies } proxies in background
+    }
+status-import-summary-partial =
+    { status-import-summary }; { $failed ->
+        [one] one failed
+       *[other] { $failed } failed
+    }
+status-import-summary-proxies-partial =
+    { status-import-summary-proxies }; { $failed ->
+        [one] one failed
+       *[other] { $failed } failed
+    }
+status-range-lifted = Lift complete: { $removed } clips removed, { $trimmed } trimmed, { $split } split, { $shifted } moved
+status-range-extracted = Extract complete: { $removed } clips removed, { $trimmed } trimmed, { $split } split, { $shifted } moved
+status-opaque-detail = { $detail }
+
+status-no-project = No project

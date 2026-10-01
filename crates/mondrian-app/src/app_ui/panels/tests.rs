@@ -1,6 +1,7 @@
 use super::*;
 use crate::app::preview_unavailability::PreviewOutputStage;
 use crate::app::product_action::TimelineSelectionEdit;
+use crate::app::AppMessage;
 use mondrian_export::queue::{ExportFailure, ExportFailureReason};
 
 fn chinese_localizer() -> Localizer {
@@ -1072,7 +1073,10 @@ fn export_panel_model_reads_app_export_draft() {
     state.set_export_draft_sequence_id(Some(sequence_id));
     state.set_export_draft_range(TimelineExportRange::EntireSequence);
     state.set_export_draft_output_path("E:/renders/deliverable.mp4");
-    state.set_status_hint("Ready to export", false);
+    state.set_status_hint(
+        AppMessage::new("status-opaque-detail").with_text("detail", "Ready to export"),
+        false,
+    );
 
     let model = ExportPanelModel::from_app_state(&state);
 
@@ -1474,7 +1478,11 @@ fn export_panel_rejects_incompatible_delivery_before_building_an_action() {
     state.set_export_draft_preset(incompatible);
     state.set_export_draft_sequence_id(Some(sequence_id));
     state.set_export_draft_output_path("E:/renders/hdr.mp4");
-    state.set_status_hint("stale success must not hide the blocker", false);
+    state.set_status_hint(
+        AppMessage::new("status-opaque-detail")
+            .with_text("detail", "stale success must not hide the blocker"),
+        false,
+    );
 
     let model = ExportPanelModel::from_app_state(&state);
 

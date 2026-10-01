@@ -1,6 +1,7 @@
 use super::product_action::TimelineSeekPayload;
 use super::timeline_position::lower_nearest_sequence_frame;
 use super::*;
+use crate::app::AppMessage;
 
 const MAX_PLAYBACK_WAKE_DELAY: Duration = Duration::from_millis(100);
 const AUDIO_CALLBACK_STALE_AFTER: Duration = Duration::from_millis(100);
@@ -1231,7 +1232,11 @@ impl AppState {
                     "failed to clear stale audio after committed authoring change"
                 );
             }
-            self.set_status_hint(format!("音频处理无法准备：{error}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-audio-prepare-failed")
+                    .with_text("error", error.to_string()),
+                true,
+            );
         }
     }
 
