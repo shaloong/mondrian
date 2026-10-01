@@ -2684,9 +2684,18 @@ dispatch and keyboard stepping. Integer fields parse i64 directly and saturate
 keyboard increments at the signed boundaries. Display text round-trips the typed
 value; minimum decimals never round a retained parameter. Editor increments apply
 to nudging and slider snapping, not to arbitrary text entry. Unchanged valid text
-publishes no duplicate value action. Escape restores the value captured at focus;
-Enter establishes a new committed focus baseline. Escape releases focus so a
-subsequent shell cancellation can close the enclosing dialog.
+publishes no duplicate value action. Text edits are local drafts: Enter or focus
+loss confirms a valid value once; Escape discards the draft without dispatching
+an author mutation. Keyboard increments remain immediate confirmed adjustments.
+Escape releases focus so a subsequent shell cancellation can close the enclosing
+dialog. `Widget::commit_pending_input` recursively confirms editable leaves before
+a form submission, so field updates precede the submission Action in the queue.
+Transactional TextInput leaves also confirm once through this interface and retain
+focus with a fresh cancellation baseline; active IME compositions remain local.
+Invalid text reverts to the last confirmed value without an author mutation.
+During active IME preedit, the inner TextInput owns key handling: arrows and Enter
+cannot nudge or confirm a NumberInput, and Escape first clears the composition.
+IME committed text remains a numeric draft until the usual confirmation seam.
 
 The Inspector numeric composite uses a normalized f32 slider for presentation
 and a typed NumberInput for author values. Integer pointer mapping uses a bounded
@@ -2697,8 +2706,7 @@ range; soft bounds shape slider travel independently of manual entry.
 
 The production acceptance fixture registers a valid visual effect definition,
 types large Integer and high-precision Double values through the Inspector,
-decodes and commits the product Actions, then checks exact Undo/Redo and Escape
-restoration. Author admission and evaluation remain in Core/editor transactions.
+decodes and commits the product Actions, then checks exact Undo/Redo and cancellation without an author write. Author admission and evaluation remain in Core/editor transactions.
 
 
 Sequence dimensions/start frames and export dimension, bitrate, CRF, GOP and
@@ -2710,9 +2718,12 @@ exact-integer domain supported by canonical audio f64 storage. Fractional or
 inexact Integer values are rejected rather than rounded by the Action adapter.
 Existing automation and lock admission remain authoritative.
 
-Pan percent and fade-second adapters retain their canonical baseline: Escape
-restores the original pan scalar or exact rational fade, including sub-millisecond
-sample durations, without a lossy unit round trip or unintended fade removal.
+Pan percent and fade-second adapters retain their canonical baseline for unchanged
+presentation values. Canceling a text draft emits no command, preserving the
+original pan scalar and exact rational fade, including sub-millisecond sample
+durations. Cancellation also retains automation key identities and author history;
+it never attempts to compensate for an already committed draft by writing back a
+sampled baseline.
 
 Audio fade inputs use f64 seconds until the existing explicit millisecond
 quantization seam creates canonical TimelineTime. Long durations therefore do

@@ -236,6 +236,11 @@ impl TextInput {
         self.edit.text()
     }
 
+    /// Whether an IME preedit owns keyboard input before committing text.
+    pub fn is_composing(&self) -> bool {
+        self.composition.is_active()
+    }
+
     /// Replace text from an external authoritative model.
     ///
     /// In transactional mode this also resets the focused session origin, so
@@ -802,6 +807,19 @@ impl Widget for TextInput {
         }
     }
 
+    fn commit_pending_input(&mut self, ctx: &mut EventContext) -> bool {
+        if !self.focused || !self.enabled || self.composition.is_active() {
+            return false;
+        }
+        let changed = self
+            .edit_session_origin
+            .as_ref()
+            .is_some_and(|origin| origin != &self.edit.text);
+        self.commit_edit_session(ctx);
+        self.begin_edit_session();
+        changed
+    }
+
     fn paint(&self, ctx: &mut PaintContext) {
         let metrics = TextInputMetrics::from_theme(ctx.theme);
         let geometry = self.text_geometry(metrics);
@@ -1206,6 +1224,40 @@ mod tests {
 
         assert_eq!(input.text(), "你");
         assert_eq!(actions.borrow().as_slice(), &[change_action("你")]);
+    }
+
+    #[test]
+    fn form_submission_commits_text_once_and_establishes_the_next_cancel_baseline() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input = TextInput::new("ph").with_text("Bus 1").on_commit(change_action);
+        layout(&mut input);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        input.select_all();
+        tp(&mut input, "Dialogue", &mut ctx);
+        input.event(&UiEvent::ImePreedit("99".to_owned()), &mut ctx);
+        assert!(!input.commit_pending_input(&mut ctx));
+        assert!(actions.borrow().is_empty());
+        input.event(&UiEvent::ImeCancel, &mut ctx);
+        assert!(input.commit_pending_input(&mut ctx));
+        assert!(!input.commit_pending_input(&mut ctx));
+        assert!(input.is_focused());
+        assert_eq!(actions.borrow().as_slice(), &[change_action("Dialogue")]);
+        input.select_all();
+        tp(&mut input, "Discarded", &mut ctx);
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(input.text(), "Dialogue");
+        assert!(!input.is_focused());
+        assert!(!input.commit_pending_input(&mut ctx));
+        input.event(&UiEvent::FocusLost, &mut ctx);
+        assert_eq!(actions.borrow().as_slice(), &[change_action("Dialogue")]);
     }
 
     #[test]

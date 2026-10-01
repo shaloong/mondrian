@@ -24,7 +24,6 @@ pub struct NumberInput<T: NumberInputValue = f64> {
     input: TextInput,
     model: NumberInputModel<T>,
     focused: bool,
-    focus_value: Option<T>,
     width: f32,
     on_change: Option<Box<NumberInputChangeAction<T>>>,
 }
@@ -38,7 +37,6 @@ impl<T: NumberInputValue> NumberInput<T> {
             input: TextInput::new("").with_text(text),
             model,
             focused: false,
-            focus_value: None,
             width: 200.0,
             on_change: None,
         }
@@ -62,7 +60,7 @@ impl<T: NumberInputValue> NumberInput<T> {
         self.input = self.input.enabled(enabled);
         if !enabled {
             self.focused = false;
-            self.commit_display_text();
+            self.input.set_text(self.model.display_text());
         }
         self
     }
@@ -84,7 +82,8 @@ impl<T: NumberInputValue> NumberInput<T> {
         self
     }
 
-    /// Dispatch an action when user input changes the valid typed numeric value.
+    /// Dispatch a confirmed value on Enter, focus loss, or a keyboard increment.
+    /// Text remains a local draft until confirmation; Escape discards that draft.
     pub fn on_change<F, R>(mut self, action: F) -> Self
     where
         F: Fn(T) -> R + 'static,
@@ -130,11 +129,12 @@ impl<T: NumberInputValue> NumberInput<T> {
         self.set_value_from_keyboard(value.offset(step, increase), ctx)
     }
 
-    fn dispatch_if_valid(&mut self, ctx: &mut EventContext) {
+    fn dispatch_if_valid(&mut self, ctx: &mut EventContext) -> bool {
         let Some(value) = self.model.commit_valid_text(self.input.text()) else {
-            return;
+            return false;
         };
         self.dispatch_value(value, ctx);
+        true
     }
 
     fn commit_display_text(&mut self) -> bool {
@@ -163,6 +163,9 @@ impl<T: NumberInputValue> Widget for NumberInput<T> {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if self.input.is_composing() && matches!(event, UiEvent::KeyDown { .. }) {
+            return self.input.event(event, ctx);
+        }
         if self.focused
             && self.input.can_focus()
             && let UiEvent::KeyDown { key, modifiers } = event
@@ -182,51 +185,41 @@ impl<T: NumberInputValue> Widget for NumberInput<T> {
         if self.focused
             && matches!(event, UiEvent::KeyDown { key: KeyCode::Escape, modifiers } if *modifiers == Modifiers::none())
         {
-            if let Some(value) = self.focus_value {
-                let changed = value != self.model.committed_value();
-                self.model.set_from_keyboard(value, self.input.text());
-                self.input.set_text(self.model.display_text());
-                if changed {
-                    self.dispatch_value(value, ctx);
-                }
-                ctx.request_repaint();
-            }
+            self.input.set_text(self.model.display_text());
+            ctx.request_repaint();
             self.input.event(&UiEvent::FocusLost, ctx);
             ctx.focus.release_focus(self.id());
             self.focused = false;
-            self.focus_value = None;
             return EventResult::Handled;
         }
         if self.focused && matches!(event, UiEvent::KeyDown { key: KeyCode::Enter, .. }) {
-            if self.commit_display_text() {
-                ctx.request_repaint();
-            }
-            self.focus_value = Some(self.model.committed_value());
+            self.commit_pending_input(ctx);
             return EventResult::Handled;
         }
-        let before = self.input.text().to_owned();
         let result = self.input.event(event, ctx);
-        if result == EventResult::Handled && self.input.text() != before {
-            self.dispatch_if_valid(ctx);
-        }
         if result == EventResult::Handled && matches!(event, UiEvent::FocusLost) {
+            self.commit_pending_input(ctx);
             self.focused = false;
-            self.focus_value = None;
-            if self.commit_display_text() {
-                ctx.request_repaint();
-            }
         } else if result == EventResult::Handled
             && matches!(
                 event,
                 UiEvent::FocusGained { .. } | UiEvent::MouseDown { .. }
             )
         {
-            if !self.focused {
-                self.focus_value = Some(self.model.committed_value());
-            }
             self.focused = true;
         }
         result
+    }
+
+    fn commit_pending_input(&mut self, ctx: &mut EventContext) -> bool {
+        if !self.focused || !self.input.can_focus() || self.input.is_composing() {
+            return false;
+        }
+        let changed = self.dispatch_if_valid(ctx);
+        if self.commit_display_text() || changed {
+            ctx.request_repaint();
+        }
+        changed
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
@@ -291,6 +284,64 @@ mod tests {
     }
 
     #[test]
+    fn numeric_ime_composition_does_not_commit_or_nudge_the_draft() {
+        let values = Rc::new(RefCell::new(Vec::new()));
+        let dispatch = |_: Action| {};
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input =
+            NumberInput::new(12.0, 0.0, 100.0).on_change(record_value(Rc::clone(&values)));
+        layout(&mut input);
+        click(&mut input, &mut ctx);
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        input.event(&UiEvent::TextInput("42".to_owned()), &mut ctx);
+        input.event(&UiEvent::ImePreedit("17".to_owned()), &mut ctx);
+        for key in [KeyCode::Up, KeyCode::Enter] {
+            assert_eq!(
+                input.event(
+                    &UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                    &mut ctx
+                ),
+                EventResult::Handled
+            );
+        }
+        assert!(!input.commit_pending_input(&mut ctx));
+        assert_eq!(input.text(), "42");
+        assert!(values.borrow().is_empty());
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert!(input.accepts_text_input());
+        assert_eq!(input.text(), "42");
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(&*values.borrow(), &[42.0]);
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        input.event(&UiEvent::ImePreedit("99".to_owned()), &mut ctx);
+        input.event(&UiEvent::ImeCommit("99".to_owned()), &mut ctx);
+        assert_eq!(input.value(), Some(99.0));
+        assert_eq!(&*values.borrow(), &[42.0]);
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(input.value(), Some(42.0));
+        assert_eq!(&*values.borrow(), &[42.0]);
+        assert!(!input.accepts_text_input());
+    }
+
+    #[test]
     fn integer_entry_keyboard_bounds_and_escape_preserve_exact_values() {
         let dispatch = |_: Action| {};
         let mut focus = DummyFocus;
@@ -330,14 +381,14 @@ mod tests {
             &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::shift() },
             &mut ctx,
         );
-        assert_eq!(&*recorded.borrow(), &[i64::MAX - 1, i64::MAX]);
+        assert_eq!(&*recorded.borrow(), &[i64::MAX]);
         input.event(
             &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
             &mut ctx,
         );
-        assert_eq!(input.text(), original.to_string());
-        assert_eq!(input.value(), Some(original));
-        assert_eq!(&*recorded.borrow(), &[i64::MAX - 1, i64::MAX, original]);
+        assert_eq!(input.text(), i64::MAX.to_string());
+        assert_eq!(input.value(), Some(i64::MAX));
+        assert_eq!(&*recorded.borrow(), &[i64::MAX]);
         assert!(!input.accepts_text_input());
         click(&mut input, &mut ctx);
         input.event(
@@ -349,10 +400,10 @@ mod tests {
             &mut ctx,
         );
         assert_eq!(input.value(), None);
-        assert_eq!(recorded.borrow().len(), 3);
+        assert_eq!(recorded.borrow().len(), 1);
         input.event(&UiEvent::FocusLost, &mut ctx);
-        assert_eq!(input.value(), Some(original));
-        assert_eq!(recorded.borrow().len(), 3);
+        assert_eq!(input.value(), Some(i64::MAX));
+        assert_eq!(recorded.borrow().len(), 1);
     }
 
     #[test]
@@ -418,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatches_normalized_number_after_text_change() {
+    fn dispatches_number_only_after_text_confirmation() {
         let actions = RefCell::new(Vec::new());
         let dispatch = |action: Action| actions.borrow_mut().push(action);
         let mut focus = DummyFocus;
@@ -437,7 +488,9 @@ mod tests {
 
         assert_eq!(input.text(), "42");
         assert_eq!(input.value(), Some(42.0));
-        assert_eq!(actions.borrow().as_slice(), &[number_action(40.0)]);
+        assert!(actions.borrow().is_empty());
+        input.event(&UiEvent::FocusLost, &mut ctx);
+        assert_eq!(actions.borrow().as_slice(), &[number_action(42.0)]);
     }
 
     #[test]
@@ -510,7 +563,7 @@ mod tests {
 
         assert_eq!(input.text(), "0.62");
         assert_eq!(input.value(), Some(0.62));
-        assert_eq!(actions.borrow().len(), 1);
+        assert!(actions.borrow().is_empty());
 
         assert_eq!(
             input.event(
@@ -613,6 +666,11 @@ mod tests {
         );
         input.event(&UiEvent::TextInput("42".into()), &mut ctx);
         assert_eq!(input.value(), Some(42.0));
+        assert!(actions.borrow().is_empty());
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
         assert_eq!(actions.borrow().len(), 1);
 
         input.event(

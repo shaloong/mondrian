@@ -5663,6 +5663,101 @@ fn inspector_effect_vec3_property_widget_dispatches_component_change() {
 }
 
 #[test]
+fn numeric_draft_cancel_preserves_automation_and_history() {
+    use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation};
+    let mut sequence = Sequence::new("Draft Cancellation");
+    sequence.settings.frame_rate = Rational::FPS_24;
+    let track_id = sequence.video_tracks[0].id;
+    let mut clip = Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("clip");
+    for (time, value) in [(TimelineTime::ZERO, 0.25), (TimelineTime::ONE, 0.75)] {
+        clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+            path: Transform2D::OPACITY_PATH.to_owned(),
+            keyframe: Keyframe::linear(time, PropertyValue::Float(value)),
+        })
+        .expect("seed opacity curve");
+    }
+    let clip_id = clip.id;
+    sequence.video_tracks[0].add_clip(clip).expect("clip");
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    state
+        .dispatch_action(crate::app::ui_actions::timeline_seek_action(
+            FramePosition::new(1, Rational::new(1, 2)),
+        ))
+        .expect("seek between keys");
+    assert_eq!(
+        state.current_timeline_time().expect("time"),
+        Some(TimelineTime::new(1, 2).expect("half"))
+    );
+    let selection = Some(SelectedClipRef { track_id, is_video_track: true, clip_id });
+    let snapshot = |state: &AppState| {
+        state
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(clip_id)
+            .expect("clip")
+            .intrinsic_parameter_bag()
+    };
+    let before = snapshot(&state);
+    let address = before.address_for_path(Transform2D::OPACITY_PATH).expect("opacity");
+    let mut widget =
+        numeric_slider_input_control(50.0_f32, 0.0, 100.0, Some(1.0), 0, true, move |value| {
+            inspector_parameter_action(
+                selection,
+                Some(address.clone()),
+                PropertyValue::Float(value / 100.0),
+            )
+        });
+    widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+    let actions = RefCell::new(Vec::new());
+    let dispatch = |action| actions.borrow_mut().push(action);
+    let mut focus = DummyFocus;
+    let mut shortcut = DummyShortcut;
+    let mut tooltip = DummyTooltip;
+    let mut requests = EventRequests::default();
+    let mut ctx = event_ctx(
+        &mut focus,
+        &mut shortcut,
+        &mut tooltip,
+        &mut requests,
+        &dispatch,
+    );
+    widget.event(
+        &UiEvent::MouseDown {
+            position: Point::new(190.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        &mut ctx,
+    );
+    widget.event(
+        &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+        &mut ctx,
+    );
+    widget.event(&UiEvent::TextInput("75".to_owned()), &mut ctx);
+    widget.event(
+        &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+        &mut ctx,
+    );
+    for action in actions.borrow().iter() {
+        state.dispatch_action(action.clone()).expect("numeric action");
+    }
+    let after = snapshot(&state);
+    assert_eq!(
+        after, before,
+        "cancel must retain original curve and key identities"
+    );
+    assert!(
+        !state.undo_timeline().expect("undo"),
+        "canceled drafts must create no history"
+    );
+    assert!(
+        actions.borrow().is_empty(),
+        "uncommitted numeric text must not publish author actions"
+    );
+}
+
+#[test]
 fn precise_inspector_entry_commits_and_undoes_exact_integer_and_double_values() {
     use mondrian_core::automation::PropertyDescriptor;
     use mondrian_effects::{
@@ -5795,6 +5890,11 @@ fn precise_inspector_entry_commits_and_undoes_exact_integer_and_double_values() 
             &mut ctx,
         );
         widget.event(&UiEvent::TextInput(text.to_owned()), &mut ctx);
+        assert!(actions.borrow().is_empty());
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
         assert_eq!(actions.borrow().len(), 1);
         state.dispatch_action(actions.borrow()[0].clone()).expect("author value");
         let snapshot = |state: &crate::app::AppState| {
@@ -5816,12 +5916,16 @@ fn precise_inspector_entry_commits_and_undoes_exact_integer_and_double_values() 
         assert!(state.redo_timeline().expect("redo"));
         assert_eq!(snapshot(&state), expected);
         widget.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        widget.event(&UiEvent::TextInput("0".to_owned()), &mut ctx);
+        widget.event(
             &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
             &mut ctx,
         );
-        assert_eq!(actions.borrow().len(), 2);
-        state.dispatch_action(actions.borrow()[1].clone()).expect("cancel edit");
-        assert_eq!(snapshot(&state), initial);
+        assert_eq!(actions.borrow().len(), 1);
+        assert_eq!(snapshot(&state), expected);
     }
 }
 
@@ -5894,6 +5998,11 @@ fn inspector_effect_float_property_text_input_preserves_value_between_steps() {
     assert_eq!(
         widget.event(&UiEvent::TextInput("0.62".to_string()), &mut ctx),
         EventResult::Handled
+    );
+    assert!(actions.borrow().is_empty());
+    widget.event(
+        &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+        &mut ctx,
     );
     let recorded = actions.borrow();
     assert_eq!(recorded.len(), 1);
@@ -6163,8 +6272,8 @@ fn inspector_effect_int_property_number_input_defaults_to_unit_step() {
         &mut ctx,
     );
     let recorded = actions.borrow();
-    assert_eq!(recorded.len(), 2);
-    let Action::Custom { payload, .. } = &recorded[1] else {
+    assert_eq!(recorded.len(), 1);
+    let Action::Custom { payload, .. } = &recorded[0] else {
         panic!("expected inspector custom action, got {:?}", recorded[0]);
     };
     let payload: VisualEffectSetParameterValuePayload =
@@ -6262,6 +6371,11 @@ fn numeric_slider_input_control_text_input_dispatches_typed_transform_action() {
         EventResult::Handled
     );
 
+    assert!(actions.borrow().is_empty());
+    widget.event(
+        &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+        &mut ctx,
+    );
     let recorded = actions.borrow();
     assert_eq!(recorded.len(), 1);
     let Action::Custom { namespace, name, payload } = &recorded[0] else {
@@ -6761,6 +6875,11 @@ fn audio_rack_numeric_widget_preserves_double_and_rejects_fractional_integer_inp
             &mut ctx,
         );
         widget.event(&UiEvent::TextInput(text.to_owned()), &mut ctx);
+        assert!(actions.borrow().is_empty());
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
         assert_eq!(actions.borrow().len(), 1);
         state.dispatch_action(actions.borrow()[0].clone()).expect("author parameter");
         let snapshot = |state: &AppState| {
@@ -6792,7 +6911,7 @@ fn audio_unit_controls_cancel_to_exact_canonical_baseline() {
     let edit_id = AudioComponentEditId::new();
     let pan = 0.0006999300069993001_f64;
     assert_ne!((pan * 100.0) / 100.0, pan);
-    for (baseline, expected, mut widget) in [
+    for (baseline, _expected, mut widget) in [
         (
             pan * 100.0,
             AudioComponentMutation::SetPan { value: pan },
@@ -6865,14 +6984,7 @@ fn audio_unit_controls_cancel_to_exact_canonical_baseline() {
             &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
             &mut ctx,
         );
-        assert_eq!(actions.borrow().len(), 2, "baseline {baseline}");
-        let Action::Custom { payload, .. } = actions.borrow().last().expect("restore").clone()
-        else {
-            panic!("typed component command");
-        };
-        let request: mondrian_timeline::AudioComponentEditRequest =
-            serde_json::from_value(payload).expect("decode");
-        assert_eq!(request.mutation, expected);
+        assert!(actions.borrow().is_empty(), "baseline {baseline}");
     }
 }
 
@@ -8092,5 +8204,85 @@ fn assert_assets_action(action: Option<&Action>, name: &str) {
             assert_eq!(action_name, name);
         }
         other => panic!("expected assets action, got {other:?}"),
+    }
+}
+
+#[test]
+fn sequence_form_confirms_numeric_draft_before_submission_and_cancel_discards_it() {
+    use crate::app::ui_actions::{
+        SequenceSettingsDraftUpdatePayload, APP_SHELL_CLOSE_MODAL,
+        APP_SHELL_CONFIRM_SEQUENCE_SETTINGS, APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED,
+    };
+    use crate::app_ui::sequence_settings_dialog::{
+        AppUiSequenceSettingsDraft, SequenceSettingsDialog,
+    };
+    for cancel in [false, true] {
+        let sequence = Sequence::new("Form draft");
+        let mut dialog = SequenceSettingsDialog::with_locale(
+            AppUiSequenceSettingsDraft::from_sequence(&sequence),
+            AppUiLocale::EnUs,
+        );
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let width = dialog.child_mut(16).expect("width field");
+        width.event(
+            &UiEvent::FocusGained {
+                source: mondrian_ui_core::types::FocusSource::Keyboard,
+            },
+            &mut ctx,
+        );
+        width.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        width.event(&UiEvent::TextInput("2560".to_owned()), &mut ctx);
+        assert!(actions.borrow().is_empty());
+        dialog.event(
+            &UiEvent::KeyDown {
+                key: if cancel {
+                    KeyCode::Escape
+                } else {
+                    KeyCode::Enter
+                },
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let actions = actions.borrow();
+        assert_eq!(actions.len(), if cancel { 1 } else { 2 });
+        let Action::Custom { name, .. } = actions.last().expect("form command") else {
+            panic!("form command must use shell protocol");
+        };
+        assert_eq!(
+            name,
+            if cancel {
+                APP_SHELL_CLOSE_MODAL
+            } else {
+                APP_SHELL_CONFIRM_SEQUENCE_SETTINGS
+            }
+        );
+        if !cancel {
+            let Action::Custom { name, payload, .. } = &actions[0] else {
+                panic!("numeric draft command");
+            };
+            assert_eq!(name, APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED);
+            let update: SequenceSettingsDraftUpdatePayload =
+                serde_json::from_value(payload.clone()).expect("draft update");
+            assert!(matches!(
+                update,
+                SequenceSettingsDraftUpdatePayload::ResolutionWidth(2560)
+            ));
+        }
     }
 }

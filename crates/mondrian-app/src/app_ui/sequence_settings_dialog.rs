@@ -1706,12 +1706,17 @@ impl Widget for SequenceSettingsDialog {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if matches!(event, UiEvent::MouseUp { position, .. } if self.apply_button.hit_test(*position))
+        {
+            self.commit_pending_input(ctx);
+        }
         match event {
             UiEvent::KeyDown { key: KeyCode::Escape, .. } => {
                 (ctx.dispatch)(app_shell_close_modal_action());
                 return EventResult::Handled;
             }
             UiEvent::KeyDown { key: KeyCode::Enter, .. } => {
+                self.commit_pending_input(ctx);
                 (ctx.dispatch)(app_shell_confirm_sequence_settings_action());
                 return EventResult::Handled;
             }

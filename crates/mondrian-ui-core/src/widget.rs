@@ -496,6 +496,20 @@ pub trait Widget {
     /// 返回 `Handled` 则停止冒泡，`Ignored` 则继续向父级传递。
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult;
 
+    /// Commit pending input before a container submits its form.
+    ///
+    /// Returns whether a value changed. The default visits every logical child;
+    /// editable leaves dispatch their confirmed values through the same context.
+    fn commit_pending_input(&mut self, ctx: &mut EventContext) -> bool {
+        let mut changed = false;
+        for index in 0..self.child_count() {
+            if let Some(child) = self.child_mut(index) {
+                changed |= child.commit_pending_input(ctx);
+            }
+        }
+        changed
+    }
+
     /// Called on ancestors before a descendant receives an event.
     ///
     /// This is for parent-owned chrome that must win over child hit targets,
