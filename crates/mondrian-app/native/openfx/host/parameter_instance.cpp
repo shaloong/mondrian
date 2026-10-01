@@ -37,27 +37,31 @@ namespace MondrianOpenFx {
   IntegerParameter::IntegerParameter(FilterEffectInstance* effect,
                                        const std::string& name,
                                        OFX::Host::Param::Descriptor& descriptor)
-    : _effect(effect), _descriptor(descriptor), OFX::Host::Param::IntegerInstance(descriptor)
+    : _effect(effect), _descriptor(descriptor), _value(descriptor.getProperties().getIntProperty(kOfxParamPropDefault)), OFX::Host::Param::IntegerInstance(descriptor)
   {
   }
 
-  OfxStatus IntegerParameter::get(int&)
+  OfxStatus IntegerParameter::get(int& value)
   {
-    return kOfxStatErrMissingHostFeature;
+    value = _value;
+    return kOfxStatOK;
   }
 
-  OfxStatus IntegerParameter::get(OfxTime time, int&)
+  OfxStatus IntegerParameter::get(OfxTime time, int& value)
   {
-    return kOfxStatErrMissingHostFeature;
+    return std::isfinite(time) && time == _effect->frameState().info.frame ? get(value) : kOfxStatErrMissingHostFeature;
   }
 
-  OfxStatus IntegerParameter::set(int)
+  OfxStatus IntegerParameter::set(int value)
   {
-    return kOfxStatErrMissingHostFeature;
+    const auto& properties = _descriptor.getProperties();
+    if (value < properties.getIntProperty(kOfxParamPropMin) || value > properties.getIntProperty(kOfxParamPropMax)) { return kOfxStatErrValue; }
+    _value = value;
+    return kOfxStatOK;
   }
 
-  OfxStatus IntegerParameter::set(OfxTime time, int) {
-    return kOfxStatErrMissingHostFeature;
+  OfxStatus IntegerParameter::set(OfxTime time, int value) {
+    return std::isfinite(time) && time == _effect->frameState().info.frame ? set(value) : kOfxStatErrMissingHostFeature;
   }
 
   //

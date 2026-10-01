@@ -1552,3 +1552,16 @@ Direct Asset placement treats a coherent still-image picture as timeless: it
 requires an admitted primary picture and valid geometry, not nonzero probed
 media duration. The existing Timeline still-clip duration remains authoritative.
 Timed Video and Audio Assets continue to require a positive media duration.
+
+
+### Bounded numeric integer animation
+
+Integer representation does not require categorical animation. Generic Int
+schemas default to Hold, while an owner may explicitly admit Linear/Bezier when
+it supplies a numeric hard range entirely inside the exact f64 integer domain
+[-2^53, 2^53]. Wider or unbounded interpolated Int schemas fail validation before
+channel lowering. Bool/Enum and other categorical representations retain their
+Hold-only contract. Canonical numeric channels evaluate the curve and round
+integer samples to the nearest integer, with halfway values away from zero.
+OpenFX Integer controls use this same path with stricter signed 32-bit hard
+bounds and a one-unit editor step; no plugin-specific curve evaluator exists.

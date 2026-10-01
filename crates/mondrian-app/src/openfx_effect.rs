@@ -215,14 +215,25 @@ fn build_definition(
             let default_value = match parameter.default_value {
                 OpenFxScalarValue::Double(value) => PropertyValue::Double(value),
                 OpenFxScalarValue::Boolean(value) => PropertyValue::Bool(value),
+                OpenFxScalarValue::Integer(value) => PropertyValue::Int(i64::from(value)),
             };
             let mut descriptor = PropertyDescriptor::try_new(path, &parameter.label, default_value)
                 .map_err(|error| OpenFxEffectRegistrationError::Schema(error.to_string()))?
                 .with_parameter_id(parameter_id.clone())
                 .with_animatable(parameter.can_animate);
+            if matches!(parameter.default_value, OpenFxScalarValue::Integer(_)) {
+                descriptor.schema.allowed_interpolations = vec![
+                    mondrian_core::automation::ParameterInterpolation::Hold,
+                    mondrian_core::automation::ParameterInterpolation::Linear,
+                    mondrian_core::automation::ParameterInterpolation::Bezier,
+                ];
+            }
             descriptor.ui_metadata.display_order = Some(index as u32);
             descriptor.ui_metadata.group_name = Some("OpenFX".to_owned());
-            if let OpenFxScalarValue::Double(_) = parameter.default_value {
+            if matches!(
+                parameter.default_value,
+                OpenFxScalarValue::Double(_) | OpenFxScalarValue::Integer(_)
+            ) {
                 let (Some(min), Some(max), Some(display_min), Some(display_max)) = (
                     parameter.minimum,
                     parameter.maximum,
@@ -244,12 +255,15 @@ fn build_definition(
                 let numeric = ParameterNumericContract::new(
                     hard_range,
                     soft_range,
-                    None,
+                    matches!(parameter.default_value, OpenFxScalarValue::Integer(_)).then_some(1.0),
                     ParameterInvalidValuePolicy::Reject,
                 )
                 .map_err(|error| OpenFxEffectRegistrationError::Schema(error.to_string()))?;
                 let unit = match parameter.double_type {
                     Some(OpenFxDoubleType::Plain | OpenFxDoubleType::Scale) => {
+                        ParameterUnit::Unitless
+                    }
+                    None if matches!(parameter.default_value, OpenFxScalarValue::Integer(_)) => {
                         ParameterUnit::Unitless
                     }
                     None => {
@@ -310,6 +324,14 @@ fn build_definition(
                                 OpenFxScalarValue::Double(value)
                             }
                             Some(PropertyValue::Bool(value)) => OpenFxScalarValue::Boolean(value),
+                            Some(PropertyValue::Int(value)) => {
+                                OpenFxScalarValue::Integer(i32::try_from(value).map_err(|_| {
+                                    invalid(format!(
+                                        "parameter `{}` exceeds the OFX Integer range",
+                                        parameter.name
+                                    ))
+                                })?)
+                            }
                             _ => {
                                 return Err(invalid(format!(
                                     "parameter `{}` has no valid value",

@@ -68,6 +68,34 @@ bool imageUnavailable(const void* handle, OfxPropertySetHandle in) {
   }
   return status == kOfxStatFailed;
 }
+bool applyInteger(const void* handle, OfxPropertySetHandle in) {
+  OfxParamSetHandle params = nullptr;
+  OfxParamHandle count = nullptr;
+  double time = 0.0;
+  int value = 0;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+      gParamHost->paramGetHandle(params, "count", &count, nullptr) != kOfxStatOK ||
+      gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
+      gParamHost->paramGetValueAtTime(count, time, &value) != kOfxStatOK) { return false; }
+  OfxImageClipHandle clip = nullptr;
+  OfxPropertySetHandle image = nullptr;
+  if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Output", &clip, nullptr) != kOfxStatOK ||
+      gEffectHost->clipGetImage(clip, time, nullptr, &image) != kOfxStatOK) { return false; }
+  void* data = nullptr;
+  int bounds[4]{}, stride = 0;
+  bool valid = gPropHost->propGetPointer(image, kOfxImagePropData, 0, &data) == kOfxStatOK && data &&
+      gPropHost->propGetIntN(image, kOfxImagePropBounds, 4, bounds) == kOfxStatOK &&
+      gPropHost->propGetInt(image, kOfxImagePropRowBytes, 0, &stride) == kOfxStatOK;
+  if (valid) {
+    for (int y = 0; y < bounds[3] - bounds[1]; ++y) {
+      auto* row = reinterpret_cast<OfxRGBAColourF*>(static_cast<char*>(data) + y * stride);
+      for (int x = 0; x < bounds[2] - bounds[0]; ++x) {
+        row[x].r *= value; row[x].g *= value; row[x].b *= value; row[x].a *= value;
+      }
+    }
+  }
+  return gEffectHost->clipReleaseImage(image) == kOfxStatOK && valid;
+}
 OfxStatus probe(const char* action, const void* handle,
                 OfxPropertySetHandle in, OfxPropertySetHandle out) {
   const std::string operation(action);
@@ -142,6 +170,21 @@ OfxStatus probe(const char* action, const void* handle,
     }
   } else if (operation == kOfxActionInstanceChanged && selected == "become_required") {
     property(handle, kOfxImageEffectInstancePropSequentialRender, 1);
+  }
+  if (selected == "integer" && result == kOfxStatOK) {
+    if (operation == kOfxImageEffectActionDescribeInContext) {
+      OfxParamSetHandle params = nullptr;
+      OfxPropertySetHandle props = nullptr;
+      if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+          gParamHost->paramDefine(params, kOfxParamTypeInteger, "count", &props) != kOfxStatOK) { return kOfxStatFailed; }
+      gPropHost->propSetString(props, kOfxPropLabel, 0, "Count");
+      gPropHost->propSetInt(props, kOfxParamPropDefault, 0, 2);
+      gPropHost->propSetInt(props, kOfxParamPropMin, 0, 0);
+      gPropHost->propSetInt(props, kOfxParamPropMax, 0, 9);
+      gPropHost->propSetInt(props, kOfxParamPropDisplayMin, 0, 0);
+      gPropHost->propSetInt(props, kOfxParamPropDisplayMax, 0, 9);
+      gPropHost->propSetInt(props, kOfxParamPropAnimates, 0, 1);
+    } else if (operation == kOfxImageEffectActionRender && !applyInteger(handle, in)) { return kOfxStatFailed; }
   }
   return result;
 }

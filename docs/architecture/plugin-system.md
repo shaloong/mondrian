@@ -66,13 +66,13 @@ its binary stays outside the shipped product.
 The application builds a selected-binary Float32 filter host on Windows,
 Linux, and macOS using vendored BSD-3-Clause OpenFX HostSupport source and separate supervised
 description/render children. The description child runs DescribeInContext for
-one selected Filter and returns bounded Double/Boolean defaults, labels, hints,
+one selected Filter and returns bounded Double/Boolean/Integer defaults, labels, hints,
 numeric hard/display ranges, and animation/visibility flags. Plain and Scale
 Double semantics are admitted; other parameter kinds and spatial Double
 semantics receive an explicit unsupported result. The caller supplies a pinned
 binary inspection, explicit frame time/rate/range/PAR, RGBA Float32
 straight-alpha working-frame pixels, and
-Double/Boolean parameter values. The parent checks binary identity, bounded
+Double/Boolean/Integer parameter values. The parent checks binary identity, bounded
 request/output sizes, finite input and output pixels, and a render deadline;
 a native crash remains in the child. Frame transfer uses one exact-sized,
 file-backed shared memory mapping with disjoint input/output ranges in native
@@ -503,13 +503,34 @@ arbitrary builtin color/blend kernels or arbitrary plugin heap allocation.
 
 The heterogeneous preparer still rejects a CPU-only graph ending with a GPU
 upload and no GPU dispatch suffix; such a route must not be assumed to migrate
-native work to that executor. Production retained-native grants and additional
-format/vendor qualification remain outstanding.
+native work to that executor. Additional format/vendor and resident pressure qualification remain outstanding.
 
 The pinned official Basic authored-UHD qualification executes a 3840x2160
 unclamped Float32 frame through the production factory. Two executor rasters
 plus three host rasters require 663,552,000 logical bytes; a one-byte-short
 working grant rejects, and a 768 MiB grant succeeds with all pixels and distinct
 corner samples preserved. Decoded input, metadata and arbitrary native heaps
-remain separately owned. This is active frame/pixel qualification, not proof of
-production retained-native grants, realtime throughput or DCI/8K support.
+remain separately owned. This is active frame/pixel qualification, not proof of realtime throughput or
+DCI/8K support. Production retention grants are described above and require
+their own pressure and residency evidence.
+
+
+### Exact scalar Integer parameters
+
+The selected Filter adapter now admits OFX Integer parameters as signed 32-bit
+values, alongside Double and Boolean. Native descriptors retain hard/soft bounds,
+defaults and animation flags. Rust rejects fractional/nonfinite/out-of-range
+bounds; author controls use canonical `PropertyValue::Int`, a one-unit editor
+step and the declared hard range. Shared author curves evaluate to exact integer
+values before worker serialization. ABI kind 3 carries an exactly representable
+integer through its double slot; the native owner checks kind, integrality and
+range before assigning the complete snapshot or issuing change callbacks.
+
+Integer parameter instances store their value independently per native session.
+Current-frame `paramGetValueAtTime` returns that authored snapshot; other times
+still return MissingHostFeature rather than pretending to provide an animation
+history. Choices, multidimensional controls, plugin-preferred interpolation metadata and
+arbitrary-time parameter queries remain separate capability work. The real SessionProbe Integer mode reads the
+Integer via the OFX suite and multiplies every output channel; product acceptance
+checks native bounds/type rejection and a canonical animated integer midpoint
+through the shared compiled graph. This is a contract probe, not a vendor matrix.

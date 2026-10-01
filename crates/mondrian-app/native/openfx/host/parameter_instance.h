@@ -17,6 +17,7 @@ namespace MondrianOpenFx {
   protected:
     FilterEffectInstance*   _effect;
     OFX::Host::Param::Descriptor& _descriptor;
+    int _value;
   public:
     IntegerParameter(FilterEffectInstance* effect, const std::string& name, OFX::Host::Param::Descriptor& descriptor);
     OfxStatus get(int&);

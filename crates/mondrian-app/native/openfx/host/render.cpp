@@ -153,6 +153,13 @@ struct MondrianOpenFxSession {
         if ((value && value->kind != 2) || (target != 0.0 && target != 1.0) ||
             scalar->get(current) != kOfxStatOK) { return 4; }
         updates.push_back({parameter, 2, target, current != (target == 1.0)});
+      } else if (auto* scalar = dynamic_cast<OFX::Host::Param::IntegerInstance*>(parameter)) {
+        const double target = value ? value->value : properties.getIntProperty(kOfxParamPropDefault);
+        int current = 0;
+        if ((value && value->kind != 3) || !std::isfinite(target) || std::trunc(target) != target ||
+            target < properties.getIntProperty(kOfxParamPropMin) || target > properties.getIntProperty(kOfxParamPropMax) ||
+            scalar->get(current) != kOfxStatOK) { return 4; }
+        updates.push_back({parameter, 3, target, current != target});
       } else { return 7; }
       changed = changed || updates.back().changed;
     }
@@ -163,6 +170,8 @@ struct MondrianOpenFxSession {
     for (const auto& update : updates) {
       if (update.kind == 1) {
         status = static_cast<OFX::Host::Param::DoubleInstance*>(update.parameter)->set(update.value);
+      } else if (update.kind == 3) {
+        status = static_cast<OFX::Host::Param::IntegerInstance*>(update.parameter)->set(static_cast<int>(update.value));
       } else {
         status = static_cast<OFX::Host::Param::BooleanInstance*>(update.parameter)->set(update.value == 1.0);
       }
@@ -338,6 +347,15 @@ static int describe(const char* binary, const char* bundle,
           !std::isfinite(info.maximum) || !std::isfinite(info.display_minimum) ||
           !std::isfinite(info.display_maximum) || info.minimum > info.maximum ||
           info.display_minimum > info.display_maximum) { return 7; }
+    } else if (type == kOfxParamTypeInteger) {
+      info.kind = 3;
+      info.double_type = -1;
+      info.default_value = properties.getIntProperty(kOfxParamPropDefault);
+      info.minimum = properties.getIntProperty(kOfxParamPropMin);
+      info.maximum = properties.getIntProperty(kOfxParamPropMax);
+      info.display_minimum = properties.getIntProperty(kOfxParamPropDisplayMin);
+      info.display_maximum = properties.getIntProperty(kOfxParamPropDisplayMax);
+      if (info.minimum > info.maximum || info.display_minimum > info.display_maximum || info.default_value < info.minimum || info.default_value > info.maximum) { return 7; }
     } else if (type == kOfxParamTypeBoolean) {
       info.kind = 2;
       info.double_type = -1;

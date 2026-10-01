@@ -542,7 +542,6 @@ impl ParameterSchema {
         if matches!(
             self.value_type,
             PropertyValueType::Bool
-                | PropertyValueType::Int
                 | PropertyValueType::Curve
                 | PropertyValueType::QualifierSamples
                 | PropertyValueType::Enum
@@ -554,6 +553,23 @@ impl ParameterSchema {
         }
         if let Some(numeric) = self.numeric {
             numeric.validate()?;
+        }
+        if self.value_type == PropertyValueType::Int
+            && self.allowed_interpolations != [ParameterInterpolation::Hold]
+        {
+            // Author channels are f64; an interpolated integer schema must bound
+            // every value to the exact integer domain rather than silently round
+            // wide i64 author values during channel lowering.
+            if matches!(self.default_value, PropertyValue::Int(value) if value.unsigned_abs() > (1_u64 << 53))
+            {
+                return Err(ParameterSchemaError::DefaultValueOutsideHardRange);
+            }
+            let exact_limit = (1_u64 << 53) as f64;
+            if self.numeric.is_none_or(|numeric| {
+                numeric.hard_range.min < -exact_limit || numeric.hard_range.max > exact_limit
+            }) {
+                return Err(ParameterSchemaError::InterpolationTypeMismatch);
+            }
         }
         for (index, option) in self.enum_options.iter().enumerate() {
             if option.key.trim().is_empty() || option.message_id.trim().is_empty() {
@@ -2258,6 +2274,15 @@ impl AnimatedProperty {
     }
 
     fn value_to_channel_values(&self, value: &PropertyValue) -> Result<Vec<f64>> {
+        if let PropertyValue::Int(integer) = value
+            && self.descriptor.schema.allowed_interpolations != [ParameterInterpolation::Hold]
+            && integer.unsigned_abs() > (1_u64 << 53)
+        {
+            return Err(parameter_value_error(
+                &self.descriptor.path,
+                "interpolated integers must remain exactly representable in author channels",
+            ));
+        }
         if let PropertyValue::Enum(key) = value {
             let index = self
                 .descriptor
@@ -4042,6 +4067,81 @@ mod tests {
             .expect_err("persisted out-of-range state must fail closed")
             .to_string()
             .contains("persisted value lies outside"));
+    }
+
+    #[test]
+    fn bounded_integer_curves_round_numeric_samples_and_reject_inexact_domains() {
+        let mut descriptor =
+            PropertyDescriptor::new("effect.integer", "Integer", PropertyValue::Int(0));
+        assert_eq!(
+            descriptor.schema.allowed_interpolations,
+            [ParameterInterpolation::Hold]
+        );
+        descriptor.schema.allowed_interpolations = vec![
+            ParameterInterpolation::Hold,
+            ParameterInterpolation::Linear,
+            ParameterInterpolation::Bezier,
+        ];
+        assert!(
+            descriptor.validate().is_err(),
+            "integer curves need an exact bounded numeric domain"
+        );
+        descriptor = descriptor.with_numeric_contract(
+            ParameterUnit::Unitless,
+            ParameterNumericContract::closed(
+                -3.0,
+                3.0,
+                Some(1.0),
+                ParameterInvalidValuePolicy::Reject,
+            )
+            .expect("range"),
+        );
+        descriptor.validate().expect("exact integer schema");
+        for (start, end, expected) in [(0, 3, 2), (-3, 0, -2)] {
+            let mut property = AnimatedProperty::from_descriptor(descriptor.clone());
+            property
+                .set_exact_keyframe(Keyframe::linear(tt(0), PropertyValue::Int(start)))
+                .expect("first key");
+            property
+                .set_exact_keyframe(Keyframe::linear(tt(2), PropertyValue::Int(end)))
+                .expect("second key");
+            assert_eq!(property.evaluate(tt(1)), PropertyValue::Int(expected));
+        }
+        let exact_max = 1_i64 << 53;
+        let mut exact = descriptor.clone();
+        exact.schema.numeric = Some(
+            ParameterNumericContract::closed(
+                0.0,
+                exact_max as f64,
+                Some(1.0),
+                ParameterInvalidValuePolicy::Reject,
+            )
+            .expect("exact range"),
+        );
+        exact.schema.default_value = PropertyValue::Int(exact_max + 1);
+        assert!(
+            exact.validate().is_err(),
+            "do not round an invalid default into the range"
+        );
+        exact.schema.default_value = PropertyValue::Int(0);
+        let mut property = AnimatedProperty::from_descriptor(exact);
+        assert!(property.set_static_value(PropertyValue::Int(exact_max + 1)).is_err());
+        property
+            .set_static_value(PropertyValue::Int(exact_max))
+            .expect("exact endpoint");
+        descriptor.schema.numeric = Some(
+            ParameterNumericContract::closed(
+                0.0,
+                ((1_u64 << 53) + 2) as f64,
+                Some(1.0),
+                ParameterInvalidValuePolicy::Reject,
+            )
+            .expect("wide range"),
+        );
+        assert!(
+            descriptor.validate().is_err(),
+            "inexact integer channels must fail closed"
+        );
     }
 
     #[test]

@@ -617,6 +617,11 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
                         OpenFxScalarValue::Double(value) => {
                             NativeParameter { name: name.as_ptr(), kind: 1, value: *value }
                         }
+                        OpenFxScalarValue::Integer(value) => NativeParameter {
+                            name: name.as_ptr(),
+                            kind: 3,
+                            value: f64::from(*value),
+                        },
                         OpenFxScalarValue::Boolean(value) => NativeParameter {
                             name: name.as_ptr(),
                             kind: 2,

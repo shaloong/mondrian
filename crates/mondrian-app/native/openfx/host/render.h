@@ -10,7 +10,7 @@ extern "C" {
 
 struct MondrianOpenFxParameter {
   const char* name;
-  int kind; // 1: double, 2: boolean
+  int kind; // 1: double, 2: boolean, 3: integer
   double value;
 };
 
@@ -31,7 +31,7 @@ struct MondrianOpenFxParameterInfo {
   size_t label_length;
   const char* hint;
   size_t hint_length;
-  int kind; // 1: double, 2: boolean
+  int kind; // 1: double, 2: boolean, 3: integer
   int double_type; // 0: plain, 1: scale, -1: not a Double
   double default_value;
   double minimum;

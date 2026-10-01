@@ -939,3 +939,129 @@ fn authored_uhd_filter_fits_professional_working_grant() {
     session.reconfigure(config);
     assert_eq!(session.diagnostics().processor_instances, 0);
 }
+
+#[test]
+#[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and MONDRIAN_OPENFX_SESSION_PROBE_MODE=integer"]
+fn integer_filter_preserves_typed_authoring_and_native_pixels() {
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
+        "integer"
+    );
+    let binary =
+        PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));
+    let inspection = inspect_openfx_binary(product_executable(), &binary).expect("inspect");
+    let identifier = "uk.co.thefoundry.BasicGainPlugin";
+    let description =
+        describe_openfx_filter(product_executable(), &inspection, identifier).expect("describe");
+    let count = description.parameters.iter().find(|p| p.name == "count").expect("integer");
+    assert_eq!(count.default_value, OpenFxScalarValue::Integer(2));
+    assert_eq!(count.minimum, Some(0.0));
+    assert_eq!(count.maximum, Some(9.0));
+    assert!(count.can_animate);
+    let input = OpenFxFloatFrame {
+        width: 2,
+        height: 2,
+        pixels: vec![[0.1, 0.2, 0.3, 0.05]; 4],
+    };
+    let timing = OpenFxRenderTiming {
+        frame: 1.0,
+        frame_rate: 24.0,
+        first_frame: 0.0,
+        last_frame: 10.0,
+        pixel_aspect_ratio: 1.0,
+    };
+    for value in [0, 1, 9] {
+        let output = render_openfx_filter_frame(
+            product_executable(),
+            &inspection,
+            identifier,
+            &timing,
+            &BTreeMap::from([("count".to_owned(), OpenFxScalarValue::Integer(value))]),
+            &input,
+        )
+        .expect("native integer");
+        for (actual, original) in output.pixels.iter().zip(&input.pixels) {
+            for channel in 0..4 {
+                assert!((actual[channel] - original[channel] * value as f32).abs() < 1e-6);
+            }
+        }
+    }
+    for value in [
+        OpenFxScalarValue::Integer(-1),
+        OpenFxScalarValue::Integer(10),
+        OpenFxScalarValue::Double(1.5),
+        OpenFxScalarValue::Boolean(true),
+    ] {
+        assert!(render_openfx_filter_frame(
+            product_executable(),
+            &inspection,
+            identifier,
+            &timing,
+            &BTreeMap::from([("count".to_owned(), value)]),
+            &input
+        )
+        .is_err());
+    }
+    let kind = register_selected_openfx_filter(product_executable(), &inspection, identifier)
+        .expect("register");
+    let mut effect = instantiate_effect_node(kind).expect("author instance");
+    let id = effect
+        .properties
+        .iter()
+        .find(|(_, p)| p.descriptor.display_name == "Count")
+        .expect("integer property")
+        .1
+        .descriptor
+        .parameter_id()
+        .clone();
+    effect
+        .set_static_value_by_parameter(&id, PropertyValue::Int(3))
+        .expect("author exact integer");
+    assert!(effect.set_static_value_by_parameter(&id, PropertyValue::Int(10)).is_err());
+    let path = effect
+        .properties
+        .iter()
+        .find(|(_, p)| p.descriptor.parameter_id() == &id)
+        .expect("integer property")
+        .0
+        .to_owned();
+    effect
+        .properties
+        .set_keyframe(
+            &path,
+            mondrian_core::automation::Keyframe::linear(TimelineTime::ZERO, PropertyValue::Int(3)),
+        )
+        .expect("first integer key");
+    effect
+        .properties
+        .set_keyframe(
+            &path,
+            mondrian_core::automation::Keyframe::linear(
+                TimelineTime::new(2, 24).expect("second key time"),
+                PropertyValue::Int(5),
+            ),
+        )
+        .expect("second integer key");
+    let range = TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::new(10, 24).expect("end"))
+        .expect("range");
+    let context = EffectFrameContext::new(Rational::FPS_24, SampleAspectRatio::SQUARE, range)
+        .expect("context");
+    let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+        &[effect],
+        &[],
+        &[],
+        &[],
+        WorkingColorSpace::LinearRec709,
+        context,
+        &LutPreparationCache::uncached(),
+    )
+    .expect("compile");
+    let graph = program.evaluate(TimelineTime::new(1, 24).expect("frame")).expect("evaluate");
+    let pixels = apply_compiled_effect_graph_rgba_f32(&input.pixels, 2, 2, &graph, 1191)
+        .expect("native graph");
+    for (actual, original) in pixels.iter().zip(&input.pixels) {
+        for channel in 0..4 {
+            assert!((actual[channel] - original[channel] * 4.0).abs() < 1e-6);
+        }
+    }
+}

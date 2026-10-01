@@ -39,6 +39,8 @@ pub enum OpenFxScalarValue {
     Double(f64),
     /// An OFX Boolean parameter value.
     Boolean(bool),
+    /// An exact signed 32-bit OFX Integer parameter value.
+    Integer(i32),
 }
 
 /// Admitted interpretation of an OpenFX Double control.
@@ -64,13 +66,13 @@ pub struct OpenFxParameterDescription {
     pub default_value: OpenFxScalarValue,
     /// Semantic kind of a Double control.
     pub double_type: Option<OpenFxDoubleType>,
-    /// Lowest accepted numeric value, when this is a Double parameter.
+    /// Lowest accepted numeric value, when this is a numeric parameter.
     pub minimum: Option<f64>,
-    /// Highest accepted numeric value, when this is a Double parameter.
+    /// Highest accepted numeric value, when this is a numeric parameter.
     pub maximum: Option<f64>,
-    /// Suggested slider lower bound, when this is a Double parameter.
+    /// Suggested slider lower bound, when this is a numeric parameter.
     pub display_minimum: Option<f64>,
-    /// Suggested slider upper bound, when this is a Double parameter.
+    /// Suggested slider upper bound, when this is a numeric parameter.
     pub display_maximum: Option<f64>,
     /// Whether this parameter permits authored animation.
     pub can_animate: bool,
@@ -138,6 +140,14 @@ pub enum OpenFxHostError {
     /// The native process exited without a valid result.
     #[error("OpenFX native worker failed: {0}")]
     WorkerFailed(String),
+}
+
+fn checked_openfx_integer(value: f64) -> Option<i32> {
+    (value.is_finite()
+        && value.fract() == 0.0
+        && value >= f64::from(i32::MIN)
+        && value <= f64::from(i32::MAX))
+    .then_some(value as i32)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -546,6 +556,17 @@ unsafe fn decode_native_parameter(
             None,
             None,
         ),
+        3 if raw.double_type == -1 => (
+            OpenFxScalarValue::Integer(
+                checked_openfx_integer(raw.default_value)
+                    .ok_or("invalid OpenFX Integer default")?,
+            ),
+            None,
+            Some(raw.minimum),
+            Some(raw.maximum),
+            Some(raw.display_minimum),
+            Some(raw.display_maximum),
+        ),
         _ => return Err("unsupported OpenFX parameter kind or default".to_owned()),
     };
     let flag = |value| match value {
@@ -772,6 +793,35 @@ fn validate_description(
                     return Err(invalid("OpenFX Boolean parameter has numeric bounds"));
                 }
             }
+            OpenFxScalarValue::Integer(value) => {
+                let bounds = [
+                    parameter.minimum,
+                    parameter.maximum,
+                    parameter.display_minimum,
+                    parameter.display_maximum,
+                ];
+                if parameter.double_type.is_some()
+                    || bounds.iter().any(|bound| bound.and_then(checked_openfx_integer).is_none())
+                {
+                    return Err(invalid(
+                        "OpenFX Integer parameter has invalid numeric bounds",
+                    ));
+                }
+                let [Some(min), Some(max), Some(display_min), Some(display_max)] = bounds else {
+                    return Err(invalid(
+                        "OpenFX Integer parameter is missing numeric bounds",
+                    ));
+                };
+                if min > max
+                    || display_min > display_max
+                    || f64::from(*value) < min
+                    || f64::from(*value) > max
+                {
+                    return Err(invalid(
+                        "OpenFX Integer parameter default or range is invalid",
+                    ));
+                }
+            }
             OpenFxScalarValue::Double(value) => {
                 if parameter.double_type.is_none() {
                     return Err(invalid("OpenFX Double parameter lacks a semantic type"));
@@ -839,6 +889,52 @@ fn unavailable(reason: impl Into<String>) -> OpenFxHostError {
 #[cfg(test)]
 mod shared_frame_tests {
     use super::*;
+
+    #[test]
+    fn integer_descriptor_rejects_fractional_nonfinite_and_out_of_range_bounds() {
+        for value in [f64::from(i32::MIN), -1.0, 0.0, f64::from(i32::MAX)] {
+            assert_eq!(checked_openfx_integer(value).map(f64::from), Some(value));
+        }
+        for value in [
+            f64::NAN,
+            f64::INFINITY,
+            1.5,
+            f64::from(i32::MIN) - 1.0,
+            f64::from(i32::MAX) + 1.0,
+        ] {
+            assert_eq!(checked_openfx_integer(value), None);
+        }
+        let mut description = OpenFxFilterDescription {
+            identifier: "test.integer".into(),
+            label: "Integer".into(),
+            parameters: vec![OpenFxParameterDescription {
+                name: "count".into(),
+                label: "Count".into(),
+                hint: String::new(),
+                default_value: OpenFxScalarValue::Integer(2),
+                double_type: None,
+                minimum: Some(0.0),
+                maximum: Some(9.0),
+                display_minimum: Some(0.0),
+                display_maximum: Some(9.0),
+                can_animate: true,
+                secret: false,
+                enabled: true,
+            }],
+        };
+        assert!(validate_description(&description, "test.integer").is_ok());
+        for bound in [
+            None,
+            Some(0.5),
+            Some(f64::NAN),
+            Some(f64::from(i32::MIN) - 1.0),
+            Some(3.0),
+            Some(10.0),
+        ] {
+            description.parameters[0].minimum = bound;
+            assert!(validate_description(&description, "test.integer").is_err());
+        }
+    }
 
     // Each native qualification runs in its own bounded child; test threads never
     // change process-wide environment or load a native plugin in the supervisor.
