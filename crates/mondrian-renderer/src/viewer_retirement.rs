@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use crate::{
     GpuColorFrameWgpuResourcePool, GpuDisplayCalibrationRuntime, GpuFrameCompositor,
-    GpuNativeDecodedFrameImportError, GpuProgramScopesRuntime, GpuSignalMonitorRuntime,
-    NativeVideoImportRuntime, ViewerBackendPreparationWorkerExit,
+    GpuNativeDecodedFrameImportError, GpuSignalMonitorRuntime, NativeVideoImportRuntime,
+    ViewerBackendPreparationWorkerExit,
 };
 
 /// Observed terminal result after joining the actual CPU YUV upload worker.
@@ -55,10 +55,9 @@ pub struct ViewerGpuExecutionRetirement {
     pub(crate) terminal: Option<ViewerGpuRetirementReceipt>,
     pub(crate) native_device_removed: bool,
     pub(crate) _resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
-    pub(crate) _color_output: crate::viewer_backend_preparation::ViewerColorBackendOwner,
+    pub(crate) _color_output: crate::viewer_backend_preparation::ViewerBackendOwner,
     pub(crate) _spatial: crate::viewer_spatial::GpuViewerSpatialRuntime,
     pub(crate) _display_calibration: GpuDisplayCalibrationRuntime,
-    pub(crate) _program_scopes: GpuProgramScopesRuntime,
     pub(crate) _signal_monitor: GpuSignalMonitorRuntime,
     pub(crate) _working_compositor: GpuFrameCompositor,
 }

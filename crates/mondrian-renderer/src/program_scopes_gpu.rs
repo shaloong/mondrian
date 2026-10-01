@@ -217,6 +217,32 @@ impl GpuProgramScopesRuntime {
         self.resources = None;
     }
 
+    /// Prepare device pipelines only. No frame buffers, textures, commands or
+    /// counts are allocated; hidden-panel preparation does not call this seam.
+    pub(crate) fn prepare_backend(&mut self, device: &wgpu::Device, mode: WaveformMode) {
+        if self.pipelines.is_none() {
+            self.pipelines = Some(ScopesPipelines::new(device));
+            self.diagnostics.pipeline_creations =
+                self.diagnostics.pipeline_creations.saturating_add(1);
+        }
+        self.pipelines
+            .as_mut()
+            .expect("scope pipelines prepared")
+            .aggregate_pipeline(device, mode);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepared_pipeline(
+        &mut self,
+        device: &wgpu::Device,
+        mode: WaveformMode,
+    ) -> wgpu::ComputePipeline {
+        self.pipelines
+            .as_mut()
+            .expect("prepared scope pipelines")
+            .aggregate_pipeline(device, mode)
+    }
+
     /// Record exact aggregation and GPU visualization for one Program Output.
     ///
     /// Callers represent hidden-panel behavior by not calling this method; the
@@ -239,11 +265,7 @@ impl GpuProgramScopesRuntime {
         }
         let colorimetry = ProgramSignalColorimetry::for_color_space(request.signal_color_space)
             .map_err(GpuProgramScopesError::UnsupportedSignal)?;
-        if self.pipelines.is_none() {
-            self.pipelines = Some(ScopesPipelines::new(device));
-            self.diagnostics.pipeline_creations =
-                self.diagnostics.pipeline_creations.saturating_add(1);
-        }
+        self.prepare_backend(device, request.waveform_mode);
         let aggregate_pipeline = self
             .pipelines
             .as_mut()
@@ -1227,6 +1249,12 @@ mod tests {
         )
         .expect("nits scope request");
         let mut runtime = GpuProgramScopesRuntime::default();
+        runtime.prepare_backend(&context.device, WaveformMode::Luma);
+        let prepared_pipeline = runtime.prepared_pipeline(&context.device, WaveformMode::Luma);
+        assert_eq!(runtime.diagnostics().frames_recorded, 0);
+        assert_eq!(runtime.diagnostics().buffer_allocations, 0);
+        assert_eq!(runtime.diagnostics().texture_allocations, 0);
+
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("program-scopes-test-encoder"),
         });
@@ -1291,6 +1319,10 @@ mod tests {
             4
         );
         assert_eq!(actual[vectorscope..].iter().copied().sum::<u32>(), 4);
+        assert_eq!(
+            prepared_pipeline,
+            runtime.prepared_pipeline(&context.device, WaveformMode::Luma)
+        );
         assert_eq!(runtime.diagnostics().pipeline_creations, 1);
         assert_eq!(runtime.diagnostics().buffer_allocations, 1);
         assert_eq!(runtime.diagnostics().texture_allocations, 3);

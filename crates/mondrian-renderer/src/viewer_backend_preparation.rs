@@ -1,4 +1,4 @@
-//! Bounded ownership transfer of the existing Viewer color cache for backend preparation.
+//! Bounded ownership transfer of existing Viewer device caches for backend preparation.
 //!
 //! This worker prepares device objects only. It owns no frames, demands,
 //! presentation tickets or publication authority. The same cache returns to
@@ -8,27 +8,30 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
 
-use mondrian_core::WorkingColorSpace;
+use mondrian_core::{WaveformMode, WorkingColorSpace};
 
 use crate::{
     ColorFrameAlpha, ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding,
-    ColorFrameResidency, GpuColorFrameTextureFormat, RenderColorTransformGpuOptions,
+    ColorFrameResidency, GpuColorFrameTextureFormat, GpuProgramScopesRuntime,
+    GpuProgramScopesRuntimeDiagnostics, RenderColorTransformGpuOptions,
     RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeDiagnostics,
     RenderGpuOutputBoundaryRuntimeRecordError, RenderMonitorAdaptation, RenderOutputColorBoundary,
     ViewerGpuOutputPrecision,
 };
 
-/// Frozen production contract for preparing Program Output device objects.
+/// Frozen production contract for preparing Program Output and scopes device objects.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ViewerGpuProgramBackendPreparation {
+pub struct ViewerGpuBackendPreparation {
     pub working_color_space: WorkingColorSpace,
     pub program_output_boundary: RenderOutputColorBoundary,
     pub monitor_adaptation: RenderMonitorAdaptation,
     pub output_precision: ViewerGpuOutputPrecision,
     pub signal_monitoring_active: bool,
+    /// Compile only the requested scope mode; hidden scopes prepare nothing.
+    pub waveform_mode: Option<WaveformMode>,
 }
 
-impl ViewerGpuProgramBackendPreparation {
+impl ViewerGpuBackendPreparation {
     pub(crate) fn prepare(
         &self,
         runtime: &mut RenderGpuOutputBoundaryRuntime,
@@ -97,7 +100,8 @@ type PreparationResult = Result<(), Arc<ViewerGpuBackendPreparationError>>;
 
 struct PreparationJob {
     runtime: RenderGpuOutputBoundaryRuntime,
-    plan: ViewerGpuProgramBackendPreparation,
+    scopes: GpuProgramScopesRuntime,
+    plan: ViewerGpuBackendPreparation,
     device: wgpu::Device,
     queue: wgpu::Queue,
     wake: Box<dyn Fn() + Send + Sync>,
@@ -105,7 +109,8 @@ struct PreparationJob {
 
 struct PreparedCache {
     runtime: RenderGpuOutputBoundaryRuntime,
-    plan: ViewerGpuProgramBackendPreparation,
+    scopes: GpuProgramScopesRuntime,
+    plan: ViewerGpuBackendPreparation,
     result: PreparationResult,
 }
 
@@ -126,7 +131,7 @@ impl PreparationWorker {
     fn spawn_with_prepare(
         mut prepare: impl FnMut(
                 &mut RenderGpuOutputBoundaryRuntime,
-                &ViewerGpuProgramBackendPreparation,
+                &ViewerGpuBackendPreparation,
                 &wgpu::Device,
                 &wgpu::Queue,
             ) -> Result<(), ViewerGpuBackendPreparationError>
@@ -142,7 +147,11 @@ impl PreparationWorker {
                 while let Ok(mut job) = requests.recv() {
                     let started = std::time::Instant::now();
                     let result = catch_unwind(AssertUnwindSafe(|| {
-                        prepare(&mut job.runtime, &job.plan, &job.device, &job.queue)
+                        prepare(&mut job.runtime, &job.plan, &job.device, &job.queue)?;
+                        if let Some(mode) = job.plan.waveform_mode {
+                            job.scopes.prepare_backend(&job.device, mode);
+                        }
+                        Ok(())
                     }))
                     .unwrap_or_else(|panic| {
                         let message = panic.downcast_ref::<String>().cloned().or_else(|| {
@@ -156,9 +165,14 @@ impl PreparationWorker {
                     tracing::debug!(
                         preparation_us = started.elapsed().as_micros(),
                         success = result.is_ok(),
-                        "Viewer Program backend preparation completed on cache owner worker"
+                        "Viewer backend preparation completed on cache owner worker"
                     );
-                    let prepared = PreparedCache { runtime: job.runtime, plan: job.plan, result };
+                    let prepared = PreparedCache {
+                        runtime: job.runtime,
+                        scopes: job.scopes,
+                        plan: job.plan,
+                        result,
+                    };
                     if responses.try_send(prepared).is_err() {
                         // The receiver was retired incorrectly or capacity was
                         // violated. Never block a worker on response delivery.
@@ -177,22 +191,26 @@ impl PreparationWorker {
 }
 
 /// One cache, either local or loaned to one bounded worker job.
-pub(crate) struct ViewerColorBackendOwner {
+pub(crate) struct ViewerBackendOwner {
     runtime: Option<RenderGpuOutputBoundaryRuntime>,
     snapshot: RenderGpuOutputBoundaryRuntimeDiagnostics,
-    prepared: Option<(ViewerGpuProgramBackendPreparation, PreparationResult)>,
+    scopes: Option<GpuProgramScopesRuntime>,
+    scopes_snapshot: GpuProgramScopesRuntimeDiagnostics,
+    prepared: Option<(ViewerGpuBackendPreparation, PreparationResult)>,
     worker: Option<PreparationWorker>,
     pending: bool,
     retiring: bool,
     terminal: Option<ViewerBackendPreparationWorkerExit>,
 }
 
-impl ViewerColorBackendOwner {
+impl ViewerBackendOwner {
     pub(crate) fn new(runtime: RenderGpuOutputBoundaryRuntime) -> Self {
         let snapshot = runtime.diagnostics();
         Self {
             runtime: Some(runtime),
             snapshot,
+            scopes: Some(GpuProgramScopesRuntime::default()),
+            scopes_snapshot: GpuProgramScopesRuntimeDiagnostics::default(),
             prepared: None,
             worker: None,
             pending: false,
@@ -209,6 +227,21 @@ impl ViewerColorBackendOwner {
         self.runtime.as_mut()
     }
 
+    pub(crate) fn recording_caches_mut(
+        &mut self,
+    ) -> Option<(
+        &mut RenderGpuOutputBoundaryRuntime,
+        &mut GpuProgramScopesRuntime,
+    )> {
+        Some((self.runtime.as_mut()?, self.scopes.as_mut()?))
+    }
+
+    pub(crate) fn scopes_diagnostics(&self) -> GpuProgramScopesRuntimeDiagnostics {
+        self.scopes
+            .as_ref()
+            .map_or(self.scopes_snapshot, GpuProgramScopesRuntime::diagnostics)
+    }
+
     pub(crate) fn diagnostics(&self) -> RenderGpuOutputBoundaryRuntimeDiagnostics {
         self.runtime.as_ref().map_or(self.snapshot, |runtime| runtime.diagnostics())
     }
@@ -216,6 +249,9 @@ impl ViewerColorBackendOwner {
     pub(crate) fn clear_frame_resources(&mut self) {
         if let Some(runtime) = &mut self.runtime {
             runtime.clear_frame_resources();
+        }
+        if let Some(scopes) = &mut self.scopes {
+            scopes.clear_frame_resources();
         }
         // A loan is admitted only after clearing its frame table. Preparation
         // cannot allocate frames, so no deferred old frame can return here.
@@ -225,7 +261,7 @@ impl ViewerColorBackendOwner {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        plan: ViewerGpuProgramBackendPreparation,
+        plan: ViewerGpuBackendPreparation,
     ) -> PreparationResult {
         if self.retiring {
             return Err(Arc::new(ViewerGpuBackendPreparationError::AdmissionClosed));
@@ -239,6 +275,14 @@ impl ViewerColorBackendOwner {
                 error,
             )))
         });
+        if result.is_ok()
+            && let Some(mode) = plan.waveform_mode
+        {
+            self.scopes
+                .as_mut()
+                .expect("local caches are paired")
+                .prepare_backend(device, mode);
+        }
         self.prepared = Some((plan, result.clone()));
         result
     }
@@ -247,7 +291,7 @@ impl ViewerColorBackendOwner {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        plan: ViewerGpuProgramBackendPreparation,
+        plan: ViewerGpuBackendPreparation,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<ViewerGpuBackendPreparationStatus, Arc<ViewerGpuBackendPreparationError>> {
         if self.retiring {
@@ -272,8 +316,12 @@ impl ViewerColorBackendOwner {
             .ok_or_else(|| Arc::new(ViewerGpuBackendPreparationError::WorkerDisconnected))?;
         runtime.clear_frame_resources();
         self.snapshot = runtime.diagnostics();
+        let scopes = self.scopes.as_mut().expect("local caches are paired");
+        scopes.clear_frame_resources();
+        self.scopes_snapshot = scopes.diagnostics();
         let job = PreparationJob {
             runtime: self.runtime.take().expect("local cache checked"),
+            scopes: self.scopes.take().expect("local caches are paired"),
             plan,
             device: device.clone(),
             queue: queue.clone(),
@@ -302,12 +350,13 @@ impl ViewerColorBackendOwner {
                 let failure = Arc::new(failure);
                 self.prepared = Some((job.plan, Err(Arc::clone(&failure))));
                 self.runtime = Some(job.runtime);
+                self.scopes = Some(job.scopes);
                 Err(failure)
             }
         }
     }
 
-    pub(crate) fn is_prepared(&self, plan: &ViewerGpuProgramBackendPreparation) -> bool {
+    pub(crate) fn is_prepared(&self, plan: &ViewerGpuBackendPreparation) -> bool {
         !self.pending
             && self.runtime.is_some()
             && self
@@ -325,6 +374,8 @@ impl ViewerColorBackendOwner {
             Ok(prepared) => {
                 self.snapshot = prepared.runtime.diagnostics();
                 self.runtime = Some(prepared.runtime);
+                self.scopes_snapshot = prepared.scopes.diagnostics();
+                self.scopes = Some(prepared.scopes);
                 self.prepared = Some((prepared.plan, prepared.result));
                 self.pending = false;
                 Ok(())
@@ -359,7 +410,10 @@ impl ViewerColorBackendOwner {
                 let joined = worker.thread.take().expect("finished worker").join();
                 // Drain only after actual termination; a disconnected/lost
                 // cache is terminal but never a healthy retirement receipt.
-                let cache_lost = self.collect().is_err() || cache_lost || self.runtime.is_none();
+                let cache_lost = self.collect().is_err()
+                    || cache_lost
+                    || self.runtime.is_none()
+                    || self.scopes.is_none();
                 if joined.is_ok() && !cache_lost {
                     ViewerBackendPreparationWorkerExit::Returned
                 } else {
@@ -372,7 +426,7 @@ impl ViewerColorBackendOwner {
     }
 }
 
-impl Drop for ViewerColorBackendOwner {
+impl Drop for ViewerBackendOwner {
     fn drop(&mut self) {
         // Normal consuming retirement joins a finished worker first. A last
         // resort Drop closes admission; an already accepted job retains its
@@ -388,8 +442,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
-    fn plan(space: ColorSpace) -> ViewerGpuProgramBackendPreparation {
-        ViewerGpuProgramBackendPreparation {
+    fn plan(space: ColorSpace) -> ViewerGpuBackendPreparation {
+        ViewerGpuBackendPreparation {
             working_color_space: WorkingColorSpace::LinearRec709,
             program_output_boundary: RenderOutputColorBoundary::display(
                 space,
@@ -404,10 +458,11 @@ mod tests {
             .unwrap(),
             output_precision: ViewerGpuOutputPrecision::Encoded8,
             signal_monitoring_active: false,
+            waveform_mode: None,
         }
     }
 
-    fn finish(owner: &mut ViewerColorBackendOwner) -> ViewerBackendPreparationWorkerExit {
+    fn finish(owner: &mut ViewerBackendOwner) -> ViewerBackendPreparationWorkerExit {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if let Some(exit) = owner.poll_retirement() {
@@ -422,13 +477,68 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires native GPU pipelines for scopes preparation qualification"]
+    async fn backend_preparation_returns_scope_modes_without_frame_allocation() {
+        mondrian_core::ensure_mondrian_default_ocio_loaded().unwrap();
+        let context = crate::GpuContext::new().await.expect("real backend adapter");
+        eprintln!("adapter={:?}", context.adapter.get_info());
+        let mut owner = ViewerBackendOwner::new(RenderGpuOutputBoundaryRuntime::new().unwrap());
+        let before = owner.diagnostics();
+        // Hidden panels do not compile scopes; switching each visible mode uses
+        // the same worker/cache while buffers and frame publication stay absent.
+        let mut luma_pipeline = None;
+        for mode in [
+            None,
+            Some(WaveformMode::Luma),
+            Some(WaveformMode::RgbParade),
+            Some(WaveformMode::Luma),
+        ] {
+            let mut requested = plan(ColorSpace::Rec709);
+            requested.waveform_mode = mode;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while owner
+                .request(&context.device, &context.queue, requested.clone(), || {})
+                .unwrap()
+                != ViewerGpuBackendPreparationStatus::Ready
+            {
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(1));
+            }
+            let scopes = owner.scopes_diagnostics();
+            assert_eq!(scopes.pipeline_creations, u64::from(mode.is_some()));
+            assert_eq!(scopes.frames_recorded, 0);
+            assert_eq!(scopes.buffer_allocations, 0);
+            assert_eq!(scopes.texture_allocations, 0);
+            assert_eq!(owner.diagnostics().next_frame_id, before.next_frame_id);
+            assert_eq!(owner.diagnostics().backend_objects.misses, 1);
+            if mode == Some(WaveformMode::Luma) {
+                let pipeline = owner
+                    .scopes
+                    .as_mut()
+                    .unwrap()
+                    .prepared_pipeline(&context.device, WaveformMode::Luma);
+                if let Some(previous) = &luma_pipeline {
+                    assert_eq!(
+                        previous, &pipeline,
+                        "returning to luma must reuse the actual device pipeline"
+                    );
+                }
+                luma_pipeline = Some(pipeline);
+            }
+        }
+        assert_eq!(
+            finish(&mut owner),
+            ViewerBackendPreparationWorkerExit::Returned
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "requires a native GPU backend for cache ownership qualification"]
     async fn backend_loan_is_single_and_superseded_contract_cannot_become_ready() {
         mondrian_core::ensure_mondrian_default_ocio_loaded().unwrap();
         let context = crate::GpuContext::new().await.expect("real backend adapter");
         eprintln!("adapter={:?}", context.adapter.get_info());
-        let mut owner =
-            ViewerColorBackendOwner::new(RenderGpuOutputBoundaryRuntime::new().unwrap());
+        let mut owner = ViewerBackendOwner::new(RenderGpuOutputBoundaryRuntime::new().unwrap());
         let before = owner.diagnostics();
         let (release, gate) = mpsc::channel();
         let mut first = true;
@@ -525,8 +635,7 @@ mod tests {
         mondrian_core::ensure_mondrian_default_ocio_loaded().unwrap();
         let context = crate::GpuContext::new().await.expect("real backend adapter");
         eprintln!("adapter={:?}", context.adapter.get_info());
-        let mut owner =
-            ViewerColorBackendOwner::new(RenderGpuOutputBoundaryRuntime::new().unwrap());
+        let mut owner = ViewerBackendOwner::new(RenderGpuOutputBoundaryRuntime::new().unwrap());
         let (release, gate) = mpsc::channel();
         owner.worker = Some(
             PreparationWorker::spawn_with_prepare(move |runtime, plan, device, queue| {
@@ -582,8 +691,7 @@ mod tests {
     async fn failed_preparation_is_retained_and_never_reclassified_ready() {
         let context = crate::GpuContext::new().await.expect("real backend adapter");
         eprintln!("adapter={:?}", context.adapter.get_info());
-        let mut owner =
-            ViewerColorBackendOwner::new(RenderGpuOutputBoundaryRuntime::new().unwrap());
+        let mut owner = ViewerBackendOwner::new(RenderGpuOutputBoundaryRuntime::new().unwrap());
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&calls);
         owner.worker = Some(

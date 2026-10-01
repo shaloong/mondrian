@@ -1727,12 +1727,12 @@ retires the complete runtime and constructs a fresh one. This removes repeated
 pipeline compilation at same-device transitions; first-use compilation of a
 new pipeline contract remains a separate responsiveness concern.
 
-Interactive Program Output preparation loans the existing color runtime to
-one bounded Renderer worker. `ViewerGpuProgramBackendPreparation` freezes the
+Interactive Program Output/scopes preparation loans the existing device caches to
+one bounded Renderer worker. `ViewerGpuBackendPreparation` freezes the
 canonical Program color context and the existing local monitor policy; the
 worker invokes the same production backend planner used by synchronous startup
 and headless preparation. It has no frame, Timeline, demand or publication
-authority. No second color cache or interpretation is created. The Window
+authority. No second color cache, scopes executor or interpretation is created. The Window
 admits the loan only after its exact GPU submissions have completed and before
 consuming a frame candidate or presentation ticket. The Renderer also rejects
 a loan while a recorded frame is still unsubmitted.
@@ -1743,8 +1743,7 @@ frame identity. A changed Program/monitor contract remains pending until its
 own preparation has returned; completion of a superseded contract cannot mark
 the new contract ready. The candidate's exact contract must match the canonical
 prepared contract before recording. Existing frame deadlines, quality and
-fallback rules remain unchanged. First-use input conversion, monitor adaptation
-and scopes preparation are not covered by this Program Output preparation.
+fallback rules remain unchanged. First-use input conversion and monitor adaptation are not covered by this preparation.
 The worker publishes one payload-free native Window wake hint after returning
 the cache. This requests a recording turn even if no Preview delivery changed;
 it cannot mark a frame Ready. Window replacement transfers the same event route.
@@ -1992,3 +1991,7 @@ renderer cleanup and consuming device retirement retain their real fence waits.
 An idle poll failure terminalizes the same device generation and rejects new
 permits. Queue-dispatch and fence-poll host timings are diagnostics, never GPU
 execution timestamps or semantic presentation authority.
+
+### Interactive scopes backend preparation
+
+Visible scopes extend the existing bounded Viewer preparation job with the exact waveform mode. The same owner loans its Program cache and scope runtime together; hidden scopes compile nothing. The worker creates only device pipelines. Frame count buffers, textures, input surfaces, candidate identities, commands and publication remain on the production recording path. Luma and RGB Parade pipelines remain tied to this device and survive ordinary frame invalidation. A mode change requires its own preparation result; a previous mode result cannot authorize it. Consuming retirement joins the same worker and retains both caches. Native input and monitor/calibration preparation are not covered by this seam yet.

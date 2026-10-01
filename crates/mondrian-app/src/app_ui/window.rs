@@ -6875,7 +6875,7 @@ fn report_successful_viewer_gpu_fallbacks(
 fn viewer_program_backend_preparation(
     host: &AppUiHost,
     session: &AppUiWindowSession,
-) -> Result<mondrian_renderer::ViewerGpuProgramBackendPreparation, String> {
+) -> Result<mondrian_renderer::ViewerGpuBackendPreparation, String> {
     // Resolve only the canonical Program and existing machine-local monitor
     // policy. This is a device-object plan, never a second color interpretation.
     let context = host.active_program_color_context().map_err(|error| error.to_string())?;
@@ -6891,7 +6891,7 @@ fn viewer_program_backend_preparation(
         session.color_engine.clone(),
     )
     .map_err(|error| error.to_string())?;
-    Ok(mondrian_renderer::ViewerGpuProgramBackendPreparation {
+    Ok(mondrian_renderer::ViewerGpuBackendPreparation {
         working_color_space: context.working_color_space(),
         program_output_boundary: boundary,
         monitor_adaptation: adaptation,
@@ -6900,6 +6900,9 @@ fn viewer_program_backend_preparation(
             session.display_calibration.is_some(),
         ),
         signal_monitoring_active: host.video_scopes_settings().monitoring.is_active(),
+        waveform_mode: (session.role == AppUiWindowRole::Workspace
+            && host.is_panel_active(PanelKind::Scopes))
+        .then_some(host.video_scopes_settings().waveform_mode),
     })
 }
 
@@ -7046,7 +7049,7 @@ fn prepare_viewer_gpu_preview(
             finish_prepare!();
         }
     };
-    if !session.viewer_gpu_execution.program_output_backend_is_prepared(&backend_plan) {
+    if !session.viewer_gpu_execution.backend_is_prepared(&backend_plan) {
         // Never loan the frame table while an exact GPU submission still owns
         // it. No candidate/ticket is consumed until the cache is back locally.
         if submission_in_flight {
@@ -7059,7 +7062,7 @@ fn prepare_viewer_gpu_preview(
             });
             finish_prepare!();
         };
-        match session.viewer_gpu_execution.prepare_program_output_backend_async(
+        match session.viewer_gpu_execution.prepare_backend_async(
             device,
             queue,
             backend_plan.clone(),
@@ -7264,7 +7267,7 @@ fn prepare_viewer_gpu_preview(
     {
         finish_prepare!();
     }
-    let exact_backend_plan = mondrian_renderer::ViewerGpuProgramBackendPreparation {
+    let exact_backend_plan = mondrian_renderer::ViewerGpuBackendPreparation {
         working_color_space: frame.working_color_space,
         program_output_boundary: frame.program_output_boundary.clone(),
         monitor_adaptation: frame.monitor_adaptation.clone(),
@@ -7273,6 +7276,7 @@ fn prepare_viewer_gpu_preview(
             session.display_calibration.is_some(),
         ),
         signal_monitoring_active: scopes_settings.monitoring.is_active(),
+        waveform_mode: program_scopes_requested.then_some(scopes_settings.waveform_mode),
     };
     if exact_backend_plan != backend_plan {
         // A stale/foreign candidate cannot authorize an unprepared contract or

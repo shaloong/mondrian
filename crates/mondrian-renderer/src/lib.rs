@@ -412,8 +412,8 @@ pub use timeline_temporal::{
     TimelineTemporalSourceDemand,
 };
 pub use viewer_backend_preparation::{
-    ViewerBackendPreparationWorkerExit, ViewerGpuBackendPreparationError,
-    ViewerGpuBackendPreparationStatus, ViewerGpuProgramBackendPreparation,
+    ViewerBackendPreparationWorkerExit, ViewerGpuBackendPreparation,
+    ViewerGpuBackendPreparationError, ViewerGpuBackendPreparationStatus,
 };
 pub use viewer_execution::{
     native_source_texture_format_from_decoded, native_video_sampling_from_decoded,
