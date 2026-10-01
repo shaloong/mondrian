@@ -364,11 +364,11 @@ impl GpuTimestampStageTimer {
         receiver
     }
 
-    fn read_mapped_counters<const N: usize>(
+    fn read_mapped_query_bytes<R>(
         &self,
         query_count: u32,
-        indices: [u32; N],
-    ) -> Result<[u64; N], GpuTimestampReadError> {
+        read: impl FnOnce(&[u8]) -> R,
+    ) -> Result<R, GpuTimestampReadError> {
         let slice = self.readback_buffer.slice(..);
         let mapped = match slice.get_mapped_range() {
             Ok(mapped) => mapped,
@@ -377,21 +377,15 @@ impl GpuTimestampStageTimer {
                 return Err(GpuTimestampReadError::MappedRange(error.to_string()));
             }
         };
-        if mapped.len() < query_count as usize * wgpu::QUERY_SIZE as usize {
+        let byte_count = query_count as usize * wgpu::QUERY_SIZE as usize;
+        if mapped.len() < byte_count {
             drop(mapped);
             self.readback_buffer.unmap();
             return Err(GpuTimestampReadError::ShortReadback);
         }
-        let mut values = [0_u64; N];
-        for (index, value) in values.iter_mut().enumerate() {
-            let offset = indices[index] as usize * wgpu::QUERY_SIZE as usize;
-            let mut bytes = [0_u8; 8];
-            bytes.copy_from_slice(&mapped[offset..offset + 8]);
-            *value = u64::from_ne_bytes(bytes);
-        }
+        let values = read(&mapped[..byte_count]);
         drop(mapped);
         self.readback_buffer.unmap();
-
         Ok(values)
     }
 
@@ -399,7 +393,16 @@ impl GpuTimestampStageTimer {
         &self,
         layout: GpuPassTimestampLayout,
     ) -> Result<(u64, GpuTimestampStageDurations), GpuTimestampReadError> {
-        let values = self.read_mapped_counters(layout.query_count, layout.boundaries)?;
+        // Keep realtime stage collection allocation-free; only the synchronous
+        // diagnostic interval retains the bounded raw pass counter vector.
+        let values = self.read_mapped_query_bytes(layout.query_count, |bytes| {
+            layout.boundaries.map(|index| {
+                let offset = index as usize * wgpu::QUERY_SIZE as usize;
+                u64::from_ne_bytes(
+                    bytes[offset..offset + 8].try_into().expect("eight-byte query counter"),
+                )
+            })
+        })?;
         let segment = |start: usize, end: usize| {
             timestamp_elapsed_us(values[start], values[end], self.timestamp_period_ns)
         };
@@ -426,6 +429,36 @@ fn timestamp_elapsed_us(
         .ok_or(GpuTimestampReadError::CounterRegression { start, end })?;
     let elapsed_us = ((ticks as f64 * timestamp_period_ns) / 1_000.0).ceil();
     Ok(elapsed_us.min(u64::MAX as f64) as u64)
+}
+
+/// Complete hardware interval and each actual pass's raw counter boundaries.
+///
+/// Adjacent pass pairs expose intervening copies and scheduling gaps. A pass
+/// span may itself include preemption; none of these values imply isolated GPU
+/// active compute time or replace the complete elapsed-time performance gate.
+#[derive(Debug)]
+pub struct GpuTimestampPassIntervalSample {
+    pub elapsed_us: u64,
+    pub timestamp_period_ns: f64,
+    pub pass_counters: Vec<[u64; 2]>,
+}
+
+impl GpuTimestampPassIntervalSample {
+    fn from_counters(
+        counters: Vec<u64>,
+        timestamp_period_ns: f64,
+    ) -> Result<Self, GpuTimestampReadError> {
+        for pair in counters.windows(2) {
+            timestamp_elapsed_us(pair[0], pair[1], timestamp_period_ns)?;
+        }
+        let elapsed_us = timestamp_elapsed_us(
+            counters[0],
+            counters[counters.len() - 1],
+            timestamp_period_ns,
+        )?;
+        let pass_counters = counters.chunks_exact(2).map(|pair| [pair[0], pair[1]]).collect();
+        Ok(Self { elapsed_us, timestamp_period_ns, pass_counters })
+    }
 }
 
 /// Synchronous hardware timer for a complete bounded command interval.
@@ -481,19 +514,19 @@ impl GpuTimestampPassIntervalTimer {
     }
 
     /// Consume this timer's receipt only after the exact submission completed.
-    pub fn read_elapsed_us_after_submission(
+    pub fn read_sample_after_submission(
         &mut self,
         device: &wgpu::Device,
         submission: wgpu::SubmissionIndex,
         receipt: GpuPassTimestampIntervalReceipt,
-    ) -> Result<u64, GpuTimestampReadError> {
+    ) -> Result<GpuTimestampPassIntervalSample, GpuTimestampReadError> {
         if receipt.query_set != self.timer.query_set {
             return Err(GpuTimestampReadError::ForeignInterval);
         }
         device
             .poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None })
             .map_err(|error| GpuTimestampReadError::DevicePoll(error.to_string()))?;
-        // Only the endpoints are interpreted; no stage sample is published.
+        // Resolve the bounded actual pass counters without Viewer stage attribution.
         let mut boundaries = [0; 8];
         boundaries[7] = receipt.query_count - 1;
         let layout = GpuPassTimestampLayout { query_count: receipt.query_count, boundaries };
@@ -513,12 +546,19 @@ impl GpuTimestampPassIntervalTimer {
             .recv()
             .map_err(|_| GpuTimestampReadError::MapCallbackDropped)?
             .map_err(|error| GpuTimestampReadError::BufferMap(error.to_string()))?;
-        let [start, end] = self
-            .timer
-            .read_mapped_counters(receipt.query_count, [0, receipt.query_count - 1])?;
-        let elapsed_us = timestamp_elapsed_us(start, end, self.timer.timestamp_period_ns)?;
+        let sample = GpuTimestampPassIntervalSample::from_counters(
+            self.timer.read_mapped_query_bytes(receipt.query_count, |bytes| {
+                bytes
+                    .chunks_exact(wgpu::QUERY_SIZE as usize)
+                    .map(|counter| {
+                        u64::from_ne_bytes(counter.try_into().expect("eight-byte query counter"))
+                    })
+                    .collect()
+            })?,
+            self.timer.timestamp_period_ns,
+        )?;
         self.recording_in_flight = false;
-        Ok(elapsed_us)
+        Ok(sample)
     }
 }
 
@@ -970,6 +1010,20 @@ mod tests {
     };
 
     #[test]
+    fn interval_sample_preserves_pass_pairs_and_intervening_time() {
+        let sample =
+            super::GpuTimestampPassIntervalSample::from_counters(vec![100, 200, 800, 900], 10.0)
+                .unwrap();
+        assert_eq!(sample.elapsed_us, 8);
+        assert_eq!(sample.pass_counters, vec![[100, 200], [800, 900]]);
+        assert_eq!(sample.timestamp_period_ns, 10.0);
+        assert!(matches!(
+            super::GpuTimestampPassIntervalSample::from_counters(vec![100, 200, 150, 900], 10.0),
+            Err(super::GpuTimestampReadError::CounterRegression { start: 200, end: 150 })
+        ));
+    }
+
+    #[test]
     fn timestamp_features_are_enabled_only_as_a_complete_pair() {
         assert!(gpu_timestamp_query_device_features(wgpu::Features::empty()).is_empty());
         assert!(gpu_timestamp_query_device_features(wgpu::Features::TIMESTAMP_QUERY).is_empty());
@@ -1300,9 +1354,10 @@ mod tests {
             // The oracle copy is explicitly outside the measured interval.
             encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, 65536 * 4);
             let submission = queue.submit([encoder.finish()]);
-            let elapsed_us =
-                interval_timer.read_elapsed_us_after_submission(&device, submission, receipt)?;
-            anyhow::ensure!(elapsed_us > 0);
+            let interval =
+                interval_timer.read_sample_after_submission(&device, submission, receipt)?;
+            anyhow::ensure!(interval.elapsed_us > 0 && interval.pass_counters.len() == 2);
+            let elapsed_us = interval.elapsed_us;
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             readback.slice(..).map_async(wgpu::MapMode::Read, move |result| {
                 let _ = tx.send(result);
@@ -1332,7 +1387,7 @@ mod tests {
             .map_err(|error| anyhow::anyhow!("interval coverage: {error:?}"))?;
         let submission = queue.submit([encoder.finish()]);
         assert!(matches!(
-            foreign_timer.read_elapsed_us_after_submission(&device, submission.clone(), receipt),
+            foreign_timer.read_sample_after_submission(&device, submission.clone(), receipt),
             Err(super::GpuTimestampReadError::ForeignInterval)
         ));
         assert!(interval_timer.recording_in_flight);

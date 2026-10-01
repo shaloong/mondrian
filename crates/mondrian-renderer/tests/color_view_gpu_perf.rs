@@ -1365,13 +1365,23 @@ fn record_view_sample(
     assert_eq!(record.stage_diagnostics.upload_stages, 0);
     assert_eq!(record.stage_diagnostics.readback_stages, 0);
     let output_id = record.materialized.output.id();
+    let wait_started = Instant::now();
     let submission = context.queue.submit(std::iter::once(encoder.finish()));
     let gpu_us = timer
         .zip(receipt)
         .map(|(timer, receipt)| {
             timer
-                .read_elapsed_us_after_submission(&context.device, submission, receipt)
+                .read_sample_after_submission(&context.device, submission, receipt)
                 .context("read color-view hardware timestamp")
+                .map(|timing| {
+                    eprintln!("MONDRIAN_VIEW_PASS_TIMING_JSON={}", serde_json::json!({
+                        "mode": case.mode, "elapsed_us": timing.elapsed_us,
+                        "timestamp_period_ns": timing.timestamp_period_ns,
+                        "pass_counters": timing.pass_counters,
+                        "submit_wait_and_query_readback_us": saturating_u64(wait_started.elapsed().as_micros()),
+                    }));
+                    timing.elapsed_us
+                })
         })
         .transpose()?;
     if let Some(gpu_us) = gpu_us {

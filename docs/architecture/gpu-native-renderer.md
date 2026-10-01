@@ -1703,6 +1703,10 @@ the measured command interval to its query allocation. This synchronous gate
 timer admits one interval until the exact submitted work, query resolution and
 counter read have completed; abandoning a receipt cannot reopen query admission.
 Its receipt proves elapsed time without inventing Viewer stage attribution.
+The consuming sample retains raw counter pairs and the counter period for every
+actual pass. These expose inter-pass copies and scheduling gaps; even an
+individual pass span may include GPU preemption. Per-pass observations never
+replace the complete interval used by the performance gate.
 The scopes clear remains inside the measured span, including the leading anchor
 cost, while counter readback remains outside. The existing workload, precision,
 sample counts, cache gates and GPU/CPU time budgets are unchanged.

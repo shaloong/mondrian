@@ -122,10 +122,22 @@ async fn program_scopes_4k_warm_path_stays_pooled_and_within_budget() -> Result<
             .map_err(|error| anyhow::anyhow!("incomplete scope timestamp coverage: {error:?}"))?;
         let record = record.context("record 4K Program Output scopes")?;
         let cpu_record_us = saturating_u64(record_started.elapsed().as_micros());
+        let wait_started = Instant::now();
         let submission = queue.submit(std::iter::once(encoder.finish()));
-        let gpu_us = timer
-            .read_elapsed_us_after_submission(&device, submission, receipt)
+        let timing = timer
+            .read_sample_after_submission(&device, submission, receipt)
             .context("read 4K scopes hardware timestamp")?;
+        let gpu_us = timing.elapsed_us;
+        eprintln!(
+            "MONDRIAN_SCOPES_PASS_TIMING_JSON={}",
+            serde_json::json!({
+                "sample_index": sample_index, "warmup": sample_index < WARMUP_COUNT,
+                "elapsed_us": gpu_us, "timestamp_period_ns": timing.timestamp_period_ns,
+                "pass_counters": timing.pass_counters,
+                "pass_order": ["leading_copy_anchor", "aggregate", "histogram_reduce", "display"],
+                "submit_wait_and_query_readback_us": saturating_u64(wait_started.elapsed().as_micros()),
+            })
+        );
         assert!(
             gpu_us > 0,
             "real 4K scope commands yielded no elapsed GPU time"
