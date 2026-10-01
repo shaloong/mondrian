@@ -884,6 +884,7 @@ fn test_clean_gpu_shutdown_json(surface_generation: u64, device_generation: u64)
                 "retirement_handoff_accepted": true,
                 "retirement_completed": true,
                 "renderer_retirement": {
+                    "backend_preparation": "not_started",
                     "cpu_yuv_upload": "returned",
                     "native_device_removed": false
                 },

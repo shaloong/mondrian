@@ -128,7 +128,7 @@ impl ViewerGpuOutputPrecision {
         }
     }
 
-    const fn texture_format(self) -> GpuColorFrameTextureFormat {
+    pub(crate) const fn texture_format(self) -> GpuColorFrameTextureFormat {
         match self {
             Self::Encoded8 => GpuColorFrameTextureFormat::Rgba8Unorm,
             Self::EncodedFloat16 => GpuColorFrameTextureFormat::Rgba16Float,
@@ -194,7 +194,7 @@ pub struct ViewerGpuExecutionRuntime {
     last_active_working_set: Option<ViewerGpuActiveWorkingSetEstimate>,
     native_video_import: NativeVideoImportRuntime,
     cpu_yuv_upload: crate::cpu_yuv::CpuYuvUploadRuntime,
-    color_output: RenderGpuOutputBoundaryRuntime,
+    color_output: crate::viewer_backend_preparation::ViewerColorBackendOwner,
     spatial: GpuViewerSpatialRuntime,
     display_calibration: GpuDisplayCalibrationRuntime,
     program_scopes: GpuProgramScopesRuntime,
@@ -296,7 +296,9 @@ impl ViewerGpuExecutionRuntime {
             last_active_working_set: None,
             native_video_import,
             cpu_yuv_upload,
-            color_output,
+            color_output: crate::viewer_backend_preparation::ViewerColorBackendOwner::new(
+                color_output,
+            ),
             spatial,
             display_calibration,
             program_scopes,
@@ -318,7 +320,7 @@ impl ViewerGpuExecutionRuntime {
             last_active_working_set: _,
             native_video_import,
             cpu_yuv_upload,
-            color_output,
+            mut color_output,
             spatial,
             display_calibration,
             program_scopes,
@@ -326,6 +328,7 @@ impl ViewerGpuExecutionRuntime {
             working_compositor,
             current_frame_submission: _,
         } = self;
+        color_output.begin_retirement();
         crate::ViewerGpuExecutionRetirement {
             native_video_import,
             cpu_yuv_upload: cpu_yuv_upload.into_retirement(),
@@ -414,30 +417,49 @@ impl ViewerGpuExecutionRuntime {
         output_precision: ViewerGpuOutputPrecision,
         signal_monitoring_active: bool,
     ) -> Result<(), ViewerGpuExecutionError> {
-        let output_texture_format =
-            if monitor_adaptation.requires_pass() || signal_monitoring_active {
-                GpuColorFrameTextureFormat::Rgba16Float
-            } else {
-                output_precision.texture_format()
-            };
         self.color_output
-            .prepare_wgpu_output_boundary_gpu_frame_backend(
-                program_output_boundary,
-                crate::ColorFrameDescriptor {
-                    width: 1,
-                    height: 1,
-                    color_space: working_color_space.into(),
-                    domain: crate::ColorFrameDomain::Working,
-                    encoding: crate::ColorFrameEncoding::LinearFloat,
-                    residency: crate::ColorFrameResidency::Gpu,
-                    alpha: crate::ColorFrameAlpha::StraightCoverage,
-                },
-                output_texture_format,
-                RenderColorTransformGpuOptions::default(),
+            .prepare_now(
                 device,
                 queue,
+                crate::ViewerGpuProgramBackendPreparation {
+                    working_color_space,
+                    program_output_boundary: program_output_boundary.clone(),
+                    monitor_adaptation: monitor_adaptation.clone(),
+                    output_precision,
+                    signal_monitoring_active,
+                },
             )
-            .map_err(|error| ViewerGpuExecutionError::ProgramOutputBoundary(Box::new(error)))
+            .map_err(ViewerGpuExecutionError::BackendPreparation)
+    }
+
+    /// Prepare the exact Program Output cache off the caller thread. The caller
+    /// admits this only between completed GPU submissions. Pending preparation
+    /// neither consumes a frame nor authorizes publication or deadline renewal.
+    pub fn prepare_program_output_backend_async(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        plan: crate::ViewerGpuProgramBackendPreparation,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Result<crate::ViewerGpuBackendPreparationStatus, ViewerGpuExecutionError> {
+        if self
+            .current_frame_submission
+            .as_ref()
+            .is_some_and(|submission| !submission.load(Ordering::Acquire))
+        {
+            return Err(ViewerGpuExecutionError::PreviousFrameNotSubmitted);
+        }
+        self.color_output
+            .request(device, queue, plan, wake)
+            .map_err(ViewerGpuExecutionError::BackendPreparation)
+    }
+
+    /// Whether this exact contract has returned successfully to the recording owner.
+    pub fn program_output_backend_is_prepared(
+        &self,
+        plan: &crate::ViewerGpuProgramBackendPreparation,
+    ) -> bool {
+        self.color_output.is_prepared(plan)
     }
 
     /// Prepare every compact input of one complete current candidate.
@@ -675,7 +697,9 @@ impl ViewerGpuExecutionRuntime {
 
     /// Aggregate output-stage diagnostics without exposing the resource table.
     pub fn color_output_diagnostics(&self) -> crate::RenderGpuOutputBoundaryRuntimeDiagnostics {
-        self.color_output.diagnostics()
+        let mut snapshot = self.color_output.diagnostics();
+        snapshot.resource_pool = self.resource_pool.diagnostics();
+        snapshot
     }
 
     /// Point-in-time evidence for persistent compositor uniform reuse.
@@ -759,6 +783,11 @@ impl ViewerGpuExecutionRuntime {
         {
             return Err(ViewerGpuExecutionError::PreviousFrameNotSubmitted);
         }
+        if self.color_output.runtime().is_none() {
+            return Err(ViewerGpuExecutionError::Backpressure(
+                "Program Output backend preparation is pending".to_owned(),
+            ));
+        }
         // Reject unavailable capacity before consuming the submitted working set.
         validate_output_precision(
             request.output_precision,
@@ -800,7 +829,10 @@ impl ViewerGpuExecutionRuntime {
             let guard = self.resource_pool.begin_ordered_turnover();
             self.cpu_yuv_upload.begin_frame();
             self.working_compositor.clear_frame_resources();
-            self.color_output.stage_frame_resources_for_ordered_turnover();
+            self.color_output
+                .runtime_mut()
+                .expect("cache admitted before recording")
+                .stage_frame_resources_for_ordered_turnover();
             self.spatial.stage_frame_resources_for_ordered_turnover();
             self.display_calibration.stage_frame_resources_for_ordered_turnover();
             self.signal_monitor.stage_frame_resources_for_ordered_turnover();
@@ -841,6 +873,11 @@ impl ViewerGpuExecutionRuntime {
         mut request: ViewerGpuExecutionRequest<'_>,
         mut stage_marker: Option<&mut dyn ViewerGpuExecutionStageMarker>,
     ) -> Result<ViewerGpuExecutionRecord, ViewerGpuExecutionError> {
+        let color_output = self.color_output.runtime_mut().ok_or_else(|| {
+            ViewerGpuExecutionError::Backpressure(
+                "Program Output backend preparation is pending".to_owned(),
+            )
+        })?;
         let input_prepare_started = Instant::now();
         let mut heterogeneous_inputs = std::mem::take(&mut request.heterogeneous_inputs)
             .into_iter()
@@ -849,7 +886,7 @@ impl ViewerGpuExecutionRuntime {
         let mut prepared = prepare_composite(
             &request,
             &mut heterogeneous_inputs,
-            &mut self.color_output,
+            color_output,
             &mut self.native_video_import,
             &self.cpu_yuv_upload,
             &self.working_compositor,
@@ -864,14 +901,13 @@ impl ViewerGpuExecutionRuntime {
             &mut prepared,
             &request,
             &self.working_compositor,
-            &mut self.color_output,
+            color_output,
             device,
             queue,
             encoder,
         )?;
         let gpu_layers = composite_layers(&prepared_layers, &prepared.gpu_input_handles);
-        let composite = self
-            .color_output
+        let composite = color_output
             .record_wgpu_composite_graph(
                 &self.working_compositor,
                 device,
@@ -901,7 +937,7 @@ impl ViewerGpuExecutionRuntime {
         )?;
         let spatial_started = Instant::now();
         let spatial_record = {
-            let (frame_table, frame_ids) = self.color_output.frame_table_and_ids_mut();
+            let (frame_table, frame_ids) = color_output.frame_table_and_ids_mut();
             let working = frame_table.get(&composite.output).map_err(|error| {
                 ViewerGpuExecutionError::WorkingOutputMissing(format!("{error:?}"))
             })?;
@@ -925,7 +961,7 @@ impl ViewerGpuExecutionRuntime {
                 .spatial
                 .take_output(&spatial_output)
                 .ok_or(ViewerGpuExecutionError::SpatialOutputMissing)?;
-            self.color_output
+            color_output
                 .frame_table_mut()
                 .insert(spatial_resource)
                 .map_err(|error| ViewerGpuExecutionError::SpatialTransfer(format!("{error:?}")))?;
@@ -943,8 +979,7 @@ impl ViewerGpuExecutionRuntime {
             } else {
                 request.output_precision.texture_format()
             };
-        let program_output_record = self
-            .color_output
+        let program_output_record = color_output
             .record_wgpu_output_boundary_gpu_frame_owned_backend(
                 request.program_output_boundary,
                 &spatial_output,
@@ -968,8 +1003,7 @@ impl ViewerGpuExecutionRuntime {
         let program_output = program_output_record.materialized.output;
         let monitor_adaptation_started = Instant::now();
         let output = if let Some(transform) = request.monitor_adaptation.gpu_transform() {
-            let monitor_record = self
-                .color_output
+            let monitor_record = color_output
                 .record_wgpu_intermediate_color_transform_owned_backend(
                     &transform,
                     &program_output,
@@ -1001,8 +1035,7 @@ impl ViewerGpuExecutionRuntime {
                 ProgramScopesTap::ProgramOutput => &program_output,
                 ProgramScopesTap::MonitorOutput => &output,
             };
-            let scope_input_view = self
-                .color_output
+            let scope_input_view = color_output
                 .frame_table()
                 .get(scope_input)
                 .map_err(|error| {
@@ -1039,11 +1072,11 @@ impl ViewerGpuExecutionRuntime {
                 ProgramScopesTap::ProgramOutput => &program_output,
                 ProgramScopesTap::MonitorOutput => &output,
             };
-            let signal_resource = self.color_output.frame_table().get(signal).map_err(|error| {
+            let signal_resource = color_output.frame_table().get(signal).map_err(|error| {
                 ViewerGpuExecutionError::ProgramOutputMissing(format!("{error:?}"))
             })?;
             let presentation_resource =
-                self.color_output.frame_table().get(&output).map_err(|error| {
+                color_output.frame_table().get(&output).map_err(|error| {
                     ViewerGpuExecutionError::DisplayOutputMissing(format!("{error:?}"))
                 })?;
             let monitored = self
@@ -1079,7 +1112,7 @@ impl ViewerGpuExecutionRuntime {
                 // namespace; the signal-monitor owner has independent frame IDs.
                 let (handle, resource) = monitored.into_parts();
                 output = GpuColorFrameHandle::new(
-                    self.color_output
+                    color_output
                         .frame_ids_mut()
                         .allocate()
                         .map_err(|e| ViewerGpuExecutionError::Calibration(format!("{e:?}")))?,
@@ -1089,7 +1122,7 @@ impl ViewerGpuExecutionRuntime {
                 )
                 .map_err(|e| ViewerGpuExecutionError::Calibration(format!("{e:?}")))?;
                 let monitored = crate::GpuColorFrameResource::new(output.clone(), resource);
-                self.color_output.frame_table_mut().insert(monitored).map_err(|e| {
+                color_output.frame_table_mut().insert(monitored).map_err(|e| {
                     ViewerGpuExecutionError::Calibration(format!("signal-monitor transfer: {e:?}"))
                 })?;
             }
@@ -1100,8 +1133,7 @@ impl ViewerGpuExecutionRuntime {
                 output_encoding: crate::ColorFrameEncoding::LinearFloat,
                 engine: engine.clone(),
             };
-            let linear = self
-                .color_output
+            let linear = color_output
                 .record_wgpu_intermediate_color_transform_owned_backend(
                     &decode,
                     &output,
@@ -1118,7 +1150,7 @@ impl ViewerGpuExecutionRuntime {
                 .map_err(|e| ViewerGpuExecutionError::Calibration(format!("{e:?}")))?;
             stage_diagnostics.accumulate(linear.stage_diagnostics);
             let matted = {
-                let (table, ids) = self.color_output.frame_table_and_ids_mut();
+                let (table, ids) = color_output.frame_table_and_ids_mut();
                 let input = table.get(&linear.materialized.output).map_err(|e| {
                     ViewerGpuExecutionError::Calibration(format!("display-linear input: {e:?}"))
                 })?;
@@ -1138,7 +1170,7 @@ impl ViewerGpuExecutionRuntime {
                     .map_err(ViewerGpuExecutionError::Calibration)?
             };
             let matted_handle = matted.handle().clone();
-            self.color_output.frame_table_mut().insert(matted).map_err(|e| {
+            color_output.frame_table_mut().insert(matted).map_err(|e| {
                 ViewerGpuExecutionError::Calibration(format!("display matte transfer: {e:?}"))
             })?;
             let encode = crate::RenderIntermediateColorTransform {
@@ -1147,8 +1179,7 @@ impl ViewerGpuExecutionRuntime {
                 output_encoding: crate::ColorFrameEncoding::EncodedFloat,
                 engine,
             };
-            let encoded = self
-                .color_output
+            let encoded = color_output
                 .record_wgpu_intermediate_color_transform_owned_backend(
                     &encode,
                     &matted_handle,
@@ -1165,7 +1196,7 @@ impl ViewerGpuExecutionRuntime {
                 .map_err(|e| ViewerGpuExecutionError::Calibration(format!("{e:?}")))?;
             stage_diagnostics.accumulate(encoded.stage_diagnostics);
             let output_resource =
-                self.color_output.frame_table().get(&encoded.materialized.output).map_err(|e| {
+                color_output.frame_table().get(&encoded.materialized.output).map_err(|e| {
                     ViewerGpuExecutionError::Calibration(format!("matted signal: {e:?}"))
                 })?;
             let calibrated = self
@@ -1237,6 +1268,8 @@ impl ViewerGpuExecutionRuntime {
         let resource = match owner {
             ViewerGpuExecutionOutputOwner::ColorOutput => self
                 .color_output
+                .runtime_mut()
+                .ok_or(ViewerGpuPresentationOutputTakeError::BackendPreparationPending)?
                 .take_frame_resource(&record.output)
                 .map_err(ViewerGpuPresentationOutputTakeError::ColorOutput)?,
             ViewerGpuExecutionOutputOwner::DisplayCalibration => {
@@ -1271,6 +1304,12 @@ impl ViewerGpuExecutionRuntime {
         match record.output_owner {
             Some(ViewerGpuExecutionOutputOwner::ColorOutput) => self
                 .color_output
+                .runtime()
+                .ok_or_else(|| {
+                    ViewerGpuExecutionError::Backpressure(
+                        "Program Output backend preparation is pending".to_owned(),
+                    )
+                })?
                 .frame_table()
                 .get(&record.output)
                 .map(|resource| resource.resource().texture_view.clone())
@@ -1310,6 +1349,12 @@ impl ViewerGpuExecutionRuntime {
         record: &ViewerGpuExecutionRecord,
     ) -> Result<wgpu::TextureView, ViewerGpuExecutionError> {
         self.color_output
+            .runtime()
+            .ok_or_else(|| {
+                ViewerGpuExecutionError::Backpressure(
+                    "Program Output backend preparation is pending".to_owned(),
+                )
+            })?
             .frame_table()
             .get(&record.program_output)
             .map(|resource| resource.resource().texture_view.clone())
@@ -1609,6 +1654,9 @@ enum ViewerGpuExecutionOutputOwner {
 /// Fail-closed ownership-transfer error for one recorded Viewer output.
 #[derive(Debug, thiserror::Error)]
 pub enum ViewerGpuPresentationOutputTakeError {
+    /// The sole color cache is loaned to a backend preparation job.
+    #[error("Viewer Program Output backend preparation is pending")]
+    BackendPreparationPending,
     /// This record's private output authority was already consumed.
     #[error("Viewer presentation output {id:?} was already taken")]
     AlreadyTaken {
@@ -1632,6 +1680,9 @@ pub enum ViewerGpuPresentationOutputTakeError {
 /// Stage-specific failures from the shared Viewer GPU execution Interface.
 #[derive(Debug, thiserror::Error)]
 pub enum ViewerGpuExecutionError {
+    /// The exact backend contract could not be prepared by its existing owner.
+    #[error("Viewer Program Output backend preparation failed: {0}")]
+    BackendPreparation(#[source] Arc<crate::ViewerGpuBackendPreparationError>),
     /// A caller attempted to overwrite resources whose command buffer has no
     /// exact queue-submission proof.
     #[error("the previous Viewer GPU frame was not submitted")]
@@ -3052,6 +3103,103 @@ mod tests {
         assert_eq!(recorded.backend_objects.hits, 1);
     }
 
+    #[tokio::test]
+    #[ignore = "requires a native GPU backend for asynchronous Viewer preparation"]
+    async fn async_program_preparation_preserves_frame_identity_and_consumes_worker_shutdown() {
+        ensure_mondrian_default_ocio_loaded().unwrap();
+        let context = GpuContext::new().await.expect("native GPU backend");
+        eprintln!("adapter={:?}", context.adapter.get_info());
+        let mut runtime =
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                .unwrap();
+        let plan = crate::ViewerGpuProgramBackendPreparation {
+            working_color_space: WorkingColorSpace::LinearRec709,
+            program_output_boundary: RenderOutputColorBoundary::display(
+                ColorSpace::Rec709,
+                false,
+                ColorEngine::mondrian_standard(),
+            ),
+            monitor_adaptation: RenderMonitorAdaptation::new(
+                ColorSpace::Rec709,
+                ColorSpace::Rec709,
+                ColorEngine::mondrian_standard(),
+            )
+            .unwrap(),
+            output_precision: ViewerGpuOutputPrecision::Encoded8,
+            signal_monitoring_active: false,
+        };
+        let before = runtime.color_output_diagnostics();
+        assert_eq!(
+            runtime
+                .prepare_program_output_backend_async(
+                    &context.device,
+                    &context.queue,
+                    plan.clone(),
+                    || {},
+                )
+                .unwrap(),
+            crate::ViewerGpuBackendPreparationStatus::Pending
+        );
+        assert!(matches!(
+            try_record_empty_viewer_frame(&context, &mut runtime, 0, None),
+            Err(ViewerGpuExecutionError::Backpressure(_))
+        ));
+        assert_eq!(
+            runtime.color_output_diagnostics().next_frame_id,
+            before.next_frame_id
+        );
+        assert_eq!(runtime.active_working_set_diagnostics().last_admitted, None);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runtime
+            .prepare_program_output_backend_async(
+                &context.device,
+                &context.queue,
+                plan.clone(),
+                || {},
+            )
+            .unwrap()
+            != crate::ViewerGpuBackendPreparationStatus::Ready
+        {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            runtime.color_output_diagnostics().next_frame_id,
+            before.next_frame_id
+        );
+        let prepared = runtime.color_output_diagnostics();
+        let _record = try_record_empty_viewer_frame(&context, &mut runtime, 0, None).unwrap();
+        let recorded = runtime.color_output_diagnostics();
+        assert_eq!(
+            recorded.backend_objects.misses,
+            prepared.backend_objects.misses
+        );
+        assert_eq!(
+            recorded.backend_objects.hits,
+            prepared.backend_objects.hits + 1
+        );
+        context
+            .device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(Duration::from_secs(5)),
+            })
+            .unwrap();
+        let mut retirement = runtime.into_retirement();
+        let receipt = loop {
+            if let Some(receipt) = retirement.poll().unwrap() {
+                break receipt;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(
+            receipt.backend_preparation,
+            crate::ViewerBackendPreparationWorkerExit::Returned
+        );
+        assert!(receipt.is_healthy());
+    }
+
     #[test]
     fn terminal_native_import_failure_preserves_backend_error_detail() {
         let message = native_import_failure_without_cpu_fallback(
@@ -3360,6 +3508,32 @@ mod tests {
                 request!(-2),
             )
             .expect("first unsubmitted frame records");
+        let before_loan = runtime.color_output_diagnostics();
+        assert!(matches!(
+            runtime.prepare_program_output_backend_async(
+                &context.device,
+                &context.queue,
+                crate::ViewerGpuProgramBackendPreparation {
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    program_output_boundary: output_boundary.clone(),
+                    monitor_adaptation: monitor_adaptation.clone(),
+                    output_precision: ViewerGpuOutputPrecision::Encoded8,
+                    signal_monitoring_active: false,
+                },
+                || {},
+            ),
+            Err(ViewerGpuExecutionError::PreviousFrameNotSubmitted)
+        ));
+        let after_loan = runtime.color_output_diagnostics();
+        assert_eq!(after_loan.next_frame_id, before_loan.next_frame_id);
+        assert_eq!(
+            after_loan.frame_table_entries,
+            before_loan.frame_table_entries
+        );
+        assert_eq!(
+            after_loan.resource_pool.releases,
+            before_loan.resource_pool.releases
+        );
         let mut premature_encoder =
             context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("viewer-resource-turnover-premature-successor"),
@@ -4762,6 +4936,8 @@ mod tests {
             .expect("Viewer composite-to-output frame");
         let output = runtime
             .color_output
+            .runtime()
+            .expect("local recording cache")
             .frame_table()
             .get(&record.output)
             .expect("Viewer output resource");

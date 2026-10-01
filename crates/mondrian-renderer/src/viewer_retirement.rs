@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::{
     GpuColorFrameWgpuResourcePool, GpuDisplayCalibrationRuntime, GpuFrameCompositor,
     GpuNativeDecodedFrameImportError, GpuProgramScopesRuntime, GpuSignalMonitorRuntime,
-    NativeVideoImportRuntime, RenderGpuOutputBoundaryRuntime,
+    NativeVideoImportRuntime, ViewerBackendPreparationWorkerExit,
 };
 
 /// Observed terminal result after joining the actual CPU YUV upload worker.
@@ -22,6 +22,8 @@ pub enum ViewerCpuYuvUploadWorkerExit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerGpuRetirementReceipt {
+    /// Actual backend preparation worker termination; not inferred from GPU idleness.
+    pub backend_preparation: ViewerBackendPreparationWorkerExit,
     /// Actual upload-worker terminal result, never inferred from queue idleness.
     pub cpu_yuv_upload: ViewerCpuYuvUploadWorkerExit,
     /// Native source release required typed physical device-removal evidence.
@@ -32,6 +34,10 @@ impl ViewerGpuRetirementReceipt {
     /// Whether the safely retired Renderer also exited without a physical fault.
     pub const fn is_healthy(self) -> bool {
         matches!(self.cpu_yuv_upload, ViewerCpuYuvUploadWorkerExit::Returned)
+            && !matches!(
+                self.backend_preparation,
+                ViewerBackendPreparationWorkerExit::Panicked
+            )
             && !self.native_device_removed
     }
 }
@@ -49,7 +55,7 @@ pub struct ViewerGpuExecutionRetirement {
     pub(crate) terminal: Option<ViewerGpuRetirementReceipt>,
     pub(crate) native_device_removed: bool,
     pub(crate) _resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
-    pub(crate) _color_output: RenderGpuOutputBoundaryRuntime,
+    pub(crate) _color_output: crate::viewer_backend_preparation::ViewerColorBackendOwner,
     pub(crate) _spatial: crate::viewer_spatial::GpuViewerSpatialRuntime,
     pub(crate) _display_calibration: GpuDisplayCalibrationRuntime,
     pub(crate) _program_scopes: GpuProgramScopesRuntime,
@@ -78,6 +84,7 @@ impl ViewerGpuExecutionRetirement {
             return Ok(Some(terminal));
         }
         let upload = self.cpu_yuv_upload.poll();
+        let backend_preparation = self._color_output.poll_retirement();
         match self.native_video_import.retire_completed_source_residency() {
             Ok(_) => {}
             Err(error) if error.is_native_device_removed() => {
@@ -92,7 +99,11 @@ impl ViewerGpuExecutionRetirement {
         let Some(cpu_yuv_upload) = upload else {
             return Ok(None);
         };
+        let Some(backend_preparation) = backend_preparation else {
+            return Ok(None);
+        };
         let terminal = ViewerGpuRetirementReceipt {
+            backend_preparation,
             cpu_yuv_upload,
             native_device_removed: self.native_device_removed,
         };

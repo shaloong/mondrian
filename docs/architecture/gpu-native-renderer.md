@@ -1726,6 +1726,38 @@ or frame texture is reused across that invalidation. Actual device replacement
 retires the complete runtime and constructs a fresh one. This removes repeated
 pipeline compilation at same-device transitions; first-use compilation of a
 new pipeline contract remains a separate responsiveness concern.
+
+Interactive Program Output preparation loans the existing color runtime to
+one bounded Renderer worker. `ViewerGpuProgramBackendPreparation` freezes the
+canonical Program color context and the existing local monitor policy; the
+worker invokes the same production backend planner used by synchronous startup
+and headless preparation. It has no frame, Timeline, demand or publication
+authority. No second color cache or interpretation is created. The Window
+admits the loan only after its exact GPU submissions have completed and before
+consuming a frame candidate or presentation ticket. The Renderer also rejects
+a loan while a recorded frame is still unsubmitted.
+
+The frame table is cleared before transferring that one cache. Preparation
+creates only device objects, so it cannot return an old frame or allocate a new
+frame identity. A changed Program/monitor contract remains pending until its
+own preparation has returned; completion of a superseded contract cannot mark
+the new contract ready. The candidate's exact contract must match the canonical
+prepared contract before recording. Existing frame deadlines, quality and
+fallback rules remain unchanged. First-use input conversion, monitor adaptation
+and scopes preparation are not covered by this Program Output preparation.
+The worker publishes one payload-free native Window wake hint after returning
+the cache. This requests a recording turn even if no Preview delivery changed;
+it cannot mark a frame Ready. Window replacement transfers the same event route.
+A late hint from a retired generation can request redraw, but only the current
+cache, canonical contract and original ticket can authorize presentation.
+
+Consuming Renderer retirement closes preparation admission, polls without
+blocking the UI, drains the returned cache and joins the actually terminated
+worker. `ViewerGpuRetirementReceipt.backend_preparation` records `NotStarted`,
+`Returned` or `Panicked` separately from GPU queue completion and CPU upload
+worker exit. A pending job cannot establish retirement completion; a lost cache
+or panicked worker cannot establish a healthy receipt. The existing native
+source and GPU completion barriers still govern resource release.
 The input-transform gate uses the same complete pass interval on pass-boundary
 GPUs. Exact frame-contract identity is separately audited through that command
 recorder: no pass, copy, clear, query write or completion map is accepted as

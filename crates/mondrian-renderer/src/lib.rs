@@ -55,6 +55,7 @@ pub mod timeline_composite;
 mod timeline_effect_routes;
 pub mod timeline_render_plan;
 pub mod timeline_temporal;
+mod viewer_backend_preparation;
 pub mod viewer_execution;
 mod viewer_retirement;
 pub mod viewer_runtime;
@@ -409,6 +410,10 @@ pub use timeline_temporal::{
     PreparedTimelineFrameExecution, TimelineFrameExecutionRequest, TimelineFramePreparationError,
     TimelineTemporalDemandBatch, TimelineTemporalPreparationError, TimelineTemporalSource,
     TimelineTemporalSourceDemand,
+};
+pub use viewer_backend_preparation::{
+    ViewerBackendPreparationWorkerExit, ViewerGpuBackendPreparationError,
+    ViewerGpuBackendPreparationStatus, ViewerGpuProgramBackendPreparation,
 };
 pub use viewer_execution::{
     native_source_texture_format_from_decoded, native_video_sampling_from_decoded,

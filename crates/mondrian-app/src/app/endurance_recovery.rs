@@ -484,6 +484,8 @@ impl EnduranceRecoveryOperationReceipt {
             retirement_handoff_accepted: true,
             retirement_completed: true,
             renderer_retirement: Some(mondrian_renderer::ViewerGpuRetirementReceipt {
+                backend_preparation:
+                    mondrian_renderer::ViewerBackendPreparationWorkerExit::NotStarted,
                 cpu_yuv_upload: mondrian_renderer::ViewerCpuYuvUploadWorkerExit::Returned,
                 native_device_removed: false,
             }),
@@ -1110,6 +1112,8 @@ mod tests {
             "missing",
             "null",
             "panic",
+            "backend_missing",
+            "backend_panic",
             "native_removed",
             "unknown_exit",
             "legacy",
@@ -1142,6 +1146,15 @@ mod tests {
                 }
                 "null" => shutdown["renderer_retirement"] = serde_json::Value::Null,
                 "panic" => shutdown["renderer_retirement"]["cpu_yuv_upload"] = "panicked".into(),
+                "backend_missing" => {
+                    shutdown["renderer_retirement"]
+                        .as_object_mut()
+                        .expect("renderer object")
+                        .remove("backend_preparation");
+                }
+                "backend_panic" => {
+                    shutdown["renderer_retirement"]["backend_preparation"] = "panicked".into()
+                }
                 "native_removed" => {
                     shutdown["renderer_retirement"]["native_device_removed"] = true.into()
                 }

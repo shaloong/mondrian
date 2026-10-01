@@ -722,6 +722,7 @@ enum AppUiWindowRole {
 enum AppUiUserEvent {
     PreviewWorkAvailable,
     ViewerGpuCompletionAvailable,
+    ViewerBackendPreparationAvailable,
     #[cfg(target_os = "macos")]
     Accessibility(accesskit_winit::Event),
 }
@@ -1823,6 +1824,7 @@ struct AppUiWindowSession {
     accessibility: Option<super::accessibility::MacAccessibility>,
     #[cfg(target_os = "macos")]
     accessibility_proxy: Option<winit::event_loop::EventLoopProxy<AppUiUserEvent>>,
+    viewer_backend_event_proxy: Option<winit::event_loop::EventLoopProxy<AppUiUserEvent>>,
     window: Arc<winit::window::Window>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
@@ -2634,6 +2636,7 @@ fn reopen_window_surface_and_device(
             Ok::<_, Box<dyn std::error::Error>>(sealed)
         },
     )?;
+    session.viewer_backend_event_proxy = retired_session.viewer_backend_event_proxy.take();
     #[cfg(target_os = "macos")]
     {
         session.accessibility_proxy = retired_session.accessibility_proxy.take();
@@ -3943,6 +3946,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
             ..
         } = initial_candidate.as_mut().expect("resumed Window candidate");
         let dispatch_action = |action| pending_actions.push(action);
+        session.viewer_backend_event_proxy.get_or_insert_with(|| preview_work_event_proxy.clone());
 
         #[cfg(target_os = "macos")]
         {
@@ -4025,6 +4029,12 @@ fn run_app_ui_with_initial_state_on_event_loop(
                 if background_tasks.needs_follow_up_poll {
                     elwt.set_control_flow(ControlFlow::Poll);
                 }
+            }
+            Event::UserEvent(AppUiUserEvent::ViewerBackendPreparationAvailable) => {
+                // Only a wake hint. The current Renderer cache and canonical
+                // contract authorize readiness on the next recording turn;
+                // a late hint from a retired generation carries no authority.
+                session.window.request_redraw();
             }
             Event::UserEvent(AppUiUserEvent::ViewerGpuCompletionAvailable) => {
                 if poll_viewer_heterogeneous_completion(device, session, &host)
@@ -6862,6 +6872,37 @@ fn report_successful_viewer_gpu_fallbacks(
     }
 }
 
+fn viewer_program_backend_preparation(
+    host: &AppUiHost,
+    session: &AppUiWindowSession,
+) -> Result<mondrian_renderer::ViewerGpuProgramBackendPreparation, String> {
+    // Resolve only the canonical Program and existing machine-local monitor
+    // policy. This is a device-object plan, never a second color interpretation.
+    let context = host.active_program_color_context().map_err(|error| error.to_string())?;
+    let boundary = crate::app::preview_cpu_execution::output_boundary_from_color_context(&context)
+        .map_err(|error| error.to_string())?;
+    let monitor = session
+        .display_management_policy
+        .resolve_output_color_space(&session.color_engine, boundary.output_color_space())
+        .map_err(|error| error.to_string())?;
+    let adaptation = RenderMonitorAdaptation::new(
+        boundary.output_color_space(),
+        monitor,
+        session.color_engine.clone(),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(mondrian_renderer::ViewerGpuProgramBackendPreparation {
+        working_color_space: context.working_color_space(),
+        program_output_boundary: boundary,
+        monitor_adaptation: adaptation,
+        output_precision: ViewerGpuOutputPrecision::minimum_for_display(
+            monitor,
+            session.display_calibration.is_some(),
+        ),
+        signal_monitoring_active: host.video_scopes_settings().monitoring.is_active(),
+    })
+}
+
 fn prepare_viewer_gpu_preview(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -6995,6 +7036,53 @@ fn prepare_viewer_gpu_preview(
     let Some(preparation) = host.viewer_gpu_preparation() else {
         finish_prepare!();
     };
+    let backend_plan = match viewer_program_backend_preparation(host, session) {
+        Ok(plan) => plan,
+        Err(error) => {
+            host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
+                feature: "viewer_program_backend_preparation".to_owned(),
+                reason: error,
+            });
+            finish_prepare!();
+        }
+    };
+    if !session.viewer_gpu_execution.program_output_backend_is_prepared(&backend_plan) {
+        // Never loan the frame table while an exact GPU submission still owns
+        // it. No candidate/ticket is consumed until the cache is back locally.
+        if submission_in_flight {
+            finish_prepare!();
+        }
+        let Some(event_proxy) = session.viewer_backend_event_proxy.clone() else {
+            host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
+                feature: "viewer_program_backend_preparation".to_owned(),
+                reason: "native Window preparation wake route is unavailable".to_owned(),
+            });
+            finish_prepare!();
+        };
+        match session.viewer_gpu_execution.prepare_program_output_backend_async(
+            device,
+            queue,
+            backend_plan.clone(),
+            move || {
+                let _ = event_proxy.send_event(AppUiUserEvent::ViewerBackendPreparationAvailable);
+            },
+        ) {
+            Ok(mondrian_renderer::ViewerGpuBackendPreparationStatus::Ready) => {}
+            Ok(mondrian_renderer::ViewerGpuBackendPreparationStatus::Pending) => {
+                session.viewer_gpu_output_telemetry.record_loading_skip();
+                finish_prepare!();
+            }
+            Err(error) => {
+                host.record_preview_gpu_output_blocker(
+                    &PreviewGpuOutputBlocker::UnsupportedFeature {
+                        feature: "viewer_program_backend_preparation".to_owned(),
+                        reason: error.to_string(),
+                    },
+                );
+                finish_prepare!();
+            }
+        }
+    }
     if !submission_in_flight {
         host.apply_preview_execution_resource_decision(&mut *session.viewer_gpu_execution);
     }
@@ -7174,6 +7262,28 @@ fn prepare_viewer_gpu_preview(
     if !frame.is_successor_preparation()
         && !host.preflight_viewer_gpu_presentation(frame.presentation_ticket())
     {
+        finish_prepare!();
+    }
+    let exact_backend_plan = mondrian_renderer::ViewerGpuProgramBackendPreparation {
+        working_color_space: frame.working_color_space,
+        program_output_boundary: frame.program_output_boundary.clone(),
+        monitor_adaptation: frame.monitor_adaptation.clone(),
+        output_precision: ViewerGpuOutputPrecision::minimum_for_display(
+            frame.monitor_adaptation.monitor_color_space(),
+            session.display_calibration.is_some(),
+        ),
+        signal_monitoring_active: scopes_settings.monitoring.is_active(),
+    };
+    if exact_backend_plan != backend_plan {
+        // A stale/foreign candidate cannot authorize an unprepared contract or
+        // silently compile it on the UI path. Its original deadline remains.
+        fail_viewer_gpu_frame(host, &mut frame);
+        host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
+            feature: "viewer_program_backend_preparation_contract".to_owned(),
+            reason:
+                "candidate Program/monitor contract differs from the canonical prepared backend"
+                    .to_owned(),
+        });
         finish_prepare!();
     }
     let Some(texture_key_base) = ExternalTextureKey::new(format!(
@@ -8700,6 +8810,7 @@ impl AppUiPreparedWindowSession {
             accessibility: None,
             #[cfg(target_os = "macos")]
             accessibility_proxy: None,
+            viewer_backend_event_proxy: None,
             window,
             surface,
             config: config.clone(),
@@ -9030,6 +9141,7 @@ fn replace_window_session(
             .map(ViewerGpuDeviceGenerationId::get),
         "app UI native window replaced"
     );
+    session.viewer_backend_event_proxy = next_session.viewer_backend_event_proxy.take();
     #[cfg(target_os = "macos")]
     {
         session.accessibility_proxy = next_session.accessibility_proxy.take();
@@ -9499,6 +9611,8 @@ mod tests {
                     retirement_handoff_accepted: true,
                     retirement_completed: true,
                     renderer_retirement: Some(mondrian_renderer::ViewerGpuRetirementReceipt {
+                        backend_preparation:
+                            mondrian_renderer::ViewerBackendPreparationWorkerExit::NotStarted,
                         cpu_yuv_upload: mondrian_renderer::ViewerCpuYuvUploadWorkerExit::Returned,
                         native_device_removed: false,
                     }),

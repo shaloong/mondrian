@@ -27,6 +27,7 @@ fn normal_receipt() -> EnduranceGpuShutdownEvidence {
         retirement_handoff_accepted: true,
         retirement_completed: true,
         renderer_retirement: Some(ViewerGpuRetirementReceipt {
+            backend_preparation: mondrian_renderer::ViewerBackendPreparationWorkerExit::NotStarted,
             cpu_yuv_upload: ViewerCpuYuvUploadWorkerExit::Returned,
             native_device_removed: false,
         }),
@@ -78,6 +79,17 @@ fn every_normal_shutdown_barrier_is_required() {
         EnduranceGpuShutdownEvidence { renderer_retirement: None, ..normal },
         EnduranceGpuShutdownEvidence {
             renderer_retirement: Some(ViewerGpuRetirementReceipt {
+                backend_preparation:
+                    mondrian_renderer::ViewerBackendPreparationWorkerExit::Panicked,
+                cpu_yuv_upload: ViewerCpuYuvUploadWorkerExit::Returned,
+                native_device_removed: false,
+            }),
+            ..normal
+        },
+        EnduranceGpuShutdownEvidence {
+            renderer_retirement: Some(ViewerGpuRetirementReceipt {
+                backend_preparation:
+                    mondrian_renderer::ViewerBackendPreparationWorkerExit::NotStarted,
                 cpu_yuv_upload: ViewerCpuYuvUploadWorkerExit::Panicked,
                 native_device_removed: false,
             }),
@@ -85,6 +97,8 @@ fn every_normal_shutdown_barrier_is_required() {
         },
         EnduranceGpuShutdownEvidence {
             renderer_retirement: Some(ViewerGpuRetirementReceipt {
+                backend_preparation:
+                    mondrian_renderer::ViewerBackendPreparationWorkerExit::NotStarted,
                 cpu_yuv_upload: ViewerCpuYuvUploadWorkerExit::Returned,
                 native_device_removed: true,
             }),

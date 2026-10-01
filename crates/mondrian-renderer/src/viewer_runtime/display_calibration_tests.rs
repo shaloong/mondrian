@@ -138,7 +138,13 @@ fn record(
     let program = readback(
         context,
         &mut encoder,
-        runtime.color_output.frame_table().get(&recorded.program_output).unwrap(),
+        runtime
+            .color_output
+            .runtime()
+            .expect("local recording cache")
+            .frame_table()
+            .get(&recorded.program_output)
+            .unwrap(),
     );
     let device = readback(
         context,

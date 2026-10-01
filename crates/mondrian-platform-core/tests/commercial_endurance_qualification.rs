@@ -1117,6 +1117,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                             "retirement_handoff_accepted": true,
                             "retirement_completed": true,
                             "renderer_retirement": {
+                                "backend_preparation": "not_started",
                                 "cpu_yuv_upload": "returned",
                                 "native_device_removed": false,
                             },
@@ -1246,6 +1247,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                                 "retirement_handoff_accepted": true,
                                 "retirement_completed": true,
                                 "renderer_retirement": {
+                                    "backend_preparation": "not_started",
                                     "cpu_yuv_upload": "returned",
                                     "native_device_removed": false,
                                 },

@@ -125,6 +125,7 @@ fn joined_panic_is_terminal_but_never_healthy() {
         Some(ViewerCpuYuvUploadWorkerExit::Panicked)
     );
     assert!(!crate::ViewerGpuRetirementReceipt {
+        backend_preparation: crate::ViewerBackendPreparationWorkerExit::NotStarted,
         cpu_yuv_upload: ViewerCpuYuvUploadWorkerExit::Panicked,
         native_device_removed: false,
     }

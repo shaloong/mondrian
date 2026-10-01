@@ -2850,6 +2850,7 @@ mod tests {
         let (mut worker, _) = scripted_worker([Ok(ViewerGpuDeviceWaitStatus::Satisfied)]);
         let drops = Arc::new(AtomicUsize::new(0));
         let receipt = mondrian_renderer::ViewerGpuRetirementReceipt {
+            backend_preparation: mondrian_renderer::ViewerBackendPreparationWorkerExit::NotStarted,
             cpu_yuv_upload: mondrian_renderer::ViewerCpuYuvUploadWorkerExit::Panicked,
             native_device_removed: false,
         };
