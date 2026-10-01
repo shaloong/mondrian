@@ -90,6 +90,129 @@ fn primary_track_clip_lens(state: &AppState) -> (usize, usize) {
 }
 
 #[test]
+fn structural_history_rebinds_rate_without_reinterpreting_cursor_frames() {
+    let settings = mondrian_timeline::sequence::SequenceSettings {
+        frame_rate: Rational::FPS_25,
+        ..Default::default()
+    };
+    let mut sequence =
+        Sequence::with_settings("history-rate", settings.clone()).expect("Sequence settings");
+    let sequence_id = sequence.id;
+    sequence.video_tracks[0]
+        .add_clip(
+            Clip::new(
+                AssetId::new(),
+                TimelineTime::ZERO,
+                TimelineTime::new(4, 1).expect("duration"),
+            )
+            .expect("Clip"),
+        )
+        .expect("placement");
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    let mut changed_settings = settings;
+    changed_settings.frame_rate = Rational::FPS_30;
+    state.update_active_sequence_settings(changed_settings).expect("rate edit");
+    state.seek(30).expect("seek one second on 30 fps grid");
+    assert_eq!(
+        state.current_timeline_time().expect("time"),
+        Some(TimelineTime::ONE)
+    );
+    let epoch_before_undo = state.playback_engine.snapshot().epoch;
+    assert!(state.undo_timeline().expect("Undo rate"));
+    assert_eq!(
+        state.active_sequence().expect("Sequence").settings.frame_rate,
+        Rational::FPS_25
+    );
+    assert_eq!(
+        state.current_timeline_time().expect("time after Undo"),
+        Some(TimelineTime::ONE)
+    );
+    assert_eq!(state.current_frame(), 25);
+    assert_eq!(
+        state.playback_engine.snapshot().position.time_base,
+        Rational::new(1, 25)
+    );
+    assert_eq!(state.playback_engine.sequence_id(), Some(sequence_id));
+    assert_ne!(
+        state.playback_engine.snapshot().epoch,
+        epoch_before_undo,
+        "old-grid frame work must be invalidated"
+    );
+    let epoch_before_redo = state.playback_engine.snapshot().epoch;
+    assert!(state.redo_timeline().expect("Redo rate"));
+    assert_eq!(
+        state.active_sequence().expect("Sequence").settings.frame_rate,
+        Rational::FPS_30
+    );
+    assert_eq!(
+        state.current_timeline_time().expect("time after Redo"),
+        Some(TimelineTime::ONE)
+    );
+    assert_eq!(state.current_frame(), 30);
+    assert_eq!(
+        state.playback_engine.snapshot().position.time_base,
+        Rational::new(1, 30)
+    );
+    assert_eq!(state.playback_engine.sequence_id(), Some(sequence_id));
+    assert_ne!(state.playback_engine.snapshot().epoch, epoch_before_redo);
+}
+
+#[test]
+fn structural_history_removed_owner_restores_navigation_without_transplanting_time() {
+    let settings = mondrian_timeline::sequence::SequenceSettings {
+        frame_rate: Rational::FPS_25,
+        ..Default::default()
+    };
+    let mut sequence = Sequence::with_settings("original", settings).expect("settings");
+    let original_id = sequence.id;
+    sequence.playhead = TimelineTime::new(3, 5).expect("original navigation");
+    sequence.video_tracks[0]
+        .add_clip(
+            Clip::new(
+                AssetId::new(),
+                TimelineTime::ZERO,
+                TimelineTime::new(4, 1).expect("duration"),
+            )
+            .expect("Clip"),
+        )
+        .expect("placement");
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    state.test_new_sequence_defaults_mut().frame_rate = Rational::FPS_30;
+    state.seek(15).expect("original seek");
+    let second_id = state.new_sequence("second").expect("new Sequence");
+    state.seek(9).expect("second seek");
+    assert_eq!(state.playback_engine.sequence_id(), Some(second_id));
+    let epoch = state.playback_engine.snapshot().epoch;
+    assert!(state.undo_timeline().expect("Undo creation"));
+    assert_eq!(state.active_sequence_id(), Some(original_id));
+    assert_eq!(state.playback_engine.sequence_id(), Some(original_id));
+    assert_eq!(state.current_frame(), 15);
+    assert_eq!(
+        state.current_timeline_time().expect("restored time"),
+        Some(TimelineTime::new(3, 5).expect("time"))
+    );
+    assert_eq!(
+        state.playback_engine.snapshot().position.time_base,
+        Rational::new(1, 25)
+    );
+    assert_ne!(state.playback_engine.snapshot().epoch, epoch);
+    assert!(state.redo_timeline().expect("Redo creation"));
+    assert_eq!(
+        state.active_sequence_id(),
+        Some(original_id),
+        "Redo must retain an existing navigation owner"
+    );
+    assert_eq!(state.playback_engine.sequence_id(), Some(original_id));
+    assert_eq!(state.current_frame(), 15);
+    assert_eq!(
+        state.current_timeline_time().expect("Redo time"),
+        Some(TimelineTime::new(3, 5).expect("time"))
+    );
+}
+
+#[test]
 fn sequence_revision_advances_on_edit_undo_and_redo_without_reusing_snapshots() {
     let mut state = create_state_with_sequence();
     let initial = state.active_sequence().expect("sequence").revision;

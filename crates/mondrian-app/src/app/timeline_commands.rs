@@ -1,3 +1,4 @@
+use super::timeline_position::lower_nearest_sequence_frame;
 use super::*;
 use crate::app::AppMessage;
 
@@ -451,16 +452,47 @@ impl AppState {
         self.reconcile_timeline_targeting();
     }
 
+    /// Rebind restored navigation through the sole Playback seek seam.
+    fn rebind_history_playback(
+        &mut self,
+        previous_owner: Option<SequenceId>,
+        previous_position: FramePosition,
+    ) -> mondrian_core::Result<()> {
+        let sequence = self.active_sequence().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "history_playback_rebind".to_owned(),
+                reason: "History restored without an active Sequence".to_owned(),
+            }
+        })?;
+        let frame = if previous_owner == Some(sequence.id) {
+            lower_nearest_sequence_frame(sequence, previous_position, "history_playback_rebind")?
+        } else {
+            // A removed owner cannot transfer its clock coordinate to another
+            // Sequence. Use navigation authored in the restored owner domain.
+            sequence
+                .playhead
+                .to_frame_position(sequence.settings.frame_rate, FrameRounding::Nearest)?
+                .frame
+        };
+        self.seek_with_source(frame, TimelineSeekSource::Settled)
+    }
+
     pub fn undo_timeline(&mut self) -> mondrian_core::Result<bool> {
         if !self.can_undo_action() {
             return Ok(false);
         }
         self.pause()?;
+        let previous_owner = self.active_sequence_id();
+        let previous_position = self.playback_engine.snapshot().position;
         let commit = self.authoring.as_mut().map(AuthoringSession::undo).transpose()?.flatten();
         let Some(commit) = commit else {
             return Ok(false);
         };
+        let playback_result = self.rebind_history_playback(previous_owner, previous_position);
+        // Author restore already committed; publish its receipt even if an
+        // independent runtime binding fails.
         self.consume_authoring_commit(commit);
+        playback_result?;
         self.settle_preview_access_source();
         Ok(true)
     }
@@ -470,11 +502,17 @@ impl AppState {
             return Ok(false);
         }
         self.pause()?;
+        let previous_owner = self.active_sequence_id();
+        let previous_position = self.playback_engine.snapshot().position;
         let commit = self.authoring.as_mut().map(AuthoringSession::redo).transpose()?.flatten();
         let Some(commit) = commit else {
             return Ok(false);
         };
+        let playback_result = self.rebind_history_playback(previous_owner, previous_position);
+        // Author restore already committed; publish its receipt even if an
+        // independent runtime binding fails.
         self.consume_authoring_commit(commit);
+        playback_result?;
         self.settle_preview_access_source();
         Ok(true)
     }

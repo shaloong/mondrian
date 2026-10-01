@@ -2821,3 +2821,20 @@ the Host, verifying continued live author edits and eventual refresh.
 This admission contract does not coalesce author history or establish validity
 for a removed/locked owner; current owner validation remains in action dispatch.
 Owner transitions and other captured widgets require their own qualification.
+
+## History transport coordinates
+
+The App pauses transport before restoring an authoring history entry. It captures
+the Playback engine's exact FramePosition and active Sequence owner before the
+restore, then rebinds through the existing settled timeline seek. For an unchanged
+owner, timeline_position performs nearest-frame lowering on the restored rate;
+a bare frame number is never reinterpreted with a different time base. If history
+removes the active owner, the restored Sequence's own playhead supplies navigation.
+Redo preserves a current navigation owner that still exists in the restored project.
+
+The seek seam binds the restored Sequence, reprimes audio and advances the playback
+epoch, invalidating work from the old grid. Current timeline time reads the actual
+Playback FramePosition rather than synthesizing one from the current author rate.
+Authoring restore and runtime admission remain separate: a committed author receipt
+is published even if subsequent playback admission reports an error. Physical device
+failure behavior is a separate qualification requirement.

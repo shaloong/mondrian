@@ -1621,11 +1621,11 @@ impl AppState {
     }
 
     pub fn current_timeline_time(&self) -> mondrian_core::Result<Option<TimelineTime>> {
-        let Some(sequence) = self.active_sequence() else {
+        if self.active_sequence().is_none() {
             return Ok(None);
-        };
+        }
         Ok(Some(TimelineTime::from_frame_position(
-            FramePosition::new(self.current_frame().max(0), sequence.time_base()),
+            self.playback_engine.snapshot().position,
         )?))
     }
 
