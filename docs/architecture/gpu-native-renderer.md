@@ -1697,6 +1697,16 @@ decode work and presentation are outside this encoder timing span; it is not
 all queue traffic or end-to-end Viewer latency. Semantic stage markers are
 shared across both timing modes.
 
+The standalone scopes and Standard View gates use the same actual-pass
+recorder through `GpuTimestampPassIntervalTimer`. A consuming receipt binds
+the measured command interval to its query allocation. This synchronous gate
+timer admits one interval until the exact submitted work, query resolution and
+counter read have completed; abandoning a receipt cannot reopen query admission.
+Its receipt proves elapsed time without inventing Viewer stage attribution.
+The scopes clear remains inside the measured span, including the leading anchor
+cost, while counter readback remains outside. The existing workload, precision,
+sample counts, cache gates and GPU/CPU time budgets are unchanged.
+
 Submitted query ownership remains live until actual work completion. The owner
 then submits query resolution/readback in a separate command buffer; GPU queue
 order alone cannot substitute for observing measured work completion on the

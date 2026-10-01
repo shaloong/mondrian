@@ -7,7 +7,9 @@ use mondrian_effects::{
     compile_reference_render_graph, lower_effect_graph_to_gpu_plan, EffectGraphBuilderState,
     EffectRenderOp,
 };
-use mondrian_renderer::profile::{gpu_timestamp_query_device_features, GpuTimestampFrameTimer};
+use mondrian_renderer::profile::{
+    gpu_timestamp_query_device_features, GpuTimestampFrameTimer, GpuTimestampPassIntervalTimer,
+};
 use mondrian_renderer::{
     color::{
         qualification::{
@@ -501,18 +503,18 @@ async fn standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2() -> Result<
     ensure_mondrian_default_ocio_loaded()
         .map_err(|error| anyhow!("load Mondrian Standard OCIO package: {error}"))?;
     let qualification_policy = GpuColorQualificationExecutionPolicy::from_environment()?;
-    let Some(context) = create_timestamp_gpu_context().await? else {
+    let Some(context) = create_timestamp_gpu_context(false).await? else {
         eprintln!(
             "MONDRIAN_COLOR_VIEW_GPU_PERF_JSON={}",
             serde_json::json!({
                 "schema_version": 4,
                 "scenario": "renderer_color_view_4k_gpu_timestamp",
-                "skipped": "no real adapter with complete encoder timestamp-query support"
+                "skipped": "no real adapter with pass-boundary timestamp-query support"
             })
         );
         qualification_policy.admit_capability(
             "standard-view-4k-performance",
-            "real-adapter-with-complete-timestamp-query",
+            "real-adapter-with-complete-pass-timestamp-coverage",
             false,
         )?;
         return Ok(());
@@ -564,7 +566,7 @@ async fn standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2() -> Result<
     let compositor = GpuFrameCompositor::new(&context.device)?;
     let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(50_000)?;
     let input = create_spatially_varying_4k_working_frame(&context, &compositor, &mut runtime)?;
-    let timer = GpuTimestampFrameTimer::new(&context.device, &context.queue)
+    let mut timer = GpuTimestampPassIntervalTimer::new(&context.device, &context.queue, 2)
         .context("timestamp features were enabled but timer creation failed")?;
 
     let standard_sdr_cold =
@@ -611,7 +613,8 @@ async fn standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2() -> Result<
                 2 => (&standard_hlg_case, &mut standard_hlg_samples),
                 _ => (&aces_pq_case, &mut aces_pq_samples),
             };
-            let sample = record_view_sample(&context, &mut runtime, &input, case, Some(&timer))?;
+            let sample =
+                record_view_sample(&context, &mut runtime, &input, case, Some(&mut timer))?;
             samples
                 .gpu_us
                 .push(sample.gpu_us.context("measured sample missing GPU timestamp")?);
@@ -771,7 +774,7 @@ async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> 
     ensure_mondrian_default_ocio_loaded()
         .map_err(|error| anyhow!("load Mondrian Standard OCIO package: {error}"))?;
     let qualification_policy = GpuColorQualificationExecutionPolicy::from_environment()?;
-    let Some(context) = create_timestamp_gpu_context().await? else {
+    let Some(context) = create_timestamp_gpu_context(true).await? else {
         eprintln!(
             "MONDRIAN_COLOR_TRANSFORM_GPU_PERF_JSON={}",
             serde_json::json!({
@@ -1014,7 +1017,9 @@ async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> 
     Ok(())
 }
 
-async fn create_timestamp_gpu_context() -> Result<Option<TimestampGpuContext>> {
+async fn create_timestamp_gpu_context(
+    encoder_timestamps: bool,
+) -> Result<Option<TimestampGpuContext>> {
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = match request_adapter_with_native_video_preference(
@@ -1031,7 +1036,11 @@ async fn create_timestamp_gpu_context() -> Result<Option<TimestampGpuContext>> {
         Ok(adapter) => adapter,
         Err(_) => return Ok(None),
     };
-    let timestamp_features = gpu_timestamp_query_device_features(adapter.features());
+    let timestamp_features = if encoder_timestamps {
+        gpu_timestamp_query_device_features(adapter.features())
+    } else {
+        adapter.features() & wgpu::Features::TIMESTAMP_QUERY
+    };
     if timestamp_features.is_empty() {
         return Ok(None);
     }
@@ -1317,48 +1326,57 @@ fn record_view_sample(
     runtime: &mut RenderGpuOutputBoundaryRuntime,
     input: &GpuColorFrameHandle,
     case: &ViewCase,
-    timer: Option<&GpuTimestampFrameTimer>,
+    mut timer: Option<&mut GpuTimestampPassIntervalTimer>,
 ) -> Result<RecordedSample> {
     let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("mondrian-color-view-4k-sample"),
     });
-    if let Some(timer) = timer {
-        timer.begin(&mut encoder);
-    }
     let started = Instant::now();
-    let record = runtime
-        .record_wgpu_output_boundary_gpu_frame_owned_backend(
-            &case.boundary(),
-            input,
-            GpuColorFrameTextureFormat::Rgba16Float,
-            RenderColorTransformGpuOptions {
-                output_residency: ColorFrameResidency::Gpu,
-                ..RenderColorTransformGpuOptions::default()
-            },
-            RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
-                device: &context.device,
-                queue: &context.queue,
-                encoder: &mut encoder,
-                load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-            },
-        )
-        .map_err(|error| anyhow!("record {} 4K HDR view: {error:?}", case.mode))?;
+    let mut record_commands =
+        |measured: &mut dyn mondrian_renderer::gpu_command::GpuCommandEncoder| {
+            runtime
+                .record_wgpu_output_boundary_gpu_frame_owned_backend(
+                    &case.boundary(),
+                    input,
+                    GpuColorFrameTextureFormat::Rgba16Float,
+                    RenderColorTransformGpuOptions {
+                        output_residency: ColorFrameResidency::Gpu,
+                        ..RenderColorTransformGpuOptions::default()
+                    },
+                    RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                        device: &context.device,
+                        queue: &context.queue,
+                        encoder: measured,
+                        load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    },
+                )
+                .map_err(|error| anyhow!("record {} 4K HDR view: {error:?}", case.mode))
+        };
+    let (record, receipt) = if let Some(timer) = timer.as_deref_mut() {
+        let (record, receipt) = timer
+            .record(&mut encoder, record_commands)
+            .map_err(|error| anyhow!("incomplete {} timestamp coverage: {error:?}", case.mode))?;
+        (record?, Some(receipt))
+    } else {
+        (record_commands(&mut encoder)?, None)
+    };
     let record_cpu_us = saturating_u64(started.elapsed().as_micros());
-    if let Some(timer) = timer {
-        timer.finish(&mut encoder);
-    }
     assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
     assert_eq!(record.stage_diagnostics.upload_stages, 0);
     assert_eq!(record.stage_diagnostics.readback_stages, 0);
     let output_id = record.materialized.output.id();
     let submission = context.queue.submit(std::iter::once(encoder.finish()));
     let gpu_us = timer
-        .map(|timer| {
+        .zip(receipt)
+        .map(|(timer, receipt)| {
             timer
-                .read_elapsed_us_after_submission(&context.device, submission)
+                .read_elapsed_us_after_submission(&context.device, submission, receipt)
                 .context("read color-view hardware timestamp")
         })
         .transpose()?;
+    if let Some(gpu_us) = gpu_us {
+        anyhow::ensure!(gpu_us > 0, "{} work yielded no elapsed GPU time", case.mode);
+    }
     let output = runtime
         .frame_table_mut()
         .remove(output_id)

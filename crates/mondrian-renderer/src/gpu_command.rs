@@ -188,6 +188,8 @@ impl GpuCommandEncoder for wgpu::CommandEncoder {
 /// Why recorded commands cannot yield a complete pass-boundary measurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum GpuPassTimestampCoverageError {
+    /// The synchronous timer still owns an unconsumed recorded interval.
+    RecordingInFlight,
     /// No real render or compute pass was recorded.
     NoPass,
     /// A copy or clear precedes the first measured boundary.
@@ -233,7 +235,7 @@ pub struct GpuPassTimestampRecorder<'a> {
     encoder: &'a mut wgpu::CommandEncoder,
     query_set: wgpu::QuerySet,
     leading_copy_anchor: GpuLeadingCopyTimestampAnchor,
-    token: GpuTimestampToken,
+    token: Option<GpuTimestampToken>,
     coverage: PassCoverage,
 }
 
@@ -284,6 +286,7 @@ struct PassCoverage {
     next_stage: u32,
     trailing_commands: bool,
     error: Option<GpuPassTimestampCoverageError>,
+    stage_attribution: bool,
 }
 
 impl PassCoverage {
@@ -295,6 +298,7 @@ impl PassCoverage {
             next_stage: 1,
             trailing_commands: false,
             error: None,
+            stage_attribution: true,
         }
     }
 
@@ -325,6 +329,9 @@ impl PassCoverage {
     }
 
     fn mark(&mut self, stage: GpuTimestampStageMarker) {
+        if !self.stage_attribution {
+            return;
+        }
         if stage.query_index() != self.next_stage {
             self.reject(GpuPassTimestampCoverageError::StageOrder);
             return;
@@ -355,6 +362,16 @@ impl PassCoverage {
             boundaries: self.boundaries,
         })
     }
+
+    fn finish_interval(mut self) -> Result<u32, GpuPassTimestampCoverageError> {
+        if self.next_query == 0 {
+            self.reject(GpuPassTimestampCoverageError::NoPass);
+        }
+        if self.trailing_commands {
+            self.reject(GpuPassTimestampCoverageError::TrailingCommands);
+        }
+        self.error.map_or(Ok(self.next_query), Err)
+    }
 }
 
 impl<'a> GpuPassTimestampRecorder<'a> {
@@ -369,9 +386,34 @@ impl<'a> GpuPassTimestampRecorder<'a> {
             encoder,
             query_set,
             leading_copy_anchor,
-            token,
+            token: Some(token),
             coverage: PassCoverage::new(capacity),
         }
+    }
+
+    pub(crate) fn new_interval(
+        encoder: &'a mut wgpu::CommandEncoder,
+        query_set: wgpu::QuerySet,
+        leading_copy_anchor: GpuLeadingCopyTimestampAnchor,
+    ) -> Self {
+        let mut coverage = PassCoverage::new(query_set.count());
+        coverage.stage_attribution = false;
+        Self {
+            encoder,
+            query_set,
+            leading_copy_anchor,
+            token: None,
+            coverage,
+        }
+    }
+
+    pub(crate) fn finish_interval(
+        self,
+    ) -> Result<GpuPassTimestampIntervalReceipt, GpuPassTimestampCoverageError> {
+        Ok(GpuPassTimestampIntervalReceipt {
+            query_set: self.query_set,
+            query_count: self.coverage.finish_interval()?,
+        })
     }
 
     fn anchor_leading_copy(&mut self) {
@@ -408,11 +450,20 @@ impl<'a> GpuPassTimestampRecorder<'a> {
     /// End this scope while retaining its query slot until GPU completion.
     pub fn finish(self) -> GpuPassTimestampReceipt {
         GpuPassTimestampReceipt {
-            token: self.token,
+            token: self.token.expect("frame recorder owns a ring token"),
             query_set: self.query_set,
             layout: self.coverage.finish(),
         }
     }
+}
+
+/// Complete command interval bound to its actual pass queries.
+///
+/// This receipt establishes elapsed time only, without Viewer stage attribution.
+/// Only the originating timer can consume it after submission completion.
+pub struct GpuPassTimestampIntervalReceipt {
+    pub(crate) query_set: wgpu::QuerySet,
+    pub(crate) query_count: u32,
 }
 
 impl GpuCommandEncoder for GpuPassTimestampRecorder<'_> {
@@ -626,6 +677,53 @@ mod tests {
         mark_remaining(&mut conflicting);
         assert_eq!(
             conflicting.finish().unwrap_err(),
+            Error::ConflictingTimestampWrites
+        );
+    }
+
+    #[test]
+    fn whole_interval_requires_complete_edges_without_viewer_stage_claims() {
+        let mut interval = PassCoverage::new(8);
+        interval.stage_attribution = false;
+        // An actual measured anchor encloses the leading clear, followed by
+        // the production passes. No synthetic Viewer stage markers are needed.
+        interval.pass(false);
+        interval.unmeasured_command();
+        interval.pass(false);
+        interval.pass(false);
+        assert_eq!(interval.finish_interval().unwrap(), 6);
+
+        let mut trailing = PassCoverage::new(8);
+        trailing.pass(false);
+        trailing.unmeasured_command();
+        assert_eq!(
+            trailing.finish_interval().unwrap_err(),
+            Error::TrailingCommands
+        );
+
+        let mut leading = PassCoverage::new(8);
+        leading.unmeasured_command();
+        leading.pass(false);
+        assert_eq!(
+            leading.finish_interval().unwrap_err(),
+            Error::LeadingCommands
+        );
+
+        assert_eq!(
+            PassCoverage::new(8).finish_interval().unwrap_err(),
+            Error::NoPass
+        );
+        let mut exhausted = PassCoverage::new(2);
+        exhausted.pass(false);
+        exhausted.pass(false);
+        assert_eq!(
+            exhausted.finish_interval().unwrap_err(),
+            Error::QueryCapacity
+        );
+        let mut conflict = PassCoverage::new(8);
+        conflict.pass(true);
+        assert_eq!(
+            conflict.finish_interval().unwrap_err(),
             Error::ConflictingTimestampWrites
         );
     }
