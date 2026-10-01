@@ -171,7 +171,7 @@ OfxStatus probe(const char* action, const void* handle,
   } else if (operation == kOfxActionInstanceChanged && selected == "become_required") {
     property(handle, kOfxImageEffectInstancePropSequentialRender, 1);
   }
-  if (selected == "integer" && result == kOfxStatOK) {
+  if ((selected == "integer" || selected == "interpolation" || selected == "bad_interpolation") && result == kOfxStatOK) {
     if (operation == kOfxImageEffectActionDescribeInContext) {
       OfxParamSetHandle params = nullptr;
       OfxPropertySetHandle props = nullptr;
@@ -184,6 +184,26 @@ OfxStatus probe(const char* action, const void* handle,
       gPropHost->propSetInt(props, kOfxParamPropDisplayMin, 0, 0);
       gPropHost->propSetInt(props, kOfxParamPropDisplayMax, 0, 9);
       gPropHost->propSetInt(props, kOfxParamPropAnimates, 0, 1);
+      if (selected != "integer") {
+        if (gPropHost->propSetString(props, kOfxParamInterpType, 0, selected == "interpolation" ? kOfxParamInterpTypeConstantStep : "InvalidInterpolation") != kOfxStatOK) { return kOfxStatFailed; }
+        OfxParamHandle scale = nullptr;
+        OfxPropertySetHandle scaleProps = nullptr;
+        if (gParamHost->paramGetHandle(params, "scale", &scale, &scaleProps) != kOfxStatOK ||
+            gPropHost->propSetString(scaleProps, kOfxParamInterpType, 0, kOfxParamInterpTypeSmooth) != kOfxStatOK) { return kOfxStatFailed; }
+      }
+    } else if (operation == kOfxActionCreateInstance && selected == "interpolation") {
+      OfxParamSetHandle params = nullptr;
+      OfxParamHandle count = nullptr;
+      OfxPropertySetHandle props = nullptr;
+      char* value = nullptr;
+      const char* replacement[] = { kOfxParamInterpTypeLinear };
+      if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+          gParamHost->paramGetHandle(params, "count", &count, &props) != kOfxStatOK ||
+          gPropHost->propSetString(props, kOfxParamInterpType, 0, replacement[0]) != kOfxStatErrValue ||
+          gPropHost->propSetStringN(props, kOfxParamInterpType, 1, replacement) != kOfxStatErrValue ||
+          gPropHost->propReset(props, kOfxParamInterpType) != kOfxStatErrValue ||
+          gPropHost->propGetString(props, kOfxParamInterpType, 0, &value) != kOfxStatOK ||
+          !value || std::string(value) != kOfxParamInterpTypeConstantStep) { return kOfxStatFailed; }
     } else if (operation == kOfxImageEffectActionRender && !applyInteger(handle, in)) { return kOfxStatFailed; }
   }
   return result;

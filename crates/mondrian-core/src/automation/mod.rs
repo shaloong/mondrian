@@ -434,7 +434,7 @@ pub struct ParameterSchema {
     pub unit: ParameterUnit,
     /// Enforced numeric bounds and editor stepping, when numeric.
     pub numeric: Option<ParameterNumericContract>,
-    /// Interpolation intents admitted by this schema.
+    /// Ordered interpolation intents; the first is the default for new keys.
     pub allowed_interpolations: Vec<ParameterInterpolation>,
     /// Stable choices for `PropertyValue::Enum`; empty for other value types.
     pub enum_options: Vec<ParameterEnumOption>,
@@ -461,8 +461,8 @@ impl ParameterSchema {
             vec![ParameterInterpolation::Hold]
         } else {
             vec![
-                ParameterInterpolation::Hold,
                 ParameterInterpolation::Linear,
+                ParameterInterpolation::Hold,
                 ParameterInterpolation::Bezier,
             ]
         };
@@ -961,10 +961,10 @@ impl PropertyValueType {
         )
     }
 
+    /// Keep categorical values at Hold; numeric modes are governed by their schema.
     pub fn normalized_interpolation(self, interpolation: InterpolationType) -> InterpolationType {
         match self {
             Self::Bool
-            | Self::Int
             | Self::Curve
             | Self::QualifierSamples
             | Self::Enum
@@ -1727,6 +1727,23 @@ impl AnimatedProperty {
         self.value_from_channel_values(&channels, &self.static_value)
     }
 
+    /// Return the definition's first admitted interpolation for new author keys.
+    pub fn default_interpolation(&self) -> Result<InterpolationType> {
+        self.descriptor
+            .schema
+            .allowed_interpolations
+            .first()
+            .copied()
+            .map(|mode| match mode {
+                ParameterInterpolation::Hold => InterpolationType::Hold,
+                ParameterInterpolation::Linear => InterpolationType::Linear,
+                ParameterInterpolation::Bezier => InterpolationType::Bezier,
+            })
+            .ok_or_else(|| {
+                parameter_value_error(&self.descriptor.path, "parameter admits no interpolation")
+            })
+    }
+
     pub fn enable_animation(&mut self, time: TimelineTime) -> Result<()> {
         if !self.descriptor.schema.is_animatable || !self.value_type().supports_animation() {
             return Err(MondrianError::WorkflowStepFailed {
@@ -1743,7 +1760,7 @@ impl AnimatedProperty {
             self.write_value(
                 time,
                 self.static_value.clone(),
-                InterpolationType::Linear,
+                self.default_interpolation()?,
                 None,
             )?;
         }
@@ -2560,7 +2577,7 @@ impl PropertyBag {
                     value,
                 }));
             }
-            let interpolation = default_value_write_interpolation(property)?;
+            let interpolation = property.default_interpolation()?;
             return Ok(Some(PropertyMutation::SetKeyframe {
                 path: path.to_owned(),
                 keyframe: Keyframe::from_preset(time, value, interpolation),
@@ -2867,36 +2884,6 @@ impl PropertyBag {
             reason: format!("属性不存在: {path}"),
         })
     }
-}
-
-fn default_value_write_interpolation(property: &AnimatedProperty) -> Result<InterpolationType> {
-    let preferred = property.value_type().normalized_interpolation(InterpolationType::Linear);
-    if property
-        .descriptor
-        .schema
-        .allowed_interpolations
-        .contains(&preferred.parameter_interpolation())
-    {
-        return Ok(preferred);
-    }
-    property
-        .descriptor
-        .schema
-        .allowed_interpolations
-        .first()
-        .copied()
-        .map(|interpolation| match interpolation {
-            ParameterInterpolation::Hold => InterpolationType::Hold,
-            ParameterInterpolation::Linear => InterpolationType::Linear,
-            ParameterInterpolation::Bezier => InterpolationType::Bezier,
-        })
-        .ok_or_else(|| MondrianError::WorkflowStepFailed {
-            step_id: "parameter_interpolation_contract".to_owned(),
-            reason: format!(
-                "parameter {} has no admitted interpolation",
-                property.descriptor.parameter_id()
-            ),
-        })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4067,6 +4054,63 @@ mod tests {
             .expect_err("persisted out-of-range state must fail closed")
             .to_string()
             .contains("persisted value lies outside"));
+    }
+
+    #[test]
+    fn definition_default_controls_animation_enable_and_integer_value_writes() {
+        for preferred in [
+            ParameterInterpolation::Hold,
+            ParameterInterpolation::Linear,
+            ParameterInterpolation::Bezier,
+        ] {
+            let mut descriptor =
+                PropertyDescriptor::new("effect.integer.default", "Integer", PropertyValue::Int(3))
+                    .with_numeric_contract(
+                        ParameterUnit::Unitless,
+                        ParameterNumericContract::closed(
+                            0.0,
+                            9.0,
+                            Some(1.0),
+                            ParameterInvalidValuePolicy::Reject,
+                        )
+                        .expect("range"),
+                    );
+            descriptor.schema.allowed_interpolations = vec![preferred];
+            for mode in [
+                ParameterInterpolation::Hold,
+                ParameterInterpolation::Linear,
+                ParameterInterpolation::Bezier,
+            ] {
+                if mode != preferred {
+                    descriptor.schema.allowed_interpolations.push(mode);
+                }
+            }
+            descriptor.validate().expect("schema");
+            let mut property = AnimatedProperty::from_descriptor(descriptor);
+            property.enable_animation(tt(0)).expect("enable");
+            assert_eq!(
+                keyframe_interpolation_type(&property.keyframe_at(tt(0)).expect("initial key")),
+                preferred
+            );
+            property
+                .write_value(
+                    tt(2),
+                    PropertyValue::Int(5),
+                    property.default_interpolation().expect("default"),
+                    None,
+                )
+                .expect("write integer");
+            assert_eq!(
+                keyframe_interpolation_type(&property.keyframe_at(tt(2)).expect("new key")),
+                preferred
+            );
+            if preferred == ParameterInterpolation::Linear {
+                assert_eq!(property.evaluate(tt(1)), PropertyValue::Int(4));
+            }
+            if preferred == ParameterInterpolation::Hold {
+                assert_eq!(property.evaluate(tt(1)), PropertyValue::Int(3));
+            }
+        }
     }
 
     #[test]

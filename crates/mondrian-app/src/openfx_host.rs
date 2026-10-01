@@ -64,6 +64,8 @@ pub struct OpenFxParameterDescription {
     pub hint: String,
     /// Value assigned when an effect instance is first created.
     pub default_value: OpenFxScalarValue,
+    /// Definition-preferred interpolation for newly authored keys.
+    pub preferred_interpolation: mondrian_core::automation::ParameterInterpolation,
     /// Semantic kind of a Double control.
     pub double_type: Option<OpenFxDoubleType>,
     /// Lowest accepted numeric value, when this is a numeric parameter.
@@ -198,6 +200,7 @@ struct NativeParameterInfo {
     hint: *const c_char,
     hint_length: usize,
     kind: c_int,
+    preferred_interpolation: c_int,
     double_type: c_int,
     default_value: f64,
     minimum: f64,
@@ -579,6 +582,12 @@ unsafe fn decode_native_parameter(
         label: if label.is_empty() { name } else { label },
         hint,
         default_value,
+        preferred_interpolation: match raw.preferred_interpolation {
+            0 => mondrian_core::automation::ParameterInterpolation::Hold,
+            1 => mondrian_core::automation::ParameterInterpolation::Linear,
+            2 => mondrian_core::automation::ParameterInterpolation::Bezier,
+            _ => return Err("invalid OpenFX preferred interpolation".to_owned()),
+        },
         double_type,
         minimum,
         maximum,
@@ -784,7 +793,9 @@ fn validate_description(
         }
         match &parameter.default_value {
             OpenFxScalarValue::Boolean(_) => {
-                if parameter.double_type.is_some()
+                if parameter.preferred_interpolation
+                    != mondrian_core::automation::ParameterInterpolation::Hold
+                    || parameter.double_type.is_some()
                     || parameter.minimum.is_some()
                     || parameter.maximum.is_some()
                     || parameter.display_minimum.is_some()
@@ -912,6 +923,7 @@ mod shared_frame_tests {
                 label: "Count".into(),
                 hint: String::new(),
                 default_value: OpenFxScalarValue::Integer(2),
+                preferred_interpolation: mondrian_core::automation::ParameterInterpolation::Linear,
                 double_type: None,
                 minimum: Some(0.0),
                 maximum: Some(9.0),

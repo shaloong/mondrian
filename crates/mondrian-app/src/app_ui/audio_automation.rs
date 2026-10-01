@@ -144,14 +144,10 @@ pub(crate) fn project_audio_automation(
     }
     let contract = inspection.value_contract();
     let allowed = inspection.allowed_interpolations();
-    let insert_interpolation = if allowed.contains(&ParameterInterpolation::Linear) {
-        AutomationSegmentInterpolation::Linear
-    } else if allowed.contains(&ParameterInterpolation::Hold) {
-        AutomationSegmentInterpolation::Hold
-    } else if allowed.contains(&ParameterInterpolation::Bezier) {
-        AutomationSegmentInterpolation::Bezier
-    } else {
-        return None;
+    let insert_interpolation = match allowed.first()? {
+        ParameterInterpolation::Linear => AutomationSegmentInterpolation::Linear,
+        ParameterInterpolation::Hold => AutomationSegmentInterpolation::Hold,
+        ParameterInterpolation::Bezier => AutomationSegmentInterpolation::Bezier,
     };
     let mut view_min = contract.soft_range.min;
     let mut view_max = contract.soft_range.max;

@@ -370,6 +370,13 @@ static int describe(const char* binary, const char* bundle,
       std::cerr << "unsupported parameter type: " << type << std::endl;
       return 7;
     }
+    if (type == kOfxParamTypeDouble || type == kOfxParamTypeInteger) {
+      const auto& interpolation = properties.getStringProperty(kOfxParamInterpType);
+      if (interpolation == kOfxParamInterpTypeConstantStep) { info.preferred_interpolation = 0; }
+      else if (interpolation == kOfxParamInterpTypeLinear) { info.preferred_interpolation = 1; }
+      else if (interpolation == kOfxParamInterpTypeSmooth) { info.preferred_interpolation = 2; }
+      else { return 7; }
+    }
     if (callback(context, &info) != 0) { return 8; }
   }
   return 0;

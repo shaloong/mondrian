@@ -529,8 +529,27 @@ range before assigning the complete snapshot or issuing change callbacks.
 Integer parameter instances store their value independently per native session.
 Current-frame `paramGetValueAtTime` returns that authored snapshot; other times
 still return MissingHostFeature rather than pretending to provide an animation
-history. Choices, multidimensional controls, plugin-preferred interpolation metadata and
-arbitrary-time parameter queries remain separate capability work. The real SessionProbe Integer mode reads the
+history. Choices, multidimensional controls and arbitrary-time parameter queries remain
+separate capability work. The real SessionProbe Integer mode reads the
 Integer via the OFX suite and multiplies every output channel; product acceptance
 checks native bounds/type rejection and a canonical animated integer midpoint
 through the shared compiled graph. This is a contract probe, not a vendor matrix.
+
+
+### Plugin-preferred scalar interpolation
+
+Scalar Integer/Double descriptor properties register `kOfxParamInterpType` with
+its normative Linear default. The description worker retains ConstantStep,
+Linear or Smooth as the canonical Hold/Linear/Bezier preference. Unknown values
+reject the description rather than silently choosing a different curve. This
+preference becomes the first admitted mode in the shared author parameter
+contract. Plugin preferences govern new keys only; users can still choose other
+admitted modes and existing authored keys are not reinterpreted.
+
+Interpolation metadata is writable on descriptors and read-only on native
+instances. The property suite enforces read-only flags for scalar/array setters
+and reset, while internal host property writes retain their own authority. A
+real probe sets Hold for an Integer and Smooth for a Double, attempts all three
+forbidden instance mutations, verifies unchanged metadata and executes the Hold
+curve through the product compiled graph. A separate invalid-metadata probe
+requires description rejection before registration.

@@ -4018,7 +4018,7 @@ fn numeric_curve_model_for_property(
         || property.channel_count() != 1
         || !matches!(
             property.value_type(),
-            PropertyValueType::Float | PropertyValueType::Double
+            PropertyValueType::Float | PropertyValueType::Double | PropertyValueType::Int
         )
     {
         return None;

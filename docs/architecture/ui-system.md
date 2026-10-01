@@ -2665,3 +2665,18 @@ use the existing set/clear interface; no mutable field compatibility aliases are
 retained. Publication identity stays outside `StatusLogEntry`: history still
 deduplicates identical adjacent message facts and severity, so repeated failures
 do not flood it. Locale projection never publishes another status.
+
+
+### Numeric Integer effect curves
+
+The Inspector curve projection and App authoring transaction accept owner-declared
+bounded numeric Integer parameters alongside Float and Double. Normalized curve
+writes round to an integer only within the exactly representable f64 integer
+range, then validate the canonical parameter contract. New keys and animation
+enable use the first allowed interpolation declared by the parameter owner.
+Audio curve insertion follows the same ordered contract. Undo/Redo retains typed
+integer values and stable key identities; evaluation remains in Core.
+
+The current Inspector integer value input still passes through f32 and requires
+separate exact integer input work before claiming unrestricted integer UI
+precision.

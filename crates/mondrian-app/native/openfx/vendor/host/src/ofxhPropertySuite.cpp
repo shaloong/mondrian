@@ -781,6 +781,7 @@ namespace OFX {
 #           endif
             return kOfxStatErrUnknown;
           }
+          if (prop->getPluginReadOnly()) { return kOfxStatErrValue; }
           prop->setValue(value, index);
         } catch (const Exception& e) {
 #         ifdef OFX_DEBUG_PROPERTIES
@@ -829,6 +830,7 @@ namespace OFX {
 #           endif
             return kOfxStatErrUnknown;
           }
+          if (prop->getPluginReadOnly()) { return kOfxStatErrValue; }
           prop->setValueN(values, count);
         } catch (const Exception& e) {
 #         ifdef OFX_DEBUG_PROPERTIES
@@ -956,6 +958,7 @@ namespace OFX {
 #           endif
             return kOfxStatErrUnknown;
           }
+          if (prop->getPluginReadOnly()) { return kOfxStatErrValue; }
           prop->reset();
 #         ifdef OFX_DEBUG_PROPERTIES
           std::cout << ' ' << StatStr(kOfxStatOK) << std::endl;

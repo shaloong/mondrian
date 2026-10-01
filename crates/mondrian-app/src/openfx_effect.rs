@@ -228,6 +228,15 @@ fn build_definition(
                     mondrian_core::automation::ParameterInterpolation::Bezier,
                 ];
             }
+            let preferred = parameter.preferred_interpolation;
+            if !descriptor.schema.allowed_interpolations.contains(&preferred) {
+                return Err(OpenFxEffectRegistrationError::Schema(format!(
+                    "parameter `{}` declares unsupported default interpolation",
+                    parameter.name
+                )));
+            }
+            descriptor.schema.allowed_interpolations.retain(|mode| *mode != preferred);
+            descriptor.schema.allowed_interpolations.insert(0, preferred);
             descriptor.ui_metadata.display_order = Some(index as u32);
             descriptor.ui_metadata.group_name = Some("OpenFX".to_owned());
             if matches!(
@@ -478,6 +487,8 @@ mod tests {
                     label: "Gain".to_owned(),
                     hint: "Multiply every channel".to_owned(),
                     default_value: OpenFxScalarValue::Double(1.0),
+                    preferred_interpolation:
+                        mondrian_core::automation::ParameterInterpolation::Linear,
                     double_type: Some(OpenFxDoubleType::Scale),
                     minimum: Some(0.0),
                     maximum: Some(2.0),
@@ -492,6 +503,8 @@ mod tests {
                     label: "Internal Switch".to_owned(),
                     hint: String::new(),
                     default_value: OpenFxScalarValue::Boolean(false),
+                    preferred_interpolation:
+                        mondrian_core::automation::ParameterInterpolation::Hold,
                     double_type: None,
                     minimum: None,
                     maximum: None,

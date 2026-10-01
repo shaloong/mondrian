@@ -32,6 +32,7 @@ struct MondrianOpenFxParameterInfo {
   const char* hint;
   size_t hint_length;
   int kind; // 1: double, 2: boolean, 3: integer
+  int preferred_interpolation; // 0: hold, 1: linear, 2: smooth
   int double_type; // 0: plain, 1: scale, -1: not a Double
   double default_value;
   double minimum;

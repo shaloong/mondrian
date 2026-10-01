@@ -16,3 +16,10 @@ Mondrian changes to upstream source:
   not use the XML plugin cache, and OCIO already bundles Expat.
 
 The product filter host is maintained separately in `../host`.
+
+- `host/src/ofxhParam.cpp` registers the OFX scalar Integer/Double default
+  interpolation property, including the normative Linear default.
+
+- Numeric interpolation metadata is read-only on parameter instances.
+  `host/src/ofxhPropertySuite.cpp` enforces existing read-only flags for scalar,
+  array and reset operations at the plugin suite boundary.

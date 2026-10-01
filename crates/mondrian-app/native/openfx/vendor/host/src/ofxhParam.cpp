@@ -417,6 +417,15 @@ namespace OFX {
 
         _properties.addProperties(allNumeric);
 
+        // OFX scalar numeric controls declare the default author interpolation.
+        if (dim == 1 && (isDoubleParam(type) || isIntParam(type))) {
+          static const Property::PropSpec scalarInterpolation[] = {
+            { kOfxParamInterpType, Property::eString, 1, false, kOfxParamInterpTypeLinear },
+            Property::propSpecEnd
+          };
+          _properties.addProperties(scalarInterpolation);
+        }
+
         /// if any double or a colour
         if (valueType == Property::eDouble) {
           static const Property::PropSpec allDouble[] = {
@@ -547,6 +556,9 @@ namespace OFX {
         , _paramSetInstance(paramSet)
         , _parentInstance(0)
       {
+        if (auto* interpolation = _properties.fetchProperty(kOfxParamInterpType, false)) {
+          interpolation->setPluginReadOnly(true);
+        }
         _properties.addNotifyHook(kOfxParamPropEnabled, this);
         _properties.addNotifyHook(kOfxParamPropSecret, this);
         _properties.addNotifyHook(kOfxPropLabel, this);

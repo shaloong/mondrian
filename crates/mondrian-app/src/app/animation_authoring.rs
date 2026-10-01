@@ -8,9 +8,8 @@
 
 use super::{AppState, SelectedClipRef};
 use mondrian_core::automation::{
-    AnimatedProperty, AnimationParameterAddress, InterpolationType, Keyframe,
-    ParameterInterpolation, PropertyBag, PropertyHost, PropertyMutation, PropertyValue,
-    PropertyValueType,
+    AnimationParameterAddress, InterpolationType, Keyframe, ParameterInterpolation, PropertyBag,
+    PropertyHost, PropertyMutation, PropertyValue, PropertyValueType,
 };
 use mondrian_core::{EffectId, KeyframeId, MondrianError, Result, TimeScale, TimelineTime};
 
@@ -201,7 +200,7 @@ impl AppState {
             && property.channel_count() == 1
             && matches!(
                 property.value_type(),
-                PropertyValueType::Float | PropertyValueType::Double
+                PropertyValueType::Float | PropertyValueType::Double | PropertyValueType::Int
             )
             && property.descriptor.schema.numeric.is_some()
             && !property.descriptor.schema.allowed_interpolations.is_empty()
@@ -237,7 +236,7 @@ impl AppState {
             || property.channel_count() != 1
             || !matches!(
                 property.value_type(),
-                PropertyValueType::Float | PropertyValueType::Double
+                PropertyValueType::Float | PropertyValueType::Double | PropertyValueType::Int
             )
             || property.descriptor.schema.numeric.is_none()
         {
@@ -257,7 +256,7 @@ impl AppState {
                 keyframe: Keyframe::from_preset(
                     time,
                     property.evaluate(time),
-                    default_curve_interpolation(property)?,
+                    property.default_interpolation()?,
                 ),
             }
         };
@@ -327,7 +326,7 @@ fn prepare_curve_edit(
     let value_type = property.value_type();
     if !matches!(
         value_type,
-        PropertyValueType::Float | PropertyValueType::Double
+        PropertyValueType::Float | PropertyValueType::Double | PropertyValueType::Int
     ) {
         return Err(curve_error(format!(
             "parameter {} is not a floating-point curve",
@@ -491,11 +490,8 @@ fn prepare_curve_edit(
                 });
             }
 
-            let keyframe = Keyframe::from_preset(
-                target_time,
-                target_value,
-                default_curve_interpolation(property)?,
-            );
+            let keyframe =
+                Keyframe::from_preset(target_time, target_value, property.default_interpolation()?);
             let keyframe_id = keyframe.id;
             Ok(PreparedCurveEdit {
                 mutations: vec![PropertyMutation::SetKeyframe { path: path.to_owned(), keyframe }],
@@ -517,22 +513,6 @@ fn schema_interpolation(interpolation: InterpolationType) -> ParameterInterpolat
     }
 }
 
-fn default_curve_interpolation(property: &AnimatedProperty) -> Result<InterpolationType> {
-    let allowed = &property.descriptor.schema.allowed_interpolations;
-    if allowed.contains(&ParameterInterpolation::Linear) {
-        Ok(InterpolationType::Linear)
-    } else {
-        allowed
-            .first()
-            .map(|interpolation| match interpolation {
-                ParameterInterpolation::Hold => InterpolationType::Hold,
-                ParameterInterpolation::Linear => InterpolationType::Linear,
-                ParameterInterpolation::Bezier => InterpolationType::Bezier,
-            })
-            .ok_or_else(|| curve_error("parameter admits no interpolation"))
-    }
-}
-
 fn curve_time(clip: &mondrian_timeline::Clip, ratio: f64) -> Result<TimelineTime> {
     let ratio = TimelineTime::from_f64_quantized(ratio, CURVE_QUANTIZATION_DENOMINATOR)?;
     let scale = TimeScale::try_from(ratio)?;
@@ -551,7 +531,12 @@ fn curve_value(value_type: PropertyValueType, value: f64) -> Result<PropertyValu
     match value_type {
         PropertyValueType::Float => Ok(PropertyValue::Float(value as f32)),
         PropertyValueType::Double => Ok(PropertyValue::Double(value)),
-        _ => Err(curve_error("curve value mapping requires Float or Double")),
+        PropertyValueType::Int if value.round().abs() <= 9_007_199_254_740_992.0 => {
+            Ok(PropertyValue::Int(value.round() as i64))
+        }
+        _ => Err(curve_error(
+            "curve value mapping requires an exactly representable numeric value",
+        )),
     }
 }
 
@@ -636,7 +621,9 @@ mod tests {
                     && property.channel_count() == 1
                     && matches!(
                         property.value_type(),
-                        PropertyValueType::Float | PropertyValueType::Double
+                        PropertyValueType::Float
+                            | PropertyValueType::Double
+                            | PropertyValueType::Int
                     )
             })
             .expect("scalar effect parameter");
@@ -663,6 +650,96 @@ mod tests {
             .and_then(|effect| effect.properties.property_by_address(address))
             .map(|(_, property)| property.clone())
             .expect("effect property")
+    }
+
+    #[test]
+    fn integer_effect_curve_rounds_keys_and_preserves_undo_identity() {
+        use mondrian_core::automation::{
+            ParameterInvalidValuePolicy, ParameterNumericContract, ParameterUnit,
+            PropertyDescriptor,
+        };
+        use mondrian_effects::{
+            instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
+            EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
+            EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
+            EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
+        };
+        let kind = EffectType::Plugin("plugin.test.integer_author_curve".to_owned());
+        let path = "plugin.test.integer_author_curve.count";
+        let mut descriptor = PropertyDescriptor::new(path, "Count", PropertyValue::Int(2))
+            .with_parameter_id(kind.parameter_id("count").expect("parameter"))
+            .with_numeric_contract(
+                ParameterUnit::Unitless,
+                ParameterNumericContract::closed(
+                    0.0,
+                    9.0,
+                    Some(1.0),
+                    ParameterInvalidValuePolicy::Reject,
+                )
+                .expect("range"),
+            );
+        descriptor.schema.allowed_interpolations = vec![
+            ParameterInterpolation::Linear,
+            ParameterInterpolation::Hold,
+            ParameterInterpolation::Bezier,
+        ];
+        let definition = EffectPluginDefinitionBuilder::new(
+            kind.key(),
+            "Integer curve",
+            EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            determinism: EffectDeterminism::Deterministic,
+            state_model: EffectStateModel::Stateless,
+            temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+            resource_lifetime: EffectResourceLifetime::Frame,
+            topology: EffectGraphTopology::LinearChain,
+        })
+        .property(descriptor)
+        .with_branching_graph(|_, _, graph| {
+            graph.apply(EffectRenderOp::Sharpen { amount: 0.0 });
+        })
+        .build();
+        register_effect_definition(definition).expect("register definition");
+        let effect = instantiate_effect_node(kind).expect("effect");
+        let effect_id = effect.id;
+        let address = effect.properties.property(path).expect("count").address();
+        let (mut state, selection, _) = state_with_clip();
+        state
+            .active_sequence_mut_uncommitted()
+            .expect("sequence")
+            .find_clip_mut(selection.clip_id)
+            .expect("clip")
+            .add_effect_node(effect);
+        let before = effect_property(&state, selection, effect_id, &address);
+        let inserted = state
+            .edit_effect_numeric_curve(
+                selection.clip_id,
+                effect_id,
+                address.clone(),
+                ClipNumericCurveEdit::Upsert {
+                    keyframe_id: None,
+                    point: NormalizedCurvePoint::new(0.5, 0.5).expect("point"),
+                },
+            )
+            .expect("integer curve insert");
+        let after = effect_property(&state, selection, effect_id, &address);
+        let key = after.keyframe_by_id(inserted.keyframe_id).expect("key");
+        assert_eq!(key.value, PropertyValue::Int(5));
+        assert_eq!(key.interp_in, KeyframeInterpolation::Linear);
+        assert_eq!(key.interp_out, KeyframeInterpolation::Linear);
+        assert!(state.undo_timeline().expect("undo"));
+        assert_eq!(
+            effect_property(&state, selection, effect_id, &address),
+            before
+        );
+        assert!(state.redo_timeline().expect("redo"));
+        assert_eq!(
+            effect_property(&state, selection, effect_id, &address),
+            after
+        );
     }
 
     #[test]

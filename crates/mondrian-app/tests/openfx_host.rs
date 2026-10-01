@@ -1065,3 +1065,117 @@ fn integer_filter_preserves_typed_authoring_and_native_pixels() {
         }
     }
 }
+
+#[test]
+#[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and MONDRIAN_OPENFX_SESSION_PROBE_MODE=interpolation"]
+fn plugin_interpolation_metadata_controls_new_author_keys_and_readonly_instances() {
+    use mondrian_core::automation::{InterpolationType, ParameterInterpolation};
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
+        "interpolation"
+    );
+    let binary =
+        PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));
+    let inspection = inspect_openfx_binary(product_executable(), &binary).expect("inspect");
+    let identifier = "uk.co.thefoundry.BasicGainPlugin";
+    let description =
+        describe_openfx_filter(product_executable(), &inspection, identifier).expect("describe");
+    assert_eq!(
+        description
+            .parameters
+            .iter()
+            .find(|p| p.name == "count")
+            .expect("integer")
+            .preferred_interpolation,
+        ParameterInterpolation::Hold
+    );
+    assert_eq!(
+        description
+            .parameters
+            .iter()
+            .find(|p| p.name == "scale")
+            .expect("double")
+            .preferred_interpolation,
+        ParameterInterpolation::Bezier
+    );
+    let kind = register_selected_openfx_filter(product_executable(), &inspection, identifier)
+        .expect("register");
+    let mut effect = instantiate_effect_node(kind).expect("instance");
+    let count = effect
+        .properties
+        .iter()
+        .find(|(_, p)| p.descriptor.display_name == "Count")
+        .expect("count")
+        .0
+        .to_owned();
+    assert_eq!(
+        effect
+            .properties
+            .property(&count)
+            .expect("count")
+            .default_interpolation()
+            .expect("default"),
+        InterpolationType::Hold
+    );
+    effect
+        .properties
+        .enable_animation(&count, TimelineTime::ZERO)
+        .expect("initial key");
+    effect
+        .properties
+        .write_value(
+            &count,
+            TimelineTime::new(2, 24).expect("time"),
+            PropertyValue::Int(6),
+            InterpolationType::Hold,
+        )
+        .expect("second key");
+    let range = TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::new(10, 24).expect("end"))
+        .expect("range");
+    let context = EffectFrameContext::new(Rational::FPS_24, SampleAspectRatio::SQUARE, range)
+        .expect("context");
+    let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+        &[effect],
+        &[],
+        &[],
+        &[],
+        WorkingColorSpace::LinearRec709,
+        context,
+        &LutPreparationCache::uncached(),
+    )
+    .expect("compile");
+    let input = vec![[0.1, 0.2, 0.3, 0.05]; 4];
+    for (frame, multiplier) in [(1, 2.0), (2, 6.0)] {
+        let graph =
+            program.evaluate(TimelineTime::new(frame, 24).expect("time")).expect("evaluate");
+        let output = apply_compiled_effect_graph_rgba_f32(&input, 2, 2, &graph, 1291)
+            .expect("render readonly instance");
+        for (actual, original) in output.iter().zip(&input) {
+            for channel in 0..4 {
+                assert!((actual[channel] - original[channel] * multiplier).abs() < 1e-6);
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and MONDRIAN_OPENFX_SESSION_PROBE_MODE=bad_interpolation"]
+fn unknown_plugin_interpolation_is_rejected_before_registration() {
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
+        "bad_interpolation"
+    );
+    let binary =
+        PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));
+    let inspection = inspect_openfx_binary(product_executable(), &binary).expect("inspect");
+    let error = describe_openfx_filter(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+    )
+    .expect_err("unknown mode must fail closed");
+    assert!(
+        matches!(error, OpenFxHostError::WorkerFailed(ref reason) if reason.contains("native status 7")),
+        "{error}"
+    );
+}

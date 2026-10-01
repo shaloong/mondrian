@@ -1565,3 +1565,15 @@ Hold-only contract. Canonical numeric channels evaluate the curve and round
 integer samples to the nearest integer, with halfway values away from zero.
 OpenFX Integer controls use this same path with stricter signed 32-bit hard
 bounds and a one-unit editor step; no plugin-specific curve evaluator exists.
+
+
+### Definition-owned new-key interpolation
+
+`ParameterSchema::allowed_interpolations` is ordered: its first entry is the
+new-key default. Generic numeric definitions put Linear first; categorical and
+generic Int definitions use Hold. Plugin definitions put their declared default
+first while retaining other admitted user choices. Animation enable, value writes
+that insert keys, and App curve insertion all ask the same core
+`AnimatedProperty::default_interpolation` seam. Numeric Int writes no longer
+normalize explicit owner-admitted modes to Hold; their bounded schema governs
+admission. Existing keys retain their authored handles and temporal flags.
