@@ -729,6 +729,10 @@ impl Widget for CurveEditor {
         self.bounds.contains(point)
     }
 
+    fn has_active_pointer_interaction(&self) -> bool {
+        self.dragging.is_some()
+    }
+
     fn can_focus(&self) -> bool {
         self.enabled
     }
@@ -935,6 +939,7 @@ mod tests {
                 editor.id()
             ))
         );
+        assert!(editor.has_active_pointer_interaction());
         editor.event(
             &UiEvent::MouseMove { position: target, modifiers: Modifiers::none() },
             &mut ctx,
@@ -954,6 +959,7 @@ mod tests {
                 editor.id()
             ))
         );
+        assert!(!editor.has_active_pointer_interaction());
         assert_eq!(editor.points()[1].x, 1.0);
         assert!(editor.points()[1].y < 0.2);
     }

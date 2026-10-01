@@ -636,6 +636,16 @@ pub trait Widget {
         false
     }
 
+    /// Whether this widget owns an unfinished pointer interaction.
+    ///
+    /// Model hosts must retain the widget while a drag is in progress so routed
+    /// pointer capture keeps its owner. This is local input state, independent
+    /// of focus, accessibility, and whether the interaction has changed a value.
+    /// Return false after release, cancellation, or programmatic disable.
+    fn has_active_pointer_interaction(&self) -> bool {
+        false
+    }
+
     /// Accessibility metadata for this widget.
     ///
     /// Containers that are only layout structure can return `None`; controls

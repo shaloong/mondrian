@@ -331,6 +331,10 @@ impl Widget for Slider {
         self.bounds.contains(point)
     }
 
+    fn has_active_pointer_interaction(&self) -> bool {
+        self.dragging
+    }
+
     fn can_focus(&self) -> bool {
         self.enabled
     }
@@ -719,7 +723,7 @@ mod tests {
             ctx.requests.pointer_capture,
             Some(PointerCaptureRequest::Release(s.id()))
         );
-        assert!(!s.dragging);
+        assert!(!s.has_active_pointer_interaction());
     }
 
     #[test]

@@ -1121,7 +1121,10 @@ impl AppUiHost {
         let next_mode = mode_for_app_state(&self.app_state.borrow());
         if next_mode == self.mode && widget_tree_has_transient_interaction(self.active_root()) {
             self.ui_dirty.set(true);
-            if preview_refresh && self.mode == AppUiMode::Workspace {
+            // Retain input widgets without retaining an obsolete author picture.
+            // Full author dirtiness requires the same current Preview projection
+            // even when no separate media-worker repaint was requested.
+            if self.mode == AppUiMode::Workspace {
                 self.refresh_preview_state_without_rebuild();
                 self.sync_playback_feedback_from_viewer();
             }
@@ -2408,6 +2411,7 @@ fn mode_for_app_state(state: &AppState) -> AppUiMode {
 
 fn widget_tree_has_transient_interaction(widget: &dyn Widget) -> bool {
     widget.accepts_text_input()
+        || widget.has_active_pointer_interaction()
         || widget.overlay_hit_test(Point::new(-1_000_000.0, -1_000_000.0))
         || (0..widget.child_count())
             .any(|index| widget.child(index).is_some_and(widget_tree_has_transient_interaction))
@@ -5014,6 +5018,133 @@ mod tests {
 
         assert_eq!(commands, AppUiShellCommands::default());
         assert!(host.root().dock().ratio() > 0.0);
+    }
+
+    #[test]
+    fn inspector_slider_capture_survives_author_refresh_until_release() {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        use mondrian_ui_core::{AccessibilityRole, WidgetId};
+        use mondrian_ui_events::EventRouter;
+
+        fn inspector_slider(widget: &dyn Widget, in_inspector: bool) -> Option<WidgetId> {
+            let in_inspector = in_inspector || widget.panel_kind() == Some(PanelKind::Inspector);
+            if in_inspector
+                && widget
+                    .accessibility()
+                    .is_some_and(|node| node.role == AccessibilityRole::Slider)
+            {
+                return Some(widget.id());
+            }
+            (0..widget.child_count()).find_map(|index| {
+                widget.child(index).and_then(|child| inspector_slider(child, in_inspector))
+            })
+        }
+
+        for lose_focus in [false, true] {
+            let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+            let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+            let mut state = workspace_app_state_with_timed_solid();
+            let sequence = state.active_sequence().expect("Sequence");
+            let track = &sequence.video_tracks[0];
+            state.selection.selected_clips = vec![crate::app::SelectedClipRef {
+                track_id: track.id,
+                is_video_track: true,
+                clip_id: track.clips[0].id,
+            }];
+            let mut host = AppUiHost::new_with_preferences_path(
+                state,
+                AppUiPreferences::default(),
+                temp_preferences_path("slider-refresh"),
+            );
+            TreeWalker::layout(host.active_root_mut(), bounds);
+            let slider_id = inspector_slider(host.active_root(), false).expect("Inspector slider");
+            let point = {
+                let tree = WidgetTreeView::new(host.active_root_mut());
+                let slider = tree.get(slider_id).expect("slider");
+                (0..720)
+                    .step_by(4)
+                    .find_map(|y| {
+                        (0..1280).step_by(4).find_map(|x| {
+                            let point = Point::new(x as f32, y as f32);
+                            slider.hit_test(point).then_some(point)
+                        })
+                    })
+                    .expect("visible slider point")
+            };
+            let pending = PendingUiActions::default();
+            let dispatch = |action| pending.push(action);
+            let mut router = EventRouter::new(host.active_root().id());
+            assert_eq!(
+                router.route(
+                    UiEvent::MouseDown {
+                        position: point,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::default()
+                    },
+                    &mut WidgetTreeView::new(host.active_root_mut()),
+                    &dispatch,
+                ),
+                EventResult::Handled
+            );
+            assert_eq!(router.captured(), Some(slider_id));
+            let before = host.app_state().active_sequence().expect("Sequence").clone();
+            host.window_preview_state.replace(ViewerPreviewState::Loading);
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            assert!(
+                matches!(
+                    &*host.window_preview_state.borrow(),
+                    ViewerPreviewState::Transparent
+                ),
+                "deferred panel rebuild must still evaluate the current Viewer output"
+            );
+            assert_ne!(
+                host.app_state().active_sequence().expect("Sequence"),
+                &before,
+                "real author edit"
+            );
+            assert!(
+                WidgetTreeView::new(host.active_root_mut()).get(slider_id).is_some(),
+                "author refresh must retain the captured Inspector control"
+            );
+            let before_move = host.app_state().active_sequence().expect("Sequence").clone();
+            assert_eq!(
+                router.route(
+                    UiEvent::MouseMove {
+                        position: Point::new(point.x + 24.0, point.y),
+                        modifiers: Modifiers::default()
+                    },
+                    &mut WidgetTreeView::new(host.active_root_mut()),
+                    &dispatch,
+                ),
+                EventResult::Handled
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            assert_ne!(
+                host.app_state().active_sequence().expect("Sequence"),
+                &before_move,
+                "continued live author edit"
+            );
+            assert_eq!(router.captured(), Some(slider_id));
+            router.route(
+                if lose_focus {
+                    UiEvent::FocusLost
+                } else {
+                    UiEvent::MouseUp {
+                        position: point,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::default(),
+                    }
+                },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &dispatch,
+            );
+            assert_eq!(router.captured(), None);
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            assert!(
+                WidgetTreeView::new(host.active_root_mut()).get(slider_id).is_none(),
+                "deferred models must refresh after release"
+            );
+        }
     }
 
     #[test]

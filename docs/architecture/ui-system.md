@@ -2772,3 +2772,23 @@ position before applying history. It does not invoke the explicit Stop command
 that returns to frame zero. Restored author snapshots retain monotonic revisions
 and the editor cursor, so the next animated parameter edit uses the same
 Clip-local author time rather than silently targeting an earlier key.
+
+### Refresh admission during pointer editing
+
+`Widget::has_active_pointer_interaction` reports local unfinished pointer
+input, independently of keyboard focus and accessibility presentation. Slider
+and CurveEditor report their actual drag state and clear it on release,
+focus loss, or disable; CurveEditor also clears it on Escape cancellation. AppUiHost includes this signal in its
+recursive transient-interaction admission check. Author actions still commit
+and synchronize Preview intent immediately; a same-mode full model rebuild is
+deferred until the gesture ends. The existing bounded Preview/frame projection
+still runs for full author dirtiness, even without a separate worker repaint,
+so retaining input widgets cannot retain an obsolete author picture. This retains the EventRouter capture owner
+without copying stale parameter values into new widgets. An empty action drain
+after pointer release admits the deferred model refresh. Real Inspector tests
+route pointer down/move/release and window focus loss through EventRouter and
+the Host, verifying continued live author edits and eventual refresh.
+
+This admission contract does not coalesce author history or establish validity
+for a removed/locked owner; current owner validation remains in action dispatch.
+Owner transitions and other captured widgets require their own qualification.
