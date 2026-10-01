@@ -2646,3 +2646,22 @@ project failures use the actual anyhow chain. Locale switching therefore changes
 error headings without replacing paths, native details or error evidence. The
 App does not parse core diagnostic Display strings. Existing String reason bodies
 remain a separate typed-domain diagnostic migration requirement.
+
+
+### Status publication ownership
+
+Host fallback decisions use a typed transient `StatusPublicationId`, not equality
+of message text or arguments. App status set/clear generates a fresh identity,
+including an identical repeated report. A current error published during the
+synchronous dispatch retains its operation-specific context. If the action
+reports nothing, clears status, or only reports success before failing, the Host
+publishes its typed generic failure. The observation is made across the one
+Main-thread dispatch; it is not a realtime queue, EventBus request or authoring
+generation.
+
+Current status and history are private App state. Public read-only `status_hint`
+and `status_log` observations prevent callers bypassing publication. All changes
+use the existing set/clear interface; no mutable field compatibility aliases are
+retained. Publication identity stays outside `StatusLogEntry`: history still
+deduplicates identical adjacent message facts and severity, so repeated failures
+do not flood it. Locale projection never publishes another status.

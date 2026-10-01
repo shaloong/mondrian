@@ -3141,7 +3141,7 @@ impl ExportPanelModel {
             ancillary_error,
             regulatory_pse: state.export_draft.regulatory_pse.clone(),
             delivery_error,
-            status: state.status_hint.clone(),
+            status: state.status_hint().cloned(),
             jobs,
             can_clear_terminal_history,
         }

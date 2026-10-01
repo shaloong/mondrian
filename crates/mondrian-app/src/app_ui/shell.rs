@@ -478,7 +478,7 @@ fn status_bar_model(state: &AppState, localizer: &Localizer) -> StatusBarModel {
     let jobs = state.export_jobs_snapshot();
     let active_jobs = jobs.iter().filter(|job| !job.status.is_terminal()).collect::<Vec<_>>();
 
-    let (message, is_error, is_busy) = if let Some((message, true)) = &state.status_hint {
+    let (message, is_error, is_busy) = if let Some((message, true)) = state.status_hint() {
         (localizer.message(message), true, false)
     } else if let Some(job) = active_jobs.first() {
         let message = active_export_status_text(
@@ -488,7 +488,7 @@ fn status_bar_model(state: &AppState, localizer: &Localizer) -> StatusBarModel {
             localizer,
         );
         (message, false, true)
-    } else if let Some((message, is_error)) = &state.status_hint {
+    } else if let Some((message, is_error)) = state.status_hint() {
         (localizer.message(message), *is_error, false)
     } else {
         (localizer.text("status-ready"), false, false)
@@ -1132,7 +1132,7 @@ impl AppUiAppRoot {
             preferences.custom_workspace_layout.clone(),
             status_model,
         );
-        root.status_bar.sync_history(&state.status_log);
+        root.status_bar.sync_history(state.status_log());
         root.status_bar.notifications =
             NotificationOverlay::from_existing(&state.notifications, root.preferences_model.locale);
         root.notification_session_id = state.authoring_session_id();
@@ -1412,7 +1412,7 @@ impl AppUiAppRoot {
     ) -> bool {
         let frame = state.current_frame().max(0);
         self.status_bar.set_model(status_bar_model(state, &self.localizer));
-        self.status_bar.sync_history(&state.status_log);
+        self.status_bar.sync_history(state.status_log());
         self.sync_notifications(state, self.preferences_model.locale);
         let mut viewer = ViewerPanelModel::from_app_state_with_preview_and_locale(
             state,
@@ -1496,7 +1496,7 @@ impl AppUiAppRoot {
         self.title_bar
             .menu_bar_mut()
             .refresh_for_app_state_with_shortcut_overrides(state, &preferences.shortcut_overrides);
-        self.status_bar.sync_history(&state.status_log);
+        self.status_bar.sync_history(state.status_log());
         self.active_sequence = state.active_sequence().cloned();
         self.project_color_environment = state.project_color_environment().clone();
         self.new_sequence_defaults = state.new_sequence_defaults().clone();
@@ -4679,8 +4679,8 @@ mod tests {
             true,
         );
         let generation = state.project_author_generation();
-        let hint = state.status_hint.clone();
-        let history = state.status_log.clone();
+        let hint = state.status_hint().cloned();
+        let history = state.status_log().to_vec();
         let mut preferences = AppUiPreferences::default();
         let mut root = AppUiAppRoot::from_app_state_with_preferences(&state, &preferences);
         root.status_bar.history_open = true;
@@ -4708,8 +4708,8 @@ mod tests {
                 assert!(root.status_bar.history_entry_text(first).contains("Project packaged"));
             }
             assert_eq!(state.project_author_generation(), generation);
-            assert_eq!(state.status_hint, hint);
-            assert_eq!(state.status_log, history);
+            assert_eq!(state.status_hint(), hint.as_ref());
+            assert_eq!(state.status_log(), history);
             assert_eq!(root.status_bar.history, history);
             assert_eq!(root.status_bar.id, widget_id);
             assert!(root.status_bar.history_open);
@@ -4736,7 +4736,7 @@ mod tests {
         assert_eq!(
             model.message,
             crate::app_ui::localization::chinese_product_message(
-                &state.status_hint.as_ref().expect("status").0
+                &state.status_hint().expect("status").0
             )
         );
         assert!(!model.is_error);

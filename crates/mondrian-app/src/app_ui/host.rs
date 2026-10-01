@@ -1776,7 +1776,7 @@ impl AppUiHost {
         let refresh_recovery_after_failure = is_recovery_project_action(&action);
         let previous_project_path =
             self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
-        let previous_status_hint = self.app_state.borrow().status_hint.clone();
+        let previous_publication = self.app_state.borrow().status_publication_id();
         let result = self.app_state.borrow_mut().dispatch_action(action);
         if result.is_ok() {
             let had_installed_plugin = installed_plugin.is_some();
@@ -1805,7 +1805,7 @@ impl AppUiHost {
                 self.refresh_recovery_candidates();
             }
         } else if let Err(err) = &result {
-            self.set_unreported_action_error_status(previous_status_hint, err);
+            self.set_unreported_action_error_status(previous_publication, err);
             if refresh_recovery_after_failure {
                 self.refresh_recovery_candidates();
             }
@@ -1815,13 +1815,12 @@ impl AppUiHost {
 
     fn set_unreported_action_error_status(
         &self,
-        previous_status_hint: Option<(crate::app::AppMessage, bool)>,
+        previous_publication: crate::app::StatusPublicationId,
         err: &mondrian_core::MondrianError,
     ) {
         let mut state = self.app_state.borrow_mut();
-        let current_status_hint = state.status_hint.clone();
-        let has_new_error = current_status_hint.as_ref().is_some_and(|(_, is_error)| *is_error)
-            && current_status_hint != previous_status_hint;
+        let has_new_error = state.status_hint().is_some_and(|(_, is_error)| *is_error)
+            && state.status_publication_id() != previous_publication;
         if !has_new_error {
             state.set_status_hint(
                 AppMessage::new("status-action-failed")
@@ -3133,13 +3132,13 @@ mod tests {
         .expect("queue selected bundle");
         assert!(host.preferences.installed_openfx_bundles.is_empty());
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !host.app_state().status_hint.as_ref().is_some_and(|(_, error)| *error)
+        while !host.app_state().status_hint().is_some_and(|(_, error)| *error)
             && Instant::now() < deadline
         {
             host.poll_background_tasks(Rect::new(0.0, 0.0, 1280.0, 720.0));
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(host.app_state().status_hint.as_ref().is_some_and(|(_, error)| *error));
+        assert!(host.app_state().status_hint().is_some_and(|(_, error)| *error));
         assert!(host.preferences.installed_openfx_bundles.is_empty());
         assert!(load_app_ui_preferences_from(&preferences_path)
             .installed_openfx_bundles
@@ -3817,7 +3816,7 @@ mod tests {
             .expect_err("unknown registered UI action should fail");
 
         let state = host.app_state();
-        let (message, is_error) = state.status_hint.as_ref().expect("status hint");
+        let (message, is_error) = state.status_hint().expect("status hint");
         assert!(*is_error);
         assert!(crate::app_ui::localization::chinese_product_message(message).contains("操作失败"));
         assert!(
@@ -3834,6 +3833,102 @@ mod tests {
         assert!(text.contains("Workflow step failed"));
         assert!(text.contains("unknown app UI action"));
         assert!(!text.contains("工作流步骤失败"));
+    }
+
+    #[test]
+    fn repeated_specific_error_keeps_its_context_and_deduplicates_history() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new_with_preferences_path(
+            AppState::new(),
+            AppUiPreferences::default(),
+            temp_preferences_path("repeated-specific-error"),
+        );
+        let generation = host.app_state().project_author_generation();
+        let mut first = None;
+        for _ in 0..2 {
+            host.dispatch_editor_action(Action::ImportMedia(vec![PathBuf::from("")]))
+                .expect_err("empty import");
+            let state = host.app_state();
+            let hint = state.status_hint().cloned().expect("specific error");
+            assert_eq!(hint.0.id, "status-import-failed");
+            assert!(hint.1);
+            let english = crate::app_ui::localization::Localizer::new(
+                crate::app_ui::localization::AppUiLocale::EnUs,
+            )
+            .expect("English")
+            .message(&hint.0);
+            assert!(english.contains("Import failed"));
+            assert!(english.contains("Choose a media file"));
+            if let Some(first) = &first {
+                assert_eq!(&hint, first);
+            } else {
+                first = Some(hint);
+            }
+            assert_eq!(state.status_log().len(), 1);
+            assert_eq!(state.project_author_generation(), generation);
+        }
+        // A new action which publishes nothing must replace the stale prior error.
+        host.dispatch_editor_action(Action::Custom {
+            namespace: crate::app::ui_actions::TIMELINE_NAMESPACE.to_owned(),
+            name: "unknown".to_owned(),
+            payload: serde_json::Value::Null,
+        })
+        .expect_err("unknown action");
+        let state = host.app_state();
+        assert_eq!(
+            state.status_hint().expect("fallback").0.id,
+            "status-action-failed"
+        );
+        assert_eq!(state.status_log().len(), 2);
+        assert_eq!(state.project_author_generation(), generation);
+    }
+
+    #[test]
+    fn error_fallback_requires_a_current_error_publication() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        for case in ["same-error", "stale-error", "cleared", "success"] {
+            let mut state = AppState::new();
+            let specific = AppMessage::new("status-import-failed")
+                .with_message("reason", AppMessage::new("reason-empty-media-path"));
+            state.set_status_hint(specific.clone(), true);
+            let host = AppUiHost::new_with_preferences_path(
+                state,
+                AppUiPreferences::default(),
+                temp_preferences_path(&format!("error-publication-{case}")),
+            );
+            let previous = host.app_state().status_publication_id();
+            let generation = host.app_state().project_author_generation();
+            match case {
+                "same-error" => host.app_state.borrow_mut().set_status_hint(specific.clone(), true),
+                "cleared" => host.app_state.borrow_mut().clear_status_hint(),
+                "success" => host
+                    .app_state
+                    .borrow_mut()
+                    .set_status_hint(AppMessage::new("status-saved"), false),
+                "stale-error" => {}
+                _ => unreachable!("fixed test matrix"),
+            }
+            host.set_unreported_action_error_status(
+                previous,
+                &mondrian_core::MondrianError::Other(anyhow::anyhow!("unreported failure")),
+            );
+            let state = host.app_state();
+            let (message, is_error) = state.status_hint().expect("error");
+            assert!(*is_error);
+            assert_eq!(
+                message.id,
+                if case == "same-error" {
+                    "status-import-failed"
+                } else {
+                    "status-action-failed"
+                }
+            );
+            if case == "same-error" {
+                assert_eq!(message, &specific);
+                assert_eq!(state.status_log().len(), 1);
+            }
+            assert_eq!(state.project_author_generation(), generation);
+        }
     }
 
     #[test]
@@ -3855,7 +3950,7 @@ mod tests {
             .expect_err("empty import should fail");
 
         let state = host.app_state();
-        let (message, is_error) = state.status_hint.as_ref().expect("status hint");
+        let (message, is_error) = state.status_hint().expect("status hint");
         assert!(*is_error);
         assert_ne!(
             message,
@@ -4670,7 +4765,7 @@ mod tests {
             host.mode(),
             AppUiMode::Workspace,
             "recovery status: {:?}",
-            host.app_state().status_hint
+            host.app_state().status_hint()
         );
         assert_eq!(
             host.app_state().current_project_path(),
@@ -5022,7 +5117,7 @@ mod tests {
         assert!(host.audio_device_catalog.request_refresh());
         let deadline = Instant::now() + Duration::from_secs(15);
         let (state, ui) = host.into_app_state_until(deadline);
-        let hint = state.status_hint.clone();
+        let hint = state.status_hint().cloned();
         let app = state.shutdown_for_endurance(deadline);
         assert!(ui.all_resources_released(), "{ui:?}");
         assert!(app.all_resources_released(), "{app:?}");
@@ -5232,7 +5327,7 @@ mod tests {
 
         assert!(!commands.quit);
         assert!(host.app_state().has_open_project());
-        assert!(host.app_state().status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
+        assert!(host.app_state().status_hint().is_some_and(|(_, is_error)| *is_error));
         drop(host);
         cleanup_project_file(&project_file);
     }
@@ -5751,7 +5846,7 @@ mod tests {
 
         assert_eq!(commands, AppUiShellCommands::default());
         assert!(
-            host.app_state().status_hint.as_ref().is_some_and(|(message, is_error)| {
+            host.app_state().status_hint().is_some_and(|(message, is_error)| {
                 *is_error
                     && crate::app_ui::localization::chinese_product_message(message)
                         .contains("missing_command")
@@ -5774,7 +5869,7 @@ mod tests {
         );
 
         assert_eq!(commands, AppUiShellCommands::default());
-        assert!(host.app_state().status_hint.is_none());
+        assert!(host.app_state().status_hint().is_none());
         assert!(!host.app_state().can_undo_action());
     }
 
@@ -5800,7 +5895,7 @@ mod tests {
         );
 
         assert_eq!(commands, AppUiShellCommands::default());
-        assert!(host.app_state().status_hint.is_none());
+        assert!(host.app_state().status_hint().is_none());
         assert_eq!(host.app_state().can_undo_action(), could_undo_before);
     }
 
@@ -5817,7 +5912,7 @@ mod tests {
 
         assert_eq!(commands, AppUiShellCommands::default());
         assert_eq!(platform.open_file_dialog_calls.load(Ordering::Relaxed), 0);
-        assert!(host.app_state().status_hint.is_none());
+        assert!(host.app_state().status_hint().is_none());
     }
 
     #[test]
@@ -5851,11 +5946,11 @@ mod tests {
 
         assert_eq!(commands, AppUiShellCommands::default());
         assert_eq!(host.app_state().pending_media_import_batches(), 1);
-        assert!(host.app_state().status_hint.as_ref().is_some_and(
-            |(message, is_error)| !*is_error
+        assert!(
+            host.app_state().status_hint().is_some_and(|(message, is_error)| !*is_error
                 && crate::app_ui::localization::chinese_product_message(message)
-                    .contains("正在导入")
-        ));
+                    .contains("正在导入"))
+        );
 
         poll_host_background_tasks_until_imports_idle(&mut host);
 
@@ -5868,11 +5963,11 @@ mod tests {
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].name, "dialog-tone.wav");
         assert_eq!(assets[0].folder_id.as_deref(), Some(folder_id.as_str()));
-        assert!(host.app_state().status_hint.as_ref().is_some_and(
-            |(message, is_error)| !*is_error
+        assert!(
+            host.app_state().status_hint().is_some_and(|(message, is_error)| !*is_error
                 && message.id == "status-import-summary"
-                && message.args.get("imported") == Some(&crate::app::AppMessageValue::Number(1))
-        ));
+                && message.args.get("imported") == Some(&crate::app::AppMessageValue::Number(1)))
+        );
 
         let _ = std::fs::remove_dir_all(library_root);
         let _ = std::fs::remove_dir_all(media_root);
@@ -5979,7 +6074,7 @@ mod tests {
 
         assert_eq!(commands, AppUiShellCommands::default());
         assert_eq!(host.root().asset_folder_id(), Some(folder_id.as_str()));
-        assert!(host.app_state().status_hint.is_none());
+        assert!(host.app_state().status_hint().is_none());
 
         pending.push(crate::app::ui_actions::assets_open_folder_action(
             crate::app::ui_actions::AssetsOpenFolderPayload { folder_id: None },
@@ -5991,7 +6086,7 @@ mod tests {
         );
 
         assert_eq!(host.root().asset_folder_id(), None);
-        assert!(host.app_state().status_hint.is_none());
+        assert!(host.app_state().status_hint().is_none());
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -6057,13 +6152,11 @@ mod tests {
 
         assert_eq!(commands, AppUiShellCommands::default());
         assert_eq!(host.root().asset_folder_id(), None);
-        assert!(host
-            .app_state()
-            .status_hint
-            .as_ref()
-            .is_some_and(|(message, is_error)| !*is_error
+        assert!(
+            host.app_state().status_hint().is_some_and(|(message, is_error)| !*is_error
                 && crate::app_ui::localization::chinese_product_message(message)
-                    .contains("Rushes")));
+                    .contains("Rushes"))
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -6083,7 +6176,7 @@ mod tests {
             &NoopPlatformService,
         );
         assert_eq!(commands, AppUiShellCommands::default());
-        assert!(host.app_state().status_hint.is_none());
+        assert!(host.app_state().status_hint().is_none());
 
         assert!(
             !host.ui_dirty.get(),

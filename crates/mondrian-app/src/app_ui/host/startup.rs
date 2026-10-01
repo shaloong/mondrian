@@ -930,7 +930,7 @@ pub fn qualify_app_ui_host_startup_ownership(
         };
         let closed = failure.shutdown_until(Instant::now() + SHUTDOWN_TIMEOUT);
         let identity_preserved = Arc::ptr_eq(&original_event_bus, &closed.app_state.event_bus)
-            && closed.app_state.status_hint.as_ref() == Some(&(marker, false));
+            && closed.app_state.status_hint() == Some(&(marker, false));
         if !identity_preserved || !closed.shutdown.all_created_resources_released() {
             return Err(AppUiHostStartupQualificationError {
                 detail: format!(

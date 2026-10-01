@@ -291,3 +291,19 @@ or admission semantics. New owner variants require explicit projection.
 These branches and exact-time causes are migrated. Other domain diagnostic
 String bodies and remaining product UI literals still require further inventory
 and typed owner contracts before full language coverage is claimed.
+
+
+### Repeated localized failures
+
+Status data identity and report identity have separate responsibilities. An
+identical operation-specific error can be freshly published, even while bounded
+history suppresses an identical row. Host snapshots a typed publication identity
+before dispatch and observes it afterward. This preserves specific nested reason
+messages on consecutive failures while still replacing a genuinely stale error
+when the next action reports nothing. Status and history now expose read-only
+views; direct mutable public field access is removed.
+
+Regression coverage dispatches the same invalid import twice, requires the same
+specific localized error and one history row, then dispatches an unreported
+failure and requires the generic typed fallback. Further cases cover clearing,
+success-only reporting and unchanged author generation.

@@ -406,6 +406,16 @@ pub enum AppClipboardKind {
     Clips,
 }
 
+/// Identity of a transient status publication, independent of its display data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StatusPublicationId(uuid::Uuid);
+
+impl StatusPublicationId {
+    fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
 /// One user-visible runtime status message retained for diagnostics panels.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusLogEntry {
@@ -514,9 +524,10 @@ pub struct AppState {
     pub export_draft: TimelineExportDraft,
 
     // 底部状态栏提示（message, is_error）
-    pub status_hint: Option<(AppMessage, bool)>,
+    status_hint: Option<(AppMessage, bool)>,
+    status_publication_id: StatusPublicationId,
     /// Bounded history of user-visible status messages for diagnostics panels.
-    pub status_log: Vec<StatusLogEntry>,
+    status_log: Vec<StatusLogEntry>,
     /// Bounded, language-neutral facts for nonblocking terminal notifications.
     pub notifications: notifications::AppNotificationFeed,
 
@@ -679,6 +690,7 @@ impl AppState {
             export_terminal_notifications_seen: HashSet::new(),
             export_draft: TimelineExportDraft::default(),
             status_hint: None,
+            status_publication_id: StatusPublicationId::new(),
             status_log: Vec::new(),
             notifications: notifications::AppNotificationFeed::default(),
             animation_selection: AnimationSelectionState::default(),
@@ -712,13 +724,31 @@ impl AppState {
         }
     }
 
+    /// Observe the current language-neutral status and its error severity.
+    pub fn status_hint(&self) -> Option<&(AppMessage, bool)> {
+        self.status_hint.as_ref()
+    }
+
+    /// Observe bounded in-session status facts without permitting external mutation.
+    pub fn status_log(&self) -> &[StatusLogEntry] {
+        &self.status_log
+    }
+
+    /// Observe publication identity even when message data is unchanged.
+    pub(crate) const fn status_publication_id(&self) -> StatusPublicationId {
+        self.status_publication_id
+    }
+
     /// Publish a language-neutral current status and retain its bounded history.
     pub fn set_status_hint(&mut self, message: AppMessage, is_error: bool) {
+        self.status_publication_id = StatusPublicationId::new();
         self.status_hint = Some((message.clone(), is_error));
         self.push_status_log(message, is_error);
     }
 
+    /// Clear the current publication while retaining its bounded history.
     pub fn clear_status_hint(&mut self) {
+        self.status_publication_id = StatusPublicationId::new();
         self.status_hint = None;
     }
 
