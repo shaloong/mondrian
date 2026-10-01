@@ -11,6 +11,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
+mod coreaudio_clock;
+
 pub(super) fn build_and_start(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -148,6 +151,8 @@ where
 {
     let channels = config.channels.max(1) as usize;
     let sample_rate = config.sample_rate;
+    #[cfg(target_os = "macos")]
+    let clock = coreaudio_clock::CoreAudioHostClock::new()?;
     device.build_output_stream(
         *config,
         move |data: &mut [T], info| {
@@ -162,8 +167,14 @@ where
                         return;
                     }
                 };
-            let playback_delay = match callback_playback_delay(info).checked_add(callback_span) {
-                Some(delay) => delay,
+            #[cfg(target_os = "macos")]
+            let delay_observation = clock.observe_tail_delay(info, callback_span, observed_at);
+            #[cfg(not(target_os = "macos"))]
+            let delay_observation = callback_playback_delay(info)
+                .checked_add(callback_span)
+                .map(|delay| (delay, callback_span));
+            let (playback_delay, playback_delay_uncertainty) = match delay_observation {
+                Some(observation) => observation,
                 None => {
                     data.fill(T::EQUILIBRIUM);
                     telemetry.stream_failed.store(true, Ordering::Release);
@@ -179,7 +190,7 @@ where
                     frames,
                     0,
                     playback_delay,
-                    callback_span,
+                    playback_delay_uncertainty,
                 );
                 callback_control.finish_callback_block(false, &telemetry);
                 return;
@@ -201,7 +212,7 @@ where
                 frames,
                 missing_samples / channels,
                 playback_delay,
-                callback_span,
+                playback_delay_uncertainty,
             );
             callback_control.finish_callback_block(true, &telemetry);
         },
@@ -210,6 +221,7 @@ where
     )
 }
 
+#[cfg(not(target_os = "macos"))]
 fn callback_playback_delay(info: &cpal::OutputCallbackInfo) -> Duration {
     let timestamp = info.timestamp();
     timestamp.playback.duration_since(timestamp.callback)
