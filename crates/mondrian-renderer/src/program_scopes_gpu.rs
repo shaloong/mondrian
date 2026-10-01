@@ -211,6 +211,12 @@ impl GpuProgramScopesRuntime {
         self.resources = None;
     }
 
+    /// Revoke frame buffers and display textures on this same device while
+    /// retaining immutable pipelines. A new device requires a new runtime.
+    pub fn clear_frame_resources(&mut self) {
+        self.resources = None;
+    }
+
     /// Record exact aggregation and GPU visualization for one Program Output.
     ///
     /// Callers represent hidden-panel behavior by not calling this method; the
@@ -1325,6 +1331,53 @@ mod tests {
             runtime.diagnostics().subgroup_frames_recorded,
             2 * u64::from(record.used_subgroups)
         );
+
+        let old_pipeline = runtime
+            .pipelines
+            .as_ref()
+            .unwrap()
+            .aggregate_luma_pipeline
+            .as_ref()
+            .unwrap()
+            .clone();
+        runtime.clear_frame_resources();
+        let mut next_encoder = context.device.create_command_encoder(&Default::default());
+        let next = runtime
+            .record(
+                &context.device,
+                &context.queue,
+                &mut next_encoder,
+                &input_view,
+                2,
+                2,
+                request,
+            )
+            .expect("new physical scope generation");
+        assert_ne!(next.counts(), record.counts());
+        assert_ne!(next.waveform_view, record.waveform_view);
+        assert_eq!(
+            runtime.pipelines.as_ref().unwrap().aggregate_luma_pipeline.as_ref().unwrap(),
+            &old_pipeline
+        );
+        let next_readback = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scope-generation-counts-readback"),
+            size: next.buffer_layout.byte_size(),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        next_encoder.copy_buffer_to_buffer(
+            next.counts(),
+            0,
+            &next_readback,
+            0,
+            next.buffer_layout.byte_size(),
+        );
+        context.queue.submit([next_encoder.finish()]);
+        let next_bytes = map_test_readback(&context.device, &next_readback);
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&next_bytes), actual);
+        assert_eq!(runtime.diagnostics().pipeline_creations, 1);
+        assert_eq!(runtime.diagnostics().buffer_allocations, 2);
+        assert_eq!(runtime.diagnostics().texture_allocations, 6);
     }
 
     #[tokio::test]

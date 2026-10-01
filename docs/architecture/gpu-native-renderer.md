@@ -1716,6 +1716,16 @@ sample counts, cache gates and GPU/CPU time budgets are unchanged. Color View
 and input-transform gates wait for all cold and warmup GPU submissions to
 complete before measurement; submitting warmup work alone is not completion.
 The reports retain this completion fact alongside the original warmup count.
+Same-device display/surface transitions invalidate the Viewer frame-resource
+generation after exact in-flight completion, without discarding immutable,
+contract-keyed device pipelines. Spatial, calibration, signal monitoring and
+scopes release their frame outputs; scope count buffers and display textures
+are recreated. A detached old output cannot repopulate the new pool generation.
+Calibration LUT reuse still requires its complete fingerprint, and no drawable
+or frame texture is reused across that invalidation. Actual device replacement
+retires the complete runtime and constructs a fresh one. This removes repeated
+pipeline compilation at same-device transitions; first-use compilation of a
+new pipeline contract remains a separate responsiveness concern.
 The input-transform gate uses the same complete pass interval on pass-boundary
 GPUs. Exact frame-contract identity is separately audited through that command
 recorder: no pass, copy, clear, query write or completion map is accepted as

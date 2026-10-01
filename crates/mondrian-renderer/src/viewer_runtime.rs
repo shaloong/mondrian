@@ -182,11 +182,12 @@ pub trait ViewerGpuExecutionStageMarker {
 ///
 /// Candidate-owned frame resources are cleared between records; a presentation
 /// output explicitly detached into [`ViewerGpuPresentationOutputLease`] is no
-/// longer candidate-owned and remains valid across ordinary clears. `reset`
+/// longer candidate-owned and remains valid across ordinary clears. Frame-generation invalidation
 /// invalidates the shared pool generation so a lease may remain readable while
 /// its later drop cannot repopulate a retired device/runtime epoch. Pipelines
 /// and backend capabilities otherwise remain resident for this object's
-/// lifetime.
+/// lifetime. Device replacement constructs a new runtime; a surface/display
+/// transition cannot rebind this runtime's existing device objects.
 pub struct ViewerGpuExecutionRuntime {
     resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
     resource_grant: ViewerGpuExecutionResourceGrant,
@@ -1315,14 +1316,16 @@ impl ViewerGpuExecutionRuntime {
             .map_err(|error| ViewerGpuExecutionError::ProgramOutputMissing(format!("{error:?}")))
     }
 
-    /// Reset all retained execution resources after a device/surface transition.
-    pub fn reset(&mut self) {
+    /// Revoke physical frame resources after a same-device surface/display
+    /// transition. Immutable, contract-keyed device objects remain resident.
+    /// Device replacement retires this complete runtime and constructs another.
+    pub fn invalidate_frame_generation(&mut self) {
         self.current_frame_submission = None;
         self.working_compositor.clear_frame_resources();
-        self.spatial.clear();
-        self.display_calibration.clear();
-        self.signal_monitor.clear();
-        self.program_scopes.clear();
+        self.spatial.clear_frame_resources();
+        self.display_calibration.clear_frame_resources();
+        self.signal_monitor.clear_frame_resources();
+        self.program_scopes.clear_frame_resources();
         self.color_output.clear_frame_resources();
         self.cpu_yuv_upload.clear();
         self.resource_pool.invalidate();
@@ -3700,11 +3703,14 @@ mod tests {
             .take_presentation_output(&mut record)
             .expect("take calibrated presentation resource");
         assert_eq!(lease.handle(), &expected);
+        let old_texture = lease.texture().clone();
+        let calibration_before = runtime.display_calibration.diagnostics();
+        let spatial_before = runtime.spatial.diagnostics();
 
         let before_reset = runtime.color_output_diagnostics().resource_pool;
         assert_eq!(before_reset.detached_presentation_resources, 1);
         assert_eq!(before_reset.detached_presentation_bytes, 4 * 4 * 8);
-        runtime.reset();
+        runtime.invalidate_frame_generation();
         let after_reset = runtime.color_output_diagnostics().resource_pool;
         assert_eq!(after_reset.invalidations, before_reset.invalidations + 1);
         assert_eq!(after_reset.detached_presentation_resources, 1);
@@ -3720,6 +3726,28 @@ mod tests {
         assert_eq!(after_drop.detached_presentation_resources, 0);
         assert_eq!(after_drop.detached_presentation_bytes, 0);
         assert_eq!(after_drop.retained_resources, 0);
+
+        let mut next = record_empty_viewer_frame(
+            &context,
+            &mut runtime,
+            12,
+            Some(identity_rec709_display_calibration()),
+        );
+        let next_lease = runtime.take_presentation_output(&mut next).expect("new frame output");
+        assert_ne!(next_lease.texture(), &old_texture);
+        assert_ne!(next_lease.handle(), &expected);
+        assert_eq!(
+            runtime.display_calibration.diagnostics().pipeline_builds,
+            calibration_before.pipeline_builds
+        );
+        assert_eq!(
+            runtime.display_calibration.diagnostics().lut_uploads,
+            calibration_before.lut_uploads
+        );
+        assert_eq!(
+            runtime.spatial.diagnostics().pipeline_builds,
+            spatial_before.pipeline_builds
+        );
     }
 
     #[tokio::test]

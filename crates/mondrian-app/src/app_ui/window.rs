@@ -6307,7 +6307,9 @@ fn apply_deferred_viewer_gpu_cleanup(session: &mut AppUiWindowSession) {
         WindowViewerGpuDeferredCleanup::ClearFrameResources => {
             session.viewer_gpu_execution.clear_frame_resources();
         }
-        WindowViewerGpuDeferredCleanup::Reset => session.viewer_gpu_execution.reset(),
+        WindowViewerGpuDeferredCleanup::Reset => {
+            session.viewer_gpu_execution.invalidate_frame_generation()
+        }
     }
 }
 
@@ -8525,7 +8527,7 @@ fn invalidate_display_dependent_gpu_preview(session: &mut AppUiWindowSession, ho
     }
     unregister_program_scopes_textures(session);
     if !cleanup_deferred {
-        session.viewer_gpu_execution.reset();
+        session.viewer_gpu_execution.invalidate_frame_generation();
     }
     host.clear_external_viewer_frame();
     host.mark_dirty();
