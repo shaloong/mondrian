@@ -832,7 +832,8 @@ impl ProgramSignalColorimetry {
 
     fn luma(self, r: f32, g: f32, b: f32) -> f32 {
         let kg = 1.0 - self.kr - self.kb;
-        self.kr * r + kg * g + self.kb * b
+        // Match the GPU scope shader's explicit accumulation order for binning.
+        self.kb.mul_add(b, kg.mul_add(g, self.kr * r))
     }
 
     fn chroma(self, r: f32, b: f32, y: f32) -> (f32, f32) {

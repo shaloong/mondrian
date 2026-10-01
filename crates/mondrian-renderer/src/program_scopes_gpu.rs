@@ -863,6 +863,13 @@ struct Uniforms {
 @group(0) @binding(2) var<uniform> uniforms: Uniforms;
 
 
+// Match the shared CPU colorimetry's explicit accumulation order. Implicit
+// multiply/add contraction can move a signal across a discrete scope bin.
+fn signal_luma(rgb: vec3<f32>) -> f32 {
+    let kg = 1.0 - uniforms.kr - uniforms.kb;
+    return fma(uniforms.kb, rgb.b, fma(kg, rgb.g, uniforms.kr * rgb.r));
+}
+
 fn signal_bin(value: f32) -> u32 {
     return u32(floor(clamp(value, 0.0, 1.0) * f32(uniforms.bins - 1u) + 0.5));
 }
@@ -910,7 +917,7 @@ fn display_nits(rgb: vec3<f32>) -> vec3<f32> {
     }
     if uniforms.transfer_kind == 5u {
         let scene = vec3<f32>(hlg_scene(value.r), hlg_scene(value.g), hlg_scene(value.b));
-        let scene_luma = dot(scene, vec3<f32>(uniforms.kr, 1.0 - uniforms.kr - uniforms.kb, uniforms.kb));
+        let scene_luma = signal_luma(scene);
         return scene * (1000.0 * pow(max(scene_luma, 0.0), 0.2));
     }
     return vec3<f32>(0.0);
@@ -921,7 +928,7 @@ fn scaled_components(rgb: vec3<f32>, encoded_luma: f32) -> vec4<f32> {
         return vec4<f32>(rgb, encoded_luma);
     }
     let nits = display_nits(rgb);
-    let luma_nits = dot(nits, vec3<f32>(uniforms.kr, 1.0 - uniforms.kr - uniforms.kb, uniforms.kb));
+    let luma_nits = signal_luma(nits);
     return vec4<f32>(nits, luma_nits) / uniforms.scale_max_nits;
 }
 
@@ -981,8 +988,7 @@ fn aggregate(gid: vec3<u32>, rgb_waveform: bool) {
         if any(rgb != rgb) {
             continue;
         }
-        let kg = 1.0 - uniforms.kr - uniforms.kb;
-        let y = uniforms.kr * rgb.r + kg * rgb.g + uniforms.kb * rgb.b;
+        let y = signal_luma(rgb);
         let scaled = scaled_components(rgb, y);
         let rb = signal_bin(scaled.r);
         let gb = signal_bin(scaled.g);
@@ -1423,8 +1429,8 @@ mod tests {
             eprintln!("skipping diagnostic GPU scopes test: no adapter available");
             return;
         };
-        const WIDTH: u32 = 256;
-        const HEIGHT: u32 = 4;
+        const WIDTH: u32 = 257;
+        const HEIGHT: u32 = 257;
         let mut pixels = Vec::with_capacity((WIDTH * HEIGHT * 4) as usize);
         for y in 0..HEIGHT {
             for x in 0..WIDTH {
@@ -1470,16 +1476,30 @@ mod tests {
             },
         );
         let mut runtime = GpuProgramScopesRuntime::default();
-        for (index, mode) in [
-            WaveformMode::RgbParade,
-            WaveformMode::Luma,
-            WaveformMode::RgbParade,
+        for (index, (signal_color_space, mode, waveform_width)) in [
+            ColorSpace::Rec709,
+            ColorSpace::Rec601Pal,
+            ColorSpace::Rec2020,
+            ColorSpace::DisplayP3,
         ]
         .into_iter()
+        .flat_map(|space| {
+            [
+                (WaveformMode::RgbParade, WIDTH),
+                (WaveformMode::Luma, WIDTH),
+                (WaveformMode::RgbParade, WIDTH),
+                (WaveformMode::Luma, 64),
+                (WaveformMode::RgbParade, 64),
+                (WaveformMode::Luma, 512),
+            ]
+            .into_iter()
+            .map(move |(mode, width)| (space, mode, width))
+        })
         .enumerate()
         {
-            let request = GpuProgramScopesRequest::new(ColorSpace::Rec709, mode, 256, WIDTH)
-                .expect("high-entropy scope request");
+            let request =
+                GpuProgramScopesRequest::new(signal_color_space, mode, 256, waveform_width)
+                    .expect("high-entropy scope request");
             let mut encoder =
                 context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("program-scopes-high-entropy-test-encoder"),
@@ -1522,7 +1542,7 @@ mod tests {
                 &pixels,
                 WIDTH,
                 HEIGHT,
-                ColorSpace::Rec709,
+                signal_color_space,
                 mode,
                 ProgramScopeScale::Ire,
                 256,
@@ -1546,17 +1566,36 @@ mod tests {
             );
             let waveform = record.buffer_layout.waveform_offset as usize;
             let vectorscope = record.buffer_layout.vectorscope_offset as usize;
-            assert_eq!(&actual[waveform..vectorscope], cpu.waveform.values);
+            // The CPU oracle measures every source column independently.
+            // Fold those exact integer bins into the requested display density;
+            // this does not repeat the GPU's column dispatch or tail geometry.
+            let channels = request.waveform_channels() as usize;
+            let mut expected_waveform = vec![0_u32; waveform_width as usize * 256 * channels];
+            for channel in 0..channels {
+                for x in 0..WIDTH as usize {
+                    let column = x * waveform_width as usize / WIDTH as usize;
+                    for bin in 0..256 {
+                        expected_waveform
+                            [(channel * waveform_width as usize + column) * 256 + bin] +=
+                            cpu.waveform.values[(channel * WIDTH as usize + x) * 256 + bin];
+                    }
+                }
+            }
+            assert_eq!(&actual[waveform..vectorscope], expected_waveform);
             let mut expected_vectorscope = vec![0_u32; 64 * 64];
             for sample in cpu.vectorscope {
                 let x = ((sample.u + 0.5) * 64.0).floor().clamp(0.0, 63.0) as usize;
                 let y = ((sample.v + 0.5) * 64.0).floor().clamp(0.0, 63.0) as usize;
                 expected_vectorscope[y * 64 + x] = sample.weight;
             }
-            assert_eq!(&actual[vectorscope..], expected_vectorscope);
+            assert_eq!(
+                &actual[vectorscope..],
+                expected_vectorscope,
+                "{signal_color_space:?} {mode:?} width={waveform_width}"
+            );
         }
         assert_eq!(runtime.diagnostics().pipeline_creations, 1);
-        assert_eq!(runtime.diagnostics().frames_recorded, 3);
+        assert_eq!(runtime.diagnostics().frames_recorded, 24);
     }
     #[tokio::test]
     async fn grouped_gpu_counts_preserve_float_excursions_vectors_and_tail_pixels() {
@@ -1575,10 +1614,20 @@ mod tests {
             [0.60, -0.10, 0.70, 1.0],
             [0.80, 1.40, -0.20, 1.0],
             [0.10, 0.20, 1.30, 1.0],
+            // A vectorscope bin boundary also measured by the RGBA8 oracle.
+            // Alpha zero must not erase the selected Program signal RGB.
+            [70.0 / 255.0, 71.0 / 255.0, 147.0 / 255.0, 0.0],
+            [
+                (70.0_f32 / 255.0).next_up(),
+                71.0 / 255.0,
+                147.0 / 255.0,
+                1.0,
+            ],
         ];
+        let width = pixels.len() as u32;
         let input = context.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("program-scopes-grouped-float-input"),
-            size: wgpu::Extent3d { width: 5, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d { width, height: 1, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -1596,10 +1645,10 @@ mod tests {
             bytemuck::cast_slice(&pixels),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(5 * 16),
+                bytes_per_row: Some(width * 16),
                 rows_per_image: Some(1),
             },
-            wgpu::Extent3d { width: 5, height: 1, depth_or_array_layers: 1 },
+            wgpu::Extent3d { width, height: 1, depth_or_array_layers: 1 },
         );
         let input_view = input.create_view(&wgpu::TextureViewDescriptor::default());
         let request =
@@ -1615,7 +1664,7 @@ mod tests {
                 &context.queue,
                 &mut encoder,
                 &input_view,
-                5,
+                width,
                 1,
                 request,
             )
@@ -1638,7 +1687,7 @@ mod tests {
         let actual = bytemuck::cast_slice::<u8, u32>(&bytes);
         let cpu = compute_program_color_scopes_rgba_f32(
             &pixels,
-            5,
+            width,
             1,
             ColorSpace::Rec709,
             WaveformMode::RgbParade,
@@ -1680,7 +1729,7 @@ mod tests {
         let vectorscope = record.buffer_layout.vectorscope_offset as usize;
         assert_eq!(
             actual[waveform..vectorscope].iter().copied().sum::<u32>(),
-            15
+            width * 3
         );
         let mut expected_vectorscope = vec![0u32; 64 * 64];
         for sample in cpu.vectorscope {
@@ -1689,7 +1738,7 @@ mod tests {
             expected_vectorscope[y * 64 + x] = sample.weight;
         }
         assert_eq!(&actual[vectorscope..], expected_vectorscope.as_slice());
-        assert_eq!(actual[vectorscope..].iter().copied().sum::<u32>(), 5);
+        assert_eq!(actual[vectorscope..].iter().copied().sum::<u32>(), width);
     }
 
     fn map_test_readback(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<u8> {
