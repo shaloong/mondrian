@@ -2666,3 +2666,10 @@ Shutdown cancels it before joining workers. Canceled fallback work delivers no
 result, and the Runtime gates both Viewer and render-cache publication on the
 current generation/epoch. Preview stopped evidence is distinct from no content,
 correctness blockers and execution failures.
+
+
+CPU fallback freezes the Preview resource decision's Effect execution Session
+configuration as well as compositor working bytes. It no longer inherits an
+unrelated default native grant. Each request reconfigures its exclusive scratch
+and binds frame generation before composition; independently evaluable native
+resources can survive frame changes, while cancellation still retires them.

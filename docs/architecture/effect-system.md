@@ -1091,9 +1091,9 @@ and exact Definition-stage value/node bindings; two pixel-identical graphs
 whose node admission differs therefore cannot reuse one another's plan or
 blocker. Preview Viewer lowering, CPU compositor diagnostics, and each Export
 job reuse only their own returned `Arc`; no process-global GPU-plan cache can
-retain another Project or execution generation. Online reconfiguration trims
-synchronously, and the same generation barrier that retires pixel residency
-also retires every plan and blocker. `lower_effect_graph_to_gpu_plan(...)`
+retain another Project. Online reconfiguration trims synchronously. Frame
+generation changes retire pixel residency while retaining pure topology and
+GPU-plan entries with their exact complete graph/execution keys. `lower_effect_graph_to_gpu_plan(...)`
 remains the uncached reference helper.
 
 The `.cube` adapter accepts one finite 3D table of size 2 through 129, requires
@@ -1155,8 +1155,9 @@ execution creates separate mutable instances for each occurrence in each
 EffectExecutionSession. Revision and raster extent are part of residency keys.
 The bank has explicit instance/byte grants, checks its conservative charge
 before creation, evicts least-recently-used instances before allocation, and
-retires obsolete extents/revisions. Generation barriers and Session drop retire
-all instances. Errors, panics, and changed pixel counts retire the affected
+retires obsolete extents/revisions. Frame-generation barriers clear pixel
+residency while retaining these frame-independent resources. Session drop and
+explicit owner retirement evict all instances. Errors, panics, and changed pixel counts retire the affected
 instance; frame staging preserves the caller's pixels.
 
 These reusable instances must preserve independently evaluable frame semantics.
@@ -1200,11 +1201,15 @@ publication and tile assembly. Temporal mask geometry remains separately
 bounded and prepared before the frame proof. Each executor evicts retained
 workers before source/fan-out allocation or kernel scratch, and temporal peak
 evidence includes workers that remain resident during those operations.
-Built-in-only scalar graphs retire native resources before identity/cache
-copies. Optional residency cannot make cold-admitted work fail.
+Built-in-only scalar graphs trim optional native siblings against their cold
+pixel peak before identity/cache copies, preserving instances when the grant
+fits both instead of restarting workers between unrelated clips. Optional residency cannot make cold-admitted work fail.
 
-Product retained-native grants remain closed until cross-owner resource
-coordination and the native factory's memory charge are qualified. These
+Product scalar Preview, CPU-prefix, fallback and Export owners now receive
+explicit machine-class native instance/byte grants. Nominal playback preserves
+those grants; memory pressure trims optional retention without shrinking active
+working admission. Frame generations and unrelated built-in clips preserve
+independent instances only while the exact working/resident grants still fit. These
 owner-local frame/processor proofs do not claim a global process-memory cap
 or enforcement of arbitrary third-party native heap allocations.
 

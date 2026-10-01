@@ -147,3 +147,9 @@ cargo test -p mondrian-app --all-features --test openfx_host \
 
 It rejects a one-byte-short 663,552,000-byte working grant, then renders the
 complete unclamped frame under 768 MiB, including distinct corner samples.
+
+The same UHD case now uses the nominal Professional eight-instance/384 MiB
+optional native grant, seeks with reversed Source data across generations,
+checks both complete unclamped outputs and resident frame charge, then trims
+to zero. The one-pixel unfetched probe also changes frame generation before
+its required second-call failure, detecting accidental worker restarts.

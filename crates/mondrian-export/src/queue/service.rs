@@ -78,6 +78,10 @@ pub struct ExportExecutionResourcePolicy {
     pub effect_cache_bytes: usize,
     /// Maximum transient Temporal/ROI working bytes for one frame.
     pub effect_working_bytes: usize,
+    /// Maximum frame-independent native Effect instances retained by this job.
+    pub effect_processor_instances: usize,
+    /// Optional native/buffer residency; active use also fits effect_working_bytes.
+    pub effect_processor_bytes: usize,
     /// Hard compositor-owned transient and retained working-set grant.
     ///
     /// This is frozen per attempt and does not shrink with cache pressure.
@@ -140,6 +144,8 @@ impl Default for ExportExecutionResourcePolicy {
             effect_cache_entries: 32,
             effect_cache_bytes: 96 * 1024 * 1024,
             effect_working_bytes: 384 * 1024 * 1024,
+            effect_processor_instances: 4,
+            effect_processor_bytes: 192 * 1024 * 1024,
             cpu_composite_working_set: TimelineCpuWorkingSetGrant {
                 max_active_bytes: 1024 * 1024 * 1024,
                 max_retained_scratch_bytes: 512 * 1024 * 1024,

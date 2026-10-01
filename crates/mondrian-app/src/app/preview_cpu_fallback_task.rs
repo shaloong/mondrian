@@ -37,6 +37,7 @@ const RESULT_CAPACITY: usize = 1;
 pub(crate) struct PreviewCpuFallbackRequest {
     pub(crate) cpu_materialization_active_bytes: u64,
     pub(crate) cpu_working_set_grant: mondrian_renderer::TimelineCpuWorkingSetGrant,
+    pub(crate) effect_session_config: mondrian_effects::EffectExecutionSessionConfig,
     pub(crate) cancellation: mondrian_core::ExecutionCancellationToken,
     pub(crate) generation: u64,
     pub(crate) epoch: PlaybackEpoch,
@@ -237,6 +238,8 @@ fn execute_cpu_fallback(
     let mut control = mondrian_effects::EffectProcessorControl::new(&mut checkpoint);
     control.check().map_err(|error| error.to_string())?;
     scratch.reconfigure_cpu_working_set(request.cpu_working_set_grant);
+    scratch.reconfigure_effect_execution(request.effect_session_config);
+    scratch.bind_effect_execution_generation(request.generation);
     scratch
         .admit_cpu_active_working_set(
             request.cpu_materialization_active_bytes,
@@ -327,6 +330,9 @@ mod tests {
             cancellation: mondrian_core::ExecutionCancellationToken::new(),
             cpu_materialization_active_bytes: 663_552_000,
             cpu_working_set_grant: grant,
+            effect_session_config: mondrian_effects::EffectExecutionSessionConfig::uncached(
+                128 * 1024 * 1024,
+            ),
             generation: 1,
             epoch: mondrian_playback::PlaybackEngine::new(sequence.time_base(), Default::default())
                 .expect("engine")
@@ -373,6 +379,15 @@ mod tests {
             "{error}"
         );
         assert_eq!(scratch.cpu_working_set_diagnostics().grant, grant);
+        assert_eq!(
+            scratch.effect_execution_diagnostics().max_working_bytes,
+            request.effect_session_config.max_working_bytes
+        );
+        assert_eq!(scratch.effect_execution_diagnostics().max_cache_bytes, 0);
+        assert_eq!(
+            scratch.effect_execution_diagnostics().generation,
+            Some(request.generation)
+        );
         assert_eq!(
             scratch.cpu_working_set_diagnostics().retained_scratch_bytes,
             0

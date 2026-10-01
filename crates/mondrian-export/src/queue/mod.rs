@@ -7017,8 +7017,8 @@ impl ExportVisualRenderSession {
             max_working_bytes: resource_policy.effect_working_bytes,
             max_gpu_plan_entries: resource_policy.effect_gpu_plan_entries,
             max_gpu_plan_bytes: resource_policy.effect_gpu_plan_bytes,
-            max_processor_instances: 0,
-            max_processor_bytes: 0,
+            max_processor_instances: resource_policy.effect_processor_instances,
+            max_processor_bytes: resource_policy.effect_processor_bytes,
         });
         composite_scratch.reconfigure_cpu_working_set(resource_policy.cpu_composite_working_set);
         composite_scratch.reconfigure_color_execution(resource_policy.cpu_color_processor_capacity);

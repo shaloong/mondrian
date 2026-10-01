@@ -223,11 +223,13 @@ impl EffectExecutionSession {
     /// functions of the graph shape, so a superseded generation's entries can
     /// never mislead the next generation. Retaining them is what keeps
     /// frame-by-frame scrubbing from re-lowering and re-compiling every graph
-    /// on every playhead position.
+    /// on every playhead position. Frame-independent processor resources also
+    /// survive: their keys include author occurrence, registration revision
+    /// and extent, and their contract forbids dependence on earlier calls.
+    /// Observed cancellation, faults and explicit retirement still evict them.
     pub fn bind_generation(&mut self, generation: u64) {
         if self.generation != Some(generation) {
             self.clear_pixel_caches();
-            self.processors.clear();
             self.generation = Some(generation);
         }
     }

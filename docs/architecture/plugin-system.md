@@ -454,7 +454,9 @@ context still come from the canonical author graph; edits and seeks do not use
 an alternate interpretation. The executor moves its atomic input stage into
 the host envelope, so this binding adds no input raster. Failures restore that
 stage before propagating the typed error; the caller's published frame remains
-unchanged. Session eviction, errors and generation barriers retire the child.
+unchanged. Session eviction, errors and observed owner stops retire the child.
+Changing only the frame generation preserves independent-frame instances;
+author occurrence, registration revision and raster extent remain exact keys.
 
 The current controlled host-frame charge is three complete Float32 rasters:
 two shared mapping ranges and the returned output vector at peak. Shared physical pages are counted once. This
@@ -466,8 +468,18 @@ has the same extent/size validation as the transport.
 
 This logical frame grant excludes executable mappings, control-plane metadata
 and arbitrary plugin-private heaps. It is not a physical process RSS limit.
-Production retained-native grants remain zero until cross-owner persistent
-resource grants are qualified; factory-backed ephemeral execution already uses
+Production grants now explicitly bound optional native residency per execution
+owner. Machine-class/pressure decisions feed scalar Preview, CPU-prefix and CPU
+fallback Sessions; each may retain at most half its class working envelope,
+with 2/4/8 instances on Minimum/Standard/Professional and none on unknown or
+below-minimum machines. Three Preview banks therefore have an explicit aggregate
+idle ceiling of 1.5 working envelopes, independent of pixel-cache grants. Export
+freezes its own single-bank instance/byte grant per attempt. Active execution
+still counts resident siblings and current native charge within the unchanged
+working grant. Reconfiguration evicts before allocation; background owners
+apply frozen requests serially and trim to the next admitted request, so an
+in-flight accepted frame does not inherit a later pressure reduction.
+Factory-backed ephemeral execution still uses
 the same frame admission and owner cancellation. Standalone qualified Sessions
 with explicit retention reuse workers without definition-global mutable state.
 

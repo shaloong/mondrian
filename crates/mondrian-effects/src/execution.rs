@@ -794,6 +794,7 @@ fn scalar_processor_reservations(
     width: u32,
     height: u32,
     budget: usize,
+    has_resident_processors: bool,
     control: &mut crate::EffectProcessorControl<'_>,
 ) -> Result<Option<Vec<usize>>, EffectFloatExecutionError> {
     let has_factory = compiled.schedule().ordered_nodes.iter().any(|id| {
@@ -802,7 +803,7 @@ fn scalar_processor_reservations(
             | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Custom { processor: Some(binding), .. }, .. }
             if binding.float32_factory().is_some()))
     });
-    if !has_factory {
+    if !has_factory && !has_resident_processors {
         return Ok(None);
     }
     let frame_bytes = (width as usize)
@@ -895,7 +896,7 @@ fn scalar_processor_reservations(
             .saturating_mul(frame_bytes)
             .saturating_add(mask_bytes);
         let required = occupied.saturating_add(processor_bytes);
-        if required > budget {
+        if has_factory && required > budget {
             return Err(EffectFloatExecutionError::CustomProcessor(
                 EffectExecutionError::CustomProcessorBudgetExceeded {
                     key: key.to_owned(),
@@ -981,12 +982,18 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
         width,
         height,
         session.max_working_bytes(),
+        session.processors.counts().0 != 0,
         control,
     )?;
-    if reservations.is_none() {
-        // A built-in-only graph cannot reuse the previous graph's workers.
-        // Retire them before identity/cache output copies as well.
-        session.processors.clear();
+    if let Some(reservations) = &reservations {
+        // Shared owner resources may serve another clip later in this frame.
+        // Keep only the siblings that fit beside this graph's cold pixel peak,
+        // including identity/cache copies. Optional retention cannot deny a
+        // built-in-only invocation that has no native admission requirement.
+        let occupied = reservations.iter().copied().max().unwrap_or(0);
+        session
+            .processors
+            .trim_working(session.max_working_bytes().saturating_sub(occupied));
     }
     if compiled.graph().is_identity() {
         let output = input.to_vec();
@@ -1015,7 +1022,7 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
         if let Some(reservations) = &reservations {
             session
                 .processors
-                .trim_working(session.max_working_bytes() - reservations[step]);
+                .trim_working(session.max_working_bytes().saturating_sub(reservations[step]));
         }
         let Some(node) = compiled.graph().node(*node_id) else {
             return Err(EffectFloatExecutionError::UnsupportedNode {

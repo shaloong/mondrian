@@ -800,3 +800,19 @@ native plugin resource policy is integrated; their existing cache budgets are
 not silently doubled. Uncached execution can prepare a frame-local instance
 within the working-byte grant. Native-worker cancellation and combined physical
 working-set qualification remain required for the OpenFX integration.
+
+
+### Optional native Effect residency (decision schema 16)
+
+Scalar Preview, its CPU-prefix worker and CPU fallback each receive an explicit
+frame-independent processor grant: 2/4/8 instances for Minimum/Standard/
+Professional, with half the class Effect working bytes per bank. Unknown and
+below-minimum machines grant zero optional residency. The three-bank aggregate
+idle ceiling is 1.5 class working envelopes, additional to pixel-cache grants.
+Elevated/critical pressure divisors shrink instance/byte residency while
+leaving active working admission unchanged. Playback alone trims pixel caches
+but preserves native residency, so UHD playback does not recreate its worker
+on every frame. Background requests freeze grants
+at admission and trim on the next executed request; scalar reconfiguration is
+synchronous. Export freezes an independent one-bank grant for the attempt.
+Native/private plugin heaps and process RSS are not covered by logical rasters.

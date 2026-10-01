@@ -47,7 +47,7 @@ use super::AppState;
 const MIB: usize = 1024 * 1024;
 
 /// Schema revision of the immutable execution-resource decision.
-pub(crate) const EXECUTION_RESOURCE_DECISION_VERSION: u32 = 15;
+pub(crate) const EXECUTION_RESOURCE_DECISION_VERSION: u32 = 16;
 const PROCESS_PRESSURE_OBSERVATION_INTERVAL: Duration = Duration::from_secs(1);
 const PROCESS_PRESSURE_RESULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PREVIEW_HETEROGENEOUS_MAX_BATCH_ITEMS: usize = 5;
@@ -308,6 +308,10 @@ pub(crate) struct PreviewEffectCacheDecision {
     /// residency or request a coarser future frame; it cannot reinterpret an
     /// already-admitted frame or invalidate its frozen execution route.
     pub(crate) max_working_bytes: usize,
+    /// Optional frame-independent native instances per exclusive Preview owner.
+    pub(crate) max_processor_instances: usize,
+    /// Optional native/buffer bytes; active instances share the working grant.
+    pub(crate) max_processor_bytes: usize,
     /// Maximum retained GPU lowering plans or deterministic blockers.
     pub(crate) max_gpu_plan_entries: usize,
     /// Maximum conservatively estimated bytes retained by GPU planning.
@@ -345,6 +349,8 @@ impl PreviewHeterogeneousEffectExecutionDecision {
         preview_heterogeneous_effect_execution_decision(
             MachineResourceClass::UnknownConservative,
             128 * MIB,
+            0,
+            0,
         )
     }
 }
@@ -1731,8 +1737,25 @@ fn derive_decision(
         MachineResourceClass::Standard => 384 * MIB,
         MachineResourceClass::Professional => 768 * MIB,
     };
-    let heterogeneous_effects =
-        preview_heterogeneous_effect_execution_decision(profile.class, effect_working_bytes);
+    // Playback alone must not evict the worker needed for its next frame.
+    // Native residency follows measured memory pressure, not pixel-cache
+    // demand trimming: restarting a UHD worker every frame defeats reuse.
+    let native_residency_divisor = match pressure {
+        ExecutionResourcePressure::Nominal => 1,
+        ExecutionResourcePressure::Elevated => 2,
+        ExecutionResourcePressure::Critical => 4,
+    };
+    let (effect_processor_instances, effect_processor_bytes) = effect_processor_residency(
+        profile.class,
+        effect_working_bytes,
+        native_residency_divisor,
+    );
+    let heterogeneous_effects = preview_heterogeneous_effect_execution_decision(
+        profile.class,
+        effect_working_bytes,
+        effect_processor_instances,
+        effect_processor_bytes,
+    );
     let (seek_index_entries, seek_index_anchors, seek_index_bytes, hardware_idle_contexts) =
         match profile.class {
             MachineResourceClass::BelowMinimum => (8, 131_072, 2 * MIB, 0),
@@ -1794,6 +1817,8 @@ fn derive_decision(
                 max_entries: (effect_cache_entries / cache_divisor).max(1),
                 max_bytes: (effect_cache_bytes / cache_divisor).max(1),
                 max_working_bytes: effect_working_bytes,
+                max_processor_instances: effect_processor_instances,
+                max_processor_bytes: effect_processor_bytes,
                 max_gpu_plan_entries: (effect_gpu_plan_entries / cache_divisor).max(1),
                 max_gpu_plan_bytes: (effect_gpu_plan_bytes / cache_divisor).max(1),
             },
@@ -1852,6 +1877,7 @@ fn derive_decision(
             resource_policy: export_resource_policy(
                 profile.class,
                 cache_divisor,
+                native_residency_divisor,
                 realtime,
                 cpu_parallelism,
             ),
@@ -1863,9 +1889,34 @@ fn derive_decision(
     }
 }
 
+fn effect_processor_residency(
+    class: MachineResourceClass,
+    working_bytes: usize,
+    cache_divisor: usize,
+) -> (usize, usize) {
+    let instances = match class {
+        MachineResourceClass::BelowMinimum | MachineResourceClass::UnknownConservative => 0,
+        MachineResourceClass::MinimumSupported => 2,
+        MachineResourceClass::Standard => 4,
+        MachineResourceClass::Professional => 8,
+    };
+    if instances == 0 {
+        return (0, 0);
+    }
+    // Each exclusive owner gets a half-working-set idle ceiling. Preview has
+    // scalar, CPU-prefix and fallback banks (aggregate at most 1.5 working
+    // envelopes); Export has one. Active use also fits the exact working grant.
+    (
+        (instances / cache_divisor).max(1),
+        working_bytes / 2 / cache_divisor,
+    )
+}
+
 fn preview_heterogeneous_effect_execution_decision(
     class: MachineResourceClass,
     effect_working_bytes: usize,
+    max_processor_instances: usize,
+    max_processor_bytes: usize,
 ) -> PreviewHeterogeneousEffectExecutionDecision {
     // `max_batch_pixel_bytes` is a policy ceiling. Renderer admission counts
     // each immutable CPU input plus every Effects-owned frontier value for the
@@ -1883,7 +1934,11 @@ fn preview_heterogeneous_effect_execution_decision(
     let effect_working_bytes = effect_working_bytes as u64;
     PreviewHeterogeneousEffectExecutionDecision {
         cpu_prefix: HeterogeneousCpuPrefixBatchGrant::new(
-            EffectExecutionSessionConfig::uncached(effect_working_bytes as usize),
+            EffectExecutionSessionConfig {
+                max_processor_instances,
+                max_processor_bytes,
+                ..EffectExecutionSessionConfig::uncached(effect_working_bytes as usize)
+            },
             EffectGraphExecutionBudget::new(
                 effect_working_bytes,
                 effect_working_bytes,
@@ -2049,6 +2104,7 @@ fn export_gpu_visual_active_grant(
 fn export_resource_policy(
     class: MachineResourceClass,
     cache_divisor: usize,
+    native_residency_divisor: usize,
     realtime: bool,
     cpu_parallelism: usize,
 ) -> ExportExecutionResourcePolicy {
@@ -2159,6 +2215,8 @@ fn export_resource_policy(
         MachineResourceClass::Standard => 256 * MIB,
         MachineResourceClass::Professional => 512 * MIB,
     };
+    let (effect_processor_instances, effect_processor_bytes) =
+        effect_processor_residency(class, effect_working_bytes, native_residency_divisor);
     ExportExecutionResourcePolicy {
         // Realtime Preview/Audio owns GPU priority. An admitted explicit
         // Export remains live, but equivalent CPU-capable visual work must not
@@ -2177,6 +2235,8 @@ fn export_resource_policy(
         effect_cache_entries: (effect_cache_entries / cache_divisor).max(1),
         effect_cache_bytes: (effect_cache_bytes / cache_divisor).max(1),
         effect_working_bytes,
+        effect_processor_instances,
+        effect_processor_bytes,
         cpu_composite_working_set: cpu_composite_working_set_grant(class),
         effect_gpu_plan_entries: (effect_gpu_plan_entries / cache_divisor).max(1),
         effect_gpu_plan_bytes: (effect_gpu_plan_bytes / cache_divisor).max(1),
@@ -2458,6 +2518,78 @@ mod tests {
     }
 
     #[test]
+    fn native_effect_residency_is_explicit_bounded_and_pressure_trimmable() {
+        for (class, instances, working) in [
+            (MachineResourceClass::BelowMinimum, 0, 128 * MIB),
+            (MachineResourceClass::UnknownConservative, 0, 128 * MIB),
+            (MachineResourceClass::MinimumSupported, 2, 256 * MIB),
+            (MachineResourceClass::Standard, 4, 384 * MIB),
+            (MachineResourceClass::Professional, 8, 768 * MIB),
+        ] {
+            let decision = ExecutionResourceCoordinator::new(profile(class)).decision();
+            let scalar = decision.preview.effect_cache;
+            let worker = decision.preview.heterogeneous_effects.cpu_prefix_grant().effect_session();
+            assert_eq!(scalar.max_processor_instances, instances);
+            assert_eq!(worker.max_processor_instances, instances);
+            let bytes = if instances == 0 { 0 } else { working / 2 };
+            assert_eq!(scalar.max_processor_bytes, bytes);
+            assert_eq!(worker.max_processor_bytes, bytes);
+            assert!(scalar.max_processor_bytes <= scalar.max_working_bytes);
+            for divisor in [1, 2, 4] {
+                let (trimmed_instances, trimmed_bytes) =
+                    effect_processor_residency(class, working, divisor);
+                assert!(trimmed_instances <= instances);
+                assert_eq!(trimmed_bytes, bytes / divisor);
+                let export = export_resource_policy(class, divisor, divisor, false, 4);
+                assert_eq!(export.effect_processor_instances, trimmed_instances);
+                // Unknown Export admits a larger working set than Preview but
+                // still grants no optional native residency.
+                assert_eq!(export.effect_processor_bytes, trimmed_bytes);
+                assert!(export.effect_processor_bytes <= export.effect_working_bytes);
+            }
+        }
+        let coordinator =
+            ExecutionResourceCoordinator::new(profile(MachineResourceClass::Professional));
+        let paused = coordinator.decision();
+        let realtime = coordinator.update_demand(ExecutionResourceDemandSnapshot {
+            preview_realtime: true,
+            ..ExecutionResourceDemandSnapshot::default()
+        });
+        assert_eq!(
+            realtime.preview.effect_cache.max_processor_bytes,
+            paused.preview.effect_cache.max_processor_bytes
+        );
+        assert_eq!(
+            realtime
+                .preview
+                .heterogeneous_effects
+                .cpu_prefix_grant()
+                .effect_session()
+                .max_processor_bytes,
+            paused
+                .preview
+                .heterogeneous_effects
+                .cpu_prefix_grant()
+                .effect_session()
+                .max_processor_bytes
+        );
+        assert_eq!(
+            realtime.export.resource_policy.effect_processor_bytes,
+            paused.export.resource_policy.effect_processor_bytes
+        );
+        let uhd_host_bytes = 3_840 * 2_160 * 16 * 3;
+        let (_, professional_bytes) =
+            effect_processor_residency(MachineResourceClass::Professional, 768 * MIB, 1);
+        assert!(professional_bytes >= uhd_host_bytes);
+        let (_, pressured_bytes) =
+            effect_processor_residency(MachineResourceClass::Professional, 768 * MIB, 2);
+        assert!(
+            pressured_bytes < uhd_host_bytes,
+            "retention is optional; active UHD admission remains unchanged"
+        );
+    }
+
+    #[test]
     fn heterogeneous_preview_grants_cover_one_single_frontier_uhd_route_at_eight_gib() {
         const UHD_RGBA_F32_FRAME_BYTES: u64 = 3_840 * 2_160 * 16;
         const UHD_CPU_PREFIX_RETAINED_BYTES: u64 = UHD_RGBA_F32_FRAME_BYTES * 2;
@@ -2544,9 +2676,37 @@ mod tests {
         let nominal = coordinator.decision();
         let critical = coordinator.observe_pressure(ExecutionResourcePressure::Critical);
 
+        let nominal_route = nominal.preview.heterogeneous_effects;
+        let critical_route = critical.preview.heterogeneous_effects;
+        let nominal_cpu = nominal_route.cpu_prefix_grant();
+        let critical_cpu = critical_route.cpu_prefix_grant();
         assert_eq!(
-            critical.preview.heterogeneous_effects,
-            nominal.preview.heterogeneous_effects
+            critical_cpu.graph_execution(),
+            nominal_cpu.graph_execution()
+        );
+        assert_eq!(
+            critical_cpu.max_batch_items(),
+            nominal_cpu.max_batch_items()
+        );
+        assert_eq!(
+            critical_cpu.max_batch_pixel_bytes(),
+            nominal_cpu.max_batch_pixel_bytes()
+        );
+        assert_eq!(
+            critical_cpu.effect_session().max_working_bytes,
+            nominal_cpu.effect_session().max_working_bytes
+        );
+        assert_eq!(
+            critical_route.gpu_continuation_grant(),
+            nominal_route.gpu_continuation_grant()
+        );
+        assert!(
+            critical_cpu.effect_session().max_processor_bytes
+                < nominal_cpu.effect_session().max_processor_bytes
+        );
+        assert!(
+            critical_cpu.effect_session().max_processor_instances
+                <= nominal_cpu.effect_session().max_processor_instances
         );
     }
 

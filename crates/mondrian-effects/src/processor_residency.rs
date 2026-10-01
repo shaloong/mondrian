@@ -460,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn compiled_factory_instances_are_separate_for_occurrences_consumers_and_generations() {
+    fn compiled_factory_instances_are_owner_exclusive_and_reuse_across_frame_generations() {
         let factory = Arc::new(ProbeFactory::default());
         let graph = graph(Arc::clone(&factory));
         let mut preview = EffectExecutionSession::default();
@@ -495,9 +495,42 @@ mod tests {
             )
             .expect("export");
         assert_eq!(factory.created.load(Ordering::SeqCst), 4);
-        preview.bind_generation(1);
-        assert_eq!(preview.diagnostics().processor_instances, 0);
+        for (generation, seed, source) in [(1, 7, 0.5), (2, -3, -0.25), (3, 99, 1.5)] {
+            preview.bind_generation(generation);
+            let identity = identity_compiled_effect_graph().expect("identity graph");
+            assert_eq!(
+                preview
+                    .apply_compiled_rgba_f32(
+                        &[[source, 0.5, 0.75, 1.0]],
+                        1,
+                        1,
+                        &identity,
+                        seed,
+                        &mut EffectProcessorControl::uncancelled(),
+                    )
+                    .expect("other clip's identity frame"),
+                [[source, 0.5, 0.75, 1.0]]
+            );
+            assert_eq!(
+                preview
+                    .apply_compiled_rgba_f32(
+                        &[[source, 0.5, 0.75, 1.0]],
+                        1,
+                        1,
+                        &graph,
+                        seed,
+                        &mut EffectProcessorControl::uncancelled(),
+                    )
+                    .expect("changed frame"),
+                [[source * 4.0, 0.5, 0.75, 1.0]]
+            );
+        }
+        assert_eq!(factory.created.load(Ordering::SeqCst), 4);
+        assert_eq!(preview.diagnostics().processor_instances, 2);
         assert_eq!(export.diagnostics().processor_instances, 2);
+        assert_eq!(factory.dropped.load(Ordering::SeqCst), 0);
+        preview.retire_processor_resources();
+        assert_eq!(preview.diagnostics().processor_instances, 0);
         assert_eq!(factory.dropped.load(Ordering::SeqCst), 2);
         drop(export);
         assert_eq!(factory.dropped.load(Ordering::SeqCst), 4);
@@ -795,7 +828,7 @@ mod tests {
     }
 
     #[test]
-    fn temporal_execution_reuses_occurrences_without_crossing_generations() {
+    fn temporal_execution_reuses_independent_instances_across_frame_generations() {
         let factory = Arc::new(ProbeFactory::default());
         let graph = graph(Arc::clone(&factory));
         let mut session = EffectExecutionSession::default();
@@ -814,11 +847,10 @@ mod tests {
                 .expect("execute reusable temporal processor");
             assert_eq!(output.tile().pixels(), &[[1.0, 0.5, 0.75, 1.0]; 6]);
             assert_eq!(session.diagnostics().processor_instances, 2);
-            assert_eq!(
-                factory.created.load(Ordering::SeqCst),
-                generation as usize * 2
-            );
+            assert_eq!(factory.created.load(Ordering::SeqCst), 2);
         }
+        assert_eq!(factory.dropped.load(Ordering::SeqCst), 0);
+        drop(session);
         assert_eq!(factory.dropped.load(Ordering::SeqCst), 2);
     }
 

@@ -624,6 +624,9 @@ fn authored_native_factory_reuses_instances_and_rejects_stale_output() {
     assert_eq!(session.diagnostics().processor_bytes, 48);
     // The probe only omits Output on its second render in the same native
     // instance. A fresh process per frame would incorrectly succeed here.
+    // A new frame generation must preserve that same worker; pixel residency
+    // remains separate from frame-independent native resources.
+    session.bind_generation(2);
     assert!(session
         .apply_compiled_rgba_f32(
             &input,
@@ -636,7 +639,7 @@ fn authored_native_factory_reuses_instances_and_rejects_stale_output() {
         .is_err());
     assert_eq!(input, [[-0.25, 1.5, 0.75, 0.5]]);
     assert_eq!(session.diagnostics().processor_instances, 0);
-    session.bind_generation(2);
+    session.bind_generation(3);
     assert_eq!(
         session
             .apply_compiled_rgba_f32(
@@ -884,8 +887,8 @@ fn authored_uhd_filter_fits_professional_working_grant() {
     input[count - 1] = [0.875, 0.25, -0.5, 0.125];
     let mut config = EffectExecutionSessionConfig {
         max_working_bytes: required - 1,
-        max_processor_instances: 0,
-        max_processor_bytes: 0,
+        max_processor_instances: 8,
+        max_processor_bytes: 384 * 1024 * 1024,
         ..EffectExecutionSessionConfig::uncached(required - 1)
     };
     let mut session = EffectExecutionSession::new(config);
@@ -913,5 +916,26 @@ fn authored_uhd_filter_fits_professional_working_grant() {
         )
         .expect("UHD native Filter within Professional grant");
     assert_eq!(output, input);
+    drop(output);
+    assert_eq!(session.diagnostics().processor_instances, 1);
+    assert_eq!(session.diagnostics().processor_bytes, count * 16 * 3);
+    // Seek with changed Source content; only pixel residency is generation-bound.
+    session.bind_generation(2);
+    input.reverse();
+    let output = session
+        .apply_compiled_rgba_f32(
+            &input,
+            width,
+            height,
+            &graph,
+            7,
+            &mut EffectProcessorControl::uncancelled(),
+        )
+        .expect("changed UHD frame in retained bank");
+    assert_eq!(output, input);
+    drop(output);
+    assert_eq!(session.diagnostics().processor_instances, 1);
+    config.max_processor_bytes = 0;
+    session.reconfigure(config);
     assert_eq!(session.diagnostics().processor_instances, 0);
 }

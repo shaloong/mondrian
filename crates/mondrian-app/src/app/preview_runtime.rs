@@ -542,6 +542,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             cancellation: self.execution.borrow().generation_cancellation(),
             cpu_materialization_active_bytes: resolved.cpu_materialization_active_bytes,
             cpu_working_set_grant: self.scratch.borrow().cpu_working_set_diagnostics().grant,
+            effect_session_config: self
+                .heterogeneous_effect_decision
+                .get()
+                .cpu_prefix_grant()
+                .effect_session(),
             generation,
             epoch,
             output_key: resolved.cpu_cache_key.clone(),
@@ -2824,8 +2829,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 max_working_bytes: decision.effect_cache.max_working_bytes,
                 max_gpu_plan_entries: decision.effect_cache.max_gpu_plan_entries,
                 max_gpu_plan_bytes: decision.effect_cache.max_gpu_plan_bytes,
-                max_processor_instances: 0,
-                max_processor_bytes: 0,
+                max_processor_instances: decision.effect_cache.max_processor_instances,
+                max_processor_bytes: decision.effect_cache.max_processor_bytes,
             });
             scratch.reconfigure_cpu_working_set(decision.cpu_composite_working_set);
             scratch.reconfigure_color_execution(decision.cpu_color_processor_capacity);

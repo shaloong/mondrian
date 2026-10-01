@@ -441,3 +441,12 @@ Export's ordinary CPU compositor borrows ExportFrameRenderContext's existing
 job cancellation token, matching temporal/mixed native execution. It creates
 no mirrored token or cancellation thread. A stopped native render produces no
 working frame and is classified by the existing job cancellation authority.
+
+
+Export freezes explicit native Effect instance/byte residency alongside its
+active Effect working grant. Its single compositor-owned bank survives ordinary
+frame generations for independently evaluable processors; author occurrence,
+registration revision and extent prevent unrelated reuse. Stops, faults, extent
+changes and attempt shutdown retire workers. Optional retention never denies
+an otherwise admitted frame: oversized instances execute ephemerally, and idle
+siblings are evicted before active allocation.
