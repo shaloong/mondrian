@@ -189,7 +189,7 @@ pub(crate) struct DirectNativeVideoImportBackend<A> {
     device: wgpu::Device,
     queue: wgpu::Queue,
     yuv_decoder: GpuNativeYuvDecoder,
-    color_runtime: RenderGpuOutputBoundaryRuntime,
+    color_runtime: Option<RenderGpuOutputBoundaryRuntime>,
     frame_cpu_timings: NativeVideoImportCpuTimings,
     retained_sources: Arc<DirectRetainedSourceState>,
     #[cfg(target_os = "macos")]
@@ -222,7 +222,7 @@ where
             device: device.clone(),
             queue: queue.clone(),
             yuv_decoder,
-            color_runtime,
+            color_runtime: Some(color_runtime),
             frame_cpu_timings: NativeVideoImportCpuTimings::default(),
             retained_sources: Arc::new(DirectRetainedSourceState::default()),
             #[cfg(target_os = "macos")]
@@ -267,6 +267,32 @@ where
         self.frame_cpu_timings
     }
 
+    /// Loan only device caches; native surfaces and synchronization remain here.
+    pub(crate) fn take_input_backend_cache(
+        &mut self,
+    ) -> Option<crate::viewer_execution::NativeVideoInputBackendCache> {
+        let source = if self.adapter.supports_buffer_source() {
+            self.yuv_decoder.fused_buffer_input()?
+        } else {
+            self.yuv_decoder.fused_texture_input()
+        };
+        Some(crate::viewer_execution::NativeVideoInputBackendCache {
+            runtime: self.color_runtime.take()?,
+            source: (source.0, source.1.clone()),
+        })
+    }
+
+    pub(crate) fn return_input_backend_cache(
+        &mut self,
+        cache: crate::viewer_execution::NativeVideoInputBackendCache,
+    ) {
+        assert!(
+            self.color_runtime.is_none(),
+            "input cache has one physical owner"
+        );
+        self.color_runtime = Some(cache.runtime);
+    }
+
     pub(crate) fn prepare_import_plan(
         &mut self,
         plan: &GpuNativeDecodedFrameImportPlan,
@@ -279,6 +305,10 @@ where
             self.yuv_decoder.fused_texture_input()
         };
         self.color_runtime
+            .as_mut()
+            .ok_or_else(|| GpuNativeDecodedFrameImportError::Backpressure {
+                reason: "native input cache is being prepared".to_owned(),
+            })?
             .prepare_fused_yuv_input(
                 &plan.input_transform,
                 &plan.encoded_source_frame,
@@ -379,6 +409,10 @@ where
         };
         let backend = self
             .color_runtime
+            .as_mut()
+            .ok_or_else(|| GpuNativeDecodedFrameImportError::Backpressure {
+                reason: "native input cache is being prepared".to_owned(),
+            })?
             .prepare_fused_yuv_input(
                 &plan.input_transform,
                 &plan.encoded_source_frame,
@@ -390,7 +424,11 @@ where
             .map_err(|error| {
                 backend_rejected(format!("native fused input preparation failed: {error}"))
             })?;
-        let resource_pool = self.color_runtime.resource_pool();
+        let resource_pool = self
+            .color_runtime
+            .as_ref()
+            .expect("recording owns native input cache")
+            .resource_pool();
         let working = resource_pool.acquire(
             &self.device,
             &GpuColorFrameAllocationPlan::for_handle(plan.working_frame.clone()),

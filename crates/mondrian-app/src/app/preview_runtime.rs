@@ -1693,8 +1693,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         )))
     }
 
-    /// Bind one exact CPU-complete speculative frame to the freshly captured
-    /// current Frame Demand without repeating Timeline, effect, or media work.
+    /// Bind one exact speculative frame, or resume one held current candidate,
+    /// without repeating Timeline, effect, or media work. Current candidates
+    /// retain their original ticket and cannot acquire a replacement demand.
     ///
     /// Generation and complete playback intent are both required. A resize,
     /// authoring change, display-contract change, seek, or quality rotation
@@ -1717,12 +1718,19 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         if !execution.is_current_generation_key(&generation_key)
             || frame.generation() != execution.generation()
             || frame.playback_intent() != intent
-            || frame.has_heterogeneous_gpu_execution()
         {
             return None;
         }
         drop(execution);
         let ticket = snapshot.presentation_ticket(frame.presentation_quality())?;
+        if !frame.is_successor_preparation() {
+            // Resume the same current candidate, including its Broker lease.
+            // A replacement demand cannot renew this original opaque ticket.
+            return (frame.presentation_ticket() == Some(ticket)).then_some(frame);
+        }
+        if frame.has_heterogeneous_gpu_execution() {
+            return None;
+        }
         self.scheduler.synchronize_playback_current_demand(ticket.identity());
         frame.bind_current_presentation(ticket);
         Some(frame)

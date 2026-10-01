@@ -692,7 +692,38 @@ fn measure_with_resource_observer(
                 frame_seed: index,
             },
         ))];
-        runtime.prepare_native_video_imports(&layers)?;
+        let (backend_wake, backend_ready) = std::sync::mpsc::channel();
+        let before_backend = runtime.color_output_diagnostics();
+        while runtime.prepare_backend_async(
+            &context.device,
+            &context.queue,
+            ViewerGpuBackendPreparation {
+                working_color_space: WorkingColorSpace::LinearRec2020,
+                program_output_boundary: boundary.clone(),
+                monitor_adaptation: monitor.clone(),
+                output_precision: ViewerGpuOutputPrecision::EncodedFloat16,
+                signal_monitoring_active: false,
+                waveform_mode: None,
+            },
+            &layers,
+            {
+                let wake = backend_wake.clone();
+                move || {
+                    let _ = wake.send(());
+                }
+            },
+        )? != ViewerGpuBackendPreparationStatus::Ready
+        {
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "candidate backend preparation timed out"
+            );
+            let _ = backend_ready.recv_timeout(Duration::from_millis(1));
+        }
+        anyhow::ensure!(
+            runtime.color_output_diagnostics().next_frame_id == before_backend.next_frame_id,
+            "backend preparation allocated a frame identity"
+        );
         while !runtime.prewarm_cpu_yuv_uploads(&layers)? {
             context.device.poll(wgpu::PollType::Poll)?;
             if Instant::now() >= deadline {

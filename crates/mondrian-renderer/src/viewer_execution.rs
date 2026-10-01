@@ -179,6 +179,41 @@ pub struct ViewerGpuCpuYuvSource {
     pub materialization_height: u32,
 }
 
+/// Exact source/working device-object contract; no decoded surface or frame identity.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct NativeVideoInputBackendPreparation {
+    pub(crate) input: crate::ColorFrameDescriptor,
+    pub(crate) output: crate::ColorFrameDescriptor,
+    pub(crate) transform: RenderInputTransform,
+}
+
+/// Move-only loan of the original native input cache and its physical shader layout.
+pub(crate) struct NativeVideoInputBackendCache {
+    pub(crate) runtime: crate::RenderGpuOutputBoundaryRuntime,
+    pub(crate) source: (&'static str, wgpu::BindGroupLayout),
+}
+
+impl NativeVideoInputBackendCache {
+    pub(crate) fn prepare(
+        &mut self,
+        plans: &[NativeVideoInputBackendPreparation],
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<(), crate::color_stage::RenderGpuFusedInputError> {
+        for plan in plans {
+            self.runtime.prepare_fused_yuv_descriptor_backend(
+                &plan.transform,
+                plan.input,
+                plan.output,
+                (self.source.0, &self.source.1),
+                device,
+                queue,
+            )?;
+        }
+        Ok(())
+    }
+}
+
 /// Renderer backend lifetime for native decoded-frame import.
 pub struct NativeVideoImportRuntime {
     support: GpuNativeDecodedFrameImportSupport,
@@ -488,6 +523,42 @@ impl NativeVideoImportRuntime {
             return backend.wait_for_released_sources_until(_deadline);
         }
         self.retire_completed_source_residency()
+    }
+
+    pub(crate) fn input_backend_preparation(
+        &self,
+        source: &ViewerGpuNativeSource,
+    ) -> Result<NativeVideoInputBackendPreparation, GpuNativeDecodedFrameImportError> {
+        let contract = native_decoded_frame_import_contract(
+            source.source_color_space,
+            &source.input_transform,
+            source.materialization_width,
+            source.materialization_height,
+            &source.native_frame,
+        )?;
+        let (input, output) = contract.validated_frame_descriptors(&self.support)?;
+        Ok(NativeVideoInputBackendPreparation {
+            input,
+            output,
+            transform: contract.input_transform,
+        })
+    }
+
+    pub(crate) fn take_input_backend_cache(&mut self) -> Option<NativeVideoInputBackendCache> {
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        if let Some(backend) = &mut self.backend {
+            return backend.take_input_backend_cache();
+        }
+        None
+    }
+
+    pub(crate) fn return_input_backend_cache(&mut self, cache: NativeVideoInputBackendCache) {
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        if let Some(backend) = &mut self.backend {
+            backend.return_input_backend_cache(cache);
+            return;
+        }
+        unreachable!("a loaned input cache retains its device backend");
     }
 
     /// Prepare contract-specific native input color objects without adopting

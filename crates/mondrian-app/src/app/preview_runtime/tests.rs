@@ -2312,6 +2312,61 @@ fn playing_gpu_candidate_carries_exact_presentation_ticket() {
 }
 
 #[test]
+fn pending_current_gpu_candidate_resumes_without_replacing_its_ticket_or_owner() {
+    let service = WindowPreviewAdapter::new();
+    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    state.play().expect("play");
+    let initial = match execute_gpu_preview_for_test_app(&service, &state) {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        _ => panic!("priming candidate"),
+    };
+    state
+        .complete_frame_presentation(initial.presentation_ticket().unwrap(), Instant::now())
+        .unwrap();
+    assert!(state.observe_video_preroll(0, 0));
+    state.advance_playback_clock_at(Instant::now() + Duration::from_millis(45));
+    let frame = match execute_gpu_preview_for_test_app(&service, &state) {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        _ => panic!("timed current candidate"),
+    };
+    assert!(!frame.is_successor_preparation());
+    let ticket = frame.presentation_ticket().unwrap();
+    let identity = frame.candidate_id();
+    let address = (&*frame) as *const PreviewGpuFrame;
+    let snapshot = state.preview_execution_snapshot(Instant::now() + Duration::from_secs(10));
+    let resumed = service
+        .bind_staged_gpu_frame_for_current(frame, &snapshot)
+        .expect("same current demand");
+    assert_eq!(
+        resumed.presentation_ticket(),
+        Some(ticket),
+        "elapsed preparation cannot renew a deadline"
+    );
+    assert_eq!(resumed.candidate_id(), identity);
+    assert_eq!(
+        (&*resumed) as *const PreviewGpuFrame,
+        address,
+        "move the original candidate, not a rebuilt frame"
+    );
+    assert_eq!(
+        state.pending_playback_frame_demand_identity(),
+        Some(ticket.identity())
+    );
+    assert!(state.set_viewer_display_management(
+        mondrian_core::DisplayManagementPolicy::default()
+            .with_monitor_output(mondrian_core::MonitorOutputIntent::ColorSpace(
+                ColorSpace::DisplayP3
+            ))
+            .unwrap(),
+    ));
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    assert!(
+        service.bind_staged_gpu_frame_for_current(resumed, &snapshot).is_none(),
+        "a foreign generation retires the held candidate"
+    );
+}
+
+#[test]
 fn exact_staged_gpu_candidate_acquires_only_the_current_demand_ticket() {
     let service = WindowPreviewAdapter::new();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));

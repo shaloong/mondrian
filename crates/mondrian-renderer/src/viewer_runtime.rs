@@ -425,14 +425,15 @@ impl ViewerGpuExecutionRuntime {
             .map_err(ViewerGpuExecutionError::BackendPreparation)
     }
 
-    /// Prepare the exact Program Output and scopes caches off the caller thread. The caller
-    /// admits this only between completed GPU submissions. Pending preparation
-    /// neither consumes a frame nor authorizes publication or deadline renewal.
+    /// Prepare the exact candidate's native input caches on the same bounded worker.
+    /// Only validated descriptors, transforms and the original device cache cross
+    /// the thread boundary. Decoder surfaces and presentation tickets stay local.
     pub fn prepare_backend_async(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         plan: crate::ViewerGpuBackendPreparation,
+        layers: &[ViewerGpuExecutionLayer],
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<crate::ViewerGpuBackendPreparationStatus, ViewerGpuExecutionError> {
         if self
@@ -443,13 +444,48 @@ impl ViewerGpuExecutionRuntime {
             return Err(ViewerGpuExecutionError::PreviousFrameNotSubmitted);
         }
         self.color_output
-            .request(device, queue, plan, wake)
-            .map_err(ViewerGpuExecutionError::BackendPreparation)
-    }
-
-    /// Whether this exact contract has returned successfully to the recording owner.
-    pub fn backend_is_prepared(&self, plan: &crate::ViewerGpuBackendPreparation) -> bool {
-        self.color_output.is_prepared(plan)
+            .collect()
+            .map_err(ViewerGpuExecutionError::BackendPreparation)?;
+        if let Some(cache) = self.color_output.take_returned_native_cache() {
+            self.native_video_import.return_input_backend_cache(cache);
+        }
+        if self.color_output.is_pending() {
+            return Ok(crate::ViewerGpuBackendPreparationStatus::Pending);
+        }
+        let mut native_plans = Vec::new();
+        if self.native_video_import.support().renderer_backend_ready {
+            for frame in visible_native_video_sources(layers) {
+                let native =
+                    self.native_video_import.input_backend_preparation(frame).map_err(|error| {
+                        ViewerGpuExecutionError::InputPreparation(error.to_string())
+                    })?;
+                if !native_plans.contains(&native) {
+                    native_plans.push(native);
+                }
+            }
+        }
+        if self.color_output.native_is_prepared(&plan, &native_plans) {
+            return Ok(crate::ViewerGpuBackendPreparationStatus::Ready);
+        }
+        let cache = if native_plans.is_empty() {
+            None
+        } else {
+            Some(
+                self.native_video_import.take_input_backend_cache().ok_or_else(|| {
+                    ViewerGpuExecutionError::InputPreparation(
+                        "native input cache is unavailable".to_owned(),
+                    )
+                })?,
+            )
+        };
+        let result = self
+            .color_output
+            .request_with_native(device, queue, plan, cache, native_plans, wake)
+            .map_err(ViewerGpuExecutionError::BackendPreparation);
+        if let Some(cache) = self.color_output.take_returned_native_cache() {
+            self.native_video_import.return_input_backend_cache(cache);
+        }
+        result
     }
 
     /// Prepare every compact input of one complete current candidate.
@@ -2465,16 +2501,21 @@ fn collect_source_cpu_yuv_upload(
 fn visible_native_video_frames(
     layers: &[ViewerGpuExecutionLayer],
 ) -> Vec<&mondrian_media::PreviewNativeDecodedFrame> {
-    fn source_frame(
-        source: &crate::ViewerGpuSourceLayer,
-    ) -> Option<&mondrian_media::PreviewNativeDecodedFrame> {
+    visible_native_video_sources(layers)
+        .into_iter()
+        .map(|source| source.native_frame.as_ref())
+        .collect()
+}
+
+fn visible_native_video_sources(
+    layers: &[ViewerGpuExecutionLayer],
+) -> Vec<&crate::ViewerGpuNativeSource> {
+    fn source_frame(source: &crate::ViewerGpuSourceLayer) -> Option<&crate::ViewerGpuNativeSource> {
         if source_layer_has_zero_contribution(source) {
             return None;
         }
         match source {
-            crate::ViewerGpuSourceLayer::Media { native_source: Some(source), .. } => {
-                Some(source.native_frame.as_ref())
-            }
+            crate::ViewerGpuSourceLayer::Media { native_source: Some(source), .. } => Some(source),
             _ => None,
         }
     }
@@ -3122,7 +3163,7 @@ mod tests {
         let before = runtime.color_output_diagnostics();
         assert_eq!(
             runtime
-                .prepare_backend_async(&context.device, &context.queue, plan.clone(), || {},)
+                .prepare_backend_async(&context.device, &context.queue, plan.clone(), &[], || {},)
                 .unwrap(),
             crate::ViewerGpuBackendPreparationStatus::Pending
         );
@@ -3137,7 +3178,7 @@ mod tests {
         assert_eq!(runtime.active_working_set_diagnostics().last_admitted, None);
         let deadline = Instant::now() + Duration::from_secs(5);
         while runtime
-            .prepare_backend_async(&context.device, &context.queue, plan.clone(), || {})
+            .prepare_backend_async(&context.device, &context.queue, plan.clone(), &[], || {})
             .unwrap()
             != crate::ViewerGpuBackendPreparationStatus::Ready
         {
@@ -3502,6 +3543,7 @@ mod tests {
                     signal_monitoring_active: false,
                     waveform_mode: None,
                 },
+                &[],
                 || {},
             ),
             Err(ViewerGpuExecutionError::PreviousFrameNotSubmitted)

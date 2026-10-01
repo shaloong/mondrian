@@ -1712,18 +1712,78 @@ impl RenderGpuOutputBoundaryRuntime {
             &stage_plan,
         )
         .map_err(RenderGpuFusedInputError::ResourcePlan)?;
-        let shader_plan = resources.transform.wgpu.shader_plan.clone();
+        self.prepare_fused_yuv_shader_backend(
+            &resources.transform.wgpu.shader_plan,
+            color_target_format_for_gpu_frame(output),
+            source,
+            device,
+            queue,
+        )
+    }
+
+    /// Device-cache preparation from a validated native contract, without frame identities.
+    pub(crate) fn prepare_fused_yuv_descriptor_backend(
+        &mut self,
+        transform: &RenderInputTransform,
+        input: ColorFrameDescriptor,
+        output: ColorFrameDescriptor,
+        source: (&str, &wgpu::BindGroupLayout),
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<RenderGpuFusedInputBackend, RenderGpuFusedInputError> {
+        let mut planner = RenderColorStagePlanner::prefer_gpu(
+            &mut self.shader_cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+        let stage_plan = planner
+            .plan_input_to_working(input, transform)
+            .map_err(RenderGpuFusedInputError::Plan)?;
+        let planned = planned_gpu_source_transform(&stage_plan)
+            .map_err(RenderGpuFusedInputError::ResourcePlan)?;
+        if planned.gpu_output != output {
+            return Err(RenderGpuFusedInputError::ResourcePlan(
+                RenderGpuInputStageResourcePlanError::OutputDescriptorMismatch {
+                    expected: planned.gpu_output,
+                    actual: output,
+                },
+            ));
+        }
+        self.prepare_fused_yuv_shader_backend(
+            &planned.transform.wgpu.shader_plan,
+            match product_gpu_working_texture_format() {
+                GpuColorFrameTextureFormat::Rgba16Float => {
+                    OcioGpuWgpuColorTargetFormat::Rgba16Float
+                }
+                GpuColorFrameTextureFormat::Rgba32Float => {
+                    OcioGpuWgpuColorTargetFormat::Rgba32Float
+                }
+                _ => unreachable!("product working format must be floating point"),
+            },
+            source,
+            device,
+            queue,
+        )
+    }
+
+    fn prepare_fused_yuv_shader_backend(
+        &mut self,
+        shader_plan: &crate::OcioGpuShaderPlan,
+        output_format: OcioGpuWgpuColorTargetFormat,
+        source: (&str, &wgpu::BindGroupLayout),
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<RenderGpuFusedInputBackend, RenderGpuFusedInputError> {
         let static_pipeline = self
             .backend_prep
-            .prepare_static_pipeline(&shader_plan, color_target_format_for_gpu_frame(output))
+            .prepare_static_pipeline(shader_plan, output_format)
             .map_err(RenderGpuFusedInputError::BackendPrep)?;
         let backend = self
             .backend_objects
-            .prepare_backend_objects(device, queue, &shader_plan, &static_pipeline)
+            .prepare_backend_objects(device, queue, shader_plan, &static_pipeline)
             .map_err(RenderGpuFusedInputError::BackendObjects)?;
         let pipeline = self.backend_objects.prepare_fused_input_pipeline(
             device,
-            &shader_plan,
+            shader_plan,
             &backend,
             source.0,
             source.1,

@@ -8,6 +8,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
 
+use crate::viewer_execution::{NativeVideoInputBackendCache, NativeVideoInputBackendPreparation};
 use mondrian_core::{WaveformMode, WorkingColorSpace};
 
 use crate::{
@@ -85,6 +86,8 @@ pub enum ViewerGpuBackendPreparationError {
     Preparation(Box<RenderGpuOutputBoundaryRuntimeRecordError>),
     #[error("Viewer backend preparation panicked: {0}")]
     Panicked(String),
+    #[error("Viewer native input backend preparation failed: {0}")]
+    NativeInput(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Observed, joined worker termination, independent of GPU queue completion.
@@ -101,6 +104,8 @@ type PreparationResult = Result<(), Arc<ViewerGpuBackendPreparationError>>;
 struct PreparationJob {
     runtime: RenderGpuOutputBoundaryRuntime,
     scopes: GpuProgramScopesRuntime,
+    native_cache: Option<NativeVideoInputBackendCache>,
+    native_plans: Vec<NativeVideoInputBackendPreparation>,
     plan: ViewerGpuBackendPreparation,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -110,6 +115,8 @@ struct PreparationJob {
 struct PreparedCache {
     runtime: RenderGpuOutputBoundaryRuntime,
     scopes: GpuProgramScopesRuntime,
+    native_cache: Option<NativeVideoInputBackendCache>,
+    native_plans: Vec<NativeVideoInputBackendPreparation>,
     plan: ViewerGpuBackendPreparation,
     result: PreparationResult,
 }
@@ -151,6 +158,13 @@ impl PreparationWorker {
                         if let Some(mode) = job.plan.waveform_mode {
                             job.scopes.prepare_backend(&job.device, mode);
                         }
+                        if let Some(cache) = &mut job.native_cache {
+                            cache.prepare(&job.native_plans, &job.device, &job.queue).map_err(
+                                |error| {
+                                    ViewerGpuBackendPreparationError::NativeInput(Box::new(error))
+                                },
+                            )?;
+                        }
                         Ok(())
                     }))
                     .unwrap_or_else(|panic| {
@@ -170,6 +184,8 @@ impl PreparationWorker {
                     let prepared = PreparedCache {
                         runtime: job.runtime,
                         scopes: job.scopes,
+                        native_cache: job.native_cache,
+                        native_plans: job.native_plans,
                         plan: job.plan,
                         result,
                     };
@@ -197,6 +213,8 @@ pub(crate) struct ViewerBackendOwner {
     scopes: Option<GpuProgramScopesRuntime>,
     scopes_snapshot: GpuProgramScopesRuntimeDiagnostics,
     prepared: Option<(ViewerGpuBackendPreparation, PreparationResult)>,
+    prepared_native: Vec<NativeVideoInputBackendPreparation>,
+    returned_native_cache: Option<NativeVideoInputBackendCache>,
     worker: Option<PreparationWorker>,
     pending: bool,
     retiring: bool,
@@ -212,6 +230,8 @@ impl ViewerBackendOwner {
             scopes: Some(GpuProgramScopesRuntime::default()),
             scopes_snapshot: GpuProgramScopesRuntimeDiagnostics::default(),
             prepared: None,
+            prepared_native: Vec::new(),
+            returned_native_cache: None,
             worker: None,
             pending: false,
             retiring: false,
@@ -283,10 +303,12 @@ impl ViewerBackendOwner {
                 .expect("local caches are paired")
                 .prepare_backend(device, mode);
         }
+        self.prepared_native.clear();
         self.prepared = Some((plan, result.clone()));
         result
     }
 
+    #[cfg(test)]
     pub(crate) fn request(
         &mut self,
         device: &wgpu::Device,
@@ -294,6 +316,23 @@ impl ViewerBackendOwner {
         plan: ViewerGpuBackendPreparation,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<ViewerGpuBackendPreparationStatus, Arc<ViewerGpuBackendPreparationError>> {
+        self.request_with_native(device, queue, plan, None, Vec::new(), wake)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn request_with_native(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        plan: ViewerGpuBackendPreparation,
+        native_cache: Option<NativeVideoInputBackendCache>,
+        native_plans: Vec<NativeVideoInputBackendPreparation>,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Result<ViewerGpuBackendPreparationStatus, Arc<ViewerGpuBackendPreparationError>> {
+        if native_cache.is_some() {
+            assert!(self.returned_native_cache.is_none());
+            self.returned_native_cache = native_cache;
+        }
         if self.retiring {
             return Err(Arc::new(ViewerGpuBackendPreparationError::AdmissionClosed));
         }
@@ -303,9 +342,13 @@ impl ViewerBackendOwner {
         }
         if let Some((prepared, result)) = &self.prepared
             && prepared == &plan
+            && self.prepared_native == native_plans
         {
             result.clone()?;
             return Ok(ViewerGpuBackendPreparationStatus::Ready);
+        }
+        if !native_plans.is_empty() && self.returned_native_cache.is_none() {
+            return Err(Arc::new(ViewerGpuBackendPreparationError::Capacity));
         }
         if self.worker.is_none() {
             self.worker = Some(PreparationWorker::spawn().map_err(Arc::new)?);
@@ -322,6 +365,8 @@ impl ViewerBackendOwner {
         let job = PreparationJob {
             runtime: self.runtime.take().expect("local cache checked"),
             scopes: self.scopes.take().expect("local caches are paired"),
+            native_cache: self.returned_native_cache.take(),
+            native_plans,
             plan,
             device: device.clone(),
             queue: queue.clone(),
@@ -351,9 +396,27 @@ impl ViewerBackendOwner {
                 self.prepared = Some((job.plan, Err(Arc::clone(&failure))));
                 self.runtime = Some(job.runtime);
                 self.scopes = Some(job.scopes);
+                self.returned_native_cache = job.native_cache;
+                self.prepared_native = job.native_plans;
                 Err(failure)
             }
         }
+    }
+
+    pub(crate) fn take_returned_native_cache(&mut self) -> Option<NativeVideoInputBackendCache> {
+        self.returned_native_cache.take()
+    }
+
+    pub(crate) fn native_is_prepared(
+        &self,
+        plan: &ViewerGpuBackendPreparation,
+        native: &[NativeVideoInputBackendPreparation],
+    ) -> bool {
+        self.is_prepared(plan) && self.prepared_native == native
+    }
+
+    pub(crate) fn is_pending(&self) -> bool {
+        self.pending
     }
 
     pub(crate) fn is_prepared(&self, plan: &ViewerGpuBackendPreparation) -> bool {
@@ -365,7 +428,7 @@ impl ViewerBackendOwner {
                 .is_some_and(|(prepared, result)| prepared == plan && result.is_ok())
     }
 
-    fn collect(&mut self) -> Result<(), Arc<ViewerGpuBackendPreparationError>> {
+    pub(crate) fn collect(&mut self) -> Result<(), Arc<ViewerGpuBackendPreparationError>> {
         if !self.pending {
             return Ok(());
         }
@@ -376,6 +439,8 @@ impl ViewerBackendOwner {
                 self.runtime = Some(prepared.runtime);
                 self.scopes_snapshot = prepared.scopes.diagnostics();
                 self.scopes = Some(prepared.scopes);
+                self.prepared_native = prepared.native_plans;
+                self.returned_native_cache = prepared.native_cache;
                 self.prepared = Some((prepared.plan, prepared.result));
                 self.pending = false;
                 Ok(())
@@ -474,6 +539,129 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires native input caches and a real GPU backend"]
+    async fn backend_preparation_returns_the_original_native_input_cache_without_frames() {
+        mondrian_core::ensure_mondrian_default_ocio_loaded().unwrap();
+        let context = crate::GpuContext::new().await.expect("real backend adapter");
+        eprintln!("adapter={:?}", context.adapter.get_info());
+        let mut native =
+            crate::NativeVideoImportRuntime::new(&context.adapter, &context.device, &context.queue);
+        assert!(native.support().renderer_backend_ready);
+        let cache = native.take_input_backend_cache().expect("original input cache");
+        assert!(
+            native.take_input_backend_cache().is_none(),
+            "a cache cannot be loaned twice"
+        );
+        let before = cache.runtime.diagnostics();
+        let input = ColorFrameDescriptor {
+            width: 16,
+            height: 16,
+            color_space: ColorSpace::Rec709.into(),
+            domain: ColorFrameDomain::Source,
+            encoding: ColorFrameEncoding::EncodedFloat,
+            residency: ColorFrameResidency::Gpu,
+            alpha: ColorFrameAlpha::Opaque,
+        };
+        let output = ColorFrameDescriptor {
+            color_space: WorkingColorSpace::LinearRec709.into(),
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            ..input
+        };
+        let plans = vec![NativeVideoInputBackendPreparation {
+            input,
+            output,
+            transform: crate::RenderInputTransform::to_working_gpu(
+                WorkingColorSpace::LinearRec709,
+                true,
+                ColorEngine::mondrian_standard(),
+            ),
+        }];
+        let requested = plan(ColorSpace::Rec709);
+        let mut owner = ViewerBackendOwner::new(RenderGpuOutputBoundaryRuntime::new().unwrap());
+        assert_eq!(
+            owner
+                .request_with_native(
+                    &context.device,
+                    &context.queue,
+                    requested.clone(),
+                    Some(cache),
+                    plans.clone(),
+                    || {}
+                )
+                .unwrap(),
+            ViewerGpuBackendPreparationStatus::Pending
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while owner
+            .request_with_native(
+                &context.device,
+                &context.queue,
+                requested.clone(),
+                None,
+                plans.clone(),
+                || {},
+            )
+            .unwrap()
+            != ViewerGpuBackendPreparationStatus::Ready
+        {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(owner.native_is_prepared(&requested, &plans));
+        assert!(!owner.native_is_prepared(&requested, &[]));
+        let mut returned = owner.take_returned_native_cache().expect("same cache returned");
+        assert_eq!(
+            returned.runtime.diagnostics().next_frame_id,
+            before.next_frame_id
+        );
+        assert_eq!(returned.runtime.diagnostics().frame_table_entries, 0);
+        assert_eq!(
+            returned.runtime.diagnostics().resource_pool.misses,
+            before.resource_pool.misses
+        );
+        let prepared = returned.runtime.diagnostics();
+        let first = returned
+            .runtime
+            .prepare_fused_yuv_descriptor_backend(
+                &plans[0].transform,
+                input,
+                output,
+                (returned.source.0, &returned.source.1),
+                &context.device,
+                &context.queue,
+            )
+            .unwrap();
+        native.return_input_backend_cache(returned);
+        let mut second = native.take_input_backend_cache().unwrap();
+        let reused = second
+            .runtime
+            .prepare_fused_yuv_descriptor_backend(
+                &plans[0].transform,
+                input,
+                output,
+                (second.source.0, &second.source.1),
+                &context.device,
+                &context.queue,
+            )
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(&first.pipeline, &reused.pipeline),
+            "the exact device pipeline is reused after returning to its backend"
+        );
+        assert_eq!(
+            second.runtime.diagnostics().backend_objects.misses,
+            prepared.backend_objects.misses
+        );
+        native.return_input_backend_cache(second);
+        assert_eq!(native.retained_source_count(), 0);
+        assert_eq!(
+            finish(&mut owner),
+            ViewerBackendPreparationWorkerExit::Returned
+        );
     }
 
     #[tokio::test]

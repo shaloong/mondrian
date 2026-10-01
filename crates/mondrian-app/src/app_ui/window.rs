@@ -1849,6 +1849,9 @@ struct AppUiWindowSession {
     /// presentation lease; an exact entry may either become the immediate
     /// successor or acquire the current Frame Demand after a clock jump.
     staged_viewer_gpu_successors: PreviewGpuFrameStaging,
+    /// Capacity-one current candidate waiting for device cache preparation.
+    /// Retains the original ticket, Broker lease and media guards locally.
+    pending_viewer_backend_frame: Option<Box<PreviewGpuFrame>>,
     viewer_gpu_deferred_cleanup: WindowViewerGpuDeferredCleanup,
     program_scopes_registered: bool,
     program_scopes_refresh_requested: bool,
@@ -6872,6 +6875,15 @@ fn report_successful_viewer_gpu_fallbacks(
     }
 }
 
+fn retain_viewer_backend_candidate(session: &mut AppUiWindowSession, frame: Box<PreviewGpuFrame>) {
+    if frame.is_successor_preparation() {
+        session.staged_viewer_gpu_successors.stage(frame);
+    } else {
+        debug_assert!(session.pending_viewer_backend_frame.is_none());
+        session.pending_viewer_backend_frame = Some(frame);
+    }
+}
+
 fn viewer_program_backend_preparation(
     host: &AppUiHost,
     session: &AppUiWindowSession,
@@ -7049,43 +7061,6 @@ fn prepare_viewer_gpu_preview(
             finish_prepare!();
         }
     };
-    if !session.viewer_gpu_execution.backend_is_prepared(&backend_plan) {
-        // Never loan the frame table while an exact GPU submission still owns
-        // it. No candidate/ticket is consumed until the cache is back locally.
-        if submission_in_flight {
-            finish_prepare!();
-        }
-        let Some(event_proxy) = session.viewer_backend_event_proxy.clone() else {
-            host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
-                feature: "viewer_program_backend_preparation".to_owned(),
-                reason: "native Window preparation wake route is unavailable".to_owned(),
-            });
-            finish_prepare!();
-        };
-        match session.viewer_gpu_execution.prepare_backend_async(
-            device,
-            queue,
-            backend_plan.clone(),
-            move || {
-                let _ = event_proxy.send_event(AppUiUserEvent::ViewerBackendPreparationAvailable);
-            },
-        ) {
-            Ok(mondrian_renderer::ViewerGpuBackendPreparationStatus::Ready) => {}
-            Ok(mondrian_renderer::ViewerGpuBackendPreparationStatus::Pending) => {
-                session.viewer_gpu_output_telemetry.record_loading_skip();
-                finish_prepare!();
-            }
-            Err(error) => {
-                host.record_preview_gpu_output_blocker(
-                    &PreviewGpuOutputBlocker::UnsupportedFeature {
-                        feature: "viewer_program_backend_preparation".to_owned(),
-                        reason: error.to_string(),
-                    },
-                );
-                finish_prepare!();
-            }
-        }
-    }
     if !submission_in_flight {
         host.apply_preview_execution_resource_decision(&mut *session.viewer_gpu_execution);
     }
@@ -7119,13 +7094,19 @@ fn prepare_viewer_gpu_preview(
         session.viewer_gpu_output_telemetry.record_non_workspace_skip();
         finish_prepare!();
     }
+    let pending_current = session
+        .pending_viewer_backend_frame
+        .take()
+        .and_then(|frame| host.bind_staged_gpu_frame_for_current(frame));
     let current_candidate = match preparation {
         ViewerGpuPreparation::Current => {
-            let staged_current = session
-                .staged_viewer_gpu_successors
-                .take_exact(host.viewer_gpu_current_intent())
-                .and_then(|frame| host.bind_staged_gpu_frame_for_current(frame));
-            staged_current.map_or_else(
+            let retained_current = pending_current.or_else(|| {
+                session
+                    .staged_viewer_gpu_successors
+                    .take_exact(host.viewer_gpu_current_intent())
+                    .and_then(|frame| host.bind_staged_gpu_frame_for_current(frame))
+            });
+            retained_current.map_or_else(
                 || host.gpu_preview_frame_for_current_state(),
                 PreviewGpuFrameState::Ready,
             )
@@ -7289,6 +7270,49 @@ fn prepare_viewer_gpu_preview(
                     .to_owned(),
         });
         finish_prepare!();
+    }
+    {
+        // Loan device caches only after the exact previous submission completes.
+        // Pending preparation does not consume or renew this candidate ticket.
+        if submission_in_flight {
+            retain_viewer_backend_candidate(session, frame);
+            finish_prepare!();
+        }
+        let Some(event_proxy) = session.viewer_backend_event_proxy.clone() else {
+            host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
+                feature: "viewer_program_backend_preparation".to_owned(),
+                reason: "native Window preparation wake route is unavailable".to_owned(),
+            });
+            finish_prepare!();
+        };
+        match session.viewer_gpu_execution.prepare_backend_async(
+            device,
+            queue,
+            backend_plan.clone(),
+            match &frame.working_input {
+                PreviewGpuWorkingInput::GpuComposite { layers } => layers,
+            },
+            move || {
+                let _ = event_proxy.send_event(AppUiUserEvent::ViewerBackendPreparationAvailable);
+            },
+        ) {
+            Ok(mondrian_renderer::ViewerGpuBackendPreparationStatus::Ready) => {}
+            Ok(mondrian_renderer::ViewerGpuBackendPreparationStatus::Pending) => {
+                session.viewer_gpu_output_telemetry.record_loading_skip();
+                retain_viewer_backend_candidate(session, frame);
+                finish_prepare!();
+            }
+            Err(error) => {
+                fail_viewer_gpu_frame(host, &mut frame);
+                host.record_preview_gpu_output_blocker(
+                    &PreviewGpuOutputBlocker::UnsupportedFeature {
+                        feature: "viewer_program_backend_preparation".to_owned(),
+                        reason: error.to_string(),
+                    },
+                );
+                finish_prepare!();
+            }
+        }
     }
     let Some(texture_key_base) = ExternalTextureKey::new(format!(
         "{}:{}:{}",
@@ -8834,6 +8858,7 @@ impl AppUiPreparedWindowSession {
             viewer_gpu_presentation: WindowViewerGpuPresentationState::default(),
             viewer_gpu_submissions: ViewerGpuSubmissionLifecycle::new(),
             staged_viewer_gpu_successors: PreviewGpuFrameStaging::default(),
+            pending_viewer_backend_frame: None,
             viewer_gpu_deferred_cleanup: WindowViewerGpuDeferredCleanup::None,
             program_scopes_registered: false,
             program_scopes_refresh_requested: false,

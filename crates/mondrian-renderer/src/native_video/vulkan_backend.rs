@@ -140,6 +140,19 @@ impl VulkanNativeVideoImportBackend {
         self.inner.frame_cpu_timings()
     }
 
+    pub(crate) fn take_input_backend_cache(
+        &mut self,
+    ) -> Option<crate::viewer_execution::NativeVideoInputBackendCache> {
+        self.inner.take_input_backend_cache()
+    }
+
+    pub(crate) fn return_input_backend_cache(
+        &mut self,
+        cache: crate::viewer_execution::NativeVideoInputBackendCache,
+    ) {
+        self.inner.return_input_backend_cache(cache);
+    }
+
     pub(crate) fn prepare_import_plan(
         &mut self,
         plan: &GpuNativeDecodedFrameImportPlan,

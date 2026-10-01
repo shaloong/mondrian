@@ -2494,73 +2494,68 @@ pub struct GpuNativeDecodedFrameImportPlan {
     pub working_frame: GpuColorFrameHandle,
 }
 
-impl GpuNativeDecodedFrameImportPlan {
-    /// Build a native decoded-frame import plan from a validated backend
-    /// support contract.
-    pub fn from_contract(
-        ids: &mut GpuColorFrameIdAllocator,
-        contract: GpuNativeDecodedFrameImportContract,
+impl GpuNativeDecodedFrameImportContract {
+    /// Validate the native route and derive color descriptors without allocating frame IDs.
+    pub(crate) fn validated_frame_descriptors(
+        &self,
         support: &GpuNativeDecodedFrameImportSupport,
-    ) -> Result<Self, GpuNativeDecodedFrameImportPlanError> {
-        if contract.width == 0 || contract.height == 0 {
+    ) -> Result<(ColorFrameDescriptor, ColorFrameDescriptor), GpuNativeDecodedFrameImportPlanError>
+    {
+        if self.width == 0 || self.height == 0 {
             return Err(GpuNativeDecodedFrameImportPlanError::EmptyExtent {
-                width: contract.width,
-                height: contract.height,
+                width: self.width,
+                height: self.height,
             });
         }
-        if contract.output_width == 0 || contract.output_height == 0 {
+        if self.output_width == 0 || self.output_height == 0 {
             return Err(GpuNativeDecodedFrameImportPlanError::EmptyOutputExtent {
-                width: contract.output_width,
-                height: contract.output_height,
+                width: self.output_width,
+                height: self.output_height,
             });
         }
         if !support.renderer_backend_ready {
             return Err(GpuNativeDecodedFrameImportPlanError::RendererBackendUnavailable);
         }
-        if !support.supports_handle_kind(contract.handle_kind) {
+        if !support.supports_handle_kind(self.handle_kind) {
             return Err(
                 GpuNativeDecodedFrameImportPlanError::UnsupportedHandleKind {
-                    handle_kind: contract.handle_kind,
+                    handle_kind: self.handle_kind,
                 },
             );
         }
-        if !support.supports_source_texture_format(contract.source_texture_format) {
+        if !support.supports_source_texture_format(self.source_texture_format) {
             return Err(
                 GpuNativeDecodedFrameImportPlanError::UnsupportedSourceTextureFormat {
-                    source_texture_format: contract.source_texture_format,
+                    source_texture_format: self.source_texture_format,
                 },
             );
         }
-        if support
-            .import_mode_for(contract.handle_kind, contract.source_texture_format)
-            .is_none()
-        {
+        if support.import_mode_for(self.handle_kind, self.source_texture_format).is_none() {
             return Err(
                 GpuNativeDecodedFrameImportPlanError::UnsupportedImportRoute {
-                    handle_kind: contract.handle_kind,
-                    source_texture_format: contract.source_texture_format,
+                    handle_kind: self.handle_kind,
+                    source_texture_format: self.source_texture_format,
                 },
             );
         }
-        contract
-            .video_sampling
-            .validate_for(contract.source_texture_format, contract.source_color_space)?;
-        if contract.input_transform.backend != RenderColorTransformBackend::OcioGpuShaderPlan {
+        self.video_sampling
+            .validate_for(self.source_texture_format, self.source_color_space)?;
+        if self.input_transform.backend != RenderColorTransformBackend::OcioGpuShaderPlan {
             return Err(
                 GpuNativeDecodedFrameImportPlanError::UnsupportedInputTransformBackend {
-                    backend: contract.input_transform.backend,
+                    backend: self.input_transform.backend,
                 },
             );
         }
-        let source_descriptor = contract.source_texture_format.physical_descriptor().ok_or(
+        let source_descriptor = self.source_texture_format.physical_descriptor().ok_or(
             GpuNativeDecodedFrameImportPlanError::UnsupportedSourceTextureFormat {
-                source_texture_format: contract.source_texture_format,
+                source_texture_format: self.source_texture_format,
             },
         )?;
         let encoded_source_descriptor = ColorFrameDescriptor {
-            width: contract.output_width,
-            height: contract.output_height,
-            color_space: contract.source_color_space.into(),
+            width: self.output_width,
+            height: self.output_height,
+            color_space: self.source_color_space.into(),
             domain: ColorFrameDomain::Source,
             encoding: ColorFrameEncoding::EncodedFloat,
             residency: ColorFrameResidency::Gpu,
@@ -2570,6 +2565,29 @@ impl GpuNativeDecodedFrameImportPlan {
                 ColorFrameAlpha::Opaque
             },
         };
+        let working_descriptor = ColorFrameDescriptor {
+            width: self.output_width,
+            height: self.output_height,
+            color_space: self.input_transform.working_color_space.into(),
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Gpu,
+            alpha: encoded_source_descriptor.alpha,
+        };
+        Ok((encoded_source_descriptor, working_descriptor))
+    }
+}
+
+impl GpuNativeDecodedFrameImportPlan {
+    /// Build a native decoded-frame import plan from a validated backend
+    /// support contract.
+    pub fn from_contract(
+        ids: &mut GpuColorFrameIdAllocator,
+        contract: GpuNativeDecodedFrameImportContract,
+        support: &GpuNativeDecodedFrameImportSupport,
+    ) -> Result<Self, GpuNativeDecodedFrameImportPlanError> {
+        let (encoded_source_descriptor, working_descriptor) =
+            contract.validated_frame_descriptors(support)?;
         let encoded_source_frame = GpuColorFrameHandle::new(
             ids.allocate()?,
             encoded_source_descriptor,
@@ -2577,15 +2595,6 @@ impl GpuNativeDecodedFrameImportPlan {
             format!("{}.encoded-source", contract.label),
         )
         .map_err(GpuNativeDecodedFrameImportPlanError::EncodedSourceFrameHandle)?;
-        let working_descriptor = ColorFrameDescriptor {
-            width: contract.output_width,
-            height: contract.output_height,
-            color_space: contract.input_transform.working_color_space.into(),
-            domain: ColorFrameDomain::Working,
-            encoding: ColorFrameEncoding::LinearFloat,
-            residency: ColorFrameResidency::Gpu,
-            alpha: encoded_source_descriptor.alpha,
-        };
         let working_frame = GpuColorFrameHandle::new(
             ids.allocate()?,
             working_descriptor,
