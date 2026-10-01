@@ -24,7 +24,7 @@ use super::multiline_geometry::{
     MultilineTextGeometry, TextMetrics,
 };
 use super::multiline_paint::{paint_multiline, MultilinePaintSnapshot};
-use super::TextInputChangeAction;
+use super::{TextInputChangeAction, TextInputCommitAction};
 
 const DEFAULT_MIN_LINES: usize = 3;
 
@@ -237,6 +237,8 @@ pub struct MultilineTextInput {
     min_lines: usize,
     wrap_mode: LineLayoutMode,
     on_change: Option<Box<TextInputChangeAction>>,
+    on_commit: Option<Box<TextInputCommitAction>>,
+    edit_session_origin: Option<String>,
     last_click: Cell<Instant>,
     click_count: Cell<u8>,
 }
@@ -267,6 +269,8 @@ impl MultilineTextInput {
             min_lines: DEFAULT_MIN_LINES,
             wrap_mode: LineLayoutMode::NoWrap,
             on_change: None,
+            on_commit: None,
+            edit_session_origin: None,
             last_click: Cell::new(Instant::now()),
             click_count: Cell::new(0),
         }
@@ -274,6 +278,7 @@ impl MultilineTextInput {
 
     pub fn with_text(mut self, text: impl Into<String>) -> Self {
         self.edit = MultilineTextEditState::with_text(text.into());
+        self.sync_edit_session_origin();
         self
     }
 
@@ -283,6 +288,9 @@ impl MultilineTextInput {
     }
 
     pub fn read_only(mut self, read_only: bool) -> Self {
+        if read_only {
+            self.cancel_edit_session();
+        }
         self.read_only = read_only;
         self
     }
@@ -292,9 +300,11 @@ impl MultilineTextInput {
         self
     }
 
+    /// Enable input, or cancel an unfinished transactional draft when disabling.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
         if !enabled {
+            self.cancel_edit_session();
             self.focused = false;
             self.mouse_down = false;
             clear_multiline_selection(&mut self.edit);
@@ -322,12 +332,19 @@ impl MultilineTextInput {
         self.edit.text()
     }
 
+    /// Install programmatic text and reset a transactional confirmation baseline.
+    /// This does not dispatch an author edit.
     pub fn set_text(&mut self, text: String) {
         let before = self.edit.text().to_string();
         let before_cursor = self.edit.cursor();
         let before_anchor = self.edit.selection().map(|s| s.start);
         self.edit = MultilineTextEditState::with_text(text);
-        self.save_undo_with_before(&before, before_cursor, before_anchor, false);
+        if self.on_commit.is_some() {
+            self.undo_stack.replace(TextUndoStack::new());
+            self.sync_edit_session_origin();
+        } else {
+            self.save_undo_with_before(&before, before_cursor, before_anchor, false);
+        }
         self.invalidate_cache();
         self.scroll_to_cursor();
     }
@@ -338,23 +355,38 @@ impl MultilineTextInput {
         self.scroll_to_cursor();
     }
 
+    /// Install empty programmatic text without dispatching an author edit.
     pub fn clear(&mut self) {
-        let before = self.edit.text().to_string();
-        let before_cursor = self.edit.cursor();
-        let before_anchor = self.edit.selection().map(|s| s.start);
-        self.edit = MultilineTextEditState::new();
-        self.save_undo_with_before(&before, before_cursor, before_anchor, false);
-        self.invalidate_cache();
+        self.set_text(String::new());
         self.scroll_y.set(0.0);
         self.scroll_x.set(0.0);
     }
 
+    /// Dispatch committed text/IME changes live, independently of edit confirmation.
+    /// This mode is mutually exclusive with [`Self::on_commit`].
     pub fn on_change<F, R>(mut self, action: F) -> Self
     where
         F: Fn(&str) -> R + 'static,
         R: Into<Option<Action>>,
     {
         self.on_change = Some(Box::new(move |text| action(text).into()));
+        self.on_commit = None;
+        self.edit_session_origin = None;
+        self
+    }
+
+    /// Keep edits local until focus loss, form submission, or Control/Command+Enter.
+    /// Plain Enter inserts a newline; Escape restores the focus-session origin.
+    /// Active IME composition owns its Enter/Escape keys before this policy.
+    /// This mode is mutually exclusive with [`Self::on_change`].
+    pub fn on_commit<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(&str) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_commit = Some(Box::new(move |text| action(text).into()));
+        self.on_change = None;
+        self.sync_edit_session_origin();
         self
     }
 
@@ -446,6 +478,47 @@ impl MultilineTextInput {
         {
             (ctx.dispatch)(action);
         }
+    }
+
+    fn begin_edit_session(&mut self) {
+        if self.on_commit.is_some() && self.edit_session_origin.is_none() {
+            self.edit_session_origin = Some(self.edit.text().to_owned());
+        }
+    }
+
+    fn sync_edit_session_origin(&mut self) {
+        self.edit_session_origin =
+            (self.on_commit.is_some() && self.focused).then(|| self.edit.text().to_owned());
+    }
+
+    fn commit_edit_session(&mut self, ctx: &mut EventContext) {
+        if self.edit_session_origin.take().is_some_and(|origin| origin != self.edit.text())
+            && let Some(factory) = &self.on_commit
+            && let Some(action) = factory(self.edit.text())
+        {
+            (ctx.dispatch)(action);
+        }
+    }
+
+    fn cancel_edit_session(&mut self) {
+        if let Some(origin) = self.edit_session_origin.take() {
+            self.edit = MultilineTextEditState::with_text(origin);
+            self.undo_stack.replace(TextUndoStack::new());
+            self.invalidate_cache();
+            self.scroll_to_cursor();
+        }
+    }
+
+    fn finish_focus(&mut self, ctx: &mut EventContext) {
+        self.focused = false;
+        self.mouse_down = false;
+        clear_multiline_selection(&mut self.edit);
+        self.composition.clear();
+        self.composition_anchor = None;
+        ctx.release_pointer_capture(self.id);
+        ctx.focus.release_focus(self.id);
+        request_disabled_ime(ctx.requests);
+        self.invalidate_cache();
     }
 
     fn refresh_ime(&self, ctx: &mut EventContext) {
@@ -998,6 +1071,7 @@ impl Widget for MultilineTextInput {
             UiEvent::MouseDown { position, button: MouseButton::Left, modifiers } => {
                 let clicked = self.bounds.contains(*position);
                 if !clicked {
+                    self.commit_edit_session(ctx);
                     let changed = self.focused
                         || self.mouse_down
                         || self.edit.selection().is_some()
@@ -1015,6 +1089,7 @@ impl Widget for MultilineTextInput {
                     return EventResult::Ignored;
                 }
 
+                self.begin_edit_session();
                 // Double-click detection
                 let now = Instant::now();
                 let since_last = now.duration_since(self.last_click.get()).as_millis();
@@ -1092,6 +1167,7 @@ impl Widget for MultilineTextInput {
 
             // ── Focus ──
             UiEvent::FocusGained { .. } => {
+                self.begin_edit_session();
                 self.focused = true;
                 self.cursor_visible.set(true);
                 self.last_blink.set(Instant::now());
@@ -1102,6 +1178,7 @@ impl Widget for MultilineTextInput {
                 EventResult::Handled
             }
             UiEvent::FocusLost => {
+                self.commit_edit_session(ctx);
                 let changed = self.focused
                     || self.mouse_down
                     || self.edit.selection().is_some()
@@ -1138,6 +1215,26 @@ impl Widget for MultilineTextInput {
                     ImeKeyDisposition::RouteNormally => {}
                 }
 
+                if self.on_commit.is_some()
+                    && *key == KeyCode::Escape
+                    && *modifiers == Modifiers::none()
+                {
+                    self.cancel_edit_session();
+                    self.finish_focus(ctx);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                if self.on_commit.is_some()
+                    && *key == KeyCode::Enter
+                    && (modifiers.ctrl || modifiers.meta)
+                    && !modifiers.shift
+                    && !modifiers.alt
+                {
+                    self.commit_edit_session(ctx);
+                    self.finish_focus(ctx);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 let keymap = PlatformKeymap::current();
                 let result = classify_key_command(*key, *modifiers, keymap, self.tab_behavior)
                     .map_or(EventResult::Ignored, |command| {
@@ -1290,6 +1387,23 @@ impl Widget for MultilineTextInput {
         self.enabled
     }
 
+    fn commit_pending_input(&mut self, ctx: &mut EventContext) -> bool {
+        if !self.focused || !self.enabled || self.read_only || self.composition.is_active() {
+            return false;
+        }
+        let changed = self
+            .edit_session_origin
+            .as_ref()
+            .is_some_and(|origin| origin != self.edit.text());
+        self.commit_edit_session(ctx);
+        self.begin_edit_session();
+        changed
+    }
+
+    fn has_active_pointer_interaction(&self) -> bool {
+        self.mouse_down
+    }
+
     fn accepts_text_input(&self) -> bool {
         self.enabled && !self.read_only && self.focused
     }
@@ -1342,6 +1456,152 @@ mod tests {
         let mut modifiers = primary_modifiers();
         modifiers.shift = true;
         modifiers
+    }
+
+    fn transactional_test_action(text: &str) -> Action {
+        Action::Custom {
+            namespace: "test.multiline".to_owned(),
+            name: text.to_owned(),
+            payload: Default::default(),
+        }
+    }
+
+    #[test]
+    fn transactional_multiline_form_cancel_disable_and_programmatic_baselines() {
+        let mut widget = MultilineTextInput::new("Text")
+            .with_text("Initial\n原值")
+            .on_commit(transactional_test_action);
+        widget.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let platform = NoopPlatformService;
+        let actions = RefCell::new(Vec::new());
+        let mut requests = EventRequests::default();
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = EventContext {
+            focus: &mut focus,
+            shortcut: &mut shortcut,
+            tooltip: &mut tooltip,
+            dispatch: &dispatch,
+            platform: &platform,
+            requests: &mut requests,
+        };
+        let focus_event = UiEvent::FocusGained { source: FocusSource::Keyboard };
+        let select = UiEvent::KeyDown { key: KeyCode::A, modifiers: primary_modifiers() };
+        widget.event(&focus_event, &mut ctx);
+        assert!(!widget.commit_pending_input(&mut ctx));
+        widget.event(&select, &mut ctx);
+        widget.event(&UiEvent::TextInput("First\n确认".to_owned()), &mut ctx);
+        assert!(actions.borrow().is_empty());
+        assert!(widget.commit_pending_input(&mut ctx));
+        assert!(!widget.commit_pending_input(&mut ctx));
+        assert!(
+            matches!(&actions.borrow()[0], Action::Custom { name, .. } if name == "First\n确认")
+        );
+        widget.event(&select, &mut ctx);
+        widget.event(&UiEvent::TextInput("Cancel me".to_owned()), &mut ctx);
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(widget.text(), "First\n确认");
+        assert!(!widget.accepts_text_input());
+        widget.event(&focus_event, &mut ctx);
+        widget.event(&select, &mut ctx);
+        widget.event(
+            &UiEvent::TextInput("Discard on disable".to_owned()),
+            &mut ctx,
+        );
+        widget.set_enabled(false);
+        widget.event(&UiEvent::FocusLost, &mut ctx);
+        assert_eq!(widget.text(), "First\n确认");
+        widget.set_enabled(true);
+        widget.event(&focus_event, &mut ctx);
+        widget.set_text("Programmatic\nbaseline".to_owned());
+        assert!(!widget.commit_pending_input(&mut ctx));
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(widget.text(), "Programmatic\nbaseline");
+        widget.event(&focus_event, &mut ctx);
+        widget.clear();
+        assert!(!widget.commit_pending_input(&mut ctx));
+        widget.event(&UiEvent::FocusLost, &mut ctx);
+        assert_eq!(widget.text(), "");
+        assert_eq!(actions.borrow().len(), 1);
+    }
+
+    #[test]
+    fn transactional_multiline_ime_enter_escape_and_focus_loss_ownership() {
+        let mut widget = MultilineTextInput::new("Text").on_commit(transactional_test_action);
+        widget.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let platform = NoopPlatformService;
+        let actions = RefCell::new(Vec::new());
+        let mut requests = EventRequests::default();
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = EventContext {
+            focus: &mut focus,
+            shortcut: &mut shortcut,
+            tooltip: &mut tooltip,
+            dispatch: &dispatch,
+            platform: &platform,
+            requests: &mut requests,
+        };
+        let focus_event = UiEvent::FocusGained { source: FocusSource::Keyboard };
+        widget.event(&focus_event, &mut ctx);
+        widget.event(&UiEvent::TextInput("Draft".to_owned()), &mut ctx);
+        widget.event(&UiEvent::ImePreedit("合成".to_owned()), &mut ctx);
+        assert!(!widget.commit_pending_input(&mut ctx));
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(widget.text(), "Draft");
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(widget.text(), "Draft");
+        assert!(widget.accepts_text_input());
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(widget.text(), "");
+        assert!(actions.borrow().is_empty());
+        widget.event(&focus_event, &mut ctx);
+        widget.event(&UiEvent::TextInput("Confirmed".to_owned()), &mut ctx);
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(widget.text(), "Confirmed\n");
+        widget.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::Enter,
+                modifiers: primary_modifiers(),
+            },
+            &mut ctx,
+        );
+        assert!(!widget.accepts_text_input());
+        widget.event(&UiEvent::FocusLost, &mut ctx);
+        assert_eq!(actions.borrow().len(), 1);
+        assert!(
+            matches!(&actions.borrow()[0], Action::Custom { name, .. } if name == "Confirmed\n")
+        );
+        widget.event(&focus_event, &mut ctx);
+        widget.select_all();
+        widget.event(&UiEvent::ImePreedit("确认".to_owned()), &mut ctx);
+        widget.event(&UiEvent::ImeCommit("确认".to_owned()), &mut ctx);
+        assert_eq!(actions.borrow().len(), 1);
+        widget.event(&UiEvent::FocusLost, &mut ctx);
+        assert_eq!(actions.borrow().len(), 2);
+        assert!(matches!(&actions.borrow()[1], Action::Custom { name, .. } if name == "确认"));
     }
 
     // ── TextUndoStack ─────────────────────────────────────────────────────────

@@ -491,7 +491,12 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
     if !model.clip_properties.is_empty() {
         let mut section = PropertySection::new(localizer.text("inspector-basic-title"));
         for property in &model.clip_properties {
-            section = section.with_row(clip_property_row(property, can_edit, selected_clip));
+            section = section.with_row(clip_property_row(
+                localizer,
+                property,
+                can_edit,
+                selected_clip,
+            ));
         }
         panel = panel.with_section(section);
     }
@@ -1269,6 +1274,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
             ));
         for property in &mask.properties {
             section = section.with_row(mask_property_row(
+                localizer,
                 property,
                 mask_can_edit,
                 selected_clip,
@@ -1438,13 +1444,14 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 if property.group_name.as_deref() != previous_group {
                     if let Some(group_name) = &property.group_name {
                         section = section.with_row(PropertyRow::new(
-                            group_name.clone(),
+                            property.group_label.as_ref().unwrap_or(group_name).clone(),
                             Box::new(Label::new("")),
                         ));
                     }
                     previous_group = property.group_name.as_deref();
                 }
                 section = section.with_row(effect_property_row(
+                    localizer,
                     property,
                     can_edit,
                     selected_clip,
@@ -2517,12 +2524,14 @@ pub(super) fn node_graph_clip_action(selection: Option<SelectedClipRef>) -> Opti
 }
 
 pub(super) fn effect_property_row(
+    localizer: &Localizer,
     property: &InspectorEffectPropertyModel,
     can_edit: bool,
     selection: Option<SelectedClipRef>,
     effect_id: EffectId,
 ) -> PropertyRow {
     inspector_property_row(
+        localizer,
         property,
         can_edit,
         selection,
@@ -2531,12 +2540,14 @@ pub(super) fn effect_property_row(
 }
 
 pub(super) fn mask_property_row(
+    localizer: &Localizer,
     property: &InspectorEffectPropertyModel,
     can_edit: bool,
     selection: Option<SelectedClipRef>,
     mask_id: MaskId,
 ) -> PropertyRow {
     inspector_property_row(
+        localizer,
         property,
         can_edit,
         selection,
@@ -2545,11 +2556,13 @@ pub(super) fn mask_property_row(
 }
 
 pub(super) fn clip_property_row(
+    localizer: &Localizer,
     property: &InspectorEffectPropertyModel,
     can_edit: bool,
     selection: Option<SelectedClipRef>,
 ) -> PropertyRow {
     inspector_property_row(
+        localizer,
         property,
         can_edit,
         selection,
@@ -2558,12 +2571,14 @@ pub(super) fn clip_property_row(
 }
 
 pub(super) fn inspector_property_row(
+    localizer: &Localizer,
     property: &InspectorEffectPropertyModel,
     can_edit: bool,
     selection: Option<SelectedClipRef>,
     target: InspectorPropertyTarget,
 ) -> PropertyRow {
-    let value = inspector_property_value_widget(property, can_edit, selection, target.clone());
+    let value =
+        inspector_property_value_widget(localizer, property, can_edit, selection, target.clone());
     let value: Box<dyn Widget> =
         if let (InspectorPropertyTarget::Effect { effect_id, .. }, Some(curve), Some(selection)) =
             (&target, &property.numeric_curve, selection)
@@ -2604,6 +2619,8 @@ pub(super) fn inspector_property_row(
     };
     if let Some(height) = height {
         row.with_height(height)
+    } else if matches!(&property.value, PropertyValue::Text(text) if text.contains(['\n', '\r'])) {
+        row.with_content_height()
     } else {
         row
     }
@@ -2630,12 +2647,14 @@ pub(super) fn effect_property_row_height(value: &PropertyValue) -> Option<f32> {
 /// Product Action through the unique external codec.
 #[cfg(test)]
 pub(super) fn effect_property_value_widget(
+    localizer: &Localizer,
     property: &InspectorEffectPropertyModel,
     can_edit: bool,
     selection: Option<SelectedClipRef>,
     effect_id: EffectId,
 ) -> Box<dyn Widget> {
     inspector_property_value_widget(
+        localizer,
         property,
         can_edit,
         selection,
@@ -2659,6 +2678,7 @@ pub(super) enum InspectorPropertyTarget {
 }
 
 pub(super) fn inspector_property_value_widget(
+    localizer: &Localizer,
     property: &InspectorEffectPropertyModel,
     can_edit: bool,
     selection: Option<SelectedClipRef>,
@@ -2769,35 +2789,58 @@ pub(super) fn inspector_property_value_widget(
                         }),
                 );
             }
-            let max_width = 180.0;
-            if !matches!(&target, InspectorPropertyTarget::Clip { .. }) && text.len() > 60 {
-                Box::new(Label::new(text).with_max_width(max_width))
+            if text.contains(['\n', '\r']) {
+                let selected_clip = selection;
+                Box::new(
+                    MultilineTextInput::new(&property.label)
+                        .with_text(text)
+                        .min_lines(3)
+                        .enabled(can_edit)
+                        .on_commit(move |text| {
+                            inspector_property_action(
+                                selected_clip,
+                                target.clone(),
+                                PropertyValue::Text(text.to_owned()),
+                            )
+                        }),
+                )
             } else {
                 let selected_clip = selection;
                 Box::new(
-                    TextInput::new(text).enabled(can_edit).on_change(move |text| {
-                        inspector_property_action(
-                            selected_clip,
-                            target.clone(),
-                            PropertyValue::Text(text.to_string()),
-                        )
-                    }),
+                    TextInput::new(&property.label).with_text(text).enabled(can_edit).on_commit(
+                        move |text| {
+                            inspector_property_action(
+                                selected_clip,
+                                target.clone(),
+                                PropertyValue::Text(text.to_string()),
+                            )
+                        },
+                    ),
                 )
             }
         }
         PropertyValue::Enum(value) => {
             let mut items = Vec::with_capacity(property.schema.enum_options.len());
             for option in &property.schema.enum_options {
-                items.push(MenuItem::new(
-                    option.key.clone(),
-                    inspector_property_action(
-                        selection,
-                        target.clone(),
-                        PropertyValue::Enum(option.key.clone()),
-                    ),
-                ));
+                items.push(
+                    MenuItem::new(
+                        property.enum_labels.get(&option.key).unwrap_or(&option.key).clone(),
+                        inspector_property_action(
+                            selection,
+                            target.clone(),
+                            PropertyValue::Enum(option.key.clone()),
+                        ),
+                    )
+                    .checked(option.key == *value),
+                );
             }
-            Box::new(Dropdown::new(value.clone(), items).enabled(can_edit))
+            Box::new(
+                Dropdown::new(
+                    property.enum_labels.get(value).unwrap_or(value).clone(),
+                    items,
+                )
+                .enabled(can_edit),
+            )
         }
         PropertyValue::Resource(reference) => {
             let text = match reference {
@@ -2808,18 +2851,20 @@ pub(super) fn inspector_property_value_widget(
             };
             let selected_clip = selection;
             Box::new(
-                TextInput::new(text).enabled(can_edit).on_change(move |text| {
-                    let value = if text.trim().is_empty() {
-                        ParameterResourceReference::Unbound
-                    } else {
-                        ParameterResourceReference::ExternalFile { path: PathBuf::from(text) }
-                    };
-                    inspector_property_action(
-                        selected_clip,
-                        target.clone(),
-                        PropertyValue::Resource(value),
-                    )
-                }),
+                TextInput::new(&property.label).with_text(text).enabled(can_edit).on_commit(
+                    move |text| {
+                        let value = if text.trim().is_empty() {
+                            ParameterResourceReference::Unbound
+                        } else {
+                            ParameterResourceReference::ExternalFile { path: PathBuf::from(text) }
+                        };
+                        inspector_property_action(
+                            selected_clip,
+                            target.clone(),
+                            PropertyValue::Resource(value),
+                        )
+                    },
+                ),
             )
         }
         PropertyValue::Curve(curve) => {
@@ -2844,7 +2889,7 @@ pub(super) fn inspector_property_value_widget(
             )
         }
         PropertyValue::QualifierSamples(samples) => {
-            qualifier_sample_editor(samples, can_edit, selection, target)
+            qualifier_sample_editor(localizer, samples, can_edit, selection, target)
         }
         PropertyValue::Vec2(value) => vector_property_widget(
             &["X", "Y"],
@@ -2874,6 +2919,7 @@ pub(super) fn inspector_property_value_widget(
 }
 
 fn qualifier_sample_editor(
+    localizer: &Localizer,
     samples: &QualifierSampleSet,
     can_edit: bool,
     selection: Option<SelectedClipRef>,
@@ -2900,22 +2946,28 @@ fn qualifier_sample_editor(
         });
 
         let operation_items = [
-            (QualifierSampleOperation::Include, "包含"),
-            (QualifierSampleOperation::Exclude, "排除"),
+            (
+                QualifierSampleOperation::Include,
+                "inspector-qualifier-include",
+            ),
+            (
+                QualifierSampleOperation::Exclude,
+                "inspector-qualifier-exclude",
+            ),
         ]
         .into_iter()
-        .map(|(operation, label)| {
+        .map(|(operation, message_id)| {
             let mut changed = samples.samples().to_vec();
             changed[index].operation = operation;
             MenuItem::new(
-                label,
+                localizer.text(message_id),
                 qualifier_sample_set_action(selection, target.clone(), changed),
             )
         })
         .collect();
         let operation_label = match sample.operation {
-            QualifierSampleOperation::Include => "包含",
-            QualifierSampleOperation::Exclude => "排除",
+            QualifierSampleOperation::Include => "inspector-qualifier-include",
+            QualifierSampleOperation::Exclude => "inspector-qualifier-exclude",
         };
         let mut without = samples.samples().to_vec();
         without.remove(index);
@@ -2924,11 +2976,16 @@ fn qualifier_sample_editor(
             FlexContainer::row(vec![
                 FlexChild::fixed(Box::new(color_picker)),
                 FlexChild::flex(
-                    Box::new(Dropdown::new(operation_label, operation_items).enabled(can_edit)),
+                    Box::new(
+                        Dropdown::new(localizer.text(operation_label), operation_items)
+                            .enabled(can_edit),
+                    ),
                     1.0,
                 ),
                 FlexChild::fixed(Box::new(
-                    Button::new("删除").enabled(can_edit && remove.is_some()).on_click(remove),
+                    Button::new(localizer.text("inspector-qualifier-remove-sample"))
+                        .enabled(can_edit && remove.is_some())
+                        .on_click(remove),
                 )),
             ])
             .with_gap(4.0),
@@ -2947,7 +3004,7 @@ fn qualifier_sample_editor(
         FlexContainer::row(vec![
             FlexChild::flex(
                 Box::new(
-                    Button::new("+ 包含")
+                    Button::new(localizer.text("inspector-qualifier-add-include"))
                         .enabled(can_add && add_include.is_some())
                         .on_click(add_include),
                 ),
@@ -2955,7 +3012,7 @@ fn qualifier_sample_editor(
             ),
             FlexChild::flex(
                 Box::new(
-                    Button::new("+ 排除")
+                    Button::new(localizer.text("inspector-qualifier-add-exclude"))
                         .enabled(can_add && add_exclude.is_some())
                         .on_click(add_exclude),
                 ),

@@ -129,6 +129,39 @@ impl Localizer {
             .unwrap_or_else(|| message_id.to_owned())
     }
 
+    /// Resolve a parameter presentation address without changing its author key.
+    /// Unknown vendor addresses retain their declared display fallback.
+    pub(crate) fn parameter_text(&self, address: &str, fallback: &str) -> String {
+        let direct = format_from(&self.requested, address, None)
+            .or_else(|| format_from(&self.fallback, address, None));
+        if let Some(text) = direct {
+            return text;
+        }
+        if address.starts_with("mondrian.title.")
+            || address.starts_with("mondrian.mask.")
+            || address.starts_with("mondrian.effect.builtin.")
+            || address.starts_with("mondrian.effect.curves.")
+            || address.starts_with("mondrian.effect.qualifier.")
+            || address.starts_with("builtin.lut_3d.")
+        {
+            let message_id = format!("parameter-{}", address.replace(['.', '_'], "-"));
+            return format_from(&self.requested, &message_id, None)
+                .or_else(|| format_from(&self.fallback, &message_id, None))
+                .unwrap_or_else(|| fallback.to_owned());
+        }
+        fallback.to_owned()
+    }
+
+    /// Localize a built-in group heading while retaining its definition identity.
+    pub(crate) fn parameter_group_text(&self, parameter_id: &str, group: &str) -> String {
+        if parameter_id.starts_with("mondrian.effect.builtin.")
+            && let Some(message_id) = builtin_parameter_group_message_id(group)
+        {
+            return self.text(message_id);
+        }
+        group.to_owned()
+    }
+
     /// Resolve language-neutral status or notification data in this UI locale.
     pub fn message(&self, message: &crate::app::AppMessage) -> String {
         use crate::app::AppMessageValue;
@@ -193,6 +226,39 @@ pub(crate) fn effect_category_message_id(category: &str) -> Option<&'static str>
         "变换" => Some("effect-category-transform"),
         "抠像" => Some("effect-category-keying"),
         "插件" => Some("effect-category-plugins"),
+        _ => None,
+    }
+}
+
+fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
+    match group {
+        "ASC CDL" => Some("parameter-group-asc-cdl"),
+        "HDR · Blacks" => Some("parameter-group-hdr-blacks"),
+        "HDR · Dark" => Some("parameter-group-hdr-dark"),
+        "HDR · Global" => Some("parameter-group-hdr-global"),
+        "HDR · Highlights" => Some("parameter-group-hdr-highlights"),
+        "HDR · Light" => Some("parameter-group-hdr-light"),
+        "HDR · Shadows" => Some("parameter-group-hdr-shadows"),
+        "HDR · Specular" => Some("parameter-group-hdr-specular"),
+        "HSL" => Some("parameter-group-hsl"),
+        "LUT" => Some("parameter-group-lut"),
+        "Primaries" => Some("parameter-group-primaries"),
+        "Qualifier" => Some("parameter-group-qualifier"),
+        "Qualifier · 3D" => Some("parameter-group-qualifier-3d"),
+        "Qualifier · Matte" => Some("parameter-group-qualifier-matte"),
+        "亮度键" => Some("parameter-group-luma-key"),
+        "基础校正" => Some("parameter-group-basic-correction"),
+        "抠像" => Some("parameter-group-chroma-key"),
+        "暗角" => Some("parameter-group-vignette"),
+        "曲线" => Some("parameter-group-curves"),
+        "模糊" => Some("parameter-group-blur"),
+        "白平衡" => Some("parameter-group-white-balance"),
+        "色域压缩" => Some("parameter-group-gamut-compression"),
+        "色差" => Some("parameter-group-chromatic-aberration"),
+        "裁切" => Some("parameter-group-crop"),
+        "锐化" => Some("parameter-group-sharpen"),
+        "颗粒" => Some("parameter-group-grain"),
+        "高光恢复" => Some("parameter-group-highlight-recovery"),
         _ => None,
     }
 }
@@ -316,6 +382,83 @@ fn pseudo_expression(expression: &mut fluent_syntax::ast::Expression<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_parameter_presentations_cover_registered_schemas() {
+        use std::collections::BTreeMap;
+        let mut declared = BTreeMap::new();
+        for kind in mondrian_effects::effect_library_types() {
+            if !kind.key().starts_with("builtin.") {
+                continue;
+            }
+            let effect = mondrian_effects::instantiate_effect_node(kind).expect("builtin schema");
+            for (_, property) in effect.properties.iter() {
+                declared.insert(
+                    property.descriptor.schema.message_id.clone(),
+                    (
+                        property.descriptor.display_name.clone(),
+                        property.descriptor.ui_metadata.group_name.clone(),
+                    ),
+                );
+                for option in &property.descriptor.schema.enum_options {
+                    declared.insert(option.message_id.clone(), (option.key.clone(), None));
+                }
+            }
+        }
+        let mut presentation_addresses = BTreeMap::new();
+        for address in declared.keys() {
+            let message_id = format!("parameter-{}", address.replace(['.', '_'], "-"));
+            assert!(
+                presentation_addresses.insert(message_id, address).is_none(),
+                "parameter presentation address collision: {address}"
+            );
+        }
+        for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+            let localizer = Localizer::new(locale).expect("catalog");
+            assert_eq!(
+                localizer.parameter_text("vendor.custom.mode", "Vendor mode"),
+                "Vendor mode"
+            );
+            let missing = declared
+                .iter()
+                .filter(|(address, _)| {
+                    let message_id = format!("parameter-{}", address.replace(['.', '_'], "-"));
+                    localizer
+                        .requested
+                        .get_message(&message_id)
+                        .and_then(|message| message.value())
+                        .is_none()
+                })
+                .collect::<BTreeMap<_, _>>();
+            for (address, (_, group)) in &declared {
+                if let Some(group) = group {
+                    let message_id = builtin_parameter_group_message_id(group)
+                        .expect("registered builtin group");
+                    assert!(
+                        localizer
+                            .requested
+                            .get_message(message_id)
+                            .and_then(|message| message.value())
+                            .is_some(),
+                        "missing {locale:?} group {message_id}"
+                    );
+                    assert_eq!(
+                        localizer.parameter_group_text(address, group),
+                        localizer.text(message_id)
+                    );
+                }
+            }
+            assert_eq!(
+                localizer.parameter_group_text("vendor.param", "曲线"),
+                "曲线"
+            );
+            assert!(
+                missing.is_empty(),
+                "missing registered parameter presentations for {locale:?}: {}",
+                serde_json::to_string(&missing).expect("missing presentation diagnostics")
+            );
+        }
+    }
 
     #[test]
     fn bundled_catalogs_have_identical_message_ids() {

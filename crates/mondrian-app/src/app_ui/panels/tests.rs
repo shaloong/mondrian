@@ -636,6 +636,160 @@ fn inspector_source_timing_actions_use_exact_typed_author_commands() {
 }
 
 #[test]
+fn inspector_parameter_label_uses_declared_message_address_and_vendor_fallback() {
+    use mondrian_core::automation::{AnimatedProperty, PropertyDescriptor};
+    let mut descriptor =
+        PropertyDescriptor::new("vendor.amount", "Vendor amount", PropertyValue::Float(0.5))
+            .with_parameter_id(mondrian_core::ParameterId::new_static(
+                "vendor.test.caption.amount",
+            ));
+    descriptor.schema.message_id = "inspector-opacity".to_owned();
+    let mut property = AnimatedProperty::from_descriptor(descriptor);
+    property.validate().expect("valid declared schema");
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let model =
+            inspector_property_model("vendor.amount", &property, TimelineTime::ZERO, &localizer);
+        assert_eq!(model.label, localizer.text("inspector-opacity"));
+        assert_eq!(model.schema, property.descriptor.schema);
+        assert_eq!(
+            model.address.parameter_id,
+            property.descriptor.schema.parameter_id
+        );
+        assert_eq!(model.value, PropertyValue::Float(0.5));
+    }
+    property.descriptor.schema.message_id = "vendor.missing.caption".to_owned();
+    let model = inspector_property_model(
+        "vendor.amount",
+        &property,
+        TimelineTime::ZERO,
+        &Localizer::new(AppUiLocale::EnUs).expect("catalog"),
+    );
+    assert_eq!(model.label, "Vendor amount");
+}
+
+#[test]
+fn inspector_parameter_locale_preserves_title_author_keys_and_history() {
+    let mut sequence = Sequence::new("Localized Title");
+    let track_id = sequence.video_tracks[0].id;
+    let clip = Clip::new_basic_title(
+        "Title",
+        mondrian_core::default_basic_title_font_family(),
+        TimelineTime::ZERO,
+        tt(25, sequence.time_base()),
+    )
+    .expect("title");
+    let clip_id = clip.id;
+    sequence.video_tracks[0].add_clip(clip).expect("placement");
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
+    state.selection.selected_clips = vec![selection];
+    let before = state.active_sequence().expect("Sequence").clone();
+    let generation = state.project_author_generation();
+    let english = Localizer::new(AppUiLocale::EnUs).expect("English");
+    let model = InspectorPanelModel::from_app_state(&state, &english);
+    assert_eq!(
+        model
+            .clip_properties
+            .iter()
+            .map(|property| property.label.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Text",
+            "Font family",
+            "Font weight",
+            "Font style",
+            "Font size",
+            "Fill",
+            "Tracking",
+            "Line height",
+            "Horizontal alignment",
+            "Vertical alignment"
+        ]
+    );
+    let chinese = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
+    let pseudo = InspectorPanelModel::from_app_state(
+        &state,
+        &Localizer::new(AppUiLocale::Pseudo).expect("pseudo"),
+    );
+    for ((en, zh), pseudo) in model
+        .clip_properties
+        .iter()
+        .zip(&chinese.clip_properties)
+        .zip(&pseudo.clip_properties)
+    {
+        assert_eq!(en.schema, zh.schema);
+        assert_eq!(en.address, zh.address);
+        assert_eq!(en.value, zh.value);
+        assert_eq!(en.schema, pseudo.schema);
+        assert_eq!(en.address, pseudo.address);
+        assert_eq!(en.value, pseudo.value);
+        assert_ne!(en.label, pseudo.label);
+    }
+    let property = &model.clip_properties[8];
+    let mut widget = inspector_property_value_widget(
+        &english,
+        property,
+        true,
+        Some(selection),
+        InspectorPropertyTarget::Clip { parameter: property.address.clone() },
+    );
+    assert_eq!(
+        widget.accessibility().expect("dropdown").name.as_deref(),
+        Some("Center")
+    );
+    widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+    let actions = RefCell::new(Vec::new());
+    let dispatch = |action| actions.borrow_mut().push(action);
+    let mut focus = DummyFocus;
+    let mut shortcut = DummyShortcut;
+    let mut tooltip = DummyTooltip;
+    let mut requests = EventRequests::default();
+    let mut ctx = event_ctx(
+        &mut focus,
+        &mut shortcut,
+        &mut tooltip,
+        &mut requests,
+        &dispatch,
+    );
+    widget.event(
+        &UiEvent::MouseDown {
+            position: Point::new(20.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        &mut ctx,
+    );
+    widget.event(
+        &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+        &mut ctx,
+    );
+    assert_eq!(state.active_sequence().expect("Sequence"), &before);
+    assert_eq!(state.project_author_generation(), generation);
+    let actions = actions.borrow();
+    assert_eq!(actions.len(), 1);
+    let Action::Custom { payload, .. } = &actions[0] else {
+        panic!("author action");
+    };
+    let payload: ClipWriteParameterValuesPayload =
+        serde_json::from_value(payload.clone()).expect("parameter write");
+    assert_eq!(
+        payload.writes,
+        vec![ParameterValueWrite::Value {
+            parameter: property.address.clone(),
+            value: PropertyValue::Enum("left".to_owned())
+        }]
+    );
+    state.dispatch_action(actions[0].clone()).expect("apply stable enum key");
+    assert!(state.undo_timeline().expect("undo"));
+    assert_eq!(
+        state.active_sequence().expect("Sequence").video_tracks[0].clips[0].content,
+        before.video_tracks[0].clips[0].content
+    );
+}
+
+#[test]
 fn inspector_model_exposes_basic_title_properties_in_canonical_order() {
     let mut sequence = Sequence::new("Inspector Basic Title");
     let track_id = sequence.video_tracks[0].id;
@@ -3830,10 +3984,7 @@ fn app_state_models_map_sequence_selection_and_basic_inspector_values() {
         "mondrian.effect.builtin.gaussian_blur.radius.label"
     );
     assert!(blur_property.path.contains(&effect_id.to_string()));
-    assert_eq!(
-        models.inspector.effects[0].label,
-        effect_display_name(&EffectType::GaussianBlur)
-    );
+    assert_eq!(models.inspector.effects[0].label, "高斯模糊");
     assert!(!models.inspector.effects[0].enabled);
     assert_eq!(
         models.node_graph.selected_clip,
@@ -5188,14 +5339,14 @@ fn primary_grade_catalog_and_inspector_are_typed_animatable_and_undoable() {
     }));
 
     let primaries = &models.inspector.effects[1];
-    assert_eq!(primaries.label, "Primaries");
+    assert_eq!(primaries.label, "主色轮");
     assert_eq!(
         primaries
             .properties
             .iter()
             .map(|property| property.label.as_str())
             .collect::<Vec<_>>(),
-        ["Offset", "Lift", "Gamma", "Gain"]
+        ["偏移", "暗部（Lift）", "中间调（Gamma）", "亮部（Gain）"]
     );
     assert!(primaries.properties.iter().all(|property| {
         property.is_animatable && matches!(property.value, PropertyValue::Vec3(_))
@@ -5208,7 +5359,7 @@ fn primary_grade_catalog_and_inspector_are_typed_animatable_and_undoable() {
             .iter()
             .map(|property| property.label.as_str())
             .collect::<Vec<_>>(),
-        ["Slope", "Offset", "Power", "Saturation"]
+        ["斜率", "偏移", "幂", "饱和度"]
     );
     assert!(cdl.properties.iter().all(|property| property.is_animatable));
     let slope = &cdl.properties[0];
@@ -5309,7 +5460,7 @@ fn inspector_exposes_grouped_typed_hdr_grading_and_supports_undo() {
 
     let models = AppUiPanelModels::from_app_state(&state);
     let hdr = &models.inspector.effects[0];
-    assert_eq!(hdr.label, "HDR Grading");
+    assert_eq!(hdr.label, "HDR 调色");
     assert_eq!(hdr.properties.len(), 33);
     let groups = hdr
         .properties
@@ -5493,6 +5644,7 @@ fn inspector_effect_vector_property_rows_get_multi_component_height() {
 
 #[test]
 fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity() {
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
     let effect_id = EffectId::new();
     let selection = SelectedClipRef {
         track_id: TrackId::new(),
@@ -5515,6 +5667,8 @@ fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity
         path: path.clone(),
         label: "Samples".to_owned(),
         group_name: None,
+        group_label: None,
+        enum_labels: BTreeMap::new(),
         value: PropertyValue::QualifierSamples(samples.clone()),
         min: None,
         max: None,
@@ -5529,9 +5683,101 @@ fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity
         Some(102.0),
         "two samples plus the add row own their full inspector height"
     );
-    let mut widget = effect_property_value_widget(&property, true, Some(selection), effect_id);
-    widget.layout(Rect::new(0.0, 0.0, 220.0, 102.0));
-    assert_eq!(widget.child_count(), 3);
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let mut widget =
+            effect_property_value_widget(&localizer, &property, true, Some(selection), effect_id);
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 102.0));
+        assert_eq!(widget.child_count(), 3);
+        for (index, message_id) in ["inspector-qualifier-include", "inspector-qualifier-exclude"]
+            .into_iter()
+            .enumerate()
+        {
+            let row = widget.child(index).expect("sample row");
+            assert_eq!(
+                row.child(1).expect("operation").accessibility().expect("dropdown").name,
+                Some(localizer.text(message_id))
+            );
+            assert_eq!(
+                row.child(2).expect("remove").accessibility().expect("button").name,
+                Some(localizer.text("inspector-qualifier-remove-sample"))
+            );
+        }
+        let add_row = widget.child(2).expect("add row");
+        for (index, message_id) in [
+            "inspector-qualifier-add-include",
+            "inspector-qualifier-add-exclude",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(
+                add_row.child(index).expect("add").accessibility().expect("button").name,
+                Some(localizer.text(message_id))
+            );
+        }
+        if locale == AppUiLocale::EnUs {
+            assert_eq!(localizer.text("inspector-qualifier-include"), "Include");
+        }
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let add_exclude = widget.child_mut(2).expect("add row").child_mut(1).expect("add exclude");
+        let click = Point::new(180.0, 90.0);
+        assert!(
+            add_exclude.hit_test(click),
+            "the add action must be visible in its row"
+        );
+        add_exclude.event(
+            &UiEvent::MouseDown {
+                position: click,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        add_exclude.event(
+            &UiEvent::MouseUp {
+                position: click,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let recorded = actions.borrow();
+        assert_eq!(recorded.len(), 1);
+        let Action::Custom { payload, .. } = &recorded[0] else {
+            panic!("author action");
+        };
+        let payload: VisualEffectSetParameterValuePayload =
+            serde_json::from_value(payload.clone()).expect("sample action");
+        assert_eq!(payload.clip_id, selection.clip_id);
+        assert_eq!(payload.effect_id, effect_id);
+        let ParameterValueWrite::Value {
+            parameter: written_parameter,
+            value: PropertyValue::QualifierSamples(changed),
+        } = payload.write
+        else {
+            panic!("typed sample write");
+        };
+        assert_eq!(written_parameter, parameter);
+        assert_eq!(changed.samples().len(), 3);
+        assert_eq!(&changed.samples()[..2], samples.samples());
+        assert_eq!(
+            changed.samples()[2].operation,
+            QualifierSampleOperation::Exclude
+        );
+    }
 
     let mut changed = samples.samples().to_vec();
     changed[0].rgb = [0.1, 0.8, 0.2];
@@ -5550,12 +5796,12 @@ fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity
     assert_eq!(name, VISUAL_EFFECT_SET_PARAMETER_VALUE);
     let payload: VisualEffectSetParameterValuePayload =
         serde_json::from_value(payload).expect("Qualifier action payload");
-    let ParameterValueWrite::Value { parameter, value } = payload.write else {
+    let ParameterValueWrite::Value { parameter: written_parameter, value } = payload.write else {
         panic!("expected complete property write");
     };
     assert_eq!(payload.clip_id, selection.clip_id);
     assert_eq!(payload.effect_id, effect_id);
-    assert_eq!(parameter, parameter);
+    assert_eq!(written_parameter, parameter);
     assert_eq!(
         value,
         PropertyValue::QualifierSamples(
@@ -5603,6 +5849,8 @@ fn inspector_effect_curve_editor_dispatches_structured_curve_value() {
         path: "curves.master".to_string(),
         label: "Master".to_string(),
         group_name: None,
+        group_label: None,
+        enum_labels: BTreeMap::new(),
         value: PropertyValue::Curve(NormalizedCurve::identity()),
         min: None,
         max: None,
@@ -5612,7 +5860,13 @@ fn inspector_effect_curve_editor_dispatches_structured_curve_value() {
         is_animatable: false,
         numeric_curve: None,
     };
-    let mut widget = effect_property_value_widget(&property, true, Some(selection), effect_id);
+    let mut widget = effect_property_value_widget(
+        &chinese_localizer(),
+        &property,
+        true,
+        Some(selection),
+        effect_id,
+    );
     widget.layout(Rect::new(0.0, 0.0, 220.0, 150.0));
     let actions = RefCell::new(Vec::new());
     let dispatch = |action| actions.borrow_mut().push(action);
@@ -5681,6 +5935,8 @@ fn inspector_effect_vec3_property_widget_dispatches_component_change() {
         path: "lighting.direction".to_string(),
         label: "Direction".to_string(),
         group_name: None,
+        group_label: None,
+        enum_labels: BTreeMap::new(),
         value: PropertyValue::Vec3(glam::Vec3::new(0.1, 0.2, 0.3)),
         min: Some(0.0),
         max: Some(1.0),
@@ -5690,7 +5946,13 @@ fn inspector_effect_vec3_property_widget_dispatches_component_change() {
         is_animatable: true,
         numeric_curve: None,
     };
-    let mut widget = effect_property_value_widget(&property, true, Some(selection), effect_id);
+    let mut widget = effect_property_value_widget(
+        &chinese_localizer(),
+        &property,
+        true,
+        Some(selection),
+        effect_id,
+    );
     widget.layout(Rect::new(0.0, 0.0, 220.0, 94.0));
 
     let actions = RefCell::new(Vec::new());
@@ -5935,6 +6197,8 @@ fn precise_inspector_entry_commits_and_undoes_exact_integer_and_double_values() 
             path: path.clone(),
             label: name.to_owned(),
             group_name: None,
+            group_label: None,
+            enum_labels: BTreeMap::new(),
             value: initial.clone(),
             min: None,
             max: None,
@@ -5944,7 +6208,13 @@ fn precise_inspector_entry_commits_and_undoes_exact_integer_and_double_values() 
             is_animatable: true,
             numeric_curve: None,
         };
-        let mut widget = effect_property_value_widget(&property, true, Some(selection), effect_id);
+        let mut widget = effect_property_value_widget(
+            &chinese_localizer(),
+            &property,
+            true,
+            Some(selection),
+            effect_id,
+        );
         widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
@@ -6028,6 +6298,8 @@ fn inspector_effect_float_property_text_input_preserves_value_between_steps() {
         path: "color.exposure".to_string(),
         label: "Exposure".to_string(),
         group_name: None,
+        group_label: None,
+        enum_labels: BTreeMap::new(),
         value: PropertyValue::Float(0.2),
         min: Some(0.0),
         max: Some(1.0),
@@ -6037,7 +6309,13 @@ fn inspector_effect_float_property_text_input_preserves_value_between_steps() {
         is_animatable: true,
         numeric_curve: None,
     };
-    let mut widget = effect_property_value_widget(&property, true, Some(selection), effect_id);
+    let mut widget = effect_property_value_widget(
+        &chinese_localizer(),
+        &property,
+        true,
+        Some(selection),
+        effect_id,
+    );
     widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
     let actions = RefCell::new(Vec::new());
     let dispatch = |action| actions.borrow_mut().push(action);
@@ -6117,6 +6395,8 @@ fn inspector_disabled_effect_property_row_remains_editable_for_unlocked_clip() {
         path: "blur.radius".to_string(),
         label: "Radius".to_string(),
         group_name: None,
+        group_label: None,
+        enum_labels: BTreeMap::new(),
         value: PropertyValue::Float(0.2),
         min: Some(0.0),
         max: Some(1.0),
@@ -6137,7 +6417,13 @@ fn inspector_disabled_effect_property_row_remains_editable_for_unlocked_clip() {
         "effect runtime bypass state should not imply read-only property rows"
     );
 
-    let mut widget = effect_property_value_widget(&property, true, Some(selection), effect_id);
+    let mut widget = effect_property_value_widget(
+        &chinese_localizer(),
+        &property,
+        true,
+        Some(selection),
+        effect_id,
+    );
     widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
     let actions = RefCell::new(Vec::new());
     let dispatch = |action| actions.borrow_mut().push(action);
@@ -6206,6 +6492,8 @@ fn inspector_effect_float_property_keyboard_nudge_sanitizes_descriptor_bounds() 
         path: "color.exposure".to_string(),
         label: "Exposure".to_string(),
         group_name: None,
+        group_label: None,
+        enum_labels: BTreeMap::new(),
         value: PropertyValue::Float(0.2),
         min: Some(f64::NAN),
         max: Some(f64::INFINITY),
@@ -6215,7 +6503,13 @@ fn inspector_effect_float_property_keyboard_nudge_sanitizes_descriptor_bounds() 
         is_animatable: true,
         numeric_curve: None,
     };
-    let mut widget = effect_property_value_widget(&property, true, Some(selection), effect_id);
+    let mut widget = effect_property_value_widget(
+        &chinese_localizer(),
+        &property,
+        true,
+        Some(selection),
+        effect_id,
+    );
     widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
     let actions = RefCell::new(Vec::new());
     let dispatch = |action| actions.borrow_mut().push(action);
@@ -6287,6 +6581,8 @@ fn inspector_effect_int_property_number_input_defaults_to_unit_step() {
         path: "levels.iterations".to_string(),
         label: "Iterations".to_string(),
         group_name: None,
+        group_label: None,
+        enum_labels: BTreeMap::new(),
         value: PropertyValue::Int(10),
         min: Some(0.0),
         max: Some(1000.0),
@@ -6296,7 +6592,13 @@ fn inspector_effect_int_property_number_input_defaults_to_unit_step() {
         is_animatable: false,
         numeric_curve: None,
     };
-    let mut widget = effect_property_value_widget(&property, true, Some(selection), effect_id);
+    let mut widget = effect_property_value_widget(
+        &chinese_localizer(),
+        &property,
+        true,
+        Some(selection),
+        effect_id,
+    );
     widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
     let actions = RefCell::new(Vec::new());
     let dispatch = |action| actions.borrow_mut().push(action);
@@ -6386,6 +6688,235 @@ fn inspector_effect_color_property_action_uses_typed_payload() {
         mondrian_core::ParameterId::new_static("mondrian.test.key_color")
     );
     assert_eq!(value, PropertyValue::Color(color));
+}
+
+#[test]
+fn effect_long_text_controls_confirm_or_cancel_without_partial_author_writes() {
+    use mondrian_core::automation::PropertyDescriptor;
+    use mondrian_effects::{
+        instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
+        EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
+        EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
+        EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
+    };
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    let kind = EffectType::Plugin("plugin.test.long_text_controls".to_owned());
+    let cases = [
+        (
+            "long",
+            "插件文本默认内容".repeat(20),
+            "Changed Unicode 文本".to_owned(),
+        ),
+        (
+            "multiline",
+            format!("First line\n{}", "第二行参数".repeat(20)),
+            "Changed\n第二行".to_owned(),
+        ),
+    ];
+    let mut builder = EffectPluginDefinitionBuilder::new(
+        kind.key(),
+        "Text controls",
+        EffectColorDomainContract::SCENE_LINEAR,
+    )
+    .with_execution_contract(EffectExecutionContract {
+        execution_modes: EffectExecutionModes::CPU_F32,
+        determinism: EffectDeterminism::Deterministic,
+        state_model: EffectStateModel::Stateless,
+        temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+        roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+        resource_lifetime: EffectResourceLifetime::Frame,
+        topology: EffectGraphTopology::LinearChain,
+    })
+    .with_branching_graph(|_, _, graph| {
+        graph.apply(EffectRenderOp::Sharpen { amount: 0.0 });
+    });
+    for (name, initial, _) in &cases {
+        builder = builder.property(
+            PropertyDescriptor::new(*name, "Vendor text", PropertyValue::Text(initial.clone()))
+                .with_parameter_id(kind.parameter_id(name).expect("parameter"))
+                .with_animatable(false),
+        );
+    }
+    register_effect_definition(builder.build()).expect("definition");
+    let effect = instantiate_effect_node(kind.clone()).expect("effect");
+    let effect_id = effect.id;
+    let mut sequence = Sequence::new("Text controls");
+    let track_id = sequence.video_tracks[0].id;
+    let mut clip = Clip::new(
+        AssetId::new(),
+        TimelineTime::ZERO,
+        tt(25, sequence.time_base()),
+    )
+    .expect("clip");
+    let clip_id = clip.id;
+    clip.add_effect_node(effect);
+    sequence.video_tracks[0].add_clip(clip).expect("placement");
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
+    state.selection.selected_clips = vec![selection];
+    for (name, initial, changed) in &cases {
+        let model = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
+        let property = model.effects[0]
+            .properties
+            .iter()
+            .find(|property| {
+                property.address.parameter_id == kind.parameter_id(name).expect("parameter")
+            })
+            .expect("property");
+        assert_eq!(property.label, "Vendor text");
+        if initial.contains(['\n', '\r']) {
+            let constraint = LayoutConstraint { min: Size::ZERO, max: Size::new(280.0, f32::MAX) };
+            let required_height = effect_property_value_widget(
+                &chinese_localizer(),
+                property,
+                true,
+                Some(selection),
+                effect_id,
+            )
+            .measure(constraint)
+            .height;
+            let mut panel = PropertyPanel::new("").with_embedded_panel_chrome().with_section(
+                PropertySection::new("")
+                    .with_row(effect_property_row(
+                        &chinese_localizer(),
+                        property,
+                        true,
+                        Some(selection),
+                        effect_id,
+                    ))
+                    .with_row(PropertyRow::new(
+                        "After text",
+                        Box::new(Button::new("After")),
+                    )),
+            );
+            let size = panel.measure(constraint);
+            panel.layout(Rect::new(0.0, 0.0, size.width, size.height));
+            let text_control = panel.child(0).expect("multiline control");
+            let following_control = panel.child(1).expect("following control");
+            let lane_x = size.width - 24.0;
+            let top = (0..size.height.ceil() as usize)
+                .find(|y| text_control.hit_test(Point::new(lane_x, *y as f32)))
+                .expect("the multiline control must have an editable lane")
+                as f32;
+            assert!(
+                text_control.hit_test(Point::new(lane_x, top + required_height - 1.0)),
+                "the actual Inspector row must fit all three editable text lines"
+            );
+            assert!(
+                (0..size.height.ceil() as usize).all(|y| {
+                    let point = Point::new(lane_x, y as f32);
+                    !text_control.hit_test(point) || !following_control.hit_test(point)
+                }),
+                "the next property must not overlap multiline text"
+            );
+        }
+        assert!(!effect_property_value_widget(
+            &chinese_localizer(),
+            property,
+            false,
+            Some(selection),
+            effect_id
+        )
+        .can_focus());
+        for confirm in [false, true] {
+            let before = state.active_sequence().expect("Sequence").clone();
+            let generation = state.project_author_generation();
+            let mut widget = effect_property_value_widget(
+                &chinese_localizer(),
+                property,
+                true,
+                Some(selection),
+                effect_id,
+            );
+            assert!(widget.can_focus(), "long plugin text must remain editable");
+            assert_eq!(
+                widget.accessibility().expect("text input").value,
+                Some(mondrian_ui_core::AccessibilityValue::Text(initial.clone())),
+                "the value must be real editable text, not a placeholder"
+            );
+            widget.layout(Rect::new(0.0, 0.0, 260.0, 100.0));
+            let actions = RefCell::new(Vec::new());
+            let dispatch = |action| actions.borrow_mut().push(action);
+            let mut focus = DummyFocus;
+            let mut shortcut = DummyShortcut;
+            let mut tooltip = DummyTooltip;
+            let mut requests = EventRequests::default();
+            let mut ctx = event_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            widget.event(
+                &UiEvent::FocusGained {
+                    source: mondrian_ui_core::types::FocusSource::Keyboard,
+                },
+                &mut ctx,
+            );
+            assert!(
+                !widget.commit_pending_input(&mut ctx),
+                "unchanged input must be a no-op"
+            );
+            let primary = Modifiers {
+                ctrl: !cfg!(target_os = "macos"),
+                meta: cfg!(target_os = "macos"),
+                ..Modifiers::none()
+            };
+            widget.event(
+                &UiEvent::KeyDown { key: KeyCode::A, modifiers: primary },
+                &mut ctx,
+            );
+            widget.event(&UiEvent::TextInput(changed.clone()), &mut ctx);
+            assert!(
+                actions.borrow().is_empty(),
+                "draft must not produce author history"
+            );
+            assert_eq!(state.active_sequence().expect("Sequence"), &before);
+            assert_eq!(state.project_author_generation(), generation);
+            if confirm {
+                assert!(widget.commit_pending_input(&mut ctx));
+                assert!(
+                    !widget.commit_pending_input(&mut ctx),
+                    "submit must not duplicate a write"
+                );
+                let recorded = actions.borrow();
+                assert_eq!(recorded.len(), 1);
+                let Action::Custom { payload, .. } = &recorded[0] else {
+                    panic!("author action");
+                };
+                let payload: VisualEffectSetParameterValuePayload =
+                    serde_json::from_value(payload.clone()).expect("text write");
+                assert_eq!(
+                    payload.write,
+                    ParameterValueWrite::Value {
+                        parameter: property.address.clone(),
+                        value: PropertyValue::Text(changed.clone())
+                    }
+                );
+                state.dispatch_action(recorded[0].clone()).expect("commit text");
+                assert!(state.undo_timeline().expect("undo"));
+                assert_eq!(
+                    state.active_sequence().expect("Sequence").video_tracks[0].clips[0].effects,
+                    before.video_tracks[0].clips[0].effects
+                );
+            } else {
+                widget.event(
+                    &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                    &mut ctx,
+                );
+                widget.event(&UiEvent::FocusLost, &mut ctx);
+                assert!(actions.borrow().is_empty());
+                assert_eq!(
+                    widget.accessibility().expect("restored text").value,
+                    Some(mondrian_ui_core::AccessibilityValue::Text(initial.clone()))
+                );
+                assert_eq!(state.active_sequence().expect("Sequence"), &before);
+                assert_eq!(state.project_author_generation(), generation);
+            }
+        }
+    }
 }
 
 #[test]
@@ -6480,6 +7011,8 @@ fn effect_vector_controls_preserve_current_siblings_keys_and_exact_history() {
                     path: path.clone(),
                     label: path.clone(),
                     group_name: None,
+                    group_label: None,
+                    enum_labels: BTreeMap::new(),
                     value: initial.clone(),
                     min: None,
                     max: None,
@@ -6490,8 +7023,13 @@ fn effect_vector_controls_preserve_current_siblings_keys_and_exact_history() {
                     numeric_curve: None,
                 };
                 // Build the actual widget before an independent author edit.
-                let mut widget =
-                    effect_property_value_widget(&model, true, Some(selection), effect_id);
+                let mut widget = effect_property_value_widget(
+                    &chinese_localizer(),
+                    &model,
+                    true,
+                    Some(selection),
+                    effect_id,
+                );
                 let sibling = (index + 1) % count;
                 let sibling_value = f32::from_bits(0x3fc00001);
                 let component_action = |index, value| {

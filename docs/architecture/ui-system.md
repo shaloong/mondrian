@@ -361,6 +361,35 @@ programmatic disable. App panel Adapters select the policy; they must not
 simulate author-transaction coalescing outside the Widget or turn each typed
 character into Undo/Author Generation history.
 
+`MultilineTextInput` exposes the same mutually exclusive live/transactional
+policies. Transactional multiline inputs retain ordinary Enter for newlines;
+Control/Command+Enter, focus loss, or form submission confirms the changed
+focus-session value once. Escape and programmatic disable cancel the draft;
+programmatic text replacement establishes a new confirmation baseline. Active
+IME composition owns its Enter/Escape keys and blocks form confirmation. Generic
+Inspector plugin Text and Resource controls use confirmation, initialize actual
+editable values, and never disable long Unicode text based on its byte length.
+Multiline property rows reuse content-height measurement so their edit regions
+fit the declared line count and do not overlap following controls.
+The existing Basic Title live Viewer text path remains live; continuous caption
+history coalescing is still a separate author-session requirement.
+
+Inspector parameter presentation is a locale projection over canonical schemas.
+Declared schema label and enum message addresses resolve through Fluent catalogs;
+owned built-in, Title, and Mask logical addresses have one validated catalog mapping.
+Vendor schemas can declare a direct registered message address or retain their
+display fallback. Enum Actions and current-item checkmarks use exact canonical
+option keys; group adjacency
+uses the original definition-owned identity independently of localized headings.
+All registered built-in parameter labels/options/groups are catalog-qualified in
+English, Chinese, and pseudo locale. Vendor property and group labels retain their
+declared fallback. The current enum schema has no independent vendor caption;
+unknown enum message addresses therefore fall back to their canonical keys.
+Locale changes do not mutate parameter schemas, author generations, or history.
+Qualifier sample operations and add/remove controls receive the same captured
+Localizer; localized labels still dispatch validated typed sample sets and the
+original stable owner/parameter address.
+
 Widget text measurement uses one thread-local owner shared by ordinary
 Label/Button layout and TextInput/NumberInput geometry. Numeric-control
 construction can already measure text before the first layout pass; it must

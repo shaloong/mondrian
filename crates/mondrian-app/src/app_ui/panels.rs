@@ -2377,10 +2377,14 @@ pub struct InspectorEffectPropertyModel {
     ///
     /// This is presentation and resource-editing metadata, never Action identity.
     pub path: String,
-    /// Human-readable property name from the descriptor.
+    /// Localized property presentation, falling back to the definition-owned display name.
     pub label: String,
     /// Definition-owned Inspector group; adjacent equal values form one visual subgroup.
     pub group_name: Option<String>,
+    /// Localized group heading, independent of adjacent-group identity.
+    pub group_label: Option<String>,
+    /// Display-only enum labels indexed by exact canonical option keys.
+    pub enum_labels: BTreeMap<String, String>,
     /// The evaluated value at the current playback time.
     pub value: PropertyValue,
     /// UI min/max bounds extracted from the descriptor.
@@ -2407,6 +2411,7 @@ fn inspector_property_model(
     path: &str,
     property: &mondrian_core::automation::AnimatedProperty,
     author_time: TimelineTime,
+    localizer: &Localizer,
 ) -> InspectorEffectPropertyModel {
     let numeric = property.descriptor.schema.numeric;
     InspectorEffectPropertyModel {
@@ -2416,8 +2421,26 @@ fn inspector_property_model(
             parameter_id: property.descriptor.parameter_id().clone(),
         },
         path: path.to_owned(),
-        label: property.descriptor.display_name.clone(),
+        label: localizer.parameter_text(
+            &property.descriptor.schema.message_id,
+            &property.descriptor.display_name,
+        ),
         group_name: property.descriptor.ui_metadata.group_name.clone(),
+        group_label: property.descriptor.ui_metadata.group_name.as_deref().map(|group| {
+            localizer.parameter_group_text(property.descriptor.parameter_id().as_str(), group)
+        }),
+        enum_labels: property
+            .descriptor
+            .schema
+            .enum_options
+            .iter()
+            .map(|option| {
+                (
+                    option.key.clone(),
+                    localizer.parameter_text(&option.message_id, &option.key),
+                )
+            })
+            .collect(),
         value: property.evaluate(author_time),
         min: numeric.map(|contract| contract.soft_range.min),
         max: numeric.map(|contract| contract.soft_range.max),
@@ -2434,8 +2457,9 @@ fn inspector_effect_property_model(
     property: &mondrian_core::automation::AnimatedProperty,
     author_time: TimelineTime,
     clip: &Clip,
+    localizer: &Localizer,
 ) -> InspectorEffectPropertyModel {
-    let mut model = inspector_property_model(path, property, author_time);
+    let mut model = inspector_property_model(path, property, author_time, localizer);
     model.numeric_curve =
         numeric_curve_model_for_property(property, clip).map(|curve| InspectorPropertyCurveModel {
             curve,
@@ -2578,7 +2602,7 @@ impl InspectorPanelModel {
                     .iter()
                     .filter_map(|path| {
                         title.property_bag().property(path).map(|property| {
-                            inspector_property_model(path, property, clip_author_time)
+                            inspector_property_model(path, property, clip_author_time, localizer)
                         })
                     })
                     .collect()
@@ -2669,7 +2693,7 @@ impl InspectorPanelModel {
                 .iter()
                 .map(|effect| InspectorEffectModel {
                     effect_id: effect.id,
-                    label: effect_display_name(&effect.effect_type),
+                    label: localized_effect_name(&effect.effect_type, Some(localizer)),
                     enabled: effect.is_enabled,
                     properties: {
                         let mut properties = effect.properties.iter().collect::<Vec<_>>();
@@ -2691,6 +2715,7 @@ impl InspectorPanelModel {
                                     property,
                                     clip_author_time,
                                     clip,
+                                    localizer,
                                 )
                             })
                             .collect()
@@ -2721,7 +2746,12 @@ impl InspectorPanelModel {
                             .properties
                             .iter()
                             .map(|(path, property)| {
-                                inspector_property_model(path, property, clip_author_time)
+                                inspector_property_model(
+                                    path,
+                                    property,
+                                    clip_author_time,
+                                    localizer,
+                                )
                             })
                             .collect(),
                     }

@@ -76,7 +76,9 @@ pub use raster_image::RasterImage;
 pub use scroll::{ScrollView, ScrollViewState};
 pub use segmented_button_group::{SegmentedButtonGroup, SegmentedButtonItem};
 pub use slider::Slider;
-pub use text_input::{MultilineTextInput, TabBehavior, TextInput, TextInputChangeAction};
+pub use text_input::{
+    MultilineTextInput, TabBehavior, TextInput, TextInputChangeAction, TextInputCommitAction,
+};
 pub use timeline_view::{
     TimelineAssetDrop, TimelineAssetDropAction, TimelineClip, TimelineClipAction, TimelineClipKind,
     TimelineClipMove, TimelineClipMoveAction, TimelineClipRef, TimelineClipSelectionMode,
