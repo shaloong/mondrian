@@ -152,6 +152,7 @@ struct FutureMediaColdActivationResidency {
     frames: Vec<MediaPreviewFrame>,
     preparation_guards: Vec<(MediaPreviewKey, MediaPreviewFrame)>,
     source_coverage_guards: Vec<MediaPreviewFrame>,
+    cursor_coverage_guards: Vec<MediaPreviewFrame>,
     preparation_work_keys: Vec<MediaPreviewKey>,
 }
 
@@ -318,11 +319,18 @@ impl FutureMediaWindowCache {
         {
             return;
         }
+        let cursor_coverage_guards = self
+            .cold_activation_residency
+            .as_mut()
+            .filter(|residency| residency.activation_frame == activation_frame)
+            .map(|residency| std::mem::take(&mut residency.cursor_coverage_guards))
+            .unwrap_or_default();
         self.cold_activation_residency = Some(FutureMediaColdActivationResidency {
             activation_frame,
             frames,
             preparation_guards: Vec::new(),
             source_coverage_guards: Vec::new(),
+            cursor_coverage_guards,
             preparation_work_keys: Vec::new(),
         });
     }
@@ -332,10 +340,12 @@ impl FutureMediaWindowCache {
         activation_frame: i64,
         preparation_guards: Vec<(MediaPreviewKey, MediaPreviewFrame)>,
         source_coverage_guards: Vec<MediaPreviewFrame>,
+        cursor_coverage_guards: Vec<MediaPreviewFrame>,
         preparation_work_keys: Vec<MediaPreviewKey>,
     ) {
         if (preparation_guards.is_empty()
             && source_coverage_guards.is_empty()
+            && cursor_coverage_guards.is_empty()
             && preparation_work_keys.is_empty())
             || self.cold_activation.and_then(|memo| memo.activation_frame) != Some(activation_frame)
         {
@@ -347,6 +357,7 @@ impl FutureMediaWindowCache {
                 frames: Vec::new(),
                 preparation_guards: Vec::new(),
                 source_coverage_guards: Vec::new(),
+                cursor_coverage_guards: Vec::new(),
                 preparation_work_keys: Vec::new(),
             }
         });
@@ -366,6 +377,10 @@ impl FutureMediaWindowCache {
             }
         }
         residency.source_coverage_guards.extend(source_coverage_guards);
+        // Unlike a different source's temporary worker occupation, this
+        // cursor has already moved away from the near samples. Their guards
+        // survive completion and full activation readiness until the cut.
+        residency.cursor_coverage_guards.extend(cursor_coverage_guards);
         if residency.preparation_work_keys.is_empty() {
             residency.source_coverage_guards.clear();
         }
@@ -589,7 +604,9 @@ impl FutureMediaWindowCache {
             retained_cold_preparation_media_frames: self.cold_activation_residency.as_ref().map_or(
                 0,
                 |residency| {
-                    residency.preparation_guards.len() + residency.source_coverage_guards.len()
+                    residency.preparation_guards.len()
+                        + residency.source_coverage_guards.len()
+                        + residency.cursor_coverage_guards.len()
                 },
             ),
         }
@@ -1210,6 +1227,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             };
             let mut activation_plan = plan_activation(remaining_prefetch_jobs);
             let mut source_coverage_guards = Vec::new();
+            let mut cursor_coverage_guards = Vec::new();
+            let mut shared_cursor_sources = Vec::new();
             let mut nearest_guards = Vec::new();
             self.future_media_window
                 .borrow_mut()
@@ -1338,6 +1357,63 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     plan_activation(if can_open { remaining_prefetch_jobs } else { 0 });
                 source_preparation_allowed = can_open;
             }
+            if prioritize_immediate {
+                // A persistent layer can reuse the same worker-local Session
+                // across an edit while restarting its source sample. Preparing
+                // that far input also moves the active cursor, even though no
+                // distinct source needs to open. Every intervening sample of
+                // that source must be resident before this out-of-order decode.
+                // Independent cold sources may still use the partial-source
+                // preparation below; their worker coverage is unchanged.
+                shared_cursor_sources = activation_plan
+                    .first_media_frame
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter(|request| {
+                        let source = request.key.decode.source();
+                        !source.is_still_image()
+                            && immediate_closure
+                                .as_deref()
+                                .unwrap_or(&[])
+                                .iter()
+                                .any(|near| near.key.decode.source() == source)
+                            && !self.scheduler.has_pending_key(&request.key)
+                            && self.frame_store.borrow_mut().media_frame(&request.key).is_none()
+                    })
+                    .map(|request| request.key.decode.source().clone())
+                    .collect::<Vec<_>>();
+                if !shared_cursor_sources.is_empty() {
+                    let remaining_intervals =
+                        usize::try_from(activation_frame.saturating_sub(frame).saturating_sub(1))
+                            .unwrap_or(usize::MAX);
+                    let cursor_coverage = if remaining_intervals <= prefetch_window_frames {
+                        Some(self.plan_future_media_prefix_scoped(
+                            snapshot,
+                            proxy_demands,
+                            sequence,
+                            frame,
+                            playback_direction,
+                            remaining_intervals,
+                            Some(activation_frame.saturating_sub(1)),
+                            Resolution { width: target_width, height: target_height },
+                            color_context.clone(),
+                            0,
+                            FutureMediaPrefixScope::SourceCoverage(&shared_cursor_sources),
+                        ))
+                    } else {
+                        None
+                    };
+                    if let Some(mut coverage) = cursor_coverage.filter(|coverage| {
+                        coverage.ready_media_frames == remaining_intervals
+                            && coverage.preservable_media_frames == remaining_intervals
+                    }) {
+                        cursor_coverage_guards.append(&mut coverage.resident_guards);
+                    } else {
+                        activation_plan = plan_activation(0);
+                    }
+                }
+            }
             if source_preparation_allowed
                 && remaining_prefetch_jobs > 0
                 && activation_plan.admission_limit_reached
@@ -1386,10 +1462,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             remaining_prefetch_jobs = remaining_prefetch_jobs.saturating_sub(activation_scheduled);
             if activation_scheduled > 0 {
                 let active_work_keys = self.scheduler.active_keys();
+                if !preparation_work_keys.iter().any(|key| {
+                    active_work_keys.contains(key)
+                        && shared_cursor_sources.contains(key.decode.source())
+                }) {
+                    cursor_coverage_guards.clear();
+                }
                 self.future_media_window.borrow_mut().retain_cold_preparation(
                     activation_frame,
                     preparation_guards,
                     source_coverage_guards,
+                    cursor_coverage_guards,
                     preparation_work_keys
                         .into_iter()
                         .filter(|key| active_work_keys.contains(key))

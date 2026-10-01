@@ -82,6 +82,16 @@ Priming also proves the next distinct physical source inside the bounded cold-op
 
 Cold-activation GPU-object preparation has its own ticketless execution purpose. Its resolved evaluation lives only for that prewarm call and does not enter the ordinary four-entry evaluation LRU; dropping the frame releases its transient media protection after renderer backend objects are ready. This keeps the far activation coordinate outside the ordinary realtime evaluation set while the bounded staging owners protect the near horizon. The cold frame still uses the same Timeline resolver, exact media keys, GPU input preparation, deadlines, and cancellation policy.
 
+A far activation may also reuse a physical source that still contributes to
+the near pictures, including a repeated clip that restarts its source sample.
+Decoding that input changes the same worker-local cursor. Before admitting it
+out of presentation order, the scheduler proves residency of every intervening
+required sample from that source inside the existing temporal and physical
+budgets. Pending work is not residency. Those sample guards survive decoder
+completion and activation readiness until the cut or ordinary identity/resource
+invalidation. Independently covered distinct sources may still prepare while
+the shared cursor waits; no second decoder or Playback authority is created.
+
 The configured media-resident Priming prefix is at most six future frames, covering the complete 250ms temporal window at the canonical 24fps qualification rate. Physical frame planning reduces that near prefix when the current frame plus a complete multi-layer cold-source activation would exceed the Standard eight-surface grant; no ninth speculative surface is admitted and no partial frame closure is counted preservable. Exact Current work reuses its already-resident prefix entry, and rolling eviction releases past coordinates before admitting farther work. Playing keeps the rate-derived 250ms temporal window, with at most two queued or in-flight prefetch decodes.
 
 Priming may overlap the farther cold-source batch with current decode only after

@@ -5850,6 +5850,141 @@ fn steady_prefetch_reserves_immediate_picture_then_cold_source_transition() {
 }
 
 #[test]
+fn cold_activation_does_not_restart_a_shared_source_before_its_near_prefix_is_resident() {
+    let (mut state, root) = state_with_sequential_invalid_video_assets();
+    let overlay_path = root.join("overlay.mp4");
+    std::fs::write(&overlay_path, b"invalid fixture").expect("fixture");
+    let overlay = commit_preview_test_media(
+        state.asset_library().expect("library"),
+        overlay_path.clone(),
+        rec709_video_media_info(std::fs::metadata(overlay_path).expect("metadata").len()),
+    );
+    let mut sequence = state.active_sequence().expect("sequence").clone();
+    let tb = sequence.time_base();
+    for position in [0, 48] {
+        sequence.video_tracks[1]
+            .add_clip(Clip::new(overlay, tt(position, tb), tt(48, tb)).expect("overlay"))
+            .expect("insert overlay");
+    }
+    state.test_set_sequence(Some(sequence));
+    state.play().expect("play");
+    let delivered =
+        deliver_test_current_frame(&mut state, mondrian_playback::FrameDeliveryKind::Ready);
+    state.observe_video_preroll_at_wall(delivered, 1, 1, true, true, Instant::now());
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let sequence = state.active_sequence().expect("sequence");
+    let window = media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
+        .expect("valid temporal prefix");
+    let current = 47 - window as i64;
+    service
+        .frame_store
+        .replace(test_cpu_frame_store(2 * window + 2, 640 * 1024 * 1024, 6));
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let resolution = Resolution { width, height };
+    let near = future_media_prefix_keys_for_state(&service, &state, current, window, resolution);
+    let activation = future_media_prefix_keys_for_state(&service, &state, 47, 1, resolution);
+    let restart = activation.iter().find(|key| key.asset_id == overlay).expect("restart");
+    let last = near.iter().rev().find(|key| key.asset_id == overlay).expect("last near");
+    assert_eq!(restart.decode.source(), last.decode.source());
+    assert_ne!(restart.source_sample(), last.source_sample());
+    for key in near
+        .iter()
+        .filter(|key| *key != last)
+        .chain(activation.iter().filter(|key| key.asset_id != overlay))
+    {
+        assert!(admit_test_media_frame(
+            &mut service.frame_store.borrow_mut(),
+            key.clone(),
+            test_media_frame(4),
+            MediaPreviewRequestPriority::Prefetch,
+        ));
+    }
+
+    schedule_media_prefetches_for_state(&service, &state, sequence, current);
+    assert_eq!(
+        service.future_media_window.borrow_mut().cold_activation(current, 96),
+        Some(Some(48)),
+        "the exact cut must be discovered outside the ordinary temporal prefix"
+    );
+    assert!(
+        !service.scheduler.has_pending_key(restart),
+        "the future restart cannot move this worker's cursor past an unowned near sample"
+    );
+    assert!(
+        service.scheduler.has_pending_key(last),
+        "the near prefix must progress first"
+    );
+
+    let receiver = service.scheduler.job_receiver();
+    let lane = service
+        .future_media_window
+        .borrow_mut()
+        .playback_worker_affinity(last.decode.source(), service.decode_worker_count);
+    let job = match receiver.recv_for_worker_outcome_timeout(lane, Duration::from_millis(10)) {
+        MediaPreviewJobQueueWait::Work(MediaPreviewJobQueueReceive::Job { job, .. }) => job,
+        other => panic!("expected near decode: {other:?}"),
+    };
+    assert_eq!(job.key, *last);
+    let execution = job.execution_id.expect("physical worker lease");
+    assert!(service.scheduler.mark_execution_completed(execution));
+    service.scheduler.resolve_execution(execution, true);
+    drop(job);
+    assert!(admit_test_media_frame(
+        &mut service.frame_store.borrow_mut(),
+        last.clone(),
+        test_media_frame(5),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+    schedule_media_prefetches_for_state(&service, &state, sequence, current);
+    assert!(
+        service.scheduler.has_pending_key(restart),
+        "resident coverage releases the restart"
+    );
+    assert!(near
+        .iter()
+        .all(|key| service.frame_store.borrow_mut().media_frame(key).is_some()));
+
+    let job = match receiver.recv_for_worker_outcome_timeout(lane, Duration::from_millis(10)) {
+        MediaPreviewJobQueueWait::Work(MediaPreviewJobQueueReceive::Job { job, .. }) => job,
+        other => panic!("expected covered restart: {other:?}"),
+    };
+    assert_eq!(job.key, *restart);
+    let execution = job.execution_id.expect("restart lease");
+    assert!(service.scheduler.mark_execution_completed(execution));
+    service.scheduler.resolve_execution(execution, true);
+    drop(job);
+    assert!(admit_test_media_frame(
+        &mut service.frame_store.borrow_mut(),
+        restart.clone(),
+        test_media_frame(6),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+    schedule_media_prefetches_for_state(&service, &state, sequence, current);
+    let retained = service.future_media_window.borrow().diagnostics();
+    assert_eq!(retained.retained_cold_activation_frame, Some(48));
+    assert_eq!(retained.retained_cold_activation_media_frames, 2);
+    assert_eq!(retained.retained_cold_preparation_media_frames, window);
+    assert_eq!(
+        service.future_media_window.borrow_mut().cold_activation(48, 96),
+        None
+    );
+    assert_eq!(
+        service
+            .future_media_window
+            .borrow()
+            .diagnostics()
+            .retained_cold_preparation_media_frames,
+        0,
+        "reaching the cut releases the old cursor prefix"
+    );
+
+    service.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).expect("cleanup shared-source cursor fixture");
+}
+
+#[test]
 fn blocked_immediate_closure_does_not_admit_farther_cold_source() {
     let (mut state, root) = state_with_sequential_invalid_video_assets();
     let upper_path = root.join("upper.mp4");
@@ -6405,9 +6540,40 @@ fn assert_cold_source_preparation(
         let _ = service.scheduler.resolve_execution(execution, false);
         job.key
     };
+    let cover_shared_cursor_before_cut = || {
+        // Advancing the test coordinate retires unrelated old queued work,
+        // while the cold source keeps its real in-flight lease. The last
+        // complete old picture is physically resident before its shared
+        // source cursor may restart at the cut.
+        for key in service.scheduler.pending_keys() {
+            if key != *cold {
+                service.scheduler.cancel(&key);
+            }
+        }
+        let frame = 94;
+        for key in future_media_prefix_keys_for_state(&service, &state, frame, 1, resolution) {
+            assert!(admit_test_media_frame(
+                &mut service.frame_store.borrow_mut(),
+                key,
+                test_media_frame(5),
+                MediaPreviewRequestPriority::Prefetch,
+            ));
+        }
+        frame
+    };
+    let mut scheduling_frame = match continuation {
+        ColdPreparationContinuation::Advance(frame) => frame,
+        _ => 48,
+    };
     complete_queued_job(MediaPreviewWorkerLane::Playback);
     if matches!(continuation, ColdPreparationContinuation::OverlapRestart) {
         schedule_media_prefetches_for_state(&service, &state, sequence, 48);
+        assert!(
+            !service.scheduler.has_pending_key(overlay_restart),
+            "the cold owner may progress, but the unbuffered shared cursor must not restart"
+        );
+        scheduling_frame = cover_shared_cursor_before_cut();
+        schedule_media_prefetches_for_state(&service, &state, sequence, scheduling_frame);
         assert!(service.scheduler.has_pending_key(overlay_restart));
         assert!(service.scheduler.active_keys().contains(cold));
         assert_eq!(
@@ -6416,29 +6582,27 @@ fn assert_cold_source_preparation(
                 .borrow()
                 .diagnostics()
                 .retained_cold_preparation_media_frames,
-            2
+            3,
+            "old worker coverage and the last shared-cursor sample remain protected"
         );
         assert_eq!(
             complete_queued_job(MediaPreviewWorkerLane::Playback),
             *overlay_restart
         );
-        schedule_media_prefetches_for_state(&service, &state, sequence, 48);
+        schedule_media_prefetches_for_state(&service, &state, sequence, scheduling_frame);
         assert_eq!(
             service
                 .future_media_window
                 .borrow()
                 .diagnostics()
                 .retained_cold_preparation_media_frames,
-            3
+            4,
+            "the completed restart cannot release the earlier owner's coverage"
         );
     }
     complete_queued_job(MediaPreviewWorkerLane::NonPlayback);
     let mut current_guards = Vec::new();
     let mut rolling_keys = Vec::new();
-    let scheduling_frame = match continuation {
-        ColdPreparationContinuation::Advance(frame) => frame,
-        _ => 48,
-    };
     if let ColdPreparationContinuation::Advance(frame) = continuation {
         // The physically presented picture remains owned while its successor
         // is decoded. Old cold-open coverage must not evict that successor
@@ -6462,7 +6626,10 @@ fn assert_cold_source_preparation(
     }
     if !seed_restart && !matches!(continuation, ColdPreparationContinuation::OverlapRestart) {
         schedule_media_prefetches_for_state(&service, &state, sequence, scheduling_frame);
-        assert!(service.scheduler.has_pending_key(overlay_restart));
+        assert!(
+            !service.scheduler.has_pending_key(overlay_restart),
+            "completing the independent cold input does not authorize an unbuffered cursor restart"
+        );
         for key in &rolling_keys {
             assert!(service.frame_store.borrow_mut().media_frame(key).is_some(), "completed cold work must release obsolete coverage before a restart can evict the nearest picture");
         }
@@ -6475,6 +6642,10 @@ fn assert_cold_source_preparation(
             0,
             "prepared cold source is not a complete future picture"
         );
+        current_guards.clear();
+        scheduling_frame = cover_shared_cursor_before_cut();
+        schedule_media_prefetches_for_state(&service, &state, sequence, scheduling_frame);
+        assert!(service.scheduler.has_pending_key(overlay_restart));
         assert_eq!(
             complete_queued_job(MediaPreviewWorkerLane::Playback),
             *overlay_restart
@@ -6482,7 +6653,10 @@ fn assert_cold_source_preparation(
     }
     schedule_media_prefetches_for_state(&service, &state, sequence, scheduling_frame);
     let complete = service.future_media_window.borrow().diagnostics();
-    assert_eq!(complete.retained_cold_preparation_media_frames, 0);
+    assert_eq!(
+        complete.retained_cold_preparation_media_frames,
+        usize::from(!seed_restart)
+    );
     assert_eq!(complete.retained_cold_activation_media_frames, 2);
     assert_eq!(complete.retained_cold_activation_frame, Some(96));
     service.future_media_window.borrow_mut().release_decoded_residency();
