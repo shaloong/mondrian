@@ -463,6 +463,21 @@ clears all nested ancestry. Project restore preserves the current target when
 it still belongs to the restored collection and otherwise uses that restored
 document's validated active fallback.
 
+## Floating author values in JSON
+
+The workspace JSON dependency enables exact floating round trips. Finite Double
+and Float parameter values retain their IEEE bit patterns through JSON text,
+including signed zero, subnormal values and finite limits. Actual `.mdp` archive
+save/reopen tests also bind audio gain bits. Approximate decimal parsing must not
+change author values, automation or processor signatures during persistence;
+individual fields do not compensate with tolerances or alternate JSON parsers.
+This changes JSON decoding only, not media sample/frame formats or DSP precision.
+A paired local Windows parser observation used 234,257 bytes containing 9,994
+assorted finite Double values, 200 decodes per run, and three old/precise pairs.
+Median time per decode was 0.502 ms versus 0.824 ms. This is parser CPU evidence,
+not realtime or cross-vendor qualification; audio sample transport and per-block
+Worker commands remain binary.
+
 ## Test runtime isolation
 
 Media Asset mutation revision/publication tests bind the real missing-helper

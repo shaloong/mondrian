@@ -2986,6 +2986,112 @@ mod tests {
     }
 
     #[test]
+    fn project_archive_retains_exact_audio_gain_bits() {
+        let root = unique_temp_dir("exact-audio-gain-bits");
+        let db_path = root.join("index.db");
+        fs::write(&db_path, b"sqlite placeholder").expect("write db");
+        let project_path = root.join("precise.mdp");
+        let precise = f64::from_bits(0xbc69_cf42_7684_6d19);
+        let mut document = test_document();
+        let sequence = document.sequences.active_mut().expect("sequence");
+        let track_id = sequence.audio_tracks[0].id;
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track_id)
+            .expect("channel")
+            .strip
+            .input_trim_db = precise;
+        save_project_archive(&document, &db_path, &project_path).expect("save exact project");
+        let reopened =
+            read_project_document_from_archive(&project_path).expect("reopen exact project");
+        let sequence = reopened.sequences.active().expect("reopened sequence");
+        let actual = sequence.audio_program.track_channels[&track_id].strip.input_trim_db;
+        assert_eq!(
+            actual.to_bits(),
+            precise.to_bits(),
+            "saved gain must retain author identity"
+        );
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn floating_property_json_retains_zero_subnormal_and_limit_bits() {
+        for bits in [
+            0,
+            1_u64 << 63,
+            1,
+            (1_u64 << 63) | 1,
+            0x0010_0000_0000_0000,
+            0x7fef_ffff_ffff_ffff,
+            0xffef_ffff_ffff_ffff,
+        ] {
+            let value = PropertyValue::Double(f64::from_bits(bits));
+            let bytes = serde_json::to_vec(&value).expect("serialize Double");
+            let parsed: PropertyValue = serde_json::from_slice(&bytes).expect("parse Double");
+            let PropertyValue::Double(actual) = parsed else {
+                panic!("Double type");
+            };
+            assert_eq!(actual.to_bits(), bits);
+        }
+        for bits in [
+            0,
+            1_u32 << 31,
+            1,
+            (1_u32 << 31) | 1,
+            0x0080_0000,
+            0x7f7f_ffff,
+            0xff7f_ffff,
+        ] {
+            let value = PropertyValue::Float(f32::from_bits(bits));
+            let bytes = serde_json::to_vec(&value).expect("serialize Float");
+            let parsed: PropertyValue = serde_json::from_slice(&bytes).expect("parse Float");
+            let PropertyValue::Float(actual) = parsed else {
+                panic!("Float type");
+            };
+            assert_eq!(actual.to_bits(), bits);
+        }
+        let mut bits = 0x9e37_79b9_u32;
+        for _ in 0..10000 {
+            bits = bits.wrapping_mul(1664525).wrapping_add(1013904223);
+            let original = f32::from_bits(bits);
+            if !original.is_finite() {
+                continue;
+            }
+            let bytes =
+                serde_json::to_vec(&PropertyValue::Float(original)).expect("serialize Float");
+            let parsed: PropertyValue = serde_json::from_slice(&bytes).expect("parse Float");
+            let PropertyValue::Float(actual) = parsed else {
+                panic!("Float type");
+            };
+            assert_eq!(actual.to_bits(), original.to_bits());
+        }
+    }
+
+    #[test]
+    fn finite_double_property_json_retains_author_bits() {
+        let mut bits = 0x9e37_79b9_7f4a_7c15_u64;
+        for _ in 0..10000 {
+            bits = bits.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let original = f64::from_bits(bits);
+            if !original.is_finite() {
+                continue;
+            }
+            let encoded = serde_json::to_vec(&PropertyValue::Double(original)).expect("serialize");
+            let decoded: PropertyValue = serde_json::from_slice(&encoded).expect("parse");
+            let PropertyValue::Double(actual) = decoded else {
+                panic!("Double type");
+            };
+            assert_eq!(
+                actual.to_bits(),
+                original.to_bits(),
+                "JSON {}",
+                String::from_utf8_lossy(&encoded)
+            );
+        }
+    }
+
+    #[test]
     fn audio_processor_schema_and_exact_curve_round_trip_without_plugin_resolution() {
         let root = unique_temp_dir("audio-parameter-schema-round-trip");
         let db_path = root.join("index.db");
