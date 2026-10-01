@@ -1100,3 +1100,21 @@ error-other = 操作失败：{ $reason }
 error-timestamp-unknown = 未提供
 
 error-context = { $context }：{ $source }
+
+# Product admission and exact-time reasons
+reason-no-project-save-as = 当前没有可另存的项目
+reason-empty-media-path = 请选择媒体文件，路径不能为空
+reason-library-disconnected = 项目素材库尚未连接
+reason-proxy-video-only = 只有视频素材支持代理模式
+reason-proxy-source-missing = 素材文件不存在，请先重新链接媒体
+reason-proxy-project-disabled = 项目已禁用代理工作流，请先在项目设置中启用代理
+reason-probe-evidence-missing = 素材的探测信息缺失或已失效，请刷新或重新链接素材
+reason-probe-duration-missing = 未能确认有效的素材时长，无法放置剪辑
+reason-time-zero-denominator = 时间分母不能为零
+reason-time-overflow = 时间运算超出支持的范围
+reason-time-invalid-base = 无效的帧时间基：{ $numerator }/{ $denominator }
+reason-time-invalid-rate = 无效的帧率：{ $numerator }/{ $denominator }
+reason-time-domain-mismatch = 时间属于不同域，需要显式时间映射
+reason-time-non-invertible = 时间映射不可逆
+reason-time-negative-duration = 时间范围的持续时间不能为负
+reason-time-non-finite = 时间输入必须是有限值

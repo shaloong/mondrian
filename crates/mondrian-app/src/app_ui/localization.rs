@@ -822,6 +822,41 @@ mod tests {
     }
 
     #[test]
+    fn exact_time_reasons_localize_without_losing_rational_coordinates() {
+        use crate::app::AppMessage;
+        use mondrian_core::{timeline_time::TimelineTimeError, MondrianError};
+        for reason in [
+            TimelineTimeError::ZeroDenominator,
+            TimelineTimeError::Overflow,
+            TimelineTimeError::InvalidLegacyTimeBase { numerator: i64::MIN, denominator: i64::MAX },
+            TimelineTimeError::InvalidFrameRate { numerator: i64::MAX, denominator: i64::MIN },
+            TimelineTimeError::DomainMismatch,
+            TimelineTimeError::NonInvertibleTransform,
+            TimelineTimeError::NegativeDuration,
+            TimelineTimeError::NonFiniteInput,
+        ] {
+            let message = AppMessage::from_error(&MondrianError::InvalidTimelineTime(reason));
+            let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese").message(&message);
+            for locale in [AppUiLocale::ZhCn, AppUiLocale::EnUs, AppUiLocale::Pseudo] {
+                let localizer = Localizer::new(locale).expect("catalog");
+                let text = localizer.message(&message);
+                assert!(!text.contains("reason-time-"));
+                if locale != AppUiLocale::ZhCn {
+                    assert_ne!(text, chinese);
+                }
+                if matches!(
+                    reason,
+                    TimelineTimeError::InvalidLegacyTimeBase { .. }
+                        | TimelineTimeError::InvalidFrameRate { .. }
+                ) {
+                    assert!(text.contains(&i64::MIN.to_string()));
+                    assert!(text.contains(&i64::MAX.to_string()));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn typed_core_failures_resolve_in_all_locales_without_parsing_diagnostics() {
         use crate::app::AppMessage;
         use mondrian_core::MondrianError;

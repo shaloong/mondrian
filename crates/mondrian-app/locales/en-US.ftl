@@ -1165,3 +1165,21 @@ error-other = Operation failed: { $reason }
 error-timestamp-unknown = not supplied
 
 error-context = { $context }: { $source }
+
+# Product admission and exact-time reasons
+reason-no-project-save-as = No project is available for Save As
+reason-empty-media-path = Choose a media file; the path is empty
+reason-library-disconnected = The project asset library is not connected
+reason-proxy-video-only = Proxy mode is available only for video assets
+reason-proxy-source-missing = Source media is missing; relink it before enabling proxies
+reason-proxy-project-disabled = Proxy workflow is disabled; enable it in Project Settings first
+reason-probe-evidence-missing = Media probe information is missing or stale; refresh or relink the asset
+reason-probe-duration-missing = A valid media duration could not be established; the clip cannot be placed
+reason-time-zero-denominator = Time denominator must not be zero
+reason-time-overflow = Time arithmetic exceeds the supported range
+reason-time-invalid-base = Invalid frame time base: { $numerator }/{ $denominator }
+reason-time-invalid-rate = Invalid frame rate: { $numerator }/{ $denominator }
+reason-time-domain-mismatch = Times belong to different domains; an explicit time mapping is required
+reason-time-non-invertible = Time mapping is not invertible
+reason-time-negative-duration = Time range duration must not be negative
+reason-time-non-finite = Time input must be finite

@@ -268,3 +268,26 @@ there is no reverse mapping from formatted text to error semantics.
 This projects existing structured failure categories. Internal reasons still
 stored as String inside those categories require further domain-owned codes;
 complete English diagnostic coverage is not yet claimed.
+
+
+### Admission reasons and exact-time causes
+
+Fixed admission conditions in the Asset/project action adapters choose a stable
+reason message directly at the decision branch: missing library, empty media
+path, unavailable Save As project, video-only proxies, absent source media,
+disabled project proxy workflow, stale probe evidence, and unproven duration.
+The corresponding diagnostic error remains available to non-UI callers; no
+reason-string lookup or translated comparison determines behavior. Missing
+Assets now return the existing typed `AssetNotFound` cause rather than wrapping
+that fact in a generic workflow reason.
+
+The `InvalidTimelineTime` projection exhaustively maps its eight
+`TimelineTimeError` variants into a nested message. Invalid frame rates/time
+bases preserve numerator and denominator as exact decimal text, including signed
+64-bit endpoints. Arithmetic limits, domain mismatch, non-invertible mapping,
+negative duration and non-finite input localize without changing time arithmetic
+or admission semantics. New owner variants require explicit projection.
+
+These branches and exact-time causes are migrated. Other domain diagnostic
+String bodies and remaining product UI literals still require further inventory
+and typed owner contracts before full language coverage is claimed.

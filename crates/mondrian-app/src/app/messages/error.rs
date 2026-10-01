@@ -141,7 +141,7 @@ impl AppMessage {
                     optional_timestamp(*selected_duration_pts),
                 ),
             MondrianError::InvalidTimelineTime(source) => {
-                Self::new("error-timeline-time").with_text("reason", source.to_string())
+                Self::new("error-timeline-time").with_message("reason", timeline_time_error(source))
             }
             MondrianError::Io(source) => {
                 Self::new("error-io").with_text("reason", source.to_string())
@@ -179,5 +179,27 @@ fn optional_timestamp(value: Option<i64>) -> AppMessage {
             AppMessage::new("status-opaque-detail").with_text("detail", value.to_string())
         }
         None => AppMessage::new("error-timestamp-unknown"),
+    }
+}
+
+fn timeline_time_error(error: &mondrian_core::timeline_time::TimelineTimeError) -> AppMessage {
+    use mondrian_core::timeline_time::TimelineTimeError;
+    match error {
+        TimelineTimeError::ZeroDenominator => AppMessage::new("reason-time-zero-denominator"),
+        TimelineTimeError::Overflow => AppMessage::new("reason-time-overflow"),
+        TimelineTimeError::InvalidLegacyTimeBase { numerator, denominator } => {
+            AppMessage::new("reason-time-invalid-base")
+                .with_text("numerator", numerator.to_string())
+                .with_text("denominator", denominator.to_string())
+        }
+        TimelineTimeError::InvalidFrameRate { numerator, denominator } => {
+            AppMessage::new("reason-time-invalid-rate")
+                .with_text("numerator", numerator.to_string())
+                .with_text("denominator", denominator.to_string())
+        }
+        TimelineTimeError::DomainMismatch => AppMessage::new("reason-time-domain-mismatch"),
+        TimelineTimeError::NonInvertibleTransform => AppMessage::new("reason-time-non-invertible"),
+        TimelineTimeError::NegativeDuration => AppMessage::new("reason-time-negative-duration"),
+        TimelineTimeError::NonFiniteInput => AppMessage::new("reason-time-non-finite"),
     }
 }

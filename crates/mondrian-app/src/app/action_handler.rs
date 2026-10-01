@@ -321,7 +321,8 @@ impl AppState {
         if !self.has_open_project() {
             let reason = "当前无可另存项目".to_string();
             self.set_status_hint(
-                AppMessage::new("status-save-failed").with_text("error", reason.clone()),
+                AppMessage::new("status-save-failed")
+                    .with_message("error", AppMessage::new("reason-no-project-save-as")),
                 true,
             );
             return Err(MondrianError::WorkflowStepFailed {
@@ -427,7 +428,8 @@ impl AppState {
         if paths.iter().any(|path| path.as_os_str().is_empty()) {
             let reason = "媒体路径不能为空".to_string();
             self.set_status_hint(
-                AppMessage::new("status-import-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-import-failed")
+                    .with_message("reason", AppMessage::new("reason-empty-media-path")),
                 true,
             );
             return Err(MondrianError::WorkflowStepFailed {
@@ -439,7 +441,8 @@ impl AppState {
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(
-                AppMessage::new("status-import-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-import-failed")
+                    .with_message("reason", AppMessage::new("reason-library-disconnected")),
                 true,
             );
             MondrianError::WorkflowStepFailed { step_id: "import_media".to_string(), reason }
@@ -536,7 +539,8 @@ impl AppState {
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(
-                AppMessage::new("status-rename-asset-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-rename-asset-failed")
+                    .with_message("reason", AppMessage::new("reason-library-disconnected")),
                 true,
             );
             MondrianError::WorkflowStepFailed { step_id: "rename_asset".to_string(), reason }
@@ -585,7 +589,8 @@ impl AppState {
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(
-                AppMessage::new("status-interpret-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-interpret-failed")
+                    .with_message("reason", AppMessage::new("reason-library-disconnected")),
                 true,
             );
             MondrianError::WorkflowStepFailed {
@@ -632,7 +637,8 @@ impl AppState {
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(
-                AppMessage::new("status-rename-folder-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-rename-folder-failed")
+                    .with_message("reason", AppMessage::new("reason-library-disconnected")),
                 true,
             );
             MondrianError::WorkflowStepFailed { step_id: "rename_folder".to_string(), reason }
@@ -673,7 +679,8 @@ impl AppState {
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(
-                AppMessage::new("status-proxy-mode-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-proxy-mode-failed")
+                    .with_message("reason", AppMessage::new("reason-library-disconnected")),
                 true,
             );
             MondrianError::WorkflowStepFailed {
@@ -682,20 +689,19 @@ impl AppState {
             }
         })?;
         let asset = library.get_asset(payload.asset_id)?.ok_or_else(|| {
-            let reason = format!("素材不存在：{}", payload.asset_id);
+            let error = MondrianError::AssetNotFound { asset_id: payload.asset_id.to_string() };
             self.set_status_hint(
-                AppMessage::new("status-proxy-mode-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-proxy-mode-failed")
+                    .with_message("reason", AppMessage::from_error(&error)),
                 true,
             );
-            MondrianError::WorkflowStepFailed {
-                step_id: "set_asset_proxy_mode".to_string(),
-                reason,
-            }
+            error
         })?;
         if !matches!(asset.kind, AssetKind::Video) {
             let reason = "只有视频素材支持代理模式".to_string();
             self.set_status_hint(
-                AppMessage::new("status-proxy-mode-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-proxy-mode-failed")
+                    .with_message("reason", AppMessage::new("reason-proxy-video-only")),
                 true,
             );
             return Err(MondrianError::WorkflowStepFailed {
@@ -713,7 +719,8 @@ impl AppState {
         if payload.enabled && source_path.as_ref().is_none_or(|source_path| !source_path.exists()) {
             let reason = "素材文件不存在，请先重新链接媒体".to_string();
             self.set_status_hint(
-                AppMessage::new("status-proxy-mode-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-proxy-mode-failed")
+                    .with_message("reason", AppMessage::new("reason-proxy-source-missing")),
                 true,
             );
             return Err(MondrianError::WorkflowStepFailed {
@@ -724,7 +731,8 @@ impl AppState {
         if payload.enabled && !self.project_settings().proxy_enabled {
             let reason = "项目已禁用代理工作流，请先在项目设置中启用代理".to_string();
             self.set_status_hint(
-                AppMessage::new("status-proxy-mode-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-proxy-mode-failed")
+                    .with_message("reason", AppMessage::new("reason-proxy-project-disabled")),
                 true,
             );
             return Err(MondrianError::WorkflowStepFailed {
@@ -813,7 +821,8 @@ impl AppState {
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(
-                AppMessage::new("status-remove-assets-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-remove-assets-failed")
+                    .with_message("reason", AppMessage::new("reason-library-disconnected")),
                 true,
             );
             MondrianError::WorkflowStepFailed {
@@ -902,7 +911,8 @@ impl AppState {
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(
-                AppMessage::new("status-move-assets-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-move-assets-failed")
+                    .with_message("reason", AppMessage::new("reason-library-disconnected")),
                 true,
             );
             MondrianError::WorkflowStepFailed {
@@ -1823,18 +1833,20 @@ impl AppState {
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(
-                AppMessage::new("status-asset-prepare-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-asset-prepare-failed")
+                    .with_message("reason", AppMessage::new("reason-library-disconnected")),
                 true,
             );
             MondrianError::WorkflowStepFailed { step_id: "assets_prepare_drag".into(), reason }
         })?;
         let asset = library.get_asset(payload.asset_id)?.ok_or_else(|| {
-            let reason = format!("素材不存在：{}", payload.asset_id);
+            let error = MondrianError::AssetNotFound { asset_id: payload.asset_id.to_string() };
             self.set_status_hint(
-                AppMessage::new("status-asset-prepare-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-asset-prepare-failed")
+                    .with_message("reason", AppMessage::from_error(&error)),
                 true,
             );
-            MondrianError::WorkflowStepFailed { step_id: "assets_prepare_drag".into(), reason }
+            error
         })?;
         let media_probe = asset.media_probe();
         if matches!(
@@ -1844,7 +1856,8 @@ impl AppState {
         {
             let reason = "文件素材的探测证据缺失或已失效，请先刷新或重新链接素材".to_owned();
             self.set_status_hint(
-                AppMessage::new("status-asset-prepare-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-asset-prepare-failed")
+                    .with_message("reason", AppMessage::new("reason-probe-evidence-missing")),
                 true,
             );
             return Err(MondrianError::WorkflowStepFailed {
@@ -1867,8 +1880,10 @@ impl AppState {
                 if probe.duration == Duration::ZERO {
                     let reason = "媒体探测没有证明正的源时长，不能创建虚构长度的 Clip".to_owned();
                     self.set_status_hint(
-                        AppMessage::new("status-asset-prepare-failed")
-                            .with_text("reason", reason.clone()),
+                        AppMessage::new("status-asset-prepare-failed").with_message(
+                            "reason",
+                            AppMessage::new("reason-probe-duration-missing"),
+                        ),
                         true,
                     );
                     return Err(MondrianError::WorkflowStepFailed {
@@ -4868,6 +4883,27 @@ mod tests {
     }
 
     #[test]
+    fn missing_project_save_as_reason_reformats_without_an_author_edit() {
+        let mut state = AppState::new();
+        let generation = state.project_author_generation();
+        let error = state
+            .save_project_as_from_action(PathBuf::from("draft.mdp"))
+            .expect_err("no project");
+        assert!(matches!(error, MondrianError::WorkflowStepFailed { .. }));
+        let (message, is_error) = state.status_hint.as_ref().expect("failure status");
+        assert!(*is_error);
+        let english = crate::app_ui::localization::Localizer::new(
+            crate::app_ui::localization::AppUiLocale::EnUs,
+        )
+        .expect("English")
+        .message(message);
+        assert!(english.contains("No project is available for Save As"));
+        assert!(!english.contains("当前无可另存项目"));
+        assert_eq!(state.project_author_generation(), generation);
+        assert!(!state.has_open_project());
+    }
+
+    #[test]
     fn dispatch_assets_set_proxy_mode_reports_missing_library() {
         let mut state = AppState::new();
 
@@ -4921,6 +4957,14 @@ mod tests {
 
         remove_temp_path(&library_root);
         remove_temp_path(&media_root);
+        let message = &state.status_hint.as_ref().expect("proxy rejection").0;
+        let english = crate::app_ui::localization::Localizer::new(
+            crate::app_ui::localization::AppUiLocale::EnUs,
+        )
+        .expect("English")
+        .message(message);
+        assert!(english.contains("Proxy mode is available only for video assets"));
+        assert!(!english.contains("只有视频"));
     }
 
     #[test]
