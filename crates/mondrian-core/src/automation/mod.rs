@@ -377,14 +377,26 @@ pub enum QualifierSampleSetError {
 /// Stable choice exposed by an enum parameter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParameterEnumOption {
+    /// Canonical author value, independent of presentation and locale.
     pub key: String,
+    /// Declared option caption used when no translation is available.
+    pub display_name: String,
+    /// Localization address for this option's caption.
     pub message_id: String,
 }
 
 impl ParameterEnumOption {
-    /// Construct one stable enum key and its default localization address.
-    pub fn new(key: impl Into<String>, message_id: impl Into<String>) -> Self {
-        Self { key: key.into(), message_id: message_id.into() }
+    /// Construct a stable choice with its declared caption and localization address.
+    pub fn new(
+        key: impl Into<String>,
+        display_name: impl Into<String>,
+        message_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            display_name: display_name.into(),
+            message_id: message_id.into(),
+        }
     }
 }
 
@@ -572,7 +584,10 @@ impl ParameterSchema {
             }
         }
         for (index, option) in self.enum_options.iter().enumerate() {
-            if option.key.trim().is_empty() || option.message_id.trim().is_empty() {
+            if option.key.trim().is_empty()
+                || option.display_name.trim().is_empty()
+                || option.message_id.trim().is_empty()
+            {
                 return Err(ParameterSchemaError::InvalidEnumOption);
             }
             if self.enum_options[..index].iter().any(|previous| previous.key == option.key) {
@@ -740,7 +755,7 @@ pub enum ParameterSchemaError {
     EmptyInterpolationSet,
     #[error("parameter interpolation modes must be unique")]
     DuplicateInterpolation,
-    #[error("enum option keys and message IDs cannot be empty")]
+    #[error("enum option keys, display names and message IDs cannot be empty")]
     InvalidEnumOption,
     #[error("enum option keys must be unique")]
     DuplicateEnumOption,
@@ -3554,8 +3569,9 @@ impl crate::AuthoringFootprint for ParameterEnumOption {
         &self,
         collector: &mut crate::AuthoringFootprintCollector,
     ) -> std::result::Result<(), crate::AuthoringFootprintError> {
-        let Self { key, message_id } = self;
+        let Self { key, display_name, message_id } = self;
         collector.collect(key)?;
+        collector.collect(display_name)?;
         collector.collect(message_id)
     }
 }
@@ -4346,6 +4362,71 @@ mod tests {
     }
 
     #[test]
+    fn enum_choice_captions_are_required_persisted_and_accounted() {
+        let choice = ParameterEnumOption::new("vendor:42", "Écho / 回声", "vendor.choice.echo");
+        let json = serde_json::to_value(&choice).expect("serialize choice");
+        assert_eq!(json["key"], "vendor:42");
+        assert_eq!(json["display_name"], "Écho / 回声");
+        assert_eq!(
+            serde_json::from_value::<ParameterEnumOption>(json.clone()).expect("roundtrip"),
+            choice
+        );
+        let mut missing_caption = json;
+        missing_caption.as_object_mut().expect("object").remove("display_name");
+        assert!(serde_json::from_value::<ParameterEnumOption>(missing_caption).is_err());
+        let mut collector = crate::AuthoringFootprintCollector::new();
+        collector.collect(&choice).expect("choice footprint");
+        let actual = collector.finish().total_bytes();
+        let mut expected = crate::AuthoringFootprintCollector::new();
+        expected.collect(&choice.key).expect("key footprint");
+        expected.collect(&choice.display_name).expect("caption footprint");
+        expected.collect(&choice.message_id).expect("message footprint");
+        assert_eq!(actual, expected.finish().total_bytes());
+
+        let descriptor = PropertyDescriptor::new(
+            "vendor.mode",
+            "Mode",
+            PropertyValue::Enum(choice.key.clone()),
+        )
+        .with_enum_options(vec![choice]);
+        descriptor.validate().expect("caption schema");
+        for blank in ["", " \n\t"] {
+            let mut invalid = descriptor.clone();
+            invalid.schema.enum_options[0].display_name = blank.to_owned();
+            assert_eq!(
+                invalid.schema.validate(),
+                Err(ParameterSchemaError::InvalidEnumOption)
+            );
+        }
+        let mut duplicate_caption = descriptor.clone();
+        let mut other = duplicate_caption.schema.enum_options[0].clone();
+        other.key = "vendor:43".to_owned();
+        duplicate_caption.schema.enum_options.push(other);
+        duplicate_caption.validate().expect("captions need not be unique");
+        let mut property = AnimatedProperty::from_descriptor(duplicate_caption);
+        property
+            .write_value(
+                tt(0),
+                PropertyValue::Enum("vendor:43".to_owned()),
+                InterpolationType::Hold,
+                None,
+            )
+            .expect("canonical choice write");
+        assert_eq!(
+            property.evaluate(tt(0)),
+            PropertyValue::Enum("vendor:43".to_owned())
+        );
+        assert!(property
+            .write_value(
+                tt(0),
+                PropertyValue::Enum("Écho / 回声".to_owned()),
+                InterpolationType::Hold,
+                None
+            )
+            .is_err());
+    }
+
+    #[test]
     fn enum_parameter_uses_stable_options_for_hold_keyframes() {
         let descriptor = PropertyDescriptor::new(
             "mask.operation",
@@ -4353,8 +4434,8 @@ mod tests {
             PropertyValue::Enum("Add".to_string()),
         )
         .with_enum_options(vec![
-            ParameterEnumOption::new("Add", "mask.operation.add"),
-            ParameterEnumOption::new("Subtract", "mask.operation.subtract"),
+            ParameterEnumOption::new("Add", "Add", "mask.operation.add"),
+            ParameterEnumOption::new("Subtract", "Subtract", "mask.operation.subtract"),
         ]);
         descriptor.validate().expect("valid enum descriptor");
         let mut property = AnimatedProperty::from_descriptor(descriptor);

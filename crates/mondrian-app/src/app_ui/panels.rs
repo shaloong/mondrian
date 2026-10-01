@@ -2437,7 +2437,7 @@ fn inspector_property_model(
             .map(|option| {
                 (
                     option.key.clone(),
-                    localizer.parameter_text(&option.message_id, &option.key),
+                    localizer.parameter_text(&option.message_id, &option.display_name),
                 )
             })
             .collect(),

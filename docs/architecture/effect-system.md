@@ -1235,3 +1235,9 @@ prepare/render, cached/identity outputs and final publication use the same
 borrowed checkpoint. EffectFloatExecutionError::Stopped preserves the exact
 owner reason; stopping retires processor resources without runtime quarantine.
 Explicit uncancelled free functions remain standalone offline reference helpers.
+
+Built-in enum schemas declare choice captions independently of keys and message
+addresses. Curves, Qualifier and LUT processing-space options retain canonical
+keys for graph/property evaluation; localized UI captions do not replace values.
+LUT spaces declare their standard technical names rather than displaying internal
+snake-case keys when the translation catalog cannot resolve an address.

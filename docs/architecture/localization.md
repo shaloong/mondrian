@@ -322,3 +322,13 @@ braces and non-English text. Status/history resolve these retained facts in the
 current locale. Rejection does not enqueue files or mutate authoring/library
 state. Foreign probe and publication diagnostic details remain a separate
 migration task; this does not claim full import failure localization.
+
+## Parameter enum captions
+
+Every schema choice declares `key`, `display_name`, and `message_id`. The App
+resolves the address using the current immutable Localizer, with the declared
+caption as fallback. Unknown vendor addresses retain Unicode vendor captions
+in English, Chinese and pseudo locales. Equal captions may identify different
+keys: menu checked state and dispatch still use canonical keys. Direct schema
+consumers also use declared captions when no localized projection is supplied.
+Locale projection does not modify schema, current values or automation addresses.

@@ -401,7 +401,10 @@ mod tests {
                     ),
                 );
                 for option in &property.descriptor.schema.enum_options {
-                    declared.insert(option.message_id.clone(), (option.key.clone(), None));
+                    declared.insert(
+                        option.message_id.clone(),
+                        (option.display_name.clone(), None),
+                    );
                 }
             }
         }

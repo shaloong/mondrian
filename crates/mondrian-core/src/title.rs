@@ -293,7 +293,11 @@ fn canonical_descriptors() -> Vec<PropertyDescriptor> {
             PropertyValue::Enum("normal".to_owned()),
         )
         .with_parameter_id(ParameterId::new_static("mondrian.title.font_style"))
-        .with_enum_options(enum_options(&["normal", "italic", "oblique"]))
+        .with_enum_options(enum_options(&[
+            ("normal", "Regular"),
+            ("italic", "Italic"),
+            ("oblique", "Oblique"),
+        ]))
         .with_animatable(false),
         PropertyDescriptor::new(
             BasicTitle::FONT_SIZE_PATH,
@@ -351,7 +355,11 @@ fn canonical_descriptors() -> Vec<PropertyDescriptor> {
             PropertyValue::Enum("center".to_owned()),
         )
         .with_parameter_id(ParameterId::new_static("mondrian.title.horizontal_align"))
-        .with_enum_options(enum_options(&["left", "center", "right"]))
+        .with_enum_options(enum_options(&[
+            ("left", "Left"),
+            ("center", "Center"),
+            ("right", "Right"),
+        ]))
         .with_animatable(false),
         PropertyDescriptor::new(
             BasicTitle::VERTICAL_ALIGN_PATH,
@@ -359,14 +367,21 @@ fn canonical_descriptors() -> Vec<PropertyDescriptor> {
             PropertyValue::Enum("center".to_owned()),
         )
         .with_parameter_id(ParameterId::new_static("mondrian.title.vertical_align"))
-        .with_enum_options(enum_options(&["top", "center", "bottom"]))
+        .with_enum_options(enum_options(&[
+            ("top", "Top"),
+            ("center", "Center"),
+            ("bottom", "Bottom"),
+        ]))
         .with_animatable(false),
     ]
 }
 
-fn enum_options(keys: &[&str]) -> Vec<ParameterEnumOption> {
-    keys.iter()
-        .map(|key| ParameterEnumOption::new(*key, format!("mondrian.title.option.{key}")))
+fn enum_options(choices: &[(&str, &str)]) -> Vec<ParameterEnumOption> {
+    choices
+        .iter()
+        .map(|(key, caption)| {
+            ParameterEnumOption::new(*key, *caption, format!("mondrian.title.option.{key}"))
+        })
         .collect()
 }
 

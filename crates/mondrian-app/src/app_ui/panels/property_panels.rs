@@ -2824,7 +2824,11 @@ pub(super) fn inspector_property_value_widget(
             for option in &property.schema.enum_options {
                 items.push(
                     MenuItem::new(
-                        property.enum_labels.get(&option.key).unwrap_or(&option.key).clone(),
+                        property
+                            .enum_labels
+                            .get(&option.key)
+                            .unwrap_or(&option.display_name)
+                            .clone(),
                         inspector_property_action(
                             selection,
                             target.clone(),
@@ -2836,7 +2840,14 @@ pub(super) fn inspector_property_value_widget(
             }
             Box::new(
                 Dropdown::new(
-                    property.enum_labels.get(value).unwrap_or(value).clone(),
+                    property.enum_labels.get(value).cloned().unwrap_or_else(|| {
+                        property
+                            .schema
+                            .enum_options
+                            .iter()
+                            .find(|option| option.key == *value)
+                            .map_or_else(|| value.clone(), |option| option.display_name.clone())
+                    }),
                     items,
                 )
                 .enabled(can_edit),

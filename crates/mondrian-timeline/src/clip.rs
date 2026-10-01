@@ -280,7 +280,8 @@ fn blend_mode_options() -> Vec<ParameterEnumOption> {
         .map(|option| {
             ParameterEnumOption::new(
                 option.value,
-                format!("mondrian.blend_mode.{}.label", option.value),
+                option.label,
+                format!("blend-mode-{}", option.value.to_ascii_lowercase()),
             )
         })
         .collect()

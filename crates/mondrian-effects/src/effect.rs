@@ -2092,8 +2092,8 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 "Master 模式",
                 "rgb",
                 vec![
-                    ParameterEnumOption::new("rgb", "mondrian.effect.curves.mode.rgb"),
-                    ParameterEnumOption::new("yrgb", "mondrian.effect.curves.mode.yrgb"),
+                    ParameterEnumOption::new("rgb", "RGB", "mondrian.effect.curves.mode.rgb"),
+                    ParameterEnumOption::new("yrgb", "YRGB", "mondrian.effect.curves.mode.yrgb"),
                 ],
             );
             for (parameter, label, neutral_delta) in [
@@ -2163,9 +2163,10 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 "选择模式",
                 "hsl",
                 vec![
-                    ParameterEnumOption::new("hsl", "mondrian.effect.qualifier.mode.hsl"),
+                    ParameterEnumOption::new("hsl", "HSL", "mondrian.effect.qualifier.mode.hsl"),
                     ParameterEnumOption::new(
                         "three_dimensional",
+                        "3D",
                         "mondrian.effect.qualifier.mode.three_dimensional",
                     ),
                 ],
@@ -2568,31 +2569,49 @@ fn define_builtin_curve_property(
 
 fn lut_processing_space_options() -> Vec<ParameterEnumOption> {
     [
-        "unassigned",
-        "scene_linear",
-        "rec709",
-        "srgb",
-        "rec2020",
-        "display_p3",
-        "rec2100_hlg",
-        "rec2100_pq",
-        "aces_cct",
-        "apple_log_bt2020",
-        "sony_slog2_sgamut",
-        "sony_slog3_sgamut3",
-        "sony_slog3_sgamut3_cine",
-        "arri_logc3_wide_gamut3",
-        "arri_logc4_wide_gamut4",
-        "canon_log2_cinema_gamut_d55",
-        "canon_log3_cinema_gamut_d55",
-        "panasonic_vlog_vgamut",
-        "red_log3g10_wide_gamut_rgb",
-        "blackmagic_film_wide_gamut_gen5",
-        "dji_dlog_dgamut",
-        "davinci_intermediate_wide_gamut",
+        ("unassigned", "Unassigned"),
+        ("scene_linear", "Scene linear"),
+        ("rec709", "Rec. 709"),
+        ("srgb", "sRGB"),
+        ("rec2020", "Rec. 2020"),
+        ("display_p3", "Display P3"),
+        ("rec2100_hlg", "Rec. 2100 HLG"),
+        ("rec2100_pq", "Rec. 2100 PQ"),
+        ("aces_cct", "ACEScct"),
+        ("apple_log_bt2020", "Apple Log / BT.2020"),
+        ("sony_slog2_sgamut", "Sony S-Log2 / S-Gamut"),
+        ("sony_slog3_sgamut3", "Sony S-Log3 / S-Gamut3"),
+        ("sony_slog3_sgamut3_cine", "Sony S-Log3 / S-Gamut3.Cine"),
+        ("arri_logc3_wide_gamut3", "ARRI LogC3 / Wide Gamut 3"),
+        ("arri_logc4_wide_gamut4", "ARRI LogC4 / Wide Gamut 4"),
+        (
+            "canon_log2_cinema_gamut_d55",
+            "Canon Log 2 / Cinema Gamut D55",
+        ),
+        (
+            "canon_log3_cinema_gamut_d55",
+            "Canon Log 3 / Cinema Gamut D55",
+        ),
+        ("panasonic_vlog_vgamut", "Panasonic V-Log / V-Gamut"),
+        ("red_log3g10_wide_gamut_rgb", "RED Log3G10 / Wide Gamut RGB"),
+        (
+            "blackmagic_film_wide_gamut_gen5",
+            "Blackmagic Film / Wide Gamut Gen 5",
+        ),
+        ("dji_dlog_dgamut", "DJI D-Log / D-Gamut"),
+        (
+            "davinci_intermediate_wide_gamut",
+            "DaVinci Intermediate / Wide Gamut",
+        ),
     ]
     .into_iter()
-    .map(|key| ParameterEnumOption::new(key, format!("builtin.lut_3d.processing_space.{key}")))
+    .map(|(key, caption)| {
+        ParameterEnumOption::new(
+            key,
+            caption,
+            format!("builtin.lut_3d.processing_space.{key}"),
+        )
+    })
     .collect()
 }
 

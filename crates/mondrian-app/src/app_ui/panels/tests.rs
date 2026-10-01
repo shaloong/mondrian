@@ -669,6 +669,127 @@ fn inspector_parameter_label_uses_declared_message_address_and_vendor_fallback()
 }
 
 #[test]
+fn inspector_blend_choices_resolve_declared_catalog_addresses() {
+    use mondrian_core::automation::PropertyHost;
+    let clip = Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("Clip");
+    let bag = clip.property_bag().expect("Clip properties");
+    let property = bag.property(Clip::BLEND_MODE_PATH).expect("blend mode");
+    let options = mondrian_core::display_labels::blend_mode_options();
+    assert_eq!(property.descriptor.schema.enum_options.len(), options.len());
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let model = inspector_property_model(
+            Clip::BLEND_MODE_PATH,
+            property,
+            TimelineTime::ZERO,
+            &localizer,
+        );
+        assert_eq!(model.schema, property.descriptor.schema);
+        assert_eq!(model.value, PropertyValue::Enum("inherit".to_owned()));
+        for (choice, option) in model.schema.enum_options.iter().zip(options) {
+            assert_eq!(choice.key, option.value);
+            let message = format!("blend-mode-{}", option.value.to_ascii_lowercase());
+            assert_eq!(choice.message_id, message);
+            assert_eq!(model.enum_labels[&choice.key], localizer.text(&message));
+        }
+        assert_eq!(
+            model.enum_labels["inherit"],
+            localizer.text("blend-mode-inherit")
+        );
+    }
+}
+
+#[test]
+fn inspector_vendor_choice_caption_keeps_canonical_dispatch_across_locales() {
+    use mondrian_core::automation::{AnimatedProperty, ParameterEnumOption, PropertyDescriptor};
+    let descriptor = PropertyDescriptor::new(
+        "vendor.mode",
+        "Mode",
+        PropertyValue::Enum("vendor:43".to_owned()),
+    )
+    .with_enum_options(vec![
+        ParameterEnumOption::new("vendor:42", "Écho / 回声", "vendor.mode.echo"),
+        ParameterEnumOption::new("vendor:43", "Écho / 回声", "vendor.mode.echo.second"),
+    ]);
+    descriptor.validate().expect("declared vendor captions");
+    let property = AnimatedProperty::from_descriptor(descriptor);
+    let selection = SelectedClipRef {
+        track_id: TrackId::new(),
+        is_video_track: true,
+        clip_id: ClipId::new(),
+    };
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let model =
+            inspector_property_model("vendor.mode", &property, TimelineTime::ZERO, &localizer);
+        assert_eq!(model.schema, property.descriptor.schema);
+        assert_eq!(model.value, PropertyValue::Enum("vendor:43".to_owned()));
+        assert_eq!(model.enum_labels["vendor:42"], "Écho / 回声");
+        assert_eq!(model.enum_labels["vendor:43"], "Écho / 回声");
+        let mut widget = inspector_property_value_widget(
+            &localizer,
+            &model,
+            true,
+            Some(selection),
+            InspectorPropertyTarget::Clip { parameter: model.address.clone() },
+        );
+        assert_eq!(
+            widget.accessibility().expect("choice").name.as_deref(),
+            Some("Écho / 回声")
+        );
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        widget.event(
+            &UiEvent::MouseDown {
+                position: Point::new(20.0, 14.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        let actions = actions.borrow();
+        assert_eq!(actions.len(), 1);
+        let Action::Custom { payload, .. } = &actions[0] else {
+            panic!("parameter action");
+        };
+        let payload: ClipWriteParameterValuesPayload =
+            serde_json::from_value(payload.clone()).expect("typed parameter write");
+        assert_eq!(
+            payload.writes,
+            vec![ParameterValueWrite::Value {
+                parameter: model.address.clone(),
+                value: PropertyValue::Enum("vendor:42".to_owned())
+            }]
+        );
+        let mut declared = property.clone();
+        declared.descriptor.schema.enum_options[0].message_id = "inspector-opacity".to_owned();
+        let translated =
+            inspector_property_model("vendor.mode", &declared, TimelineTime::ZERO, &localizer);
+        assert_eq!(
+            translated.enum_labels["vendor:42"],
+            localizer.text("inspector-opacity")
+        );
+        assert_eq!(translated.enum_labels["vendor:43"], "Écho / 回声");
+    }
+}
+
+#[test]
 fn inspector_parameter_locale_preserves_title_author_keys_and_history() {
     let mut sequence = Sequence::new("Localized Title");
     let track_id = sequence.video_tracks[0].id;

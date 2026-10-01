@@ -352,3 +352,12 @@ Windows namespace policy. Its dependency direction stays below Media/App: plain
 bootstrap contracts and OS object ownership only; it has no authoring or media
 interpretation. Media and App enable it only for validation. See
 `native-validation-launcher.md` for the consuming outer process/Job owner.
+
+## Declared parameter choice presentation
+
+Core's `ParameterEnumOption` contains a canonical `key`, required `display_name`
+and required `message_id`. Schema validation rejects blank values and duplicate
+keys; duplicate captions remain valid because captions do not identify choices.
+All three strings are persisted and included in authoring footprint accounting.
+The constructor requires all three declarations, with no migration alias or
+caption synthesized from an unknown vendor key. Hold automation stores keys only.

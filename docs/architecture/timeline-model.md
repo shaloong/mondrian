@@ -1583,3 +1583,12 @@ that insert keys, and App curve insertion all ask the same core
 `AnimatedProperty::default_interpolation` seam. Numeric Int writes no longer
 normalize explicit owner-admitted modes to Hold; their bounded schema governs
 admission. Existing keys retain their authored handles and temporal flags.
+
+Enum parameter choices retain Core's explicit declared caption alongside the
+stable key and localization address. Clip blend options use their canonical
+display declarations while persisted values and discrete automation remain the
+existing stable keys. Caption equality never merges distinct author choices.
+
+Clip blend choice message addresses are the registered `blend-mode-*` messages,
+shared with the specialized menu rather than a second unresolved address set.
+Generic Inspector choices therefore use the same English/Chinese/pseudo catalog.
