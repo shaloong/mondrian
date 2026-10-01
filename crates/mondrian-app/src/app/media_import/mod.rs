@@ -318,15 +318,15 @@ impl AppState {
     }
 
     fn report_timeline_drop_failure(&mut self, batch_id: u64, reason: impl Into<String>) {
-        use super::notifications::{AppNotificationMessage, AppNotificationSeverity};
+        use super::notifications::AppNotificationSeverity;
+        use crate::app::AppMessage;
 
         let reason = reason.into();
         self.set_status_hint(format!("文件放置失败：{reason}"), true);
         self.notifications.publish(
             format!("timeline_drop:{batch_id}"),
             AppNotificationSeverity::Error,
-            AppNotificationMessage::new("notification-timeline-drop-failed")
-                .with_text("reason", reason),
+            AppMessage::new("notification-timeline-drop-failed").with_text("reason", reason),
         );
     }
 
@@ -390,7 +390,8 @@ impl AppState {
     }
 
     fn finish_media_import_batch(&mut self, batch_id: u64, batch: PendingMediaImportBatch) {
-        use super::notifications::{AppNotificationMessage, AppNotificationSeverity};
+        use super::notifications::AppNotificationSeverity;
+        use crate::app::AppMessage;
 
         let notification_key = format!("media_import:{batch_id}");
         if batch.imported > 0 {
@@ -412,14 +413,13 @@ impl AppState {
                 self.notifications.publish(
                     notification_key,
                     AppNotificationSeverity::Success,
-                    AppNotificationMessage::new("notification-import-complete")
-                        .with_number("count", imported),
+                    AppMessage::new("notification-import-complete").with_number("count", imported),
                 );
             } else {
                 self.notifications.publish(
                     notification_key,
                     AppNotificationSeverity::Warning,
-                    AppNotificationMessage::new("notification-import-partial")
+                    AppMessage::new("notification-import-partial")
                         .with_number("imported", imported)
                         .with_number(
                             "failed",
@@ -439,7 +439,7 @@ impl AppState {
         self.notifications.publish(
             notification_key,
             AppNotificationSeverity::Error,
-            AppNotificationMessage::new("notification-import-failed").with_text("reason", reason),
+            AppMessage::new("notification-import-failed").with_text("reason", reason),
         );
     }
 }

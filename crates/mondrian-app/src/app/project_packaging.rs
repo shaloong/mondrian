@@ -240,10 +240,8 @@ impl AppState {
                         self.notifications.publish(
                             format!("portable-package:{}", target.display()),
                             super::notifications::AppNotificationSeverity::Success,
-                            super::notifications::AppNotificationMessage::new(
-                                "notification-package-complete",
-                            )
-                            .with_text("path", target.display().to_string()),
+                            super::AppMessage::new("notification-package-complete")
+                                .with_text("path", target.display().to_string()),
                         );
                     }
                     Err(error) if error.is::<PortableExportCanceled>() => {
@@ -255,10 +253,8 @@ impl AppState {
                         self.notifications.publish(
                             format!("portable-package:{}", target.display()),
                             super::notifications::AppNotificationSeverity::Error,
-                            super::notifications::AppNotificationMessage::new(
-                                "notification-package-failed",
-                            )
-                            .with_text("reason", reason),
+                            super::AppMessage::new("notification-package-failed")
+                                .with_text("reason", reason),
                         );
                     }
                 }
@@ -271,10 +267,8 @@ impl AppState {
                 self.notifications.publish(
                     format!("portable-package:{}", target.display()),
                     super::notifications::AppNotificationSeverity::Error,
-                    super::notifications::AppNotificationMessage::new(
-                        "notification-package-failed",
-                    )
-                    .with_text("reason", "工作线程意外终止"),
+                    super::AppMessage::new("notification-package-failed")
+                        .with_text("reason", "工作线程意外终止"),
                 );
                 true
             }

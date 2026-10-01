@@ -3,14 +3,12 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use fluent_bundle::FluentArgs;
 use mondrian_ui_core::types::{MouseButton, Point, Rect, UiEvent};
 use mondrian_ui_core::widget::PaintContext;
 use mondrian_ui_core::EventResult;
 
 use crate::app::notifications::{
     AppNotification, AppNotificationFeed, AppNotificationId, AppNotificationSeverity,
-    AppNotificationValue,
 };
 use crate::app_ui::localization::{AppUiLocale, Localizer};
 use crate::app_ui::shell::elide_text_to_width;
@@ -184,20 +182,14 @@ fn localized_message(notification: &AppNotification, locale: AppUiLocale) -> Str
     let Ok(localizer) = Localizer::new(locale) else {
         return notification.message.id.to_owned();
     };
-    let mut args = FluentArgs::new();
-    for (name, value) in &notification.message.args {
-        match value {
-            AppNotificationValue::Number(value) => args.set(*name, *value),
-            AppNotificationValue::Text(value) => args.set(*name, value.clone()),
-        }
-    }
-    localizer.format(notification.message.id, Some(&args))
+    localizer.message(&notification.message)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::notifications::{AppNotificationMessage, AppNotificationSeverity};
+    use crate::app::notifications::AppNotificationSeverity;
+    use crate::app::AppMessage;
     use mondrian_ui_core::types::Modifiers;
 
     #[test]
@@ -206,7 +198,7 @@ mod tests {
         feed.publish(
             "import:old",
             AppNotificationSeverity::Success,
-            AppNotificationMessage::new("notification-import-complete").with_number("count", 1),
+            AppMessage::new("notification-import-complete").with_number("count", 1),
         );
         let now = Instant::now();
         let mut overlay = NotificationOverlay::from_existing(&feed, AppUiLocale::EnUs);
@@ -215,8 +207,7 @@ mod tests {
             feed.publish(
                 format!("import:{index}"),
                 AppNotificationSeverity::Success,
-                AppNotificationMessage::new("notification-import-complete")
-                    .with_number("count", index),
+                AppMessage::new("notification-import-complete").with_number("count", index),
             );
         }
         assert!(overlay.sync(&feed, AppUiLocale::EnUs, now));
@@ -234,7 +225,7 @@ mod tests {
         feed.publish(
             "save:1",
             AppNotificationSeverity::Success,
-            AppNotificationMessage::new("notification-save-complete"),
+            AppMessage::new("notification-save-complete"),
         );
         assert!(overlay.sync(&feed, AppUiLocale::ZhCn, now));
         assert_eq!(overlay.visible.len(), 1);

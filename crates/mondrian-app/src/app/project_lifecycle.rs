@@ -1127,9 +1127,7 @@ impl AppState {
                     self.notifications.publish(
                         notification_key,
                         super::notifications::AppNotificationSeverity::Success,
-                        super::notifications::AppNotificationMessage::new(
-                            "notification-save-complete",
-                        ),
+                        super::AppMessage::new("notification-save-complete"),
                     );
                 }
                 (
@@ -1143,10 +1141,8 @@ impl AppState {
                     self.notifications.publish(
                         notification_key,
                         super::notifications::AppNotificationSeverity::Warning,
-                        super::notifications::AppNotificationMessage::new(
-                            "notification-save-warning",
-                        )
-                        .with_text("reason", reason),
+                        super::AppMessage::new("notification-save-warning")
+                            .with_text("reason", reason),
                     );
                 }
                 (
@@ -1167,10 +1163,8 @@ impl AppState {
                     self.notifications.publish(
                         autosave_notification_key,
                         super::notifications::AppNotificationSeverity::Warning,
-                        super::notifications::AppNotificationMessage::new(
-                            "notification-autosave-warning",
-                        )
-                        .with_text("reason", reason),
+                        super::AppMessage::new("notification-autosave-warning")
+                            .with_text("reason", reason),
                     );
                 }
                 (ProjectPersistencePurpose::Manual { .. }, Err(error)) => {
@@ -1178,10 +1172,8 @@ impl AppState {
                     self.notifications.publish(
                         notification_key,
                         super::notifications::AppNotificationSeverity::Error,
-                        super::notifications::AppNotificationMessage::new(
-                            "notification-save-failed",
-                        )
-                        .with_text("reason", error.to_string()),
+                        super::AppMessage::new("notification-save-failed")
+                            .with_text("reason", error.to_string()),
                     );
                 }
                 (ProjectPersistencePurpose::Autosave { .. }, Err(error)) => {
@@ -1189,10 +1181,8 @@ impl AppState {
                     self.notifications.publish(
                         autosave_notification_key,
                         super::notifications::AppNotificationSeverity::Error,
-                        super::notifications::AppNotificationMessage::new(
-                            "notification-autosave-failed",
-                        )
-                        .with_text("reason", error.to_string()),
+                        super::AppMessage::new("notification-autosave-failed")
+                            .with_text("reason", error.to_string()),
                     );
                 }
             }

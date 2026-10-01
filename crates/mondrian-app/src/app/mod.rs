@@ -114,6 +114,8 @@ pub use audio_monitoring::ActiveAudioMonitoringPathEvidence;
 mod audio_playback_acceptance;
 mod audio_rendering;
 mod basic_titles;
+mod messages;
+pub use messages::{AppMessage, AppMessageValue};
 mod clip_clipboard;
 mod clip_retime;
 mod dynamic_hdr_authoring;

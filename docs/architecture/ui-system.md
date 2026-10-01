@@ -2616,3 +2616,14 @@ the status widget or clearing its open/scrolled history viewport. Pseudo
 formatting expands catalog AST text, preserving named argument data and
 already-localized nested strings. Eager App-produced status/history messages
 remain a separate pending migration to stable message IDs and arguments.
+
+
+### Common notification message projection
+
+Notifications now use the App-wide `AppMessage` tree and `Localizer::message`.
+Named argument identity is independent of insertion order, and nested product
+labels are resolved with the toast's current captured locale. Exact integers
+outside Fluent's precise numeric range remain decimal text. Notification feed
+identity, bounded retention, timeout and locale-change behavior are unchanged.
+The former notification-only message/value APIs are removed rather than retained
+as compatibility aliases. Status/history producer migration remains outstanding.

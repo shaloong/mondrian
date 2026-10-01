@@ -129,6 +129,23 @@ impl Localizer {
             .unwrap_or_else(|| message_id.to_owned())
     }
 
+    /// Resolve language-neutral status or notification data in this UI locale.
+    pub fn message(&self, message: &crate::app::AppMessage) -> String {
+        use crate::app::AppMessageValue;
+        let mut args = FluentArgs::new();
+        for (name, value) in &message.args {
+            match value {
+                AppMessageValue::Number(value) if value.unsigned_abs() <= (1_u64 << 53) => {
+                    args.set(*name, *value as f64);
+                }
+                AppMessageValue::Number(value) => args.set(*name, value.to_string()),
+                AppMessageValue::Text(value) => args.set(*name, value.as_str()),
+                AppMessageValue::Message(value) => args.set(*name, self.message(value)),
+            }
+        }
+        self.format(message.id, Some(&args))
+    }
+
     /// Format one display-only text argument for a UI message.
     pub(crate) fn format_text(&self, message_id: &str, argument: &str, value: &str) -> String {
         let mut args = FluentArgs::new();
@@ -796,6 +813,46 @@ mod tests {
         assert_eq!(english.text("missing-message"), "missing-message");
         let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
         assert!(chinese.format("notification-import-complete", Some(&args)).contains('3'));
+    }
+
+    #[test]
+    fn product_message_resolves_nested_copy_on_each_locale_projection() {
+        use crate::app::AppMessage;
+        let nested = AppMessage::new("notification-import-complete").with_number("count", 1);
+        let message = AppMessage::new("export-status-error").with_message("error", nested.clone());
+        let original = message.clone();
+        for locale in [AppUiLocale::ZhCn, AppUiLocale::EnUs, AppUiLocale::Pseudo] {
+            let localizer = Localizer::new(locale).expect("catalog");
+            let inner = localizer.message(&nested);
+            let outer = localizer.message(&message);
+            assert_eq!(
+                outer,
+                localizer.format_text("export-status-error", "error", &inner)
+            );
+            assert!(outer.contains(&inner), "{outer}");
+        }
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English");
+        // Fluent isolates interpolated text for correct bidirectional rendering.
+        assert_eq!(
+            english.message(&message),
+            "Error: \u{2068}Imported one media file\u{2069}"
+        );
+        assert_eq!(message, original);
+    }
+
+    #[test]
+    fn product_message_preserves_large_integers_and_opaque_details() {
+        use crate::app::AppMessage;
+        let detail = "E:/项目/Mixed Case/{clip}.mdp";
+        for locale in [AppUiLocale::ZhCn, AppUiLocale::EnUs, AppUiLocale::Pseudo] {
+            let localizer = Localizer::new(locale).expect("catalog");
+            for value in [i64::MIN, i64::MAX, (1_i64 << 53) + 1] {
+                let message = AppMessage::new("export-status-error").with_number("error", value);
+                assert!(localizer.message(&message).contains(&value.to_string()));
+            }
+            let message = AppMessage::new("export-status-error").with_text("error", detail);
+            assert!(localizer.message(&message).contains(detail));
+        }
     }
 
     #[test]

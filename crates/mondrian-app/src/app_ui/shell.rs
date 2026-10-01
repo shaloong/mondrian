@@ -4922,7 +4922,7 @@ mod tests {
         state.notifications.publish(
             "save:before-root",
             crate::app::notifications::AppNotificationSeverity::Success,
-            crate::app::notifications::AppNotificationMessage::new("notification-save-complete"),
+            crate::app::AppMessage::new("notification-save-complete"),
         );
         let mut root = AppUiAppRoot::from_app_state(&state);
         assert!(root.next_notification_deadline().is_none());
@@ -4930,7 +4930,7 @@ mod tests {
         state.notifications.publish(
             "save:after-root",
             crate::app::notifications::AppNotificationSeverity::Success,
-            crate::app::notifications::AppNotificationMessage::new("notification-save-complete"),
+            crate::app::AppMessage::new("notification-save-complete"),
         );
         root.refresh_from_app_state(&state);
         let deadline = root.next_notification_deadline().expect("visible terminal toast");
@@ -4946,7 +4946,7 @@ mod tests {
         state.notifications.publish(
             "save:first-session",
             crate::app::notifications::AppNotificationSeverity::Success,
-            crate::app::notifications::AppNotificationMessage::new("notification-save-complete"),
+            crate::app::AppMessage::new("notification-save-complete"),
         );
         root.refresh_from_app_state(&state);
         assert!(root.next_notification_deadline().is_some());

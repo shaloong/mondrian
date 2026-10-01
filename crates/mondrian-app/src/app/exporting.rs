@@ -339,10 +339,8 @@ impl AppState {
                     self.notifications.publish(
                         key,
                         super::notifications::AppNotificationSeverity::Success,
-                        super::notifications::AppNotificationMessage::new(
-                            "notification-export-complete",
-                        )
-                        .with_text("path", path),
+                        super::AppMessage::new("notification-export-complete")
+                            .with_text("path", path),
                     );
                 }
                 JobStatus::Failed(failure) => {
@@ -350,10 +348,8 @@ impl AppState {
                     self.notifications.publish(
                         key,
                         super::notifications::AppNotificationSeverity::Error,
-                        super::notifications::AppNotificationMessage::new(
-                            "notification-export-failed",
-                        )
-                        .with_text("reason", failure.detail.clone()),
+                        super::AppMessage::new("notification-export-failed")
+                            .with_text("reason", failure.detail.clone()),
                     );
                 }
                 JobStatus::Cancelled => self.set_status_hint("导出已取消", false),

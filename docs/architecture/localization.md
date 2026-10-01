@@ -193,3 +193,28 @@ numbers and already-formatted nested status text in accessible names. Generic
 widgets still consume formatted labels; the private App status composite owns
 a formatter with the same explicit locale snapshot as the root, with no global
 locale lookup during painting or playback refresh.
+
+
+## Shared product message data
+
+`app::AppMessage` and `AppMessageValue` own the stable catalog key and named
+arguments for product notifications and the forthcoming typed status history.
+The notification-specific message/value types have been removed, with no alpha
+compatibility aliases. A deterministic argument map gives equal messages equal
+identity regardless of builder insertion order; assigning an existing argument
+replaces its value. The message tree contains text, signed integer, and nested
+message arguments. A nested operation or phase label remains locale-independent
+until projection, rather than becoming a translated string inside App state.
+
+`Localizer::message` is the common projection used by toasts. It resolves nested
+messages using that same captured UI locale and leaves opaque text intact. Fluent
+numbers are used within the exactly representable integer range through 2^53;
+larger signed integers are passed as decimal text to preserve their exact value.
+Those large arguments intentionally do not participate in numeric plural rules.
+Pseudo localization expands catalog text nodes, including nested messages, once;
+it does not expand runtime path/error arguments again. Locale changes can resolve
+the same message facts repeatedly without modifying them or notification IDs.
+
+This shared contract is implemented and notifications consume it. App status
+hints and history still store eager strings; migrating their producers remains
+required before complete status/history localization can be claimed.
