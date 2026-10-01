@@ -9498,6 +9498,56 @@ fn empty_root_timeline_is_a_transparent_presentation_and_breaks_stale_reuse() {
 
 #[test]
 fn transparent_timeline_presentation_completes_the_exact_playback_demand() {
+    assert_transparent_playback_delivery(
+        TransparentPresentationTime::Anchor,
+        mondrian_playback::FrameDeliveryKind::Ready,
+    );
+}
+
+#[test]
+fn transparent_timeline_presentation_before_deadline_is_ready() {
+    assert_transparent_playback_delivery(
+        TransparentPresentationTime::BeforeDeadline,
+        mondrian_playback::FrameDeliveryKind::Ready,
+    );
+}
+
+#[test]
+fn transparent_timeline_presentation_at_deadline_is_degraded() {
+    assert_transparent_playback_delivery(
+        TransparentPresentationTime::Deadline,
+        mondrian_playback::FrameDeliveryKind::Degraded,
+    );
+}
+
+#[test]
+fn transparent_timeline_presentation_at_grace_end_is_degraded() {
+    assert_transparent_playback_delivery(
+        TransparentPresentationTime::GraceEnd,
+        mondrian_playback::FrameDeliveryKind::Degraded,
+    );
+}
+
+#[test]
+fn transparent_timeline_presentation_after_grace_end_is_late() {
+    assert_transparent_playback_delivery(
+        TransparentPresentationTime::AfterGraceEnd,
+        mondrian_playback::FrameDeliveryKind::Late,
+    );
+}
+
+enum TransparentPresentationTime {
+    Anchor,
+    BeforeDeadline,
+    Deadline,
+    GraceEnd,
+    AfterGraceEnd,
+}
+
+fn assert_transparent_playback_delivery(
+    observed_time: TransparentPresentationTime,
+    expected: mondrian_playback::FrameDeliveryKind,
+) {
     let service = WindowPreviewAdapter::new();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     let sequence = state.active_sequence_mut_uncommitted().expect("sequence");
@@ -9519,15 +9569,51 @@ fn transparent_timeline_presentation_completes_the_exact_playback_demand() {
     let ticket = playback_presentation_ticket_for_state(&service, &state)
         .expect("transparent canvas presentation ticket");
     assert_eq!(ticket.identity(), demand);
-    let completion = state
-        .complete_frame_presentation(ticket, Instant::now())
-        .expect("accepted transparent presentation");
-    assert_eq!(
-        completion.delivery().kind(),
-        mondrian_playback::FrameDeliveryKind::Ready
+    // Observe the real presentation seam at explicit policy time. CPU scheduling
+    // delays must not decide whether this functional test asserts Ready or Late.
+    let deadline_elapsed = ticket
+        .deadline()
+        .expect("priming deadline")
+        .duration_since_origin()
+        .checked_sub(state.playback_observation_time_anchor.duration_since_origin())
+        .expect("deadline follows observation anchor");
+    let grace = Duration::from_nanos(
+        state
+            .playback_engine
+            .pending_frame_demand()
+            .expect("pending demand")
+            .late_presentation_grace_ns,
     );
+    let elapsed = match observed_time {
+        TransparentPresentationTime::Anchor => Duration::ZERO,
+        TransparentPresentationTime::BeforeDeadline => deadline_elapsed
+            .checked_sub(Duration::from_nanos(1))
+            .expect("positive deadline"),
+        TransparentPresentationTime::Deadline => deadline_elapsed,
+        TransparentPresentationTime::GraceEnd => deadline_elapsed + grace,
+        TransparentPresentationTime::AfterGraceEnd => {
+            deadline_elapsed + grace + Duration::from_nanos(1)
+        }
+    };
+    let completed_at = state.playback_observation_instant_anchor + elapsed;
+    let completion = state
+        .complete_frame_presentation(ticket, completed_at)
+        .expect("accepted transparent presentation");
+    assert_eq!(completion.delivery().kind(), expected);
     assert!(state.pending_playback_frame_demand_identity().is_none());
-    assert_eq!(state.playback_evidence_report().deliveries.ready, 1);
+    let deliveries = state.playback_evidence_report().deliveries;
+    assert_eq!(
+        deliveries.ready,
+        u64::from(expected == mondrian_playback::FrameDeliveryKind::Ready)
+    );
+    assert_eq!(
+        deliveries.degraded,
+        u64::from(expected == mondrian_playback::FrameDeliveryKind::Degraded)
+    );
+    assert_eq!(
+        deliveries.late,
+        u64::from(expected == mondrian_playback::FrameDeliveryKind::Late)
+    );
 }
 
 #[test]

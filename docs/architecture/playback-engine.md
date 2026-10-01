@@ -2673,3 +2673,16 @@ configuration as well as compositor working bytes. It no longer inherits an
 unrelated default native grant. Each request reconfigures its exclusive scratch
 and binds frame generation before composition; independently evaluable native
 resources can survive frame changes, while cancellation still retires them.
+
+
+### Transparent presentation timing qualification
+
+An empty Timeline frame is a Ready-quality transparent candidate, not an
+exception to Playback presentation deadlines. Runtime acceptance tests retain
+the exact demand identity and complete the real App presentation seam at an
+explicit observation time: the anchor and one nanosecond before the deadline
+are Ready; the deadline and grace end are Degraded; one nanosecond after the
+grace end is Late. Each case consumes the demand once and records only its
+actual Ready/Degraded/Late delivery class. Functional tests do not use test-runner
+wall-clock duration as evidence of realtime performance; deadline admission and
+physical publication remain governed by their production observation seams.
