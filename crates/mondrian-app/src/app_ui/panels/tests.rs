@@ -6404,6 +6404,136 @@ fn inspector_effect_color_property_action_uses_typed_payload() {
 }
 
 #[test]
+fn inspector_axis_controls_preserve_concurrent_siblings_and_canonical_percent_bits() {
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    for (row, path, index, text, expected) in [
+        (2, Transform2D::POSITION_PATH, 0, "42.25", 42.25_f32),
+        (3, Transform2D::POSITION_PATH, 1, "42.25", 42.25_f32),
+        (4, Transform2D::SCALE_PATH, 0, "125", 1.25_f32),
+        (5, Transform2D::SCALE_PATH, 1, "125", 1.25_f32),
+        (6, Transform2D::ANCHOR_POINT_PATH, 0, "42.25", 42.25_f32),
+        (7, Transform2D::ANCHOR_POINT_PATH, 1, "42.25", 42.25_f32),
+    ] {
+        let original = glam::Vec2::new(f32::from_bits(0x3f800003), f32::from_bits(0x3f800001));
+        let opacity = f32::from_bits(0x3e800001);
+        let mut sequence = Sequence::new("component edits");
+        let mut clip = Clip::new_solid_color(
+            AssetId::new(),
+            Color::WHITE,
+            TimelineTime::ZERO,
+            TimelineTime::ONE,
+        )
+        .expect("clip");
+        clip.transform.set_position(original);
+        clip.transform.set_scale(original);
+        clip.transform.set_anchor_point(original);
+        clip.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: Transform2D::OPACITY_PATH.to_owned(),
+            value: PropertyValue::Float(opacity),
+        })
+        .expect("opacity");
+        let clip_id = clip.id;
+        let track_id = sequence.video_tracks[0].id;
+        sequence.video_tracks[0].add_clip(clip).expect("clip");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+        let mut model = AppUiPanelModels::from_app_state(&state).inspector;
+        assert_eq!(
+            ((model.opacity / 100.0) as f32).to_bits(),
+            opacity.to_bits()
+        );
+        assert_eq!(
+            ((model.scale_x_percent / 100.0) as f32).to_bits(),
+            original.x.to_bits()
+        );
+        assert_eq!(
+            ((model.scale_y_percent / 100.0) as f32).to_bits(),
+            original.y.to_bits()
+        );
+        // Keep the two style rows and real transform controls; omit optional menus.
+        model.shows_tint = false;
+        model.blend_mode = None;
+        let parameter = state
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(clip_id)
+            .expect("clip")
+            .intrinsic_parameter_bag()
+            .address_for_path(path)
+            .expect("address");
+        let mut panel = inspector_panel(&model, &chinese_localizer());
+        let sibling = f32::from_bits(0x40400001);
+        state
+            .dispatch_action(
+                inspector_parameter_channel_action(
+                    model.selected_clip,
+                    Some(parameter.clone()),
+                    1 - index,
+                    f64::from(sibling),
+                )
+                .expect("sibling action"),
+            )
+            .expect("concurrent sibling edit");
+        let mut before = state.active_sequence().expect("sequence").clone();
+        let widget = panel.child_mut(row).expect("transform control");
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        widget.event(
+            &UiEvent::MouseDown {
+                position: Point::new(190.0, 14.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        widget.event(&UiEvent::TextInput(text.to_owned()), &mut ctx);
+        assert!(actions.borrow().is_empty());
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(actions.borrow().len(), 1);
+        state.dispatch_action(actions.borrow()[0].clone()).expect("commit axis");
+        let value = state
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(clip_id)
+            .expect("clip")
+            .intrinsic_parameter_bag()
+            .evaluate(path, TimelineTime::ZERO)
+            .expect("value");
+        let PropertyValue::Vec2(value) = value else {
+            panic!("vector");
+        };
+        assert_eq!(value[index].to_bits(), expected.to_bits());
+        assert_eq!(value[1 - index].to_bits(), sibling.to_bits());
+        assert!(state.undo_timeline().expect("undo axis"));
+        let undone = state.active_sequence().expect("sequence");
+        assert_eq!(undone.revision.get(), before.revision.get() + 2);
+        before.revision = undone.revision;
+        assert_eq!(state.active_sequence().expect("sequence"), &before);
+    }
+}
+
+#[test]
 fn numeric_slider_input_control_text_input_dispatches_typed_transform_action() {
     let selection = SelectedClipRef {
         track_id: TrackId::new(),
@@ -6475,8 +6605,10 @@ fn numeric_slider_input_control_text_input_dispatches_typed_transform_action() {
         serde_json::from_value(payload.clone()).expect("transform payload");
     assert_eq!(payload.clip_id, selection.clip_id);
     assert_eq!(payload.writes.len(), 1);
-    assert_eq!(payload.writes[0].parameter, expected_parameter);
-    let PropertyValue::Float(value) = payload.writes[0].value else {
+    assert_eq!(*payload.writes[0].parameter(), expected_parameter);
+    let ClipParameterValueWrite::Value { value: PropertyValue::Float(value), .. } =
+        payload.writes[0]
+    else {
         panic!("rotation payload must remain Float");
     };
     assert!((value - 45.6).abs() < 0.0001);
@@ -7650,8 +7782,8 @@ fn viewer_anchor_gesture_emits_one_atomic_stable_address_action() {
         serde_json::from_value(payload.clone()).expect("transform payload");
     assert_eq!(payload.clip_id, clip_id);
     assert_eq!(payload.writes.len(), 2);
-    assert_eq!(payload.writes[0].parameter, expected.anchor);
-    assert_eq!(payload.writes[1].parameter, expected.position);
+    assert_eq!(*payload.writes[0].parameter(), expected.anchor);
+    assert_eq!(*payload.writes[1].parameter(), expected.position);
 }
 
 #[test]

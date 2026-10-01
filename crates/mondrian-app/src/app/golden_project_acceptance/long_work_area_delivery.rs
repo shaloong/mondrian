@@ -207,7 +207,7 @@ pub(super) fn execute_long_work_area_delivery(
     state.dispatch_action(clip_write_parameter_values_action(
         ClipWriteParameterValuesPayload {
             clip_id: solid_clip_id,
-            writes: vec![ClipParameterValueWrite {
+            writes: vec![ClipParameterValueWrite::Value {
                 parameter: opacity_parameter,
                 value: PropertyValue::Float(AUTHORED_OPACITY),
             }],

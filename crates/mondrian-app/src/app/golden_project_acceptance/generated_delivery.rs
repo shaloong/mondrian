@@ -1330,11 +1330,11 @@ pub(super) fn execute_delivery_stage(
         clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
             clip_id: solid_clip_id,
             writes: vec![
-                ClipParameterValueWrite {
+                ClipParameterValueWrite::Value {
                     parameter: position_parameter,
                     value: PropertyValue::Vec2(glam::Vec2::new(96.0, 54.0)),
                 },
-                ClipParameterValueWrite {
+                ClipParameterValueWrite::Value {
                     parameter: scale_parameter,
                     value: PropertyValue::Vec2(glam::Vec2::splat(0.9)),
                 },
@@ -1346,7 +1346,7 @@ pub(super) fn execute_delivery_stage(
         "set-delivery-opacity",
         clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
             clip_id: solid_clip_id,
-            writes: vec![ClipParameterValueWrite {
+            writes: vec![ClipParameterValueWrite::Value {
                 parameter: opacity_parameter,
                 value: PropertyValue::Float(0.8),
             }],

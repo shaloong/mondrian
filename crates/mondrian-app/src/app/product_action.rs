@@ -2538,12 +2538,31 @@ pub struct ClipHoldFramePayload {
 
 /// One stable-address parameter value in an atomic Clip write.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClipParameterValueWrite {
-    /// Stable owner-local parameter instance and Definition identity.
-    pub parameter: AnimationParameterAddress,
-    /// Typed value to write statically or at the current Clip-local author time.
-    pub value: PropertyValue,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ClipParameterValueWrite {
+    /// Replace the complete parameter value, including explicit Viewer gestures.
+    Value {
+        /// Stable owner-local parameter instance and Definition identity.
+        parameter: AnimationParameterAddress,
+        /// Typed value at the current Clip-local author time.
+        value: PropertyValue,
+    },
+    /// Change only the specified numeric components of the current author value.
+    Channels {
+        /// Stable owner-local parameter instance and Definition identity.
+        parameter: AnimationParameterAddress,
+        /// Unique component indices and their values in canonical author units.
+        channel_values: Vec<(usize, f64)>,
+    },
+}
+
+impl ClipParameterValueWrite {
+    /// Resolve the stable target shared by complete and component edits.
+    pub fn parameter(&self) -> &AnimationParameterAddress {
+        match self {
+            Self::Value { parameter, .. } | Self::Channels { parameter, .. } => parameter,
+        }
+    }
 }
 
 /// Atomically write one or more persistent parameters owned directly by a Clip.
@@ -3807,7 +3826,7 @@ mod tests {
         let expected = ProductAction::Clip(ClipProductAction::WriteParameterValues(Box::new(
             ClipWriteParameterValuesPayload {
                 clip_id: ClipId::new(),
-                writes: vec![ClipParameterValueWrite {
+                writes: vec![ClipParameterValueWrite::Value {
                     parameter: AnimationParameterAddress {
                         animation_track_id: mondrian_core::AnimationTrackId::new(),
                         parameter_id: mondrian_core::ParameterId::new_static("transform.position"),
@@ -4543,7 +4562,7 @@ mod tests {
         assert!(projection.allows(&ProductAction::Clip(
             ClipProductAction::WriteParameterValues(Box::new(ClipWriteParameterValuesPayload {
                 clip_id,
-                writes: vec![ClipParameterValueWrite {
+                writes: vec![ClipParameterValueWrite::Value {
                     parameter: position_parameter.clone(),
                     value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
                 }],
@@ -4558,7 +4577,7 @@ mod tests {
         assert!(!projection.allows(&ProductAction::Clip(
             ClipProductAction::WriteParameterValues(Box::new(ClipWriteParameterValuesPayload {
                 clip_id: ClipId::new(),
-                writes: vec![ClipParameterValueWrite {
+                writes: vec![ClipParameterValueWrite::Value {
                     parameter: position_parameter.clone(),
                     value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
                 }],
@@ -4588,7 +4607,7 @@ mod tests {
         assert!(!locked.allows(&ProductAction::Clip(
             ClipProductAction::WriteParameterValues(Box::new(ClipWriteParameterValuesPayload {
                 clip_id,
-                writes: vec![ClipParameterValueWrite {
+                writes: vec![ClipParameterValueWrite::Value {
                     parameter: position_parameter,
                     value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
                 }],

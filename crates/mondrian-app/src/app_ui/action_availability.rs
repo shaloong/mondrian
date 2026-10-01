@@ -600,7 +600,7 @@ mod tests {
             });
         let transform = clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
             clip_id,
-            writes: vec![ClipParameterValueWrite {
+            writes: vec![ClipParameterValueWrite::Value {
                 parameter: position_parameter.clone(),
                 value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
             }],
@@ -619,7 +619,7 @@ mod tests {
 
         let stale = clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
             clip_id: ClipId::new(),
-            writes: vec![ClipParameterValueWrite {
+            writes: vec![ClipParameterValueWrite::Value {
                 parameter: position_parameter,
                 value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
             }],

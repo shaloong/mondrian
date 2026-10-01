@@ -2548,6 +2548,8 @@ impl PropertyBag {
     /// Static properties receive a static write; an enabled animated property
     /// receives either a new key or an edit that preserves the identity,
     /// interpolation handles, and temporal flags of an existing complete key.
+    /// Existing independent channel keys receive a complete channel write,
+    /// retaining each channel's identity and interpolation metadata.
     pub fn prepare_value_write_by_address(
         &self,
         address: &AnimationParameterAddress,
@@ -2570,6 +2572,18 @@ impl PropertyBag {
 
         if property.is_enabled() {
             if let Some(existing) = property.keyframe_at(time) {
+                if property.keyframe_by_id(existing.id).is_none() {
+                    return Ok(Some(PropertyMutation::WriteChannels {
+                        path: path.to_owned(),
+                        time,
+                        channel_values: property
+                            .value_to_channel_values(&value)?
+                            .into_iter()
+                            .enumerate()
+                            .collect(),
+                        interpolation: property.default_interpolation()?,
+                    }));
+                }
                 return Ok(Some(PropertyMutation::EditKeyframe {
                     path: path.to_owned(),
                     keyframe_id: existing.id,
@@ -2587,6 +2601,71 @@ impl PropertyBag {
         Ok(Some(PropertyMutation::SetStaticValue {
             path: path.to_owned(),
             value,
+        }))
+    }
+
+    /// Prepare a sparse numeric-component edit using current stable author identity.
+    ///
+    /// Normalize and compare in the property's canonical value representation.
+    /// Unchanged components are omitted, so an evaluated no-op cannot create a
+    /// key. Application uses the existing channel mutation, preserving untouched
+    /// siblings and existing key identities, handles and temporal constraints.
+    /// Preparation allocates only channel values, never copies animation curves.
+    pub fn prepare_channel_write_by_address(
+        &self,
+        address: &AnimationParameterAddress,
+        time: TimelineTime,
+        channel_values: &[(usize, f64)],
+    ) -> Result<Option<PropertyMutation>> {
+        let (path, property) =
+            self.property_by_address(address)
+                .ok_or_else(|| MondrianError::WorkflowStepFailed {
+                    step_id: "property_address_resolution".to_owned(),
+                    reason: format!(
+                        "parameter instance {} / {} is not owned by this Property Bag",
+                        address.animation_track_id, address.parameter_id
+                    ),
+                })?;
+        validate_channel_updates(property.channel_count(), channel_values, path)?;
+        if channel_values.is_empty() {
+            return Ok(None);
+        }
+        let current_value = property.evaluate(time);
+        let current = property.value_to_channel_values(&current_value)?;
+        if current.len() != property.channel_count() {
+            return Err(parameter_value_error(
+                path,
+                "canonical value and channel counts differ",
+            ));
+        }
+        let mut candidate = current.clone();
+        for &(index, value) in channel_values {
+            candidate[index] = property.normalize_numeric_channel(value)?;
+        }
+        let normalized = property
+            .normalize_value(property.value_from_channel_values(&candidate, &current_value))?;
+        if current_value == normalized {
+            return Ok(None);
+        }
+        let normalized = property.value_to_channel_values(&normalized)?;
+        let changed = channel_values
+            .iter()
+            .filter_map(|&(index, _)| {
+                // A held i64 can exceed f64's consecutive-integer precision.
+                // Its canonical value comparison above retains the edit intent
+                // even when old/new numeric channel projections coincide.
+                (current.len() == 1 || current[index] != normalized[index])
+                    .then_some((index, normalized[index]))
+            })
+            .collect::<Vec<_>>();
+        if changed.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(PropertyMutation::WriteChannels {
+            path: path.to_owned(),
+            time,
+            channel_values: changed,
+            interpolation: property.default_interpolation()?,
         }))
     }
 
@@ -3119,12 +3198,22 @@ fn validate_channel_updates(
     channel_values: &[(usize, f64)],
     path: &str,
 ) -> Result<()> {
+    if channel_values.len() > channel_count {
+        return Err(parameter_value_error(path, "too many component updates"));
+    }
+    let mut seen = HashSet::with_capacity(channel_values.len());
     for (index, _) in channel_values {
         if *index >= channel_count {
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "property_channel_bounds".to_string(),
                 reason: format!("属性通道越界: {path}[{index}]"),
             });
+        }
+        if !seen.insert(*index) {
+            return Err(parameter_value_error(
+                path,
+                &format!("duplicate channel index {index}"),
+            ));
         }
     }
     Ok(())
@@ -4420,6 +4509,240 @@ mod tests {
         assert_eq!(property.keyframe_times().len(), 2);
         assert_eq!(property.evaluate(tt(10)), PropertyValue::Float(10.0));
         assert_eq!(*property.static_value(), PropertyValue::Float(10.0));
+    }
+
+    #[test]
+    fn stable_address_full_write_preserves_independent_channel_keys() {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "transform.position",
+            "Position",
+            PropertyValue::Vec2(Vec2::ZERO),
+        ));
+        bag.apply_mutation(PropertyMutation::EnableAnimation {
+            path: "transform.position".to_owned(),
+            time: tt(0),
+        })
+        .expect("enable vector animation");
+        let address = bag.address_for_path("transform.position").expect("address");
+        let mutation = bag
+            .prepare_channel_write_by_address(&address, tt(3), &[(0, 9.0)])
+            .expect("prepare axis")
+            .expect("changed");
+        bag.apply_mutation(mutation).expect("write x only");
+        let x = bag
+            .property("transform.position")
+            .expect("property")
+            .channel(0)
+            .expect("x")
+            .keyframes
+            .last()
+            .expect("key")
+            .clone();
+        for value in [Vec2::new(11.0, 13.0), Vec2::new(15.0, 17.0)] {
+            let mutation = bag
+                .prepare_value_write_by_address(&address, tt(3), PropertyValue::Vec2(value))
+                .expect("prepare complete gesture")
+                .expect("changed");
+            bag.apply_mutation(mutation).expect("complete gesture over independent keys");
+            let property = bag.property("transform.position").expect("property");
+            let edited = property.channel(0).expect("x").keyframes.last().expect("key");
+            assert_eq!(edited.id, x.id);
+            assert_eq!(edited.interp_in, x.interp_in);
+            assert_eq!(edited.interp_out, x.interp_out);
+            assert_eq!(edited.temporal_flags, x.temporal_flags);
+            assert_eq!(property.evaluate(tt(3)), PropertyValue::Vec2(value));
+        }
+    }
+
+    #[test]
+    fn stable_address_channel_write_preserves_exact_held_integer_intent() {
+        let mut bag = PropertyBag::default();
+        let mut descriptor =
+            PropertyDescriptor::new("held.count", "Count", PropertyValue::Int((1_i64 << 53) + 1));
+        descriptor.schema.allowed_interpolations = vec![ParameterInterpolation::Hold];
+        bag.define(descriptor);
+        bag.validate().expect("valid exact held integer");
+        let address = bag.address_for_path("held.count").expect("address");
+        let mutation = bag
+            .prepare_channel_write_by_address(&address, tt(3), &[(0, (1_u64 << 53) as f64)])
+            .expect("prepare representable target")
+            .expect("different canonical integer");
+        bag.apply_mutation(mutation).expect("apply integer edit");
+        assert_eq!(
+            bag.evaluate("held.count", tt(3)),
+            Some(PropertyValue::Int(1_i64 << 53))
+        );
+        assert!(bag
+            .prepare_channel_write_by_address(&address, tt(3), &[(0, (1_u64 << 53) as f64)],)
+            .expect("same canonical target")
+            .is_none());
+    }
+
+    #[test]
+    fn stable_address_channel_write_preserves_current_static_sibling_bits() {
+        let mut bag = PropertyBag::default();
+        let sibling = f32::from_bits(0x3f800001);
+        bag.define(PropertyDescriptor::new(
+            "transform.scale",
+            "Scale",
+            PropertyValue::Vec2(Vec2::new(1.0, sibling)),
+        ));
+        let address = bag.address_for_path("transform.scale").expect("address");
+        // Preparation reads the current owner, not a UI's captured vector.
+        bag.apply_mutation(PropertyMutation::SetStaticValue {
+            path: "transform.scale".to_owned(),
+            value: PropertyValue::Vec2(Vec2::new(1.0, sibling * 2.0)),
+        })
+        .expect("concurrent sibling edit");
+        let mutation = bag
+            .prepare_channel_write_by_address(&address, tt(3), &[(0, 1.25)])
+            .expect("prepare")
+            .expect("changed");
+        bag.apply_mutation(mutation).expect("apply");
+        let PropertyValue::Vec2(value) = bag.evaluate("transform.scale", tt(3)).expect("value")
+        else {
+            panic!("vector");
+        };
+        assert_eq!(value.x.to_bits(), 1.25_f32.to_bits());
+        assert_eq!(value.y.to_bits(), (sibling * 2.0).to_bits());
+        assert!(bag
+            .prepare_channel_write_by_address(&address, tt(3), &[(0, 1.25 + 1e-10)])
+            .expect("canonical rounded no-op")
+            .is_none());
+    }
+
+    #[test]
+    fn stable_address_channel_write_keeps_independent_keys_and_elides_unchanged_axes() {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "transform.position",
+            "Position",
+            PropertyValue::Vec2(Vec2::new(2.0, 5.0)),
+        ));
+        bag.apply_mutation(PropertyMutation::EnableAnimation {
+            path: "transform.position".to_owned(),
+            time: tt(0),
+        })
+        .expect("enable");
+        let address = bag.address_for_path("transform.position").expect("address");
+        let before = bag.clone();
+        assert!(bag
+            .prepare_channel_write_by_address(&address, tt(3), &[(0, 2.0), (1, 5.0)])
+            .expect("evaluated no-op")
+            .is_none());
+        assert_eq!(bag, before);
+        let sibling = bag
+            .property("transform.position")
+            .expect("property")
+            .channel(1)
+            .expect("sibling")
+            .clone();
+        let mutation = bag
+            .prepare_channel_write_by_address(&address, tt(3), &[(0, 9.0), (1, 5.0)])
+            .expect("prepare")
+            .expect("changed");
+        assert!(
+            matches!(&mutation, PropertyMutation::WriteChannels { channel_values, .. }
+            if channel_values == &[(0, 9.0)])
+        );
+        bag.apply_mutation(mutation).expect("apply");
+        let property = bag.property("transform.position").expect("property");
+        assert_eq!(property.channel(1).expect("sibling"), &sibling);
+        bag.apply_mutation(PropertyMutation::UpdateChannelKeyframeHandles {
+            path: "transform.position".to_owned(),
+            time: tt(3),
+            channel_index: 0,
+            interp_in: KeyframeInterpolation::Bezier(BezierHandle {
+                time_offset: ht(-0.01),
+                value_offset: -0.5,
+            }),
+            interp_out: KeyframeInterpolation::Bezier(BezierHandle {
+                time_offset: ht(0.01),
+                value_offset: 0.5,
+            }),
+        })
+        .expect("authored Bezier handles");
+        let key = bag
+            .property("transform.position")
+            .expect("property")
+            .channel(0)
+            .expect("x")
+            .keyframes
+            .last()
+            .expect("key")
+            .clone();
+        let mutation = bag
+            .prepare_channel_write_by_address(&address, tt(3), &[(0, 11.0)])
+            .expect("prepare existing")
+            .expect("changed");
+        bag.apply_mutation(mutation).expect("edit existing");
+        let edited = bag
+            .property("transform.position")
+            .expect("property")
+            .channel(0)
+            .expect("x")
+            .keyframes
+            .last()
+            .expect("key");
+        assert_eq!(edited.id, key.id);
+        assert_eq!(edited.interp_in, key.interp_in);
+        assert_eq!(edited.interp_out, key.interp_out);
+        assert_eq!(edited.temporal_flags, key.temporal_flags);
+    }
+
+    #[test]
+    fn stable_address_channel_write_validates_all_updates_before_noop_filtering() {
+        let mut bag = PropertyBag::default();
+        let numeric =
+            ParameterNumericContract::closed(0.0, 1.0, None, ParameterInvalidValuePolicy::Clamp)
+                .expect("contract");
+        bag.define(
+            PropertyDescriptor::new("amount", "Amount", PropertyValue::Float(1.0))
+                .with_numeric_contract(ParameterUnit::Normalized, numeric),
+        );
+        let address = bag.address_for_path("amount").expect("address");
+        let before = bag.clone();
+        assert!(bag
+            .prepare_channel_write_by_address(&address, tt(3), &[(0, 2.0)])
+            .expect("clamped no-op")
+            .is_none());
+        for updates in [
+            vec![(0, 1.0), (0, 0.5)],
+            vec![(1, 0.5)],
+            vec![(0, f64::NAN)],
+            vec![(0, f64::INFINITY)],
+        ] {
+            assert!(bag.prepare_channel_write_by_address(&address, tt(3), &updates).is_err());
+        }
+        let stale = AnimationParameterAddress {
+            animation_track_id: AnimationTrackId::new(),
+            parameter_id: address.parameter_id,
+        };
+        assert!(bag.prepare_channel_write_by_address(&stale, tt(3), &[(0, 0.5)]).is_err());
+        assert_eq!(bag, before);
+    }
+
+    #[test]
+    fn write_channels_rejects_duplicate_components_without_mutating_owner() {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "transform.position",
+            "Position",
+            PropertyValue::Vec2(Vec2::new(2.0, 5.0)),
+        ));
+        let before = bag.clone();
+        let result = bag.apply_mutation(PropertyMutation::WriteChannels {
+            path: "transform.position".to_owned(),
+            time: tt(3),
+            channel_values: vec![(0, 9.0), (0, 11.0)],
+            interpolation: InterpolationType::Linear,
+        });
+        assert!(
+            result.is_err(),
+            "ambiguous repeated component must be rejected"
+        );
+        assert_eq!(bag, before);
     }
 
     #[test]

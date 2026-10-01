@@ -2143,7 +2143,7 @@ pub struct InspectorPanelModel {
     /// Video Clip blend-mode override and localized menu presentation.
     pub blend_mode: Option<InspectorBlendModeModel>,
     /// Opacity shown in UI percent units.
-    pub opacity: f32,
+    pub opacity: f64,
     /// Solid/tint color shown by the color trigger.
     pub tint: Color,
     /// Whether the selected Clip owns the editable solid-color property.
@@ -2153,9 +2153,9 @@ pub struct InspectorPanelModel {
     /// Vertical transform position in sequence pixels.
     pub position_y: f32,
     /// Horizontal transform scale shown in UI percent units.
-    pub scale_x_percent: f32,
+    pub scale_x_percent: f64,
     /// Vertical transform scale shown in UI percent units.
-    pub scale_y_percent: f32,
+    pub scale_y_percent: f64,
     /// Horizontal anchor coordinate in source-authoring pixels.
     pub anchor_x: f32,
     /// Vertical anchor coordinate in source-authoring pixels.
@@ -2556,7 +2556,8 @@ impl InspectorPanelModel {
 
         let time = state.current_timeline_time().ok().flatten().unwrap_or(sequence.playhead);
         let clip_author_time = clip.clamped_visual_author_time(time).unwrap_or(clip.clip_time_in);
-        let opacity = (clip.transform.evaluate_opacity(clip_author_time) * 100.0).clamp(0.0, 100.0);
+        let opacity = (f64::from(clip.transform.evaluate_opacity(clip_author_time)) * 100.0)
+            .clamp(0.0, 100.0);
         let position = clip.transform.get_position(clip_author_time);
         let scale = clip.transform.get_scale(clip_author_time);
         let anchor = clip.transform.get_anchor_point(clip_author_time);
@@ -2608,8 +2609,8 @@ impl InspectorPanelModel {
             shows_tint: clip.is_solid_color(),
             position_x: position.x,
             position_y: position.y,
-            scale_x_percent: scale.x * 100.0,
-            scale_y_percent: scale.y * 100.0,
+            scale_x_percent: f64::from(scale.x) * 100.0,
+            scale_y_percent: f64::from(scale.y) * 100.0,
             anchor_x: anchor.x,
             anchor_y: anchor.y,
             rotation_degrees: clip_rotation_degrees(clip, time),
@@ -3645,24 +3646,28 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
             .with_clip_transform(transform.overlay)
             .on_clip_transform_edit(move |edit| {
                 let writes = match edit {
-                    ViewerClipTransformEdit::Position(value) => vec![ClipParameterValueWrite {
-                        parameter: transform.position.clone(),
-                        value: PropertyValue::Vec2(glam::Vec2::from_array(value)),
-                    }],
-                    ViewerClipTransformEdit::Scale(value) => vec![ClipParameterValueWrite {
+                    ViewerClipTransformEdit::Position(value) => {
+                        vec![ClipParameterValueWrite::Value {
+                            parameter: transform.position.clone(),
+                            value: PropertyValue::Vec2(glam::Vec2::from_array(value)),
+                        }]
+                    }
+                    ViewerClipTransformEdit::Scale(value) => vec![ClipParameterValueWrite::Value {
                         parameter: transform.scale.clone(),
                         value: PropertyValue::Vec2(glam::Vec2::from_array(value)),
                     }],
-                    ViewerClipTransformEdit::Rotation(value) => vec![ClipParameterValueWrite {
-                        parameter: transform.rotation.clone(),
-                        value: PropertyValue::Float(value),
-                    }],
+                    ViewerClipTransformEdit::Rotation(value) => {
+                        vec![ClipParameterValueWrite::Value {
+                            parameter: transform.rotation.clone(),
+                            value: PropertyValue::Float(value),
+                        }]
+                    }
                     ViewerClipTransformEdit::Anchor { anchor, position } => vec![
-                        ClipParameterValueWrite {
+                        ClipParameterValueWrite::Value {
                             parameter: transform.anchor.clone(),
                             value: PropertyValue::Vec2(glam::Vec2::from_array(anchor)),
                         },
-                        ClipParameterValueWrite {
+                        ClipParameterValueWrite::Value {
                             parameter: transform.position.clone(),
                             value: PropertyValue::Vec2(glam::Vec2::from_array(position)),
                         },

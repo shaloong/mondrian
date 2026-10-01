@@ -12,7 +12,8 @@ use mondrian_core::{BlendMode, ClipId, Color, MondrianError, Result};
 
 use super::animation_authoring::{ClipNumericCurveEdit, NormalizedCurvePoint};
 use super::product_action::{
-    ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipWriteParameterValuesPayload,
+    ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipParameterValueWrite,
+    ClipWriteParameterValuesPayload,
 };
 use super::*;
 
@@ -198,20 +199,24 @@ fn prepare_clip_parameter_writes(
     let mut seen = HashSet::<AnimationParameterAddress>::with_capacity(payload.writes.len());
     let mut mutations = Vec::with_capacity(payload.writes.len());
     for write in &payload.writes {
-        if !seen.insert(write.parameter.clone()) {
+        let parameter = write.parameter();
+        if !seen.insert(parameter.clone()) {
             return Err(clip_authoring_error(
                 "clip_write_parameter_values",
                 format!(
                     "duplicate parameter instance {} / {}",
-                    write.parameter.animation_track_id, write.parameter.parameter_id
+                    parameter.animation_track_id, parameter.parameter_id
                 ),
             ));
         }
-        if let Some(mutation) = parameters.prepare_value_write_by_address(
-            &write.parameter,
-            author_time,
-            write.value.clone(),
-        )? {
+        let mutation = match write {
+            ClipParameterValueWrite::Value { value, .. } => {
+                parameters.prepare_value_write_by_address(parameter, author_time, value.clone())?
+            }
+            ClipParameterValueWrite::Channels { channel_values, .. } => parameters
+                .prepare_channel_write_by_address(parameter, author_time, channel_values)?,
+        };
+        if let Some(mutation) = mutation {
             mutations.push(mutation);
         }
     }

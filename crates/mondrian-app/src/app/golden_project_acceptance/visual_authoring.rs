@@ -1367,7 +1367,7 @@ pub(super) fn execute_visual_stage(
         "set-basic-title-text",
         clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
             clip_id: title_clip_id,
-            writes: vec![ClipParameterValueWrite {
+            writes: vec![ClipParameterValueWrite::Value {
                 parameter: title_text_parameter,
                 value: PropertyValue::Text(TITLE_TEXT.to_owned()),
             }],

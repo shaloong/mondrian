@@ -2430,7 +2430,7 @@ mod tests {
     ) -> mondrian_editor_state::Action {
         clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
             clip_id,
-            writes: vec![ClipParameterValueWrite { parameter, value }],
+            writes: vec![ClipParameterValueWrite::Value { parameter, value }],
         })
     }
 
@@ -6553,11 +6553,11 @@ mod tests {
                 ClipWriteParameterValuesPayload {
                     clip_id,
                     writes: vec![
-                        ClipParameterValueWrite {
+                        ClipParameterValueWrite::Value {
                             parameter: position,
                             value: PropertyValue::Vec2(glam::Vec2::new(20.0, 10.0)),
                         },
-                        ClipParameterValueWrite {
+                        ClipParameterValueWrite::Value {
                             parameter: stale,
                             value: PropertyValue::Float(0.5),
                         },
@@ -7110,15 +7110,15 @@ mod tests {
                 ClipWriteParameterValuesPayload {
                     clip_id,
                     writes: vec![
-                        ClipParameterValueWrite {
+                        ClipParameterValueWrite::Value {
                             parameter: position,
                             value: PropertyValue::Vec2(glam::Vec2::new(128.0, 72.0)),
                         },
-                        ClipParameterValueWrite {
+                        ClipParameterValueWrite::Value {
                             parameter: scale,
                             value: PropertyValue::Vec2(glam::Vec2::splat(1.5)),
                         },
-                        ClipParameterValueWrite {
+                        ClipParameterValueWrite::Value {
                             parameter: rotation,
                             value: PropertyValue::Float(-12.5),
                         },
@@ -7158,6 +7158,207 @@ mod tests {
     }
 
     #[test]
+    fn clip_component_write_preserves_concurrent_sibling_and_exact_undo_redo() {
+        for path in [
+            Transform2D::POSITION_PATH,
+            Transform2D::SCALE_PATH,
+            Transform2D::ANCHOR_POINT_PATH,
+        ] {
+            let (mut state, _, clip_id) = state_with_two_video_tracks();
+            let parameter = clip_parameter_address(&state, clip_id, path);
+            let sibling = f32::from_bits(0x3f800001);
+            state
+                .dispatch_action(clip_parameter_action(
+                    clip_id,
+                    parameter.clone(),
+                    PropertyValue::Vec2(glam::Vec2::new(1.0, sibling)),
+                ))
+                .expect("initial vector");
+            let edit = clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
+                clip_id,
+                writes: vec![ClipParameterValueWrite::Channels {
+                    parameter: parameter.clone(),
+                    channel_values: vec![(0, 1.25)],
+                }],
+            });
+            state
+                .dispatch_action(clip_parameter_action(
+                    clip_id,
+                    parameter,
+                    PropertyValue::Vec2(glam::Vec2::new(1.0, sibling * 2.0)),
+                ))
+                .expect("concurrent sibling");
+            let mut before = state.active_sequence().expect("sequence").clone();
+            state.dispatch_action(edit).expect("component edit");
+            let mut after = state.active_sequence().expect("sequence").clone();
+            assert_eq!(
+                after.revision,
+                before.revision.checked_next().expect("revision")
+            );
+            let value = after
+                .find_clip(clip_id)
+                .expect("clip")
+                .intrinsic_parameter_bag()
+                .evaluate(path, TimelineTime::ZERO)
+                .expect("value");
+            assert_eq!(
+                value,
+                PropertyValue::Vec2(glam::Vec2::new(1.25, sibling * 2.0))
+            );
+            assert!(state.undo_timeline().expect("undo one component edit"));
+            let undone = state.active_sequence().expect("sequence");
+            assert_eq!(
+                undone.revision,
+                after.revision.checked_next().expect("revision")
+            );
+            // Undo restores author content but publishes a new monotonic revision.
+            before.revision = undone.revision;
+            assert_eq!(state.active_sequence().expect("sequence"), &before);
+            assert!(state.redo_timeline().expect("redo"));
+            let redone = state.active_sequence().expect("sequence");
+            assert_eq!(
+                redone.revision,
+                before.revision.checked_next().expect("revision")
+            );
+            after.revision = redone.revision;
+            assert_eq!(state.active_sequence().expect("sequence"), &after);
+        }
+    }
+
+    #[test]
+    fn whole_clip_transform_gesture_preserves_independent_axis_keys_and_undo() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks_at_rate(Rational::new(25, 1));
+        let mut sequence = state.active_sequence().expect("sequence").clone();
+        sequence
+            .find_clip_mut(clip_id)
+            .expect("clip")
+            .apply_property_mutation(PropertyMutation::EnableAnimation {
+                path: Transform2D::POSITION_PATH.to_owned(),
+                time: TimelineTime::ZERO,
+            })
+            .expect("enable vector animation");
+        state.test_set_sequence(Some(sequence));
+        state.seek(13).expect("seek inside offset Clip");
+        let parameter = clip_parameter_address(&state, clip_id, Transform2D::POSITION_PATH);
+        state
+            .dispatch_action(clip_write_parameter_values_action(
+                ClipWriteParameterValuesPayload {
+                    clip_id,
+                    writes: vec![ClipParameterValueWrite::Channels {
+                        parameter: parameter.clone(),
+                        channel_values: vec![(0, 3.75)],
+                    }],
+                },
+            ))
+            .expect("write one independent axis");
+        let before = state
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(clip_id)
+            .expect("clip")
+            .intrinsic_parameter_bag();
+        let x = before
+            .property(Transform2D::POSITION_PATH)
+            .expect("position")
+            .channel(0)
+            .expect("x")
+            .keyframes()
+            .last()
+            .expect("x key")
+            .clone();
+        assert_eq!(x.time, TimelineTime::new(3, 25).expect("Clip-local time"));
+        state
+            .dispatch_action(clip_parameter_action(
+                clip_id,
+                parameter,
+                PropertyValue::Vec2(glam::Vec2::new(17.0, 29.0)),
+            ))
+            .expect("complete Viewer-style vector gesture");
+        let after = state
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(clip_id)
+            .expect("clip")
+            .intrinsic_parameter_bag();
+        let property = after.property(Transform2D::POSITION_PATH).expect("position");
+        assert_eq!(
+            property.evaluate(x.time),
+            PropertyValue::Vec2(glam::Vec2::new(17.0, 29.0))
+        );
+        let edited = property.channel(0).expect("x").keyframes().last().expect("x key");
+        assert_eq!(edited.id, x.id);
+        assert_eq!(edited.interp_in, x.interp_in);
+        assert_eq!(edited.interp_out, x.interp_out);
+        assert_eq!(edited.temporal_flags, x.temporal_flags);
+        assert!(state.undo_timeline().expect("undo complete gesture"));
+        assert_eq!(
+            state
+                .active_sequence()
+                .expect("sequence")
+                .find_clip(clip_id)
+                .expect("clip")
+                .intrinsic_parameter_bag(),
+            before
+        );
+        assert!(state.redo_timeline().expect("redo complete gesture"));
+        assert_eq!(
+            state
+                .active_sequence()
+                .expect("sequence")
+                .find_clip(clip_id)
+                .expect("clip")
+                .intrinsic_parameter_bag(),
+            after
+        );
+    }
+
+    #[test]
+    fn clip_component_write_rejects_invalid_atomic_batch_and_elides_noop() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let position = clip_parameter_address(&state, clip_id, Transform2D::POSITION_PATH);
+        let scale = clip_parameter_address(&state, clip_id, Transform2D::SCALE_PATH);
+        let before = state.active_sequence().expect("sequence").clone();
+        let generation = state.project_author_generation();
+        for channels in [
+            vec![(0, 1.5), (0, 2.0)],
+            vec![(2, 1.5)],
+            vec![(0, f64::INFINITY)],
+        ] {
+            let payload = ClipWriteParameterValuesPayload {
+                clip_id,
+                writes: vec![
+                    ClipParameterValueWrite::Channels {
+                        parameter: position.clone(),
+                        channel_values: vec![(0, 20.0)],
+                    },
+                    ClipParameterValueWrite::Channels {
+                        parameter: scale.clone(),
+                        channel_values: channels,
+                    },
+                ],
+            };
+            let action =
+                ProductAction::Clip(ClipProductAction::WriteParameterValues(Box::new(payload)));
+            assert!(!state.product_action_availability().allows(&action));
+            assert!(state.dispatch_product_action(action).is_err());
+            assert_eq!(state.active_sequence().expect("sequence"), &before);
+            assert_eq!(state.project_author_generation(), generation);
+            assert!(!state.can_undo_action());
+        }
+        let noop = clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
+            clip_id,
+            writes: vec![ClipParameterValueWrite::Channels {
+                parameter: scale,
+                channel_values: vec![(0, 1.0)],
+            }],
+        });
+        assert!(state.dispatch_action(noop).is_err());
+        assert_eq!(state.active_sequence().expect("sequence"), &before);
+        assert_eq!(state.project_author_generation(), generation);
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
     fn compensated_anchor_write_preserves_picture_and_undoes_as_one_action() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
         let anchor = clip_parameter_address(&state, clip_id, Transform2D::ANCHOR_POINT_PATH);
@@ -7170,11 +7371,11 @@ mod tests {
                 ClipWriteParameterValuesPayload {
                     clip_id,
                     writes: vec![
-                        ClipParameterValueWrite {
+                        ClipParameterValueWrite::Value {
                             parameter: anchor,
                             value: PropertyValue::Vec2(glam::Vec2::new(20.0, 10.0)),
                         },
-                        ClipParameterValueWrite {
+                        ClipParameterValueWrite::Value {
                             parameter: position,
                             value: PropertyValue::Vec2(glam::Vec2::new(20.0, 10.0)),
                         },
@@ -7229,7 +7430,7 @@ mod tests {
                 ClipProductAction::WriteParameterValues(Box::new(
                     ClipWriteParameterValuesPayload {
                         clip_id,
-                        writes: vec![ClipParameterValueWrite {
+                        writes: vec![ClipParameterValueWrite::Value {
                             parameter: position,
                             value: PropertyValue::Vec2(glam::Vec2::new(f32::NAN, 0.0)),
                         }],
@@ -7264,7 +7465,7 @@ mod tests {
                 ClipProductAction::WriteParameterValues(Box::new(
                     ClipWriteParameterValuesPayload {
                         clip_id: audio_clip_id,
-                        writes: vec![ClipParameterValueWrite {
+                        writes: vec![ClipParameterValueWrite::Value {
                             parameter: position,
                             value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
                         }],

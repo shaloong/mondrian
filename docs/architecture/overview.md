@@ -6,6 +6,24 @@ Mondrian is a native video editor organized around strict crate boundaries. The 
 
 ## Layers
 
+Stable-address numeric component preparation lives in Core's `PropertyBag`.
+It validates the complete sparse update, normalizes through the canonical
+property representation and omits unchanged components before returning the
+existing `WriteChannels` mutation. It allocates component values without cloning
+animation curves. Duplicate indices fail before any property mutation. Existing
+keys retain their IDs, handles and temporal constraints; untouched channels keep
+their independent curves. Application adapters commit these mutations through
+the authoring session, with the same atomic admission and Undo/Redo as complete
+parameter writes.
+
+Complete parameter writes distinguish shared-ID property keys from independent
+channel keys at the requested author time. They edit a complete key by ID only
+when that identity resolves across all channels; otherwise they use the same
+channel mutation to retain every existing channel ID and create missing keys.
+This lets a Viewer gesture follow an Inspector axis edit without rejecting or
+merging away its independent key identities. Canonical scalar no-op comparison
+also retains exact held-i64 intent above f64's consecutive-integer range.
+
 ```text
 OS / winit
   -> mondrian-platform-core / mondrian-platform

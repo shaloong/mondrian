@@ -2741,3 +2741,14 @@ Media language tags, user-authored stream titles, stable identities and named
 multichannel speaker layouts retain their canonical values. Re-projecting locale
 changes labels without modifying component selection, channel mapping or author
 generation. Both catalogs carry the same message IDs.
+
+Inspector position, scale and anchor axis controls emit sparse channel edits,
+resolved against the current Clip at admission. They never capture sibling
+values in callbacks. Viewer gestures explicitly replace complete vectors, and
+compensated anchor gestures still commit anchor and position atomically. Both
+forms use one tagged Clip parameter-write contract and the existing authoring
+transaction. The alpha API requires an explicit write kind; there is no legacy
+payload interpretation. Opacity and scale percentages use Double presentation
+arithmetic until the canonical Float/vector author seam, retaining original
+Float bits through unit conversion. No-op component writes produce neither new
+keys nor history entries.

@@ -385,12 +385,6 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
     let anchor_y_parameter = anchor_x_parameter.clone();
     let rotation_parameter =
         model.visual_parameters.as_ref().and_then(|targets| targets.rotation.clone());
-    let position_x = model.position_x;
-    let position_y = model.position_y;
-    let scale_x = model.scale_x_percent;
-    let scale_y = model.scale_y_percent;
-    let anchor_x = model.anchor_x;
-    let anchor_y = model.anchor_y;
     let has_target = selected_clip.is_some();
     let can_edit = has_target && model.is_editable;
     let subtitle = model.edit_disabled_reason.clone().unwrap_or_else(|| {
@@ -439,8 +433,8 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
         )
     } else {
         CurveEditor::with_points(vec![
-            CurvePoint::new(0.0, model.opacity / 100.0),
-            CurvePoint::new(1.0, model.opacity / 100.0),
+            CurvePoint::new(0.0, (model.opacity / 100.0) as f32),
+            CurvePoint::new(1.0, (model.opacity / 100.0) as f32),
         ])
         .disabled()
     };
@@ -466,7 +460,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                     inspector_parameter_action(
                         selected_clip,
                         opacity_parameter.clone(),
-                        PropertyValue::Float(value / 100.0),
+                        PropertyValue::Float((value / 100.0) as f32),
                     )
                 },
             ),
@@ -761,10 +755,11 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                     0,
                     can_edit,
                     move |value| {
-                        inspector_parameter_action(
+                        inspector_parameter_channel_action(
                             selected_clip,
                             position_x_parameter.clone(),
-                            PropertyValue::Vec2(glam::Vec2::new(value, position_y)),
+                            0,
+                            f64::from(value),
                         )
                     },
                 ),
@@ -781,10 +776,11 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                     0,
                     can_edit,
                     move |value| {
-                        inspector_parameter_action(
+                        inspector_parameter_channel_action(
                             selected_clip,
                             position_y_parameter.clone(),
-                            PropertyValue::Vec2(glam::Vec2::new(position_x, value)),
+                            1,
+                            f64::from(value),
                         )
                     },
                 ),
@@ -801,10 +797,11 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                     0,
                     can_edit,
                     move |value| {
-                        inspector_parameter_action(
+                        inspector_parameter_channel_action(
                             selected_clip,
                             scale_x_parameter.clone(),
-                            PropertyValue::Vec2(glam::Vec2::new(value / 100.0, scale_y / 100.0)),
+                            0,
+                            value / 100.0,
                         )
                     },
                 ),
@@ -821,10 +818,11 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                     0,
                     can_edit,
                     move |value| {
-                        inspector_parameter_action(
+                        inspector_parameter_channel_action(
                             selected_clip,
                             scale_y_parameter.clone(),
-                            PropertyValue::Vec2(glam::Vec2::new(scale_x / 100.0, value / 100.0)),
+                            1,
+                            value / 100.0,
                         )
                     },
                 ),
@@ -841,10 +839,11 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                     0,
                     can_edit,
                     move |value| {
-                        inspector_parameter_action(
+                        inspector_parameter_channel_action(
                             selected_clip,
                             anchor_x_parameter.clone(),
-                            PropertyValue::Vec2(glam::Vec2::new(value, anchor_y)),
+                            0,
+                            f64::from(value),
                         )
                     },
                 ),
@@ -861,10 +860,11 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                     0,
                     can_edit,
                     move |value| {
-                        inspector_parameter_action(
+                        inspector_parameter_channel_action(
                             selected_clip,
                             anchor_y_parameter.clone(),
-                            PropertyValue::Vec2(glam::Vec2::new(anchor_x, value)),
+                            1,
+                            f64::from(value),
                         )
                     },
                 ),
@@ -2056,7 +2056,26 @@ pub(super) fn inspector_parameter_action(
     Some(clip_write_parameter_values_action(
         ClipWriteParameterValuesPayload {
             clip_id: selection.clip_id,
-            writes: vec![ClipParameterValueWrite { parameter, value }],
+            writes: vec![ClipParameterValueWrite::Value { parameter, value }],
+        },
+    ))
+}
+
+pub(super) fn inspector_parameter_channel_action(
+    selection: Option<SelectedClipRef>,
+    parameter: Option<AnimationParameterAddress>,
+    index: usize,
+    value: f64,
+) -> Option<Action> {
+    let selection = selection?;
+    let parameter = parameter?;
+    Some(clip_write_parameter_values_action(
+        ClipWriteParameterValuesPayload {
+            clip_id: selection.clip_id,
+            writes: vec![ClipParameterValueWrite::Channels {
+                parameter,
+                channel_values: vec![(index, value)],
+            }],
         },
     ))
 }
@@ -3206,7 +3225,7 @@ pub(super) fn inspector_property_action(
         InspectorPropertyTarget::Clip { parameter } => {
             clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
                 clip_id: selection.clip_id,
-                writes: vec![ClipParameterValueWrite { parameter, value }],
+                writes: vec![ClipParameterValueWrite::Value { parameter, value }],
             })
         }
         InspectorPropertyTarget::Effect { effect_id, parameter } => {
