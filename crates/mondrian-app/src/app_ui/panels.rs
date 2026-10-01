@@ -6446,29 +6446,29 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
     if let Some(resolution) = model.preset.resolution {
         let width_preset = model.preset.clone();
         let width_input = NumberInput::new(
-            resolution.width as f64,
-            mondrian_timeline::SequenceSettings::MIN_WIDTH as f64,
-            mondrian_timeline::SequenceSettings::MAX_WIDTH as f64,
+            resolution.width as i64,
+            mondrian_timeline::SequenceSettings::MIN_WIDTH as i64,
+            mondrian_timeline::SequenceSettings::MAX_WIDTH as i64,
         )
-        .with_step(1.0)
+        .with_step(1)
         .on_change(move |width| {
             let mut updated = width_preset.clone();
             if let Some(resolution) = &mut updated.resolution {
-                resolution.width = width.round() as u32;
+                resolution.width = width as u32;
             }
             export_preset_update_action(updated)
         });
         let height_preset = model.preset.clone();
         let height_input = NumberInput::new(
-            resolution.height as f64,
-            mondrian_timeline::SequenceSettings::MIN_HEIGHT as f64,
-            mondrian_timeline::SequenceSettings::MAX_HEIGHT as f64,
+            resolution.height as i64,
+            mondrian_timeline::SequenceSettings::MIN_HEIGHT as i64,
+            mondrian_timeline::SequenceSettings::MAX_HEIGHT as i64,
         )
-        .with_step(1.0)
+        .with_step(1)
         .on_change(move |height| {
             let mut updated = height_preset.clone();
             if let Some(resolution) = &mut updated.resolution {
-                resolution.height = height.round() as u32;
+                resolution.height = height as u32;
             }
             export_preset_update_action(updated)
         });
@@ -6513,23 +6513,23 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
         media.and_then(|media| export_video_rate_control(&media.video))
     {
         let crf_preset = model.preset.clone();
-        let crf_input = NumberInput::new(rate_control.crf as f64, 0.0, max_crf as f64)
-            .with_step(1.0)
+        let crf_input = NumberInput::new(rate_control.crf as i64, 0, max_crf as i64)
+            .with_step(1)
             .on_change(move |crf| {
                 let mut updated = rate_control;
-                updated.crf = crf.round() as u8;
+                updated.crf = crf as u8;
                 export_preset_update_action(export_with_rate_control(crf_preset.clone(), updated))
             });
         let max_bitrate_preset = model.preset.clone();
         let max_bitrate_input = NumberInput::new(
-            rate_control.max_bitrate_kbps.unwrap_or_default() as f64,
-            0.0,
-            2_000_000.0,
+            rate_control.max_bitrate_kbps.unwrap_or_default() as i64,
+            0,
+            2_000_000,
         )
-        .with_step(100.0)
+        .with_step(100)
         .on_change(move |max_bitrate| {
             let mut updated = rate_control;
-            let value = max_bitrate.round() as u32;
+            let value = max_bitrate as u32;
             updated.max_bitrate_kbps = (value > 0).then_some(value);
             export_preset_update_action(export_with_rate_control(
                 max_bitrate_preset.clone(),
@@ -6538,14 +6538,14 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
         });
         let buffer_preset = model.preset.clone();
         let buffer_input = NumberInput::new(
-            rate_control.buffer_size_kbits.unwrap_or_default() as f64,
-            0.0,
-            4_000_000.0,
+            rate_control.buffer_size_kbits.unwrap_or_default() as i64,
+            0,
+            4_000_000,
         )
-        .with_step(100.0)
+        .with_step(100)
         .on_change(move |buffer_size| {
             let mut updated = rate_control;
-            let value = buffer_size.round() as u32;
+            let value = buffer_size as u32;
             updated.buffer_size_kbits = (value > 0).then_some(value);
             export_preset_update_action(export_with_rate_control(buffer_preset.clone(), updated))
         });
@@ -6565,8 +6565,8 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
                 scene_cut,
             }) => {
                 let keyframe_preset = model.preset.clone();
-                let keyframe_input = NumberInput::new(keyframe_interval_seconds as f64, 1.0, 10.0)
-                    .with_step(1.0)
+                let keyframe_input = NumberInput::new(keyframe_interval_seconds as i64, 1, 10)
+                    .with_step(1)
                     .on_change(move |seconds| {
                         let mut updated = keyframe_preset.clone();
                         if let Some(media) = updated.media_file_mut()
@@ -6575,20 +6575,20 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
                                 ..
                             } = &mut media.video_coding
                         {
-                            *keyframe_interval_seconds = seconds.round() as u16;
+                            *keyframe_interval_seconds = seconds as u16;
                         }
                         export_preset_update_action(updated)
                     });
                 let b_frame_preset = model.preset.clone();
-                let b_frame_input = NumberInput::new(max_b_frames as f64, 0.0, 4.0)
-                    .with_step(1.0)
+                let b_frame_input = NumberInput::new(max_b_frames as i64, 0, 4)
+                    .with_step(1)
                     .on_change(move |frames| {
                         let mut updated = b_frame_preset.clone();
                         if let Some(media) = updated.media_file_mut()
                             && let VideoCodingStructure::H26xLongGop { max_b_frames, .. } =
                                 &mut media.video_coding
                         {
-                            *max_b_frames = frames.round() as u8;
+                            *max_b_frames = frames as u8;
                         }
                         export_preset_update_action(updated)
                     });
@@ -6645,8 +6645,8 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
                 lookahead_frames,
             }) => {
                 let keyframe_preset = model.preset.clone();
-                let keyframe_input = NumberInput::new(keyframe_interval_seconds as f64, 1.0, 10.0)
-                    .with_step(1.0)
+                let keyframe_input = NumberInput::new(keyframe_interval_seconds as i64, 1, 10)
+                    .with_step(1)
                     .on_change(move |seconds| {
                         let mut updated = keyframe_preset.clone();
                         if let Some(media) = updated.media_file_mut()
@@ -6655,13 +6655,13 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
                                 ..
                             } = &mut media.video_coding
                         {
-                            *keyframe_interval_seconds = seconds.round() as u16;
+                            *keyframe_interval_seconds = seconds as u16;
                         }
                         export_preset_update_action(updated)
                     });
                 let lookahead_preset = model.preset.clone();
-                let lookahead_input = NumberInput::new(lookahead_frames as f64, 0.0, 120.0)
-                    .with_step(1.0)
+                let lookahead_input = NumberInput::new(lookahead_frames as i64, 0, 120)
+                    .with_step(1)
                     .on_change(move |frames| {
                         let mut updated = lookahead_preset.clone();
                         if let Some(media) = updated.media_file_mut()
@@ -6669,7 +6669,7 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
                                 lookahead_frames, ..
                             } = &mut media.video_coding
                         {
-                            *lookahead_frames = frames.round() as u16;
+                            *lookahead_frames = frames as u16;
                         }
                         export_preset_update_action(updated)
                     });
@@ -6690,17 +6690,15 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
     {
         let colors_preset = model.preset.clone();
         let colors_input =
-            NumberInput::new(colors as f64, 2.0, 256.0)
-                .with_step(1.0)
-                .on_change(move |colors| {
-                    let mut updated = colors_preset.clone();
-                    if let Some(media) = updated.media_file_mut()
-                        && let VideoCodecConfig::Gif { colors: current, .. } = &mut media.video
-                    {
-                        *current = colors.round() as u16;
-                    }
-                    export_preset_update_action(updated)
-                });
+            NumberInput::new(colors as i64, 2, 256).with_step(1).on_change(move |colors| {
+                let mut updated = colors_preset.clone();
+                if let Some(media) = updated.media_file_mut()
+                    && let VideoCodecConfig::Gif { colors: current, .. } = &mut media.video
+                {
+                    *current = colors as u16;
+                }
+                export_preset_update_action(updated)
+            });
         let dither_preset = model.preset.clone();
         let dither_checkbox = Checkbox::new(localizer.text("export-palette-dither"), dither)
             .on_change(move |enabled| {
@@ -6738,15 +6736,15 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
         Some(AudioCodecConfig::Aac { bitrate_kbps })
         | Some(AudioCodecConfig::Mp3 { bitrate_kbps }) => {
             let bitrate_preset = model.preset.clone();
-            let bitrate_input = NumberInput::new(bitrate_kbps as f64, 1.0, 1_536.0)
-                .with_step(8.0)
+            let bitrate_input = NumberInput::new(bitrate_kbps as i64, 1, 1_536)
+                .with_step(8)
                 .on_change(move |bitrate| {
                     let mut updated = bitrate_preset.clone();
                     if let Some(media) = updated.media_file_mut() {
                         match &mut media.audio {
                             AudioCodecConfig::Aac { bitrate_kbps }
                             | AudioCodecConfig::Mp3 { bitrate_kbps } => {
-                                *bitrate_kbps = bitrate.round() as u32;
+                                *bitrate_kbps = bitrate as u32;
                             }
                             AudioCodecConfig::Disabled | AudioCodecConfig::Pcm { .. } => {}
                         }

@@ -14,28 +14,31 @@ use crate::TextInput;
 mod model;
 
 use model::NumberInputModel;
+pub use model::NumberInputValue;
 
 /// Adapter that maps the current numeric value to an editor [`Action`].
-pub type NumberInputChangeAction = dyn Fn(f64) -> Option<Action>;
+pub type NumberInputChangeAction<T = f64> = dyn Fn(T) -> Option<Action>;
 
 /// Single-line numeric input.
-pub struct NumberInput {
+pub struct NumberInput<T: NumberInputValue = f64> {
     input: TextInput,
-    model: NumberInputModel,
+    model: NumberInputModel<T>,
     focused: bool,
+    focus_value: Option<T>,
     width: f32,
-    on_change: Option<Box<NumberInputChangeAction>>,
+    on_change: Option<Box<NumberInputChangeAction<T>>>,
 }
 
-impl NumberInput {
+impl<T: NumberInputValue> NumberInput<T> {
     /// Create a number input with a clamped initial value.
-    pub fn new(value: f64, min: f64, max: f64) -> Self {
+    pub fn new(value: T, min: T, max: T) -> Self {
         let model = NumberInputModel::new(value, min, max);
         let text = model.display_text();
         Self {
             input: TextInput::new("").with_text(text),
             model,
             focused: false,
+            focus_value: None,
             width: 200.0,
             on_change: None,
         }
@@ -69,22 +72,22 @@ impl NumberInput {
         self.enabled(false)
     }
 
-    /// Set the number of decimals used for initial/displayed values.
+    /// Set minimum displayed decimals without rounding the stored value.
     pub fn with_decimals(mut self, decimals: usize) -> Self {
         self.input.set_text(self.model.set_decimals(decimals));
         self
     }
 
-    /// Quantize submitted values to a fixed step.
-    pub fn with_step(mut self, step: f64) -> Self {
+    /// Set the keyboard increment; typed values retain their full precision.
+    pub fn with_step(mut self, step: T) -> Self {
         self.model.set_step(step);
         self
     }
 
-    /// Dispatch an action whenever user input parses as a valid numeric value.
+    /// Dispatch an action when user input changes the valid typed numeric value.
     pub fn on_change<F, R>(mut self, action: F) -> Self
     where
-        F: Fn(f64) -> R + 'static,
+        F: Fn(T) -> R + 'static,
         R: Into<Option<Action>>,
     {
         self.on_change = Some(Box::new(move |value| action(value).into()));
@@ -97,11 +100,11 @@ impl NumberInput {
     }
 
     /// Current parsed and normalized value, if the raw text is numeric.
-    pub fn value(&self) -> Option<f64> {
+    pub fn value(&self) -> Option<T> {
         self.model.normalized_text_value(self.input.text())
     }
 
-    fn dispatch_value(&self, value: f64, ctx: &mut EventContext) {
+    fn dispatch_value(&self, value: T, ctx: &mut EventContext) {
         if let Some(factory) = &self.on_change
             && let Some(action) = factory(value)
         {
@@ -109,19 +112,22 @@ impl NumberInput {
         }
     }
 
-    fn set_value_from_keyboard(&mut self, value: f64, ctx: &mut EventContext) -> EventResult {
+    fn set_value_from_keyboard(&mut self, value: T, ctx: &mut EventContext) -> EventResult {
+        let previous = self.model.committed_value();
         let Some(update) = self.model.set_from_keyboard(value, self.input.text()) else {
             return EventResult::Ignored;
         };
         self.input.set_text(update.text);
-        self.dispatch_value(update.value, ctx);
+        if previous != update.value {
+            self.dispatch_value(update.value, ctx);
+        }
         ctx.request_repaint();
         EventResult::Handled
     }
 
-    fn nudge(&mut self, delta: f64, ctx: &mut EventContext) -> EventResult {
+    fn nudge(&mut self, step: T, increase: bool, ctx: &mut EventContext) -> EventResult {
         let value = self.value().unwrap_or_else(|| self.model.committed_value());
-        self.set_value_from_keyboard(value + delta, ctx)
+        self.set_value_from_keyboard(value.offset(step, increase), ctx)
     }
 
     fn dispatch_if_valid(&mut self, ctx: &mut EventContext) {
@@ -140,7 +146,7 @@ impl NumberInput {
     }
 }
 
-impl Widget for NumberInput {
+impl<T: NumberInputValue> Widget for NumberInput<T> {
     fn id(&self) -> WidgetId {
         self.input.id()
     }
@@ -166,17 +172,36 @@ impl Widget for NumberInput {
         {
             let step = self.model.keyboard_step(*modifiers);
             match key {
-                KeyCode::Up => return self.nudge(step, ctx),
-                KeyCode::Down => return self.nudge(-step, ctx),
-                KeyCode::PageUp => return self.nudge(self.model.page_step(), ctx),
-                KeyCode::PageDown => return self.nudge(-self.model.page_step(), ctx),
+                KeyCode::Up => return self.nudge(step, true, ctx),
+                KeyCode::Down => return self.nudge(step, false, ctx),
+                KeyCode::PageUp => return self.nudge(self.model.page_step(), true, ctx),
+                KeyCode::PageDown => return self.nudge(self.model.page_step(), false, ctx),
                 _ => {}
             }
+        }
+        if self.focused
+            && matches!(event, UiEvent::KeyDown { key: KeyCode::Escape, modifiers } if *modifiers == Modifiers::none())
+        {
+            if let Some(value) = self.focus_value {
+                let changed = value != self.model.committed_value();
+                self.model.set_from_keyboard(value, self.input.text());
+                self.input.set_text(self.model.display_text());
+                if changed {
+                    self.dispatch_value(value, ctx);
+                }
+                ctx.request_repaint();
+            }
+            self.input.event(&UiEvent::FocusLost, ctx);
+            ctx.focus.release_focus(self.id());
+            self.focused = false;
+            self.focus_value = None;
+            return EventResult::Handled;
         }
         if self.focused && matches!(event, UiEvent::KeyDown { key: KeyCode::Enter, .. }) {
             if self.commit_display_text() {
                 ctx.request_repaint();
             }
+            self.focus_value = Some(self.model.committed_value());
             return EventResult::Handled;
         }
         let before = self.input.text().to_owned();
@@ -186,6 +211,7 @@ impl Widget for NumberInput {
         }
         if result == EventResult::Handled && matches!(event, UiEvent::FocusLost) {
             self.focused = false;
+            self.focus_value = None;
             if self.commit_display_text() {
                 ctx.request_repaint();
             }
@@ -195,6 +221,9 @@ impl Widget for NumberInput {
                 UiEvent::FocusGained { .. } | UiEvent::MouseDown { .. }
             )
         {
+            if !self.focused {
+                self.focus_value = Some(self.model.committed_value());
+            }
             self.focused = true;
         }
         result
@@ -246,11 +275,11 @@ mod tests {
         }
     }
 
-    fn layout(input: &mut NumberInput) {
+    fn layout<T: NumberInputValue>(input: &mut NumberInput<T>) {
         input.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
     }
 
-    fn click(input: &mut NumberInput, ctx: &mut EventContext) {
+    fn click<T: NumberInputValue>(input: &mut NumberInput<T>, ctx: &mut EventContext) {
         input.event(
             &UiEvent::MouseDown {
                 position: Point::new(12.0, 12.0),
@@ -259,6 +288,133 @@ mod tests {
             },
             ctx,
         );
+    }
+
+    #[test]
+    fn integer_entry_keyboard_bounds_and_escape_preserve_exact_values() {
+        let dispatch = |_: Action| {};
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let original = 9_007_199_254_740_993_i64;
+        let recorded = Rc::new(RefCell::new(Vec::new()));
+        let captured = Rc::clone(&recorded);
+        let mut input =
+            NumberInput::new(original, i64::MIN, i64::MAX)
+                .with_step(1)
+                .on_change(move |value| {
+                    captured.borrow_mut().push(value);
+                    Action::ToggleFullscreen
+                });
+        layout(&mut input);
+        click(&mut input, &mut ctx);
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        input.event(&UiEvent::TextInput((i64::MAX - 1).to_string()), &mut ctx);
+        assert_eq!(input.value(), Some(i64::MAX - 1));
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        assert_eq!(input.value(), Some(i64::MAX - 1));
+        assert!(input.accepts_text_input());
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(input.value(), Some(i64::MAX));
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::shift() },
+            &mut ctx,
+        );
+        assert_eq!(&*recorded.borrow(), &[i64::MAX - 1, i64::MAX]);
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(input.text(), original.to_string());
+        assert_eq!(input.value(), Some(original));
+        assert_eq!(&*recorded.borrow(), &[i64::MAX - 1, i64::MAX, original]);
+        assert!(!input.accepts_text_input());
+        click(&mut input, &mut ctx);
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        input.event(
+            &UiEvent::TextInput("9223372036854775808".to_owned()),
+            &mut ctx,
+        );
+        assert_eq!(input.value(), None);
+        assert_eq!(recorded.borrow().len(), 3);
+        input.event(&UiEvent::FocusLost, &mut ctx);
+        assert_eq!(input.value(), Some(original));
+        assert_eq!(recorded.borrow().len(), 3);
+    }
+
+    #[test]
+    fn correcting_invalid_integer_text_at_a_boundary_does_not_publish_a_value() {
+        let recorded = Rc::new(RefCell::new(Vec::new()));
+        let captured = Rc::clone(&recorded);
+        let dispatch = |_: Action| {};
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input =
+            NumberInput::new(i64::MAX, i64::MIN, i64::MAX)
+                .with_step(10)
+                .on_change(move |v| {
+                    captured.borrow_mut().push(v);
+                    Action::ToggleFullscreen
+                });
+        layout(&mut input);
+        click(&mut input, &mut ctx);
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        input.event(
+            &UiEvent::TextInput("9223372036854775808".to_owned()),
+            &mut ctx,
+        );
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(input.value(), Some(i64::MAX));
+        assert!(recorded.borrow().is_empty());
+    }
+
+    #[test]
+    fn untouched_double_focus_and_commit_do_not_publish_a_rounded_value() {
+        let recorded = Rc::new(RefCell::new(Vec::new()));
+        let captured = Rc::clone(&recorded);
+        let dispatch = |_: Action| {};
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let value = 0.12345678901234568;
+        let mut input = NumberInput::new(value, -1.0, 1.0)
+            .with_decimals(2)
+            .with_step(0.1)
+            .on_change(move |v| {
+                captured.borrow_mut().push(v);
+                Action::ToggleFullscreen
+            });
+        layout(&mut input);
+        click(&mut input, &mut ctx);
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        input.event(&UiEvent::FocusLost, &mut ctx);
+        assert_eq!(input.value(), Some(value));
+        assert!(recorded.borrow().is_empty());
     }
 
     #[test]
@@ -280,7 +436,7 @@ mod tests {
         input.event(&UiEvent::TextInput("42".into()), &mut ctx);
 
         assert_eq!(input.text(), "42");
-        assert_eq!(input.value(), Some(40.0));
+        assert_eq!(input.value(), Some(42.0));
         assert_eq!(actions.borrow().as_slice(), &[number_action(40.0)]);
     }
 
@@ -353,7 +509,7 @@ mod tests {
         input.event(&UiEvent::TextInput("0.62".into()), &mut ctx);
 
         assert_eq!(input.text(), "0.62");
-        assert_eq!(input.value(), Some(0.5));
+        assert_eq!(input.value(), Some(0.62));
         assert_eq!(actions.borrow().len(), 1);
 
         assert_eq!(
@@ -364,8 +520,8 @@ mod tests {
             EventResult::Handled
         );
 
-        assert_eq!(input.text(), "0.50");
-        assert_eq!(input.value(), Some(0.5));
+        assert_eq!(input.text(), "0.62");
+        assert_eq!(input.value(), Some(0.62));
         assert_eq!(actions.borrow().len(), 1);
     }
 
@@ -456,7 +612,7 @@ mod tests {
             &mut ctx,
         );
         input.event(&UiEvent::TextInput("42".into()), &mut ctx);
-        assert_eq!(input.value(), Some(40.0));
+        assert_eq!(input.value(), Some(42.0));
         assert_eq!(actions.borrow().len(), 1);
 
         input.event(
@@ -472,8 +628,8 @@ mod tests {
             EventResult::Handled
         );
 
-        assert_eq!(input.text(), "40");
-        assert_eq!(input.value(), Some(40.0));
+        assert_eq!(input.text(), "42");
+        assert_eq!(input.value(), Some(42.0));
         assert_eq!(actions.borrow().len(), 1);
     }
 

@@ -66,7 +66,7 @@ pub use label::Label;
 pub use list::{List, ListItem};
 pub use menu::{Dropdown, MenuItem};
 pub use node_graph_view::{NodeGraphEdge, NodeGraphNode, NodeGraphView};
-pub use number_input::{NumberInput, NumberInputChangeAction};
+pub use number_input::{NumberInput, NumberInputChangeAction, NumberInputValue};
 pub use panel_list::{
     PanelList, PanelListAction, PanelListBadge, PanelListBadgeTone, PanelListItem, PanelListState,
 };

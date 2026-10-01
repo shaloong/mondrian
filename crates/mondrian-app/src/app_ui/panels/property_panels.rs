@@ -1808,14 +1808,14 @@ pub(super) fn audio_automation_curve_control(model: &AudioAutomationCurveModel) 
     )
 }
 
-pub(super) fn numeric_slider_input_control<R>(
-    value: f32,
-    min: f32,
-    max: f32,
-    step: Option<f32>,
+pub(super) fn numeric_slider_input_control<T: mondrian_ui_widgets::NumberInputValue, R>(
+    value: T,
+    min: T,
+    max: T,
+    step: Option<T>,
     decimals: usize,
     enabled: bool,
-    action: impl Fn(f32) -> R + 'static,
+    action: impl Fn(T) -> R + 'static,
 ) -> Box<dyn Widget>
 where
     R: Into<Option<Action>>,
@@ -1826,38 +1826,46 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn numeric_slider_input_control_with_hard_range<R>(
-    value: f32,
-    soft_min: f32,
-    soft_max: f32,
-    hard_min: f32,
-    hard_max: f32,
-    step: Option<f32>,
+pub(super) fn numeric_slider_input_control_with_hard_range<
+    T: mondrian_ui_widgets::NumberInputValue,
+    R,
+>(
+    value: T,
+    soft_min: T,
+    soft_max: T,
+    hard_min: T,
+    hard_max: T,
+    step: Option<T>,
     decimals: usize,
     enabled: bool,
-    action: impl Fn(f32) -> R + 'static,
+    action: impl Fn(T) -> R + 'static,
 ) -> Box<dyn Widget>
 where
     R: Into<Option<Action>>,
 {
-    let action: Rc<dyn Fn(f32) -> Option<Action>> = Rc::new(move |value| action(value).into());
-    let mut slider =
-        Slider::new(value.clamp(soft_min, soft_max), soft_min, soft_max).enabled(enabled);
-    if let Some(step) = step.filter(|step| step.is_finite() && *step > 0.0) {
-        slider = slider.with_step(step);
+    let action: Rc<dyn Fn(T) -> Option<Action>> = Rc::new(move |value| action(value).into());
+    let mut slider = Slider::new(value.ratio(soft_min, soft_max), 0.0, 1.0)
+        .enabled(enabled && soft_min != soft_max);
+    let step = step.filter(|step| step.is_positive());
+    if let Some(step) = step {
+        let ratio_step = soft_min.offset(step, true).ratio(soft_min, soft_max);
+        if ratio_step > 0.0 {
+            slider = slider.with_step(ratio_step);
+        }
     }
     let slider_action = Rc::clone(&action);
-    slider = slider.on_change(move |value| slider_action(value));
+    slider = slider
+        .on_change(move |ratio| slider_action(T::from_ratio(ratio, soft_min, soft_max, step)));
 
-    let mut input = NumberInput::new(value as f64, hard_min as f64, hard_max as f64)
+    let mut input = NumberInput::new(value, hard_min, hard_max)
         .with_width(72.0)
         .with_decimals(decimals)
         .enabled(enabled);
-    if let Some(step) = step.filter(|step| step.is_finite() && *step > 0.0) {
-        input = input.with_step(step as f64);
+    if let Some(step) = step {
+        input = input.with_step(step);
     }
     let input_action = Rc::clone(&action);
-    input = input.on_change(move |value| input_action(value as f32));
+    input = input.on_change(move |value| input_action(value));
 
     Box::new(
         FlexContainer::row(vec![
@@ -2628,49 +2636,52 @@ pub(super) fn inspector_property_value_widget(
             )
         }
         PropertyValue::Double(value) => {
-            let ((min, max), (hard_min, hard_max)) = parameter_numeric_ranges(property, 0.0, 1.0);
+            let ((min, max), (hard_min, hard_max)) = parameter_double_ranges(property);
             let selected_clip = selection;
             let path = path.clone();
             numeric_slider_input_control_with_hard_range(
-                *value as f32,
+                *value,
                 min,
                 max,
                 hard_min,
                 hard_max,
-                property_step(property.step, None),
-                numeric_decimals(property.step, *value as f32),
+                property.step.filter(|step| step.is_finite() && *step > 0.0),
+                property.step.map_or(2, decimal_places_for_step),
                 can_edit,
-                move |v: f32| {
+                move |v: f64| {
                     inspector_property_action(
                         selected_clip,
                         target.clone(),
                         &path,
-                        PropertyValue::Double((v as f64).clamp(hard_min as f64, hard_max as f64)),
+                        PropertyValue::Double(v),
                     )
                 },
             )
         }
         PropertyValue::Int(value) => {
-            let ((min, max), (hard_min, hard_max)) = parameter_numeric_ranges(property, 0.0, 100.0);
+            let ((min, max), (hard_min, hard_max)) = parameter_integer_ranges(property);
             let selected_clip = selection;
             let path = path.clone();
             numeric_slider_input_control_with_hard_range(
-                *value as f32,
+                *value,
                 min,
                 max,
                 hard_min,
                 hard_max,
-                property_step(property.step, Some(1.0)),
+                Some(
+                    property
+                        .step
+                        .filter(|step| step.is_finite() && *step >= 1.0)
+                        .map_or(1, |step| step.round() as i64),
+                ),
                 0,
                 can_edit,
-                move |v: f32| {
+                move |v: i64| {
                     inspector_property_action(
                         selected_clip,
                         target.clone(),
                         &path,
-                        PropertyValue::Int(
-                            (v.round() as i64).clamp(hard_min as i64, hard_max as i64),
-                        ),
+                        PropertyValue::Int(v),
                     )
                 },
             )
@@ -3011,13 +3022,54 @@ pub(super) fn numeric_property_range(
     }
 }
 
+fn parameter_double_ranges(property: &InspectorEffectPropertyModel) -> ((f64, f64), (f64, f64)) {
+    let hard_min = property.hard_min.filter(|value| value.is_finite()).unwrap_or(-f64::MAX);
+    let hard_max = property.hard_max.filter(|value| value.is_finite()).unwrap_or(f64::MAX);
+    let (hard_min, hard_max) = (hard_min.min(hard_max), hard_min.max(hard_max));
+    let min = property
+        .min
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0)
+        .clamp(hard_min, hard_max);
+    let max = property
+        .max
+        .filter(|value| value.is_finite())
+        .unwrap_or(1.0)
+        .clamp(hard_min, hard_max);
+    ((min.min(max), min.max(max)), (hard_min, hard_max))
+}
+
+fn parameter_integer_ranges(property: &InspectorEffectPropertyModel) -> ((i64, i64), (i64, i64)) {
+    let hard_min = property
+        .hard_min
+        .filter(|value| value.is_finite())
+        .map_or(i64::MIN, |value| value.ceil() as i64);
+    let hard_max = property
+        .hard_max
+        .filter(|value| value.is_finite())
+        .map_or(i64::MAX, |value| value.floor() as i64);
+    let (hard_min, hard_max) = (hard_min.min(hard_max), hard_min.max(hard_max));
+    let min = property
+        .min
+        .filter(|value| value.is_finite())
+        .map_or(0, |value| value.ceil() as i64)
+        .clamp(hard_min, hard_max);
+    let max = property
+        .max
+        .filter(|value| value.is_finite())
+        .map_or(100, |value| value.floor() as i64)
+        .clamp(hard_min, hard_max);
+    ((min.min(max), min.max(max)), (hard_min, hard_max))
+}
+
 pub(super) fn parameter_numeric_ranges(
     property: &InspectorEffectPropertyModel,
     default_min: f32,
     default_max: f32,
 ) -> ((f32, f32), (f32, f32)) {
     let soft = numeric_property_range(property.min, property.max, default_min, default_max);
-    let hard = numeric_property_range(property.hard_min, property.hard_max, soft.0, soft.1);
+    let hard = numeric_property_range(property.hard_min, property.hard_max, -f32::MAX, f32::MAX);
+    let soft = (soft.0.clamp(hard.0, hard.1), soft.1.clamp(hard.0, hard.1));
     (soft, hard)
 }
 

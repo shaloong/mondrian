@@ -2677,6 +2677,31 @@ enable use the first allowed interpolation declared by the parameter owner.
 Audio curve insertion follows the same ordered contract. Undo/Redo retains typed
 integer values and stable key identities; evaluation remains in Core.
 
-The current Inspector integer value input still passes through f32 and requires
-separate exact integer input work before claiming unrestricted integer UI
-precision.
+### Typed numeric inputs
+
+`NumberInput<T>` keeps Float32, Double and signed Integer storage through parsing,
+dispatch and keyboard stepping. Integer fields parse i64 directly and saturate
+keyboard increments at the signed boundaries. Display text round-trips the typed
+value; minimum decimals never round a retained parameter. Editor increments apply
+to nudging and slider snapping, not to arbitrary text entry. Unchanged valid text
+publishes no duplicate value action. Escape restores the value captured at focus;
+Enter establishes a new committed focus baseline. Escape releases focus so a
+subsequent shell cancellation can close the enclosing dialog.
+
+The Inspector numeric composite uses a normalized f32 slider for presentation
+and a typed NumberInput for author values. Integer pointer mapping uses a bounded
+i128 numerator with 24-bit slider coordinates, preserving exact endpoints and
+nearby integer steps even beyond f64's exact integer range. Double bounds and
+steps never pass through f32. Missing hard bounds retain the scalar's full finite
+range; soft bounds shape slider travel independently of manual entry.
+
+The production acceptance fixture registers a valid visual effect definition,
+types large Integer and high-precision Double values through the Inspector,
+decodes and commits the product Actions, then checks exact Undo/Redo and Escape
+restoration. Author admission and evaluation remain in Core/editor transactions.
+
+
+Sequence dimensions/start frames and export dimension, bitrate, CRF, GOP and
+palette fields use Integer input storage instead of floating value adapters.
+Audio Processor Rack and Mixer numeric adapters still narrow their canonical
+f64 values through f32 and remain a separate precision migration requirement.

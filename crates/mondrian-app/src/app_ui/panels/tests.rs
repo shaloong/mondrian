@@ -5663,7 +5663,170 @@ fn inspector_effect_vec3_property_widget_dispatches_component_change() {
 }
 
 #[test]
-fn inspector_effect_float_property_number_input_honors_descriptor_step() {
+fn precise_inspector_entry_commits_and_undoes_exact_integer_and_double_values() {
+    use mondrian_core::automation::PropertyDescriptor;
+    use mondrian_effects::{
+        instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
+        EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
+        EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
+        EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
+    };
+    let kind = EffectType::Plugin("plugin.test.precise_inspector".to_owned());
+    let cases = [
+        (
+            "float",
+            PropertyValue::Float(0.12345679),
+            "16777220",
+            PropertyValue::Float(16777220.0),
+        ),
+        (
+            "integer",
+            PropertyValue::Int(9_007_199_254_740_993),
+            "9223372036854775806",
+            PropertyValue::Int(i64::MAX - 1),
+        ),
+        (
+            "double",
+            PropertyValue::Double(0.12345678901234568),
+            "0.23456789012345678",
+            PropertyValue::Double(0.23456789012345678),
+        ),
+    ];
+    let mut builder = EffectPluginDefinitionBuilder::new(
+        kind.key(),
+        "Precise Inspector",
+        EffectColorDomainContract::SCENE_LINEAR,
+    )
+    .with_execution_contract(EffectExecutionContract {
+        execution_modes: EffectExecutionModes::CPU_F32,
+        determinism: EffectDeterminism::Deterministic,
+        state_model: EffectStateModel::Stateless,
+        temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+        roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+        resource_lifetime: EffectResourceLifetime::Frame,
+        topology: EffectGraphTopology::LinearChain,
+    })
+    .with_branching_graph(|_, _, graph| {
+        graph.apply(EffectRenderOp::Sharpen { amount: 0.0 });
+    });
+    for (name, initial, _, _) in &cases {
+        builder = builder.property(
+            PropertyDescriptor::new(
+                format!("plugin.test.precise_inspector.{name}"),
+                *name,
+                initial.clone(),
+            )
+            .with_parameter_id(kind.parameter_id(name).expect("parameter")),
+        );
+    }
+    register_effect_definition(builder.build()).expect("definition");
+    let effect = instantiate_effect_node(kind.clone()).expect("effect");
+    let effect_id = effect.id;
+    let mut sequence = Sequence::new("Precision");
+    let track_id = sequence.video_tracks[0].id;
+    let mut clip = Clip::new(
+        AssetId::new(),
+        TimelineTime::ZERO,
+        TimelineTime::new(1, 1).expect("duration"),
+    )
+    .expect("clip");
+    let clip_id = clip.id;
+    clip.add_effect_node(effect);
+    sequence.video_tracks[0].add_clip(clip).expect("add clip");
+    let mut state = crate::app::AppState::new();
+    state.test_set_sequence(Some(sequence));
+    let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
+    for (name, initial, text, expected) in cases {
+        let parameter_id = kind.parameter_id(name).expect("parameter");
+        let owned = state
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(clip_id)
+            .expect("clip")
+            .effects[0]
+            .properties
+            .iter()
+            .map(|(_, property)| property)
+            .find(|property| property.descriptor.schema.parameter_id == parameter_id)
+            .expect("property")
+            .clone();
+        let path = owned.descriptor.path.clone();
+        let property = InspectorEffectPropertyModel {
+            schema: owned.descriptor.schema.clone(),
+            address: owned.address(),
+            path: path.clone(),
+            label: name.to_owned(),
+            group_name: None,
+            value: initial.clone(),
+            min: None,
+            max: None,
+            hard_min: None,
+            hard_max: None,
+            step: (name == "double").then_some(0.1),
+            is_animatable: true,
+            numeric_curve: None,
+        };
+        let mut widget =
+            effect_property_value_widget(&property, true, Some(selection), effect_id, path.clone());
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        widget.event(
+            &UiEvent::MouseDown {
+                position: Point::new(190.0, 14.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        widget.event(&UiEvent::TextInput(text.to_owned()), &mut ctx);
+        assert_eq!(actions.borrow().len(), 1);
+        state.dispatch_action(actions.borrow()[0].clone()).expect("author value");
+        let snapshot = |state: &crate::app::AppState| {
+            state
+                .active_sequence()
+                .expect("sequence")
+                .find_clip(clip_id)
+                .expect("clip")
+                .effects[0]
+                .properties
+                .property(&path)
+                .expect("property")
+                .static_value()
+                .clone()
+        };
+        assert_eq!(snapshot(&state), expected);
+        assert!(state.undo_timeline().expect("undo"));
+        assert_eq!(snapshot(&state), initial);
+        assert!(state.redo_timeline().expect("redo"));
+        assert_eq!(snapshot(&state), expected);
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(actions.borrow().len(), 2);
+        state.dispatch_action(actions.borrow()[1].clone()).expect("cancel edit");
+        assert_eq!(snapshot(&state), initial);
+    }
+}
+
+#[test]
+fn inspector_effect_float_property_text_input_preserves_value_between_steps() {
     let effect_id = EffectId::new();
     let selection = SelectedClipRef {
         track_id: TrackId::new(),
@@ -5744,8 +5907,8 @@ fn inspector_effect_float_property_number_input_honors_descriptor_step() {
         panic!("expected Float payload");
     };
     assert!(
-        (value - 0.5).abs() <= 0.0001,
-        "expected stepped value 0.5 from typed 0.62, got {value}"
+        (value - 0.62).abs() <= 0.0001,
+        "expected exact typed value 0.62, got {value}"
     );
 }
 
@@ -5920,7 +6083,7 @@ fn inspector_effect_float_property_keyboard_nudge_sanitizes_descriptor_bounds() 
         panic!("expected Float payload");
     };
     assert!(
-        (value - 0.5).abs() <= 0.0001,
+        (value - 0.45).abs() <= 0.0001,
         "expected finite stepped nudge, got {value}"
     );
 }
@@ -5992,18 +6155,22 @@ fn inspector_effect_int_property_number_input_defaults_to_unit_step() {
         EventResult::Handled
     );
     assert_eq!(
-        widget.event(&UiEvent::TextInput("12.4".to_string()), &mut ctx),
+        widget.event(&UiEvent::TextInput("12".to_string()), &mut ctx),
         EventResult::Handled
     );
+    widget.event(
+        &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+        &mut ctx,
+    );
     let recorded = actions.borrow();
-    assert_eq!(recorded.len(), 1);
-    let Action::Custom { payload, .. } = &recorded[0] else {
+    assert_eq!(recorded.len(), 2);
+    let Action::Custom { payload, .. } = &recorded[1] else {
         panic!("expected inspector custom action, got {:?}", recorded[0]);
     };
     let payload: VisualEffectSetParameterValuePayload =
         serde_json::from_value(payload.clone()).expect("set effect property payload");
     assert_eq!(payload.parameter, property.address);
-    assert_eq!(payload.value, PropertyValue::Int(12));
+    assert_eq!(payload.value, PropertyValue::Int(13));
 }
 
 #[test]
