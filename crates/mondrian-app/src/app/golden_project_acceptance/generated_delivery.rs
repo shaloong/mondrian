@@ -22,7 +22,7 @@ use crate::app::preview_unavailability::{PreviewOutputStage, PreviewUnavailabili
 use crate::app::preview_viewer_plan::ResolvedPreviewElement;
 use crate::app::ui_actions::{
     assets_prepare_drag_action, clip_write_parameter_values_action, timeline_trim_clips_action,
-    AssetsPrepareDragPayload, ClipParameterValueWrite, ClipWriteParameterValuesPayload,
+    AssetsPrepareDragPayload, ClipWriteParameterValuesPayload, ParameterValueWrite,
     TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, ClipOverlapMode};
@@ -1330,11 +1330,11 @@ pub(super) fn execute_delivery_stage(
         clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
             clip_id: solid_clip_id,
             writes: vec![
-                ClipParameterValueWrite::Value {
+                ParameterValueWrite::Value {
                     parameter: position_parameter,
                     value: PropertyValue::Vec2(glam::Vec2::new(96.0, 54.0)),
                 },
-                ClipParameterValueWrite::Value {
+                ParameterValueWrite::Value {
                     parameter: scale_parameter,
                     value: PropertyValue::Vec2(glam::Vec2::splat(0.9)),
                 },
@@ -1346,7 +1346,7 @@ pub(super) fn execute_delivery_stage(
         "set-delivery-opacity",
         clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
             clip_id: solid_clip_id,
-            writes: vec![ClipParameterValueWrite::Value {
+            writes: vec![ParameterValueWrite::Value {
                 parameter: opacity_parameter,
                 value: PropertyValue::Float(0.8),
             }],

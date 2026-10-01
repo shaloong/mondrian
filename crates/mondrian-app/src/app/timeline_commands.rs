@@ -455,7 +455,7 @@ impl AppState {
         if !self.can_undo_action() {
             return Ok(false);
         }
-        self.stop()?;
+        self.pause()?;
         let commit = self.authoring.as_mut().map(AuthoringSession::undo).transpose()?.flatten();
         let Some(commit) = commit else {
             return Ok(false);
@@ -469,7 +469,7 @@ impl AppState {
         if !self.can_redo_action() {
             return Ok(false);
         }
-        self.stop()?;
+        self.pause()?;
         let commit = self.authoring.as_mut().map(AuthoringSession::redo).transpose()?.flatten();
         let Some(commit) = commit else {
             return Ok(false);

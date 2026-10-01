@@ -6,13 +6,20 @@ Mondrian is a native video editor organized around strict crate boundaries. The 
 
 ## Layers
 
+Core owns the shared `ParameterValueWrite` algebra: complete typed values or
+sparse numeric components at a stable `AnimationParameterAddress`. Clip, Effect
+and Mask adapters supply exact owner-local time to `PropertyBag::prepare_parameter_write`;
+there is no owner-specific normalization or curve interpretation.
+
 Stable-address numeric component preparation lives in Core's `PropertyBag`.
 It validates the complete sparse update, normalizes through the canonical
 property representation and omits unchanged components before returning the
 existing `WriteChannels` mutation. It allocates component values without cloning
 animation curves. Duplicate indices fail before any property mutation. Existing
 keys retain their IDs, handles and temporal constraints; untouched channels keep
-their independent curves. Application adapters commit these mutations through
+their independent curves. Each edited channel normalizes its own constraints;
+sparse writes do not normalize or detach untouched sibling curve allocations.
+Application adapters commit these mutations through
 the authoring session, with the same atomic admission and Undo/Redo as complete
 parameter writes.
 

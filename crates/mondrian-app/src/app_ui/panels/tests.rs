@@ -5529,8 +5529,7 @@ fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity
         Some(102.0),
         "two samples plus the add row own their full inspector height"
     );
-    let mut widget =
-        effect_property_value_widget(&property, true, Some(selection), effect_id, path.clone());
+    let mut widget = effect_property_value_widget(&property, true, Some(selection), effect_id);
     widget.layout(Rect::new(0.0, 0.0, 220.0, 102.0));
     assert_eq!(widget.child_count(), 3);
 
@@ -5543,7 +5542,6 @@ fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity
     let Some(Action::Custom { namespace, name, payload }) = qualifier_sample_set_action(
         Some(selection),
         InspectorPropertyTarget::Effect { effect_id, parameter: parameter.clone() },
-        &path,
         changed.clone(),
     ) else {
         panic!("valid Qualifier edit must dispatch");
@@ -5552,11 +5550,14 @@ fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity
     assert_eq!(name, VISUAL_EFFECT_SET_PARAMETER_VALUE);
     let payload: VisualEffectSetParameterValuePayload =
         serde_json::from_value(payload).expect("Qualifier action payload");
+    let ParameterValueWrite::Value { parameter, value } = payload.write else {
+        panic!("expected complete property write");
+    };
     assert_eq!(payload.clip_id, selection.clip_id);
     assert_eq!(payload.effect_id, effect_id);
-    assert_eq!(payload.parameter, parameter);
+    assert_eq!(parameter, parameter);
     assert_eq!(
-        payload.value,
+        value,
         PropertyValue::QualifierSamples(
             QualifierSampleSet::new(changed).expect("same valid sample payload")
         )
@@ -5568,7 +5569,6 @@ fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity
             effect_id,
             parameter: test_parameter_address("mondrian.effect.builtin.qualifier.samples"),
         },
-        &path,
         vec![QualifierSample::new(
             [1.0, 0.0, 0.0],
             QualifierSampleOperation::Exclude,
@@ -5581,7 +5581,6 @@ fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity
             effect_id,
             parameter: test_parameter_address("mondrian.effect.builtin.qualifier.samples"),
         },
-        &path,
         Vec::new(),
     )
     .is_none());
@@ -5613,13 +5612,7 @@ fn inspector_effect_curve_editor_dispatches_structured_curve_value() {
         is_animatable: false,
         numeric_curve: None,
     };
-    let mut widget = effect_property_value_widget(
-        &property,
-        true,
-        Some(selection),
-        effect_id,
-        property.path.clone(),
-    );
+    let mut widget = effect_property_value_widget(&property, true, Some(selection), effect_id);
     widget.layout(Rect::new(0.0, 0.0, 220.0, 150.0));
     let actions = RefCell::new(Vec::new());
     let dispatch = |action| actions.borrow_mut().push(action);
@@ -5656,10 +5649,13 @@ fn inspector_effect_curve_editor_dispatches_structured_curve_value() {
     assert_eq!(name, VISUAL_EFFECT_SET_PARAMETER_VALUE);
     let payload: VisualEffectSetParameterValuePayload =
         serde_json::from_value(payload.clone()).expect("curve property payload");
+    let ParameterValueWrite::Value { parameter, value } = payload.write else {
+        panic!("expected complete property write");
+    };
     assert_eq!(payload.clip_id, selection.clip_id);
     assert_eq!(payload.effect_id, effect_id);
-    assert_eq!(payload.parameter, property.address);
-    let PropertyValue::Curve(curve) = payload.value else {
+    assert_eq!(parameter, property.address);
+    let PropertyValue::Curve(curve) = value else {
         panic!("expected structured Curve payload");
     };
     assert_eq!(curve.points().len(), 3);
@@ -5694,13 +5690,7 @@ fn inspector_effect_vec3_property_widget_dispatches_component_change() {
         is_animatable: true,
         numeric_curve: None,
     };
-    let mut widget = effect_property_value_widget(
-        &property,
-        true,
-        Some(selection),
-        effect_id,
-        property.path.clone(),
-    );
+    let mut widget = effect_property_value_widget(&property, true, Some(selection), effect_id);
     widget.layout(Rect::new(0.0, 0.0, 220.0, 94.0));
 
     let actions = RefCell::new(Vec::new());
@@ -5734,20 +5724,25 @@ fn inspector_effect_vec3_property_widget_dispatches_component_change() {
     };
     assert_eq!(namespace, VISUAL_EFFECT_NAMESPACE);
     assert_eq!(name, VISUAL_EFFECT_SET_PARAMETER_VALUE);
+    assert_eq!(
+        payload
+            .get("write")
+            .and_then(|write| write.get("kind"))
+            .and_then(serde_json::Value::as_str),
+        Some("channels"),
+        "one axis control must emit a sparse write, never captured sibling values"
+    );
     let payload: VisualEffectSetParameterValuePayload =
         serde_json::from_value(payload.clone()).expect("set effect property payload");
     assert_eq!(payload.clip_id, selection.clip_id);
     assert_eq!(payload.effect_id, effect_id);
-    assert_eq!(payload.parameter, property.address);
-    let PropertyValue::Vec3(value) = payload.value else {
-        panic!("expected Vec3 payload");
+    let ParameterValueWrite::Channels { parameter, channel_values } = payload.write else {
+        panic!("expected sparse component write");
     };
-    assert_eq!(value.x, 0.1);
-    assert_eq!(value.y, 0.2);
-    assert!(
-        value.z > 0.3,
-        "clicking the third component slider should update z, got {value:?}"
-    );
+    assert_eq!(parameter, property.address);
+    assert_eq!(channel_values.len(), 1);
+    assert_eq!(channel_values[0].0, 2);
+    assert!(channel_values[0].1 > 0.3, "third slider should change z");
 }
 
 #[test]
@@ -5949,8 +5944,7 @@ fn precise_inspector_entry_commits_and_undoes_exact_integer_and_double_values() 
             is_animatable: true,
             numeric_curve: None,
         };
-        let mut widget =
-            effect_property_value_widget(&property, true, Some(selection), effect_id, path.clone());
+        let mut widget = effect_property_value_widget(&property, true, Some(selection), effect_id);
         widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
@@ -6043,13 +6037,7 @@ fn inspector_effect_float_property_text_input_preserves_value_between_steps() {
         is_animatable: true,
         numeric_curve: None,
     };
-    let mut widget = effect_property_value_widget(
-        &property,
-        true,
-        Some(selection),
-        effect_id,
-        property.path.clone(),
-    );
+    let mut widget = effect_property_value_widget(&property, true, Some(selection), effect_id);
     widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
     let actions = RefCell::new(Vec::new());
     let dispatch = |action| actions.borrow_mut().push(action);
@@ -6099,8 +6087,11 @@ fn inspector_effect_float_property_text_input_preserves_value_between_steps() {
     };
     let payload: VisualEffectSetParameterValuePayload =
         serde_json::from_value(payload.clone()).expect("set effect property payload");
-    assert_eq!(payload.parameter, property.address);
-    let PropertyValue::Float(value) = payload.value else {
+    let ParameterValueWrite::Value { parameter, value } = payload.write else {
+        panic!("expected complete property write");
+    };
+    assert_eq!(parameter, property.address);
+    let PropertyValue::Float(value) = value else {
         panic!("expected Float payload");
     };
     assert!(
@@ -6146,13 +6137,7 @@ fn inspector_disabled_effect_property_row_remains_editable_for_unlocked_clip() {
         "effect runtime bypass state should not imply read-only property rows"
     );
 
-    let mut widget = effect_property_value_widget(
-        &property,
-        true,
-        Some(selection),
-        effect_id,
-        property.path.clone(),
-    );
+    let mut widget = effect_property_value_widget(&property, true, Some(selection), effect_id);
     widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
     let actions = RefCell::new(Vec::new());
     let dispatch = |action| actions.borrow_mut().push(action);
@@ -6189,10 +6174,13 @@ fn inspector_disabled_effect_property_row_remains_editable_for_unlocked_clip() {
     assert_eq!(name, VISUAL_EFFECT_SET_PARAMETER_VALUE);
     let payload: VisualEffectSetParameterValuePayload =
         serde_json::from_value(payload.clone()).expect("set effect property payload");
+    let ParameterValueWrite::Value { parameter, value } = payload.write else {
+        panic!("expected complete property write");
+    };
     assert_eq!(payload.clip_id, selection.clip_id);
     assert_eq!(payload.effect_id, effect_id);
-    assert_eq!(payload.parameter, property.address);
-    let PropertyValue::Float(value) = payload.value else {
+    assert_eq!(parameter, property.address);
+    let PropertyValue::Float(value) = value else {
         panic!("expected Float payload");
     };
     assert!(
@@ -6227,13 +6215,7 @@ fn inspector_effect_float_property_keyboard_nudge_sanitizes_descriptor_bounds() 
         is_animatable: true,
         numeric_curve: None,
     };
-    let mut widget = effect_property_value_widget(
-        &property,
-        true,
-        Some(selection),
-        effect_id,
-        property.path.clone(),
-    );
+    let mut widget = effect_property_value_widget(&property, true, Some(selection), effect_id);
     widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
     let actions = RefCell::new(Vec::new());
     let dispatch = |action| actions.borrow_mut().push(action);
@@ -6275,8 +6257,11 @@ fn inspector_effect_float_property_keyboard_nudge_sanitizes_descriptor_bounds() 
     };
     let payload: VisualEffectSetParameterValuePayload =
         serde_json::from_value(payload.clone()).expect("set effect property payload");
-    assert_eq!(payload.parameter, property.address);
-    let PropertyValue::Float(value) = payload.value else {
+    let ParameterValueWrite::Value { parameter, value } = payload.write else {
+        panic!("expected complete property write");
+    };
+    assert_eq!(parameter, property.address);
+    let PropertyValue::Float(value) = value else {
         panic!("expected Float payload");
     };
     assert!(
@@ -6311,13 +6296,7 @@ fn inspector_effect_int_property_number_input_defaults_to_unit_step() {
         is_animatable: false,
         numeric_curve: None,
     };
-    let mut widget = effect_property_value_widget(
-        &property,
-        true,
-        Some(selection),
-        effect_id,
-        property.path.clone(),
-    );
+    let mut widget = effect_property_value_widget(&property, true, Some(selection), effect_id);
     widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
     let actions = RefCell::new(Vec::new());
     let dispatch = |action| actions.borrow_mut().push(action);
@@ -6366,8 +6345,11 @@ fn inspector_effect_int_property_number_input_defaults_to_unit_step() {
     };
     let payload: VisualEffectSetParameterValuePayload =
         serde_json::from_value(payload.clone()).expect("set effect property payload");
-    assert_eq!(payload.parameter, property.address);
-    assert_eq!(payload.value, PropertyValue::Int(13));
+    let ParameterValueWrite::Value { parameter, value } = payload.write else {
+        panic!("expected complete property write");
+    };
+    assert_eq!(parameter, property.address);
+    assert_eq!(value, PropertyValue::Int(13));
 }
 
 #[test]
@@ -6394,13 +6376,254 @@ fn inspector_effect_color_property_action_uses_typed_payload() {
     assert_eq!(name, VISUAL_EFFECT_SET_PARAMETER_VALUE);
     let payload: VisualEffectSetParameterValuePayload =
         serde_json::from_value(payload).expect("set effect property payload");
+    let ParameterValueWrite::Value { parameter, value } = payload.write else {
+        panic!("expected complete property write");
+    };
     assert_eq!(payload.clip_id, selection.clip_id);
     assert_eq!(payload.effect_id, effect_id);
     assert_eq!(
-        payload.parameter.parameter_id,
+        parameter.parameter_id,
         mondrian_core::ParameterId::new_static("mondrian.test.key_color")
     );
-    assert_eq!(payload.value, PropertyValue::Color(color));
+    assert_eq!(value, PropertyValue::Color(color));
+}
+
+#[test]
+fn effect_vector_controls_preserve_current_siblings_keys_and_exact_history() {
+    use mondrian_core::automation::PropertyDescriptor;
+    use mondrian_effects::{
+        instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
+        EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
+        EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
+        EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
+    };
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    let kind = EffectType::Plugin("plugin.test.sparse_vector_controls".to_owned());
+    let initial = [
+        PropertyValue::Vec2(glam::Vec2::new(f32::from_bits(0x3f800001), 0.75)),
+        PropertyValue::Vec3(glam::Vec3::new(f32::from_bits(0x3f800001), 0.75, 0.5)),
+        PropertyValue::Vec4([f32::from_bits(0x3f800001), 0.75, 0.5, 0.25]),
+    ];
+    let mut builder = EffectPluginDefinitionBuilder::new(
+        kind.key(),
+        "Sparse vector controls",
+        EffectColorDomainContract::SCENE_LINEAR,
+    )
+    .with_execution_contract(EffectExecutionContract {
+        execution_modes: EffectExecutionModes::CPU_F32,
+        determinism: EffectDeterminism::Deterministic,
+        state_model: EffectStateModel::Stateless,
+        temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+        roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+        resource_lifetime: EffectResourceLifetime::Frame,
+        topology: EffectGraphTopology::LinearChain,
+    })
+    .with_branching_graph(|_, _, graph| {
+        graph.apply(EffectRenderOp::Sharpen { amount: 0.0 });
+    });
+    for (index, value) in initial.iter().enumerate() {
+        let name = format!("vector{index}");
+        builder = builder.property(
+            PropertyDescriptor::new(name.clone(), name.clone(), value.clone())
+                .with_parameter_id(kind.parameter_id(&name).expect("parameter")),
+        );
+    }
+    register_effect_definition(builder.build()).expect("definition");
+    let author_time = TimelineTime::new(3, 25).expect("Clip-local time");
+    for (dimension, initial) in initial.into_iter().enumerate() {
+        let count = dimension + 2;
+        let path = format!("vector{dimension}");
+        for animated in [false, true] {
+            for index in 0..count {
+                let mut effect = instantiate_effect_node(kind.clone()).expect("effect");
+                let effect_id = effect.id;
+                if animated {
+                    effect
+                        .apply_property_mutation(PropertyMutation::EnableAnimation {
+                            path: path.clone(),
+                            time: TimelineTime::ZERO,
+                        })
+                        .expect("enable animation");
+                    effect
+                        .apply_property_mutation(PropertyMutation::WriteChannels {
+                            path: path.clone(),
+                            time: author_time,
+                            channel_values: initial
+                                .to_channel_values()
+                                .into_iter()
+                                .enumerate()
+                                .collect(),
+                            interpolation: mondrian_core::automation::InterpolationType::Linear,
+                        })
+                        .expect("seed independent keys");
+                }
+                let owned = effect.properties.property(&path).expect("property").clone();
+                let mut sequence = Sequence::new("Vector controls");
+                sequence.settings.frame_rate = Rational::new(25, 1);
+                let track_id = sequence.video_tracks[0].id;
+                let mut clip = Clip::new(
+                    AssetId::new(),
+                    TimelineTime::new(2, 5).expect("offset"),
+                    TimelineTime::new(4, 5).expect("duration"),
+                )
+                .expect("clip");
+                let clip_id = clip.id;
+                clip.add_effect_node(effect);
+                sequence.video_tracks[0].add_clip(clip).expect("add clip");
+                let mut state = AppState::new();
+                state.test_set_sequence(Some(sequence));
+                state.seek(13).expect("seek inside offset Clip");
+                let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
+                let model = InspectorEffectPropertyModel {
+                    schema: owned.descriptor.schema.clone(),
+                    address: owned.address(),
+                    path: path.clone(),
+                    label: path.clone(),
+                    group_name: None,
+                    value: initial.clone(),
+                    min: None,
+                    max: None,
+                    hard_min: None,
+                    hard_max: None,
+                    step: None,
+                    is_animatable: true,
+                    numeric_curve: None,
+                };
+                // Build the actual widget before an independent author edit.
+                let mut widget =
+                    effect_property_value_widget(&model, true, Some(selection), effect_id);
+                let sibling = (index + 1) % count;
+                let sibling_value = f32::from_bits(0x3fc00001);
+                let component_action = |index, value| {
+                    visual_effect_set_parameter_value_action(VisualEffectSetParameterValuePayload {
+                        clip_id,
+                        effect_id,
+                        write: ParameterValueWrite::Channels {
+                            parameter: owned.address(),
+                            channel_values: vec![(index, value)],
+                        },
+                    })
+                };
+                state
+                    .dispatch_action(component_action(sibling, f64::from(sibling_value)))
+                    .expect("concurrent sibling write");
+                let before = state.active_sequence().expect("sequence").clone();
+                let before_property = before.find_clip(clip_id).expect("clip").effects[0]
+                    .properties
+                    .property_by_address(&owned.address())
+                    .expect("stable property")
+                    .1
+                    .clone();
+                let row = widget.child_mut(index).expect("component row");
+                row.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+                let actions = RefCell::new(Vec::new());
+                let dispatch = |action| actions.borrow_mut().push(action);
+                let mut focus = DummyFocus;
+                let mut shortcut = DummyShortcut;
+                let mut tooltip = DummyTooltip;
+                let mut requests = EventRequests::default();
+                let mut ctx = event_ctx(
+                    &mut focus,
+                    &mut shortcut,
+                    &mut tooltip,
+                    &mut requests,
+                    &dispatch,
+                );
+                row.event(
+                    &UiEvent::MouseDown {
+                        position: Point::new(190.0, 14.0),
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                );
+                row.event(
+                    &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+                    &mut ctx,
+                );
+                row.event(&UiEvent::TextInput("0.625".to_owned()), &mut ctx);
+                assert!(actions.borrow().is_empty(), "draft must not write");
+                row.event(
+                    &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                    &mut ctx,
+                );
+                assert_eq!(actions.borrow().len(), 1);
+                state.dispatch_action(actions.borrow()[0].clone()).expect("commit component");
+                let after = state.active_sequence().expect("sequence").clone();
+                let property = after.find_clip(clip_id).expect("clip").effects[0]
+                    .properties
+                    .property_by_address(&owned.address())
+                    .expect("stable property")
+                    .1;
+                let values = property.evaluate(author_time).to_channel_values();
+                assert_eq!(values[index], f64::from(0.625_f32));
+                assert_eq!(values[sibling], f64::from(sibling_value));
+                for other in 0..count {
+                    if other != index {
+                        assert_eq!(property.channel(other), before_property.channel(other));
+                    }
+                }
+                if animated {
+                    let old_key = before_property
+                        .channel(index)
+                        .expect("channel")
+                        .keyframes()
+                        .last()
+                        .expect("key");
+                    let key =
+                        property.channel(index).expect("channel").keyframes().last().expect("key");
+                    assert_eq!(key.id, old_key.id);
+                    assert_eq!(key.time, author_time);
+                    assert_eq!(key.interp_in, old_key.interp_in);
+                    assert_eq!(key.interp_out, old_key.interp_out);
+                    assert_eq!(key.temporal_flags, old_key.temporal_flags);
+                }
+                assert!(state.undo_timeline().expect("undo component"));
+                assert_eq!(
+                    state.current_timeline_time().expect("current time"),
+                    Some(TimelineTime::new(13, 25).expect("timeline time")),
+                    "undo must preserve the edit cursor",
+                );
+                let undone = state.active_sequence().expect("sequence");
+                assert_eq!(undone.revision.get(), after.revision.get() + 1);
+                let mut expected = before;
+                expected.revision = undone.revision;
+                assert_eq!(undone, &expected);
+                assert!(state.redo_timeline().expect("redo component"));
+                assert_eq!(
+                    state.current_timeline_time().expect("current time"),
+                    Some(TimelineTime::new(13, 25).expect("timeline time")),
+                    "redo must preserve the edit cursor",
+                );
+                let redone = state.active_sequence().expect("sequence");
+                assert_eq!(redone.revision.get(), after.revision.get() + 2);
+                let mut expected = after;
+                expected.revision = redone.revision;
+                assert_eq!(redone, &expected);
+                // Canonical no-op is disabled and must not advance the author generation.
+                let noop = component_action(index, f64::from(0.625_f32));
+                assert!(!app_state_action_enabled(&noop, &state));
+                assert!(matches!(
+                    state.dispatch_action(noop),
+                    Err(mondrian_core::MondrianError::ActionNotExecuted { .. })
+                ));
+                assert_eq!(state.active_sequence().expect("sequence"), &expected);
+                let invalid = visual_effect_set_parameter_value_action(
+                    VisualEffectSetParameterValuePayload {
+                        clip_id,
+                        effect_id,
+                        write: ParameterValueWrite::Channels {
+                            parameter: owned.address(),
+                            channel_values: vec![(index, 0.7), (index, 0.8)],
+                        },
+                    },
+                );
+                assert!(!app_state_action_enabled(&invalid, &state));
+                assert!(state.dispatch_action(invalid).is_err());
+                assert_eq!(state.active_sequence().expect("sequence"), &expected);
+            }
+        }
+    }
 }
 
 #[test]
@@ -6606,8 +6829,7 @@ fn numeric_slider_input_control_text_input_dispatches_typed_transform_action() {
     assert_eq!(payload.clip_id, selection.clip_id);
     assert_eq!(payload.writes.len(), 1);
     assert_eq!(*payload.writes[0].parameter(), expected_parameter);
-    let ClipParameterValueWrite::Value { value: PropertyValue::Float(value), .. } =
-        payload.writes[0]
+    let ParameterValueWrite::Value { value: PropertyValue::Float(value), .. } = payload.writes[0]
     else {
         panic!("rotation payload must remain Float");
     };

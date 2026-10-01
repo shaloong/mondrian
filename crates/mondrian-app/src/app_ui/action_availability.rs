@@ -292,8 +292,8 @@ mod tests {
         timeline_trim_selected_clips_to_playhead_action, track_add_action, track_move_action,
         track_set_author_control_action, track_set_edit_policy_action,
         viewer_set_preview_resolution_scale_action, AssetsDeleteSelectionPayload,
-        AssetsImportFilesPayload, AssetsMoveSelectionPayload, ClipParameterValueWrite,
-        ClipWriteParameterValuesPayload, ExportDraftEdit, ProjectCreateWithSettingsPayload,
+        AssetsImportFilesPayload, AssetsMoveSelectionPayload, ClipWriteParameterValuesPayload,
+        ExportDraftEdit, ParameterValueWrite, ProjectCreateWithSettingsPayload,
         SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineExportRequest,
         TimelineInOutPointKind, TimelineMoveClipPayload, TimelineSelectClipPayload,
         TimelineSetInOutPointPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
@@ -600,7 +600,7 @@ mod tests {
             });
         let transform = clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
             clip_id,
-            writes: vec![ClipParameterValueWrite::Value {
+            writes: vec![ParameterValueWrite::Value {
                 parameter: position_parameter.clone(),
                 value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
             }],
@@ -619,7 +619,7 @@ mod tests {
 
         let stale = clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
             clip_id: ClipId::new(),
-            writes: vec![ClipParameterValueWrite::Value {
+            writes: vec![ParameterValueWrite::Value {
                 parameter: position_parameter,
                 value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
             }],

@@ -133,8 +133,7 @@ impl AppState {
                 })
             }
             VisualMaskProductAction::SetParameterValue(payload) => {
-                let VisualMaskSetParameterValuePayload { clip_id, mask_id, parameter, value } =
-                    *payload;
+                let VisualMaskSetParameterValuePayload { clip_id, mask_id, write } = *payload;
                 let context = self.visual_mask_context(
                     "visual_mask_set_parameter_value",
                     clip_id,
@@ -148,11 +147,10 @@ impl AppState {
                             "there is no active Sequence",
                         )
                     })?;
-                    video_clip(sequence, clip_id)?.prepare_mask_parameter_value(
+                    video_clip(sequence, clip_id)?.prepare_mask_parameter_write(
                         mask_id,
-                        &parameter,
+                        &write,
                         context.clip_time,
-                        value,
                     )?
                 }
                 .ok_or_else(|| {
@@ -493,8 +491,10 @@ mod tests {
                 VisualMaskSetParameterValuePayload {
                     clip_id,
                     mask_id,
-                    parameter: parameter.clone(),
-                    value: PropertyValue::Float(0.35),
+                    write: ParameterValueWrite::Value {
+                        parameter: parameter.clone(),
+                        value: PropertyValue::Float(0.35),
+                    },
                 },
             )),
         )
@@ -514,8 +514,10 @@ mod tests {
                 VisualMaskSetParameterValuePayload {
                     clip_id,
                     mask_id,
-                    parameter,
-                    value: PropertyValue::Float(0.5),
+                    write: ParameterValueWrite::Value {
+                        parameter,
+                        value: PropertyValue::Float(0.5)
+                    },
                 },
             )),
         )

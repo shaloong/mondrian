@@ -2056,7 +2056,7 @@ pub(super) fn inspector_parameter_action(
     Some(clip_write_parameter_values_action(
         ClipWriteParameterValuesPayload {
             clip_id: selection.clip_id,
-            writes: vec![ClipParameterValueWrite::Value { parameter, value }],
+            writes: vec![ParameterValueWrite::Value { parameter, value }],
         },
     ))
 }
@@ -2072,7 +2072,7 @@ pub(super) fn inspector_parameter_channel_action(
     Some(clip_write_parameter_values_action(
         ClipWriteParameterValuesPayload {
             clip_id: selection.clip_id,
-            writes: vec![ClipParameterValueWrite::Channels {
+            writes: vec![ParameterValueWrite::Channels {
                 parameter,
                 channel_values: vec![(index, value)],
             }],
@@ -2563,13 +2563,7 @@ pub(super) fn inspector_property_row(
     selection: Option<SelectedClipRef>,
     target: InspectorPropertyTarget,
 ) -> PropertyRow {
-    let value = inspector_property_value_widget(
-        property,
-        can_edit,
-        selection,
-        target.clone(),
-        property.path.clone(),
-    );
+    let value = inspector_property_value_widget(property, can_edit, selection, target.clone());
     let value: Box<dyn Widget> =
         if let (InspectorPropertyTarget::Effect { effect_id, .. }, Some(curve), Some(selection)) =
             (&target, &property.numeric_curve, selection)
@@ -2640,14 +2634,12 @@ pub(super) fn effect_property_value_widget(
     can_edit: bool,
     selection: Option<SelectedClipRef>,
     effect_id: EffectId,
-    path: String,
 ) -> Box<dyn Widget> {
     inspector_property_value_widget(
         property,
         can_edit,
         selection,
         InspectorPropertyTarget::Effect { effect_id, parameter: property.address.clone() },
-        path,
     )
 }
 
@@ -2671,26 +2663,19 @@ pub(super) fn inspector_property_value_widget(
     can_edit: bool,
     selection: Option<SelectedClipRef>,
     target: InspectorPropertyTarget,
-    path: String,
 ) -> Box<dyn Widget> {
     match &property.value {
         PropertyValue::Bool(value) => {
             let selected_clip = selection;
             Box::new(
                 Checkbox::new(&property.label, *value).enabled(can_edit).on_change(move |v| {
-                    inspector_property_action(
-                        selected_clip,
-                        target.clone(),
-                        &path,
-                        PropertyValue::Bool(v),
-                    )
+                    inspector_property_action(selected_clip, target.clone(), PropertyValue::Bool(v))
                 }),
             )
         }
         PropertyValue::Float(value) => {
             let ((min, max), (hard_min, hard_max)) = parameter_numeric_ranges(property, 0.0, 1.0);
             let selected_clip = selection;
-            let path = path.clone();
             numeric_slider_input_control_with_hard_range(
                 *value,
                 min,
@@ -2704,7 +2689,6 @@ pub(super) fn inspector_property_value_widget(
                     inspector_property_action(
                         selected_clip,
                         target.clone(),
-                        &path,
                         PropertyValue::Float(v.clamp(hard_min, hard_max)),
                     )
                 },
@@ -2713,7 +2697,6 @@ pub(super) fn inspector_property_value_widget(
         PropertyValue::Double(value) => {
             let ((min, max), (hard_min, hard_max)) = parameter_double_ranges(property);
             let selected_clip = selection;
-            let path = path.clone();
             numeric_slider_input_control_with_hard_range(
                 *value,
                 min,
@@ -2727,7 +2710,6 @@ pub(super) fn inspector_property_value_widget(
                     inspector_property_action(
                         selected_clip,
                         target.clone(),
-                        &path,
                         PropertyValue::Double(v),
                     )
                 },
@@ -2736,7 +2718,6 @@ pub(super) fn inspector_property_value_widget(
         PropertyValue::Int(value) => {
             let ((min, max), (hard_min, hard_max)) = parameter_integer_ranges(property);
             let selected_clip = selection;
-            let path = path.clone();
             numeric_slider_input_control_with_hard_range(
                 *value,
                 min,
@@ -2752,24 +2733,17 @@ pub(super) fn inspector_property_value_widget(
                 0,
                 can_edit,
                 move |v: i64| {
-                    inspector_property_action(
-                        selected_clip,
-                        target.clone(),
-                        &path,
-                        PropertyValue::Int(v),
-                    )
+                    inspector_property_action(selected_clip, target.clone(), PropertyValue::Int(v))
                 },
             )
         }
         PropertyValue::Color(value) => {
             let selected_clip = selection;
-            let path = path.clone();
             let trigger = color_picker_trigger(*value).enabled(can_edit);
             Box::new(trigger.on_change(move |color| {
                 inspector_property_action(
                     selected_clip,
                     target.clone(),
-                    &path,
                     PropertyValue::Color(color),
                 )
             }))
@@ -2777,11 +2751,12 @@ pub(super) fn inspector_property_value_widget(
         PropertyValue::Text(value) => {
             let text = value.clone();
             if matches!(&target, InspectorPropertyTarget::Clip { .. })
-                && path == mondrian_core::BasicTitle::TEXT_PATH
+                && property.schema.parameter_id
+                    == mondrian_core::ParameterId::new_static("mondrian.title.text")
             {
                 let selected_clip = selection;
                 return Box::new(
-                    MultilineTextInput::new("标题文本")
+                    MultilineTextInput::new(&property.label)
                         .with_text(text)
                         .min_lines(3)
                         .enabled(can_edit)
@@ -2789,7 +2764,6 @@ pub(super) fn inspector_property_value_widget(
                             inspector_property_action(
                                 selected_clip,
                                 target.clone(),
-                                &path,
                                 PropertyValue::Text(text.to_owned()),
                             )
                         }),
@@ -2800,13 +2774,11 @@ pub(super) fn inspector_property_value_widget(
                 Box::new(Label::new(text).with_max_width(max_width))
             } else {
                 let selected_clip = selection;
-                let path = path.clone();
                 Box::new(
                     TextInput::new(text).enabled(can_edit).on_change(move |text| {
                         inspector_property_action(
                             selected_clip,
                             target.clone(),
-                            &path,
                             PropertyValue::Text(text.to_string()),
                         )
                     }),
@@ -2821,7 +2793,6 @@ pub(super) fn inspector_property_value_widget(
                     inspector_property_action(
                         selection,
                         target.clone(),
-                        &path,
                         PropertyValue::Enum(option.key.clone()),
                     ),
                 ));
@@ -2836,7 +2807,6 @@ pub(super) fn inspector_property_value_widget(
                 ParameterResourceReference::Uri { uri } => uri.clone(),
             };
             let selected_clip = selection;
-            let path = path.clone();
             Box::new(
                 TextInput::new(text).enabled(can_edit).on_change(move |text| {
                     let value = if text.trim().is_empty() {
@@ -2847,7 +2817,6 @@ pub(super) fn inspector_property_value_widget(
                     inspector_property_action(
                         selected_clip,
                         target.clone(),
-                        &path,
                         PropertyValue::Resource(value),
                     )
                 }),
@@ -2869,14 +2838,13 @@ pub(super) fn inspector_property_value_widget(
                     inspector_property_action(
                         selected_clip,
                         target.clone(),
-                        &path,
                         PropertyValue::Curve(curve),
                     )
                 }),
             )
         }
         PropertyValue::QualifierSamples(samples) => {
-            qualifier_sample_editor(samples, can_edit, selection, target, path)
+            qualifier_sample_editor(samples, can_edit, selection, target)
         }
         PropertyValue::Vec2(value) => vector_property_widget(
             &["X", "Y"],
@@ -2885,8 +2853,6 @@ pub(super) fn inspector_property_value_widget(
             can_edit,
             selection,
             target,
-            path,
-            |values| PropertyValue::Vec2(glam::Vec2::new(values[0], values[1])),
         ),
         PropertyValue::Vec3(value) => vector_property_widget(
             &["X", "Y", "Z"],
@@ -2895,8 +2861,6 @@ pub(super) fn inspector_property_value_widget(
             can_edit,
             selection,
             target,
-            path,
-            |values| PropertyValue::Vec3(glam::Vec3::new(values[0], values[1], values[2])),
         ),
         PropertyValue::Vec4(value) => vector_property_widget(
             &["X", "Y", "Z", "W"],
@@ -2905,8 +2869,6 @@ pub(super) fn inspector_property_value_widget(
             can_edit,
             selection,
             target,
-            path,
-            |values| PropertyValue::Vec4([values[0], values[1], values[2], values[3]]),
         ),
     }
 }
@@ -2916,13 +2878,11 @@ fn qualifier_sample_editor(
     can_edit: bool,
     selection: Option<SelectedClipRef>,
     target: InspectorPropertyTarget,
-    path: String,
 ) -> Box<dyn Widget> {
     let mut rows = Vec::with_capacity(samples.samples().len() + 1);
     for (index, sample) in samples.samples().iter().copied().enumerate() {
         let base_for_color = samples.clone();
         let color_target = target.clone();
-        let color_path = path.clone();
         let color = Color {
             r: sample.rgb[0],
             g: sample.rgb[1],
@@ -2936,7 +2896,7 @@ fn qualifier_sample_editor(
                 color.g.clamp(0.0, 1.0),
                 color.b.clamp(0.0, 1.0),
             ];
-            qualifier_sample_set_action(selection, color_target.clone(), &color_path, changed)
+            qualifier_sample_set_action(selection, color_target.clone(), changed)
         });
 
         let operation_items = [
@@ -2949,7 +2909,7 @@ fn qualifier_sample_editor(
             changed[index].operation = operation;
             MenuItem::new(
                 label,
-                qualifier_sample_set_action(selection, target.clone(), &path, changed),
+                qualifier_sample_set_action(selection, target.clone(), changed),
             )
         })
         .collect();
@@ -2959,7 +2919,7 @@ fn qualifier_sample_editor(
         };
         let mut without = samples.samples().to_vec();
         without.remove(index);
-        let remove = qualifier_sample_set_action(selection, target.clone(), &path, without);
+        let remove = qualifier_sample_set_action(selection, target.clone(), without);
         rows.push(FlexChild::fixed(Box::new(
             FlexContainer::row(vec![
                 FlexChild::fixed(Box::new(color_picker)),
@@ -2979,7 +2939,7 @@ fn qualifier_sample_editor(
     let add_action = |operation| {
         let mut changed = samples.samples().to_vec();
         changed.push(QualifierSample::new([0.5, 0.5, 0.5], operation));
-        qualifier_sample_set_action(selection, target.clone(), &path, changed)
+        qualifier_sample_set_action(selection, target.clone(), changed)
     };
     let add_include = add_action(QualifierSampleOperation::Include);
     let add_exclude = add_action(QualifierSampleOperation::Exclude);
@@ -3010,16 +2970,10 @@ fn qualifier_sample_editor(
 pub(super) fn qualifier_sample_set_action(
     selection: Option<SelectedClipRef>,
     target: InspectorPropertyTarget,
-    path: &str,
     samples: Vec<QualifierSample>,
 ) -> Option<Action> {
     let samples = QualifierSampleSet::new(samples).ok()?;
-    inspector_property_action(
-        selection,
-        target,
-        path,
-        PropertyValue::QualifierSamples(samples),
-    )
+    inspector_property_action(selection, target, PropertyValue::QualifierSamples(samples))
 }
 
 pub(super) fn vector_property_widget(
@@ -3029,8 +2983,6 @@ pub(super) fn vector_property_widget(
     can_edit: bool,
     selection: Option<SelectedClipRef>,
     target: InspectorPropertyTarget,
-    path: String,
-    build_value: fn(&[f32]) -> PropertyValue,
 ) -> Box<dyn Widget> {
     let ((min, max), (hard_min, hard_max)) = parameter_numeric_ranges(property, 0.0, 1.0);
     let values = values
@@ -3042,10 +2994,8 @@ pub(super) fn vector_property_widget(
         .zip(values.iter())
         .enumerate()
         .map(|(component_index, (label, value))| {
-            let base_values = values.to_vec();
             let selected_clip = selection;
             let target = target.clone();
-            let path = path.clone();
             let control = numeric_slider_input_control_with_hard_range(
                 *value,
                 min,
@@ -3056,13 +3006,11 @@ pub(super) fn vector_property_widget(
                 numeric_decimals(property.step, *value),
                 can_edit,
                 move |v| {
-                    let mut next_values = base_values.clone();
-                    next_values[component_index] = v.clamp(hard_min, hard_max);
-                    inspector_property_action(
+                    inspector_property_channel_action(
                         selected_clip,
                         target.clone(),
-                        &path,
-                        build_value(&next_values),
+                        component_index,
+                        f64::from(v.clamp(hard_min, hard_max)),
                     )
                 },
             );
@@ -3209,7 +3157,6 @@ pub(super) fn inspector_effect_property_action(
     inspector_property_action(
         selection,
         InspectorPropertyTarget::Effect { effect_id, parameter },
-        "",
         value,
     )
 }
@@ -3217,31 +3164,50 @@ pub(super) fn inspector_effect_property_action(
 pub(super) fn inspector_property_action(
     selection: Option<SelectedClipRef>,
     target: InspectorPropertyTarget,
-    _path: &str,
     value: PropertyValue,
+) -> Option<Action> {
+    inspector_property_write_action(selection, target, |parameter| ParameterValueWrite::Value {
+        parameter,
+        value,
+    })
+}
+
+fn inspector_property_channel_action(
+    selection: Option<SelectedClipRef>,
+    target: InspectorPropertyTarget,
+    index: usize,
+    value: f64,
+) -> Option<Action> {
+    inspector_property_write_action(selection, target, |parameter| {
+        ParameterValueWrite::Channels { parameter, channel_values: vec![(index, value)] }
+    })
+}
+
+fn inspector_property_write_action(
+    selection: Option<SelectedClipRef>,
+    target: InspectorPropertyTarget,
+    write: impl FnOnce(AnimationParameterAddress) -> ParameterValueWrite,
 ) -> Option<Action> {
     let selection = selection?;
     Some(match target {
         InspectorPropertyTarget::Clip { parameter } => {
             clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
                 clip_id: selection.clip_id,
-                writes: vec![ClipParameterValueWrite::Value { parameter, value }],
+                writes: vec![write(parameter)],
             })
         }
         InspectorPropertyTarget::Effect { effect_id, parameter } => {
             visual_effect_set_parameter_value_action(VisualEffectSetParameterValuePayload {
                 clip_id: selection.clip_id,
                 effect_id,
-                parameter,
-                value,
+                write: write(parameter),
             })
         }
         InspectorPropertyTarget::Mask { mask_id, parameter } => {
             visual_mask_set_parameter_value_action(VisualMaskSetParameterValuePayload {
                 clip_id: selection.clip_id,
                 mask_id,
-                parameter,
-                value,
+                write: write(parameter),
             })
         }
     })

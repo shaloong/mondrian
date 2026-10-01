@@ -10,7 +10,11 @@ pub use visual_mask::*;
 
 use std::path::PathBuf;
 
-use mondrian_core::automation::{AnimationParameterAddress, PropertyValue};
+use mondrian_core::automation::AnimationParameterAddress;
+/// Shared canonical value-edit contract used by all product parameter owners.
+pub use mondrian_core::automation::ParameterValueWrite;
+#[cfg(test)]
+use mondrian_core::automation::PropertyValue;
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{
@@ -2289,10 +2293,8 @@ pub struct VisualEffectSetParameterValuePayload {
     pub clip_id: ClipId,
     /// Stable Effect instance that owns the parameter.
     pub effect_id: EffectId,
-    /// Stable parameter instance plus definition identity; never a property-path alias.
-    pub parameter: AnimationParameterAddress,
-    /// Value to write statically or as a key at the current Clip-local author time.
-    pub value: PropertyValue,
+    /// Complete or sparse edit resolved against the current parameter owner.
+    pub write: ParameterValueWrite,
 }
 
 /// Edit one numeric visual Effect curve over the owning Clip's author span.
@@ -2536,35 +2538,6 @@ pub struct ClipHoldFramePayload {
     pub sequence_time: FramePosition,
 }
 
-/// One stable-address parameter value in an atomic Clip write.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ClipParameterValueWrite {
-    /// Replace the complete parameter value, including explicit Viewer gestures.
-    Value {
-        /// Stable owner-local parameter instance and Definition identity.
-        parameter: AnimationParameterAddress,
-        /// Typed value at the current Clip-local author time.
-        value: PropertyValue,
-    },
-    /// Change only the specified numeric components of the current author value.
-    Channels {
-        /// Stable owner-local parameter instance and Definition identity.
-        parameter: AnimationParameterAddress,
-        /// Unique component indices and their values in canonical author units.
-        channel_values: Vec<(usize, f64)>,
-    },
-}
-
-impl ClipParameterValueWrite {
-    /// Resolve the stable target shared by complete and component edits.
-    pub fn parameter(&self) -> &AnimationParameterAddress {
-        match self {
-            Self::Value { parameter, .. } | Self::Channels { parameter, .. } => parameter,
-        }
-    }
-}
-
 /// Atomically write one or more persistent parameters owned directly by a Clip.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2572,7 +2545,7 @@ pub struct ClipWriteParameterValuesPayload {
     /// Canonical Clip identity; current Track placement is derived at dispatch.
     pub clip_id: ClipId,
     /// Non-empty, duplicate-free parameter writes committed as one gesture.
-    pub writes: Vec<ClipParameterValueWrite>,
+    pub writes: Vec<ParameterValueWrite>,
 }
 
 /// One finite normalized point in a Clip curve editor viewport.
@@ -3080,11 +3053,7 @@ impl<'a> ProductActionAvailability<'a> {
                                 target
                                     .effect
                                     .properties
-                                    .prepare_value_write_by_address(
-                                        &payload.parameter,
-                                        time,
-                                        payload.value.clone(),
-                                    )
+                                    .prepare_parameter_write(&payload.write, time)
                                     .ok()
                                     .flatten()
                             })
@@ -3826,7 +3795,7 @@ mod tests {
         let expected = ProductAction::Clip(ClipProductAction::WriteParameterValues(Box::new(
             ClipWriteParameterValuesPayload {
                 clip_id: ClipId::new(),
-                writes: vec![ClipParameterValueWrite::Value {
+                writes: vec![ParameterValueWrite::Value {
                     parameter: AnimationParameterAddress {
                         animation_track_id: mondrian_core::AnimationTrackId::new(),
                         parameter_id: mondrian_core::ParameterId::new_static("transform.position"),
@@ -4041,8 +4010,10 @@ mod tests {
                 VisualEffectSetParameterValuePayload {
                     clip_id,
                     effect_id,
-                    parameter: parameter.clone(),
-                    value: PropertyValue::Float(0.75),
+                    write: ParameterValueWrite::Value {
+                        parameter: parameter.clone(),
+                        value: PropertyValue::Float(0.75),
+                    },
                 },
             ))),
             ProductAction::VisualEffect(VisualEffectProductAction::EditNumericCurve(Box::new(
@@ -4119,8 +4090,10 @@ mod tests {
                 VisualMaskSetParameterValuePayload {
                     clip_id,
                     mask_id,
-                    parameter,
-                    value: PropertyValue::Float(0.75),
+                    write: ParameterValueWrite::Value {
+                        parameter,
+                        value: PropertyValue::Float(0.75),
+                    },
                 },
             ))),
             ProductAction::VisualMask(VisualMaskProductAction::StartTracking(
@@ -4562,7 +4535,7 @@ mod tests {
         assert!(projection.allows(&ProductAction::Clip(
             ClipProductAction::WriteParameterValues(Box::new(ClipWriteParameterValuesPayload {
                 clip_id,
-                writes: vec![ClipParameterValueWrite::Value {
+                writes: vec![ParameterValueWrite::Value {
                     parameter: position_parameter.clone(),
                     value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
                 }],
@@ -4577,7 +4550,7 @@ mod tests {
         assert!(!projection.allows(&ProductAction::Clip(
             ClipProductAction::WriteParameterValues(Box::new(ClipWriteParameterValuesPayload {
                 clip_id: ClipId::new(),
-                writes: vec![ClipParameterValueWrite::Value {
+                writes: vec![ParameterValueWrite::Value {
                     parameter: position_parameter.clone(),
                     value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
                 }],
@@ -4607,7 +4580,7 @@ mod tests {
         assert!(!locked.allows(&ProductAction::Clip(
             ClipProductAction::WriteParameterValues(Box::new(ClipWriteParameterValuesPayload {
                 clip_id,
-                writes: vec![ClipParameterValueWrite::Value {
+                writes: vec![ParameterValueWrite::Value {
                     parameter: position_parameter,
                     value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
                 }],
@@ -4751,8 +4724,10 @@ mod tests {
                 VisualEffectSetParameterValuePayload {
                     clip_id,
                     effect_id: first_id,
-                    parameter: parameter.clone(),
-                    value: initial_value,
+                    write: ParameterValueWrite::Value {
+                        parameter: parameter.clone(),
+                        value: initial_value,
+                    },
                 },
             )));
         let changed_parameter =
@@ -4760,8 +4735,10 @@ mod tests {
                 VisualEffectSetParameterValuePayload {
                     clip_id,
                     effect_id: first_id,
-                    parameter,
-                    value: PropertyValue::Float(3.0),
+                    write: ParameterValueWrite::Value {
+                        parameter,
+                        value: PropertyValue::Float(3.0),
+                    },
                 },
             )));
 

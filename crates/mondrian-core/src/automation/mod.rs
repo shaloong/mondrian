@@ -1972,7 +1972,8 @@ impl AnimatedProperty {
                         .unwrap_or(default_flags),
                 });
             }
-            self.normalize_channels();
+            // set_keyframe normalizes each edited channel already. Leave
+            // independent siblings and their shared curve allocations untouched.
             Ok(())
         } else {
             let mut static_channels = self.value_to_channel_values(&self.static_value)?;
@@ -2508,6 +2509,35 @@ pub struct AnimationParameterAddress {
     pub parameter_id: ParameterId,
 }
 
+/// One complete or sparse value edit addressed to a current author parameter.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ParameterValueWrite {
+    /// Replace the complete parameter value, including explicit complete gestures.
+    Value {
+        /// Stable owner-local parameter instance and Definition identity.
+        parameter: AnimationParameterAddress,
+        /// Typed value at an explicitly supplied owner-local author time.
+        value: PropertyValue,
+    },
+    /// Change only the specified numeric components of the current author value.
+    Channels {
+        /// Stable owner-local parameter instance and Definition identity.
+        parameter: AnimationParameterAddress,
+        /// Unique component indices and their values in canonical author units.
+        channel_values: Vec<(usize, f64)>,
+    },
+}
+
+impl ParameterValueWrite {
+    /// Resolve the stable target shared by complete and component edits.
+    pub fn parameter(&self) -> &AnimationParameterAddress {
+        match self {
+            Self::Value { parameter, .. } | Self::Channels { parameter, .. } => parameter,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PropertyBag {
     properties: AuthoringMap<String, AnimatedProperty>,
@@ -2602,6 +2632,25 @@ impl PropertyBag {
             path: path.to_owned(),
             value,
         }))
+    }
+
+    /// Prepare a complete or sparse write against this current author owner.
+    ///
+    /// Both edit forms resolve stable identity and reuse the canonical value and
+    /// channel preparation rules, including no-op suppression and key metadata.
+    pub fn prepare_parameter_write(
+        &self,
+        write: &ParameterValueWrite,
+        time: TimelineTime,
+    ) -> Result<Option<PropertyMutation>> {
+        match write {
+            ParameterValueWrite::Value { parameter, value } => {
+                self.prepare_value_write_by_address(parameter, time, value.clone())
+            }
+            ParameterValueWrite::Channels { parameter, channel_values } => {
+                self.prepare_channel_write_by_address(parameter, time, channel_values)
+            }
+        }
     }
 
     /// Prepare a sparse numeric-component edit using current stable author identity.
@@ -4509,6 +4558,63 @@ mod tests {
         assert_eq!(property.keyframe_times().len(), 2);
         assert_eq!(property.evaluate(tt(10)), PropertyValue::Float(10.0));
         assert_eq!(*property.static_value(), PropertyValue::Float(10.0));
+    }
+
+    #[test]
+    fn sparse_write_retains_untouched_constrained_curve_storage() {
+        for interpolation in [
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+            InterpolationType::Bezier,
+        ] {
+            let mut bag = PropertyBag::default();
+            bag.define(PropertyDescriptor::new(
+                "vector",
+                "Vector",
+                PropertyValue::Vec3(Vec3::ZERO),
+            ));
+            bag.apply_mutation(PropertyMutation::EnableAnimation {
+                path: "vector".to_owned(),
+                time: tt(0),
+            })
+            .expect("enable animation");
+            for (time, value) in [(tt(0), 0.1), (tt(1), 0.3), (tt(2), 0.7)] {
+                bag.apply_mutation(PropertyMutation::WriteChannels {
+                    path: "vector".to_owned(),
+                    time,
+                    channel_values: vec![(0, value), (1, value * 2.0), (2, value * 3.0)],
+                    interpolation,
+                })
+                .expect("seed constrained curves");
+            }
+            let before = bag.clone();
+            let original = before.property("vector").expect("property");
+            let address = original.address();
+            let mutation = bag
+                .prepare_parameter_write(
+                    &ParameterValueWrite::Channels {
+                        parameter: address,
+                        channel_values: vec![(0, 0.625)],
+                    },
+                    tt(1),
+                )
+                .expect("prepare component")
+                .expect("changed");
+            bag.apply_mutation(mutation).expect("write component");
+            let edited = bag.property("vector").expect("property");
+            assert_eq!(edited.evaluate(tt(1)).to_channel_values()[0], 0.625);
+            for index in [1, 2] {
+                let sibling = edited.channel(index).expect("sibling");
+                let previous = original.channel(index).expect("original sibling");
+                assert_eq!(sibling, previous, "constrained sibling must remain exact");
+                assert_eq!(
+                    sibling.keyframes().as_ptr(),
+                    previous.keyframes().as_ptr(),
+                    "sparse writes must not detach untouched sibling curve allocations",
+                );
+            }
+            bag.validate().expect("valid constrained author state");
+        }
     }
 
     #[test]

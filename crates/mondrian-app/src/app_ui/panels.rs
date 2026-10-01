@@ -147,17 +147,17 @@ use crate::app::ui_actions::{
     AssetsPrepareDragPayload, AssetsRebindAudioComponentPayload,
     AssetsRefreshAudioComponentsPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
     AssetsSetProxyModePayload, ClipCurveEditPayload, ClipEditNumericCurvePayload,
-    ClipNormalizedCurvePointPayload, ClipParameterValueWrite, ClipSetEnabledPayload,
-    ClipSetSolidColorPayload, ClipWriteParameterValuesPayload, DockDropAreaPayload,
-    ExportDraftEdit, ExportOutputDialogPayload, ImportMediaDialogPayload, SequenceTargetPayload,
-    TimelineClipSelectionModePayload, TimelineDropAssetPayload, TimelineDropFilePayload,
-    TimelineExportRequest, TimelineInOutPointKind, TimelineMoveClipPayload,
-    TimelineSeekSource as AppTimelineSeekSource, TimelineSelectClipPayload,
-    TimelineSetInOutPointPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind,
-    TrackAddPayload, TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload,
-    TrackSetAuthorControlPayload, TrackSetEditPolicyPayload,
-    VideoTransitionCreateCrossDissolvePayload, VideoTransitionHandlePolicy,
-    VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
+    ClipNormalizedCurvePointPayload, ClipSetEnabledPayload, ClipSetSolidColorPayload,
+    ClipWriteParameterValuesPayload, DockDropAreaPayload, ExportDraftEdit,
+    ExportOutputDialogPayload, ImportMediaDialogPayload, ParameterValueWrite,
+    SequenceTargetPayload, TimelineClipSelectionModePayload, TimelineDropAssetPayload,
+    TimelineDropFilePayload, TimelineExportRequest, TimelineInOutPointKind,
+    TimelineMoveClipPayload, TimelineSeekSource as AppTimelineSeekSource,
+    TimelineSelectClipPayload, TimelineSetInOutPointPayload, TimelineTrimClipsPayload,
+    TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload, TrackAuthorControl,
+    TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
+    TrackSetEditPolicyPayload, VideoTransitionCreateCrossDissolvePayload,
+    VideoTransitionHandlePolicy, VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
     ViewerSetPreviewResolutionScalePayload, ViewerSetZoomScalePayload,
     VisualEffectAddToClipPayload, VisualEffectEditNumericCurvePayload,
     VisualEffectParameterTargetPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
@@ -3647,27 +3647,27 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
             .on_clip_transform_edit(move |edit| {
                 let writes = match edit {
                     ViewerClipTransformEdit::Position(value) => {
-                        vec![ClipParameterValueWrite::Value {
+                        vec![ParameterValueWrite::Value {
                             parameter: transform.position.clone(),
                             value: PropertyValue::Vec2(glam::Vec2::from_array(value)),
                         }]
                     }
-                    ViewerClipTransformEdit::Scale(value) => vec![ClipParameterValueWrite::Value {
+                    ViewerClipTransformEdit::Scale(value) => vec![ParameterValueWrite::Value {
                         parameter: transform.scale.clone(),
                         value: PropertyValue::Vec2(glam::Vec2::from_array(value)),
                     }],
                     ViewerClipTransformEdit::Rotation(value) => {
-                        vec![ClipParameterValueWrite::Value {
+                        vec![ParameterValueWrite::Value {
                             parameter: transform.rotation.clone(),
                             value: PropertyValue::Float(value),
                         }]
                     }
                     ViewerClipTransformEdit::Anchor { anchor, position } => vec![
-                        ClipParameterValueWrite::Value {
+                        ParameterValueWrite::Value {
                             parameter: transform.anchor.clone(),
                             value: PropertyValue::Vec2(glam::Vec2::from_array(anchor)),
                         },
-                        ClipParameterValueWrite::Value {
+                        ParameterValueWrite::Value {
                             parameter: transform.position.clone(),
                             value: PropertyValue::Vec2(glam::Vec2::from_array(position)),
                         },

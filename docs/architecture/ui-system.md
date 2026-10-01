@@ -2746,9 +2746,29 @@ Inspector position, scale and anchor axis controls emit sparse channel edits,
 resolved against the current Clip at admission. They never capture sibling
 values in callbacks. Viewer gestures explicitly replace complete vectors, and
 compensated anchor gestures still commit anchor and position atomically. Both
-forms use one tagged Clip parameter-write contract and the existing authoring
-transaction. The alpha API requires an explicit write kind; there is no legacy
+forms use Core's tagged parameter-write contract and the existing authoring
+transaction. Clip, Effect and Mask share that same write algebra. The alpha API
+requires an explicit write kind; there is no legacy
 payload interpretation. Opacity and scale percentages use Double presentation
 arithmetic until the canonical Float/vector author seam, retaining original
 Float bits through unit conversion. No-op component writes produce neither new
 keys nor history entries.
+
+Generic Vec2/Vec3/Vec4 Inspector controls emit one changed component and never
+rebuild a vector from captured siblings. Current stable owner admission supplies
+remaining values and exact Clip-local time; no-op components create no history
+or keys. Complete colors, curves and Viewer gestures remain whole-value writes.
+Mask parameters use the same value-write contract, while shape geometry retains
+its separate typed shape authoring interface.
+
+Value-widget callbacks and their action helpers take stable owner targets only;
+no ignored property-path argument or captured alias is retained. Basic Title
+multiline presentation resolves the title-text definition identity and uses the
+projected property label for its input hint. External resource file paths remain
+authored resource values, distinct from removed UI routing aliases.
+
+Undo/Redo pauses the Playback-owned transport at its authoritative current
+position before applying history. It does not invoke the explicit Stop command
+that returns to frame zero. Restored author snapshots retain monotonic revisions
+and the editor cursor, so the next animated parameter edit uses the same
+Clip-local author time rather than silently targeting an earlier key.

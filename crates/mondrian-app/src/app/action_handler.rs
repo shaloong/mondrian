@@ -1923,7 +1923,7 @@ impl AppState {
         &mut self,
         payload: VisualEffectSetParameterValuePayload,
     ) -> Result<bool> {
-        let VisualEffectSetParameterValuePayload { clip_id, effect_id, parameter, value } = payload;
+        let VisualEffectSetParameterValuePayload { clip_id, effect_id, write } = payload;
         self.ensure_clip_track_unlocked("visual_effect_set_parameter_value", clip_id)?;
         let (_, is_video_track, _) =
             self.clip_action_location("visual_effect_set_parameter_value", clip_id)?;
@@ -1953,9 +1953,7 @@ impl AppState {
                         reason: format!("Effect {effect_id} does not belong to Clip {clip_id}"),
                     }
                 })?;
-            effect
-                .properties
-                .prepare_value_write_by_address(&parameter, author_time, value)?
+            effect.properties.prepare_parameter_write(&write, author_time)?
         };
         let Some(mutation) = mutation else {
             return Ok(false);
@@ -2222,8 +2220,8 @@ mod tests {
         AssetsRefreshAudioComponentsPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
         AssetsRenameFolderPayload, AssetsSetInterpretationPayload, AssetsSetProxyModePayload,
         ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
-        ClipParameterValueWrite, ClipSetBlendModePayload, ClipSetEnabledPayload,
-        ClipSetSolidColorPayload, ClipWriteParameterValuesPayload, ExportDraftEdit,
+        ClipSetBlendModePayload, ClipSetEnabledPayload, ClipSetSolidColorPayload,
+        ClipWriteParameterValuesPayload, ExportDraftEdit, ParameterValueWrite,
         ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
         ProjectUpdateColorEnvironmentPayload, ProjectUpdateNewSequenceDefaultsPayload,
         SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineDropAssetPayload,
@@ -2430,7 +2428,7 @@ mod tests {
     ) -> mondrian_editor_state::Action {
         clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
             clip_id,
-            writes: vec![ClipParameterValueWrite::Value { parameter, value }],
+            writes: vec![ParameterValueWrite::Value { parameter, value }],
         })
     }
 
@@ -6553,11 +6551,11 @@ mod tests {
                 ClipWriteParameterValuesPayload {
                     clip_id,
                     writes: vec![
-                        ClipParameterValueWrite::Value {
+                        ParameterValueWrite::Value {
                             parameter: position,
                             value: PropertyValue::Vec2(glam::Vec2::new(20.0, 10.0)),
                         },
-                        ClipParameterValueWrite::Value {
+                        ParameterValueWrite::Value {
                             parameter: stale,
                             value: PropertyValue::Float(0.5),
                         },
@@ -7110,15 +7108,15 @@ mod tests {
                 ClipWriteParameterValuesPayload {
                     clip_id,
                     writes: vec![
-                        ClipParameterValueWrite::Value {
+                        ParameterValueWrite::Value {
                             parameter: position,
                             value: PropertyValue::Vec2(glam::Vec2::new(128.0, 72.0)),
                         },
-                        ClipParameterValueWrite::Value {
+                        ParameterValueWrite::Value {
                             parameter: scale,
                             value: PropertyValue::Vec2(glam::Vec2::splat(1.5)),
                         },
-                        ClipParameterValueWrite::Value {
+                        ParameterValueWrite::Value {
                             parameter: rotation,
                             value: PropertyValue::Float(-12.5),
                         },
@@ -7176,7 +7174,7 @@ mod tests {
                 .expect("initial vector");
             let edit = clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
                 clip_id,
-                writes: vec![ClipParameterValueWrite::Channels {
+                writes: vec![ParameterValueWrite::Channels {
                     parameter: parameter.clone(),
                     channel_values: vec![(0, 1.25)],
                 }],
@@ -7244,7 +7242,7 @@ mod tests {
             .dispatch_action(clip_write_parameter_values_action(
                 ClipWriteParameterValuesPayload {
                     clip_id,
-                    writes: vec![ClipParameterValueWrite::Channels {
+                    writes: vec![ParameterValueWrite::Channels {
                         parameter: parameter.clone(),
                         channel_values: vec![(0, 3.75)],
                     }],
@@ -7327,11 +7325,11 @@ mod tests {
             let payload = ClipWriteParameterValuesPayload {
                 clip_id,
                 writes: vec![
-                    ClipParameterValueWrite::Channels {
+                    ParameterValueWrite::Channels {
                         parameter: position.clone(),
                         channel_values: vec![(0, 20.0)],
                     },
-                    ClipParameterValueWrite::Channels {
+                    ParameterValueWrite::Channels {
                         parameter: scale.clone(),
                         channel_values: channels,
                     },
@@ -7347,7 +7345,7 @@ mod tests {
         }
         let noop = clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
             clip_id,
-            writes: vec![ClipParameterValueWrite::Channels {
+            writes: vec![ParameterValueWrite::Channels {
                 parameter: scale,
                 channel_values: vec![(0, 1.0)],
             }],
@@ -7371,11 +7369,11 @@ mod tests {
                 ClipWriteParameterValuesPayload {
                     clip_id,
                     writes: vec![
-                        ClipParameterValueWrite::Value {
+                        ParameterValueWrite::Value {
                             parameter: anchor,
                             value: PropertyValue::Vec2(glam::Vec2::new(20.0, 10.0)),
                         },
-                        ClipParameterValueWrite::Value {
+                        ParameterValueWrite::Value {
                             parameter: position,
                             value: PropertyValue::Vec2(glam::Vec2::new(20.0, 10.0)),
                         },
@@ -7430,7 +7428,7 @@ mod tests {
                 ClipProductAction::WriteParameterValues(Box::new(
                     ClipWriteParameterValuesPayload {
                         clip_id,
-                        writes: vec![ClipParameterValueWrite::Value {
+                        writes: vec![ParameterValueWrite::Value {
                             parameter: position,
                             value: PropertyValue::Vec2(glam::Vec2::new(f32::NAN, 0.0)),
                         }],
@@ -7465,7 +7463,7 @@ mod tests {
                 ClipProductAction::WriteParameterValues(Box::new(
                     ClipWriteParameterValuesPayload {
                         clip_id: audio_clip_id,
-                        writes: vec![ClipParameterValueWrite::Value {
+                        writes: vec![ParameterValueWrite::Value {
                             parameter: position,
                             value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
                         }],
@@ -7703,8 +7701,7 @@ mod tests {
                 VisualEffectSetParameterValuePayload {
                     clip_id,
                     effect_id,
-                    parameter,
-                    value: next_value.clone(),
+                    write: ParameterValueWrite::Value { parameter, value: next_value.clone() },
                 },
             ))
             .expect("dispatch effect property");
@@ -7776,8 +7773,7 @@ mod tests {
                 VisualEffectSetParameterValuePayload {
                     clip_id,
                     effect_id,
-                    parameter,
-                    value: next_value.clone(),
+                    write: ParameterValueWrite::Value { parameter, value: next_value.clone() },
                 },
             ))
             .expect("dispatch curve edit");
@@ -7849,8 +7845,7 @@ mod tests {
                 VisualEffectSetParameterValuePayload {
                     clip_id,
                     effect_id,
-                    parameter,
-                    value: next_value.clone(),
+                    write: ParameterValueWrite::Value { parameter, value: next_value.clone() },
                 },
             ))
             .expect("dispatch Qualifier sample edit");
@@ -7959,8 +7954,7 @@ mod tests {
                 VisualEffectSetParameterValuePayload {
                     clip_id,
                     effect_id,
-                    parameter,
-                    value: initial_value,
+                    write: ParameterValueWrite::Value { parameter, value: initial_value },
                 },
             ))
             .expect_err("no-op parameter edit must not report success");
@@ -7981,8 +7975,7 @@ mod tests {
                 VisualEffectSetParameterValuePayload {
                     clip_id,
                     effect_id,
-                    parameter,
-                    value: initial_value,
+                    write: ParameterValueWrite::Value { parameter, value: initial_value },
                 },
             ))
             .expect_err("missing effect property should reject mutation");

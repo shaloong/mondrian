@@ -1,5 +1,11 @@
 # Timeline Model
 
+Mask parameter admission accepts Core's complete or sparse `ParameterValueWrite`,
+verifies Mask ownership and lock, and delegates canonical preparation to the
+current Mask Property Bag at explicit owner-local time. Applying the prepared
+mutation checks the lock again. Mask shape geometry remains a separate typed
+authoring operation; parameter channels do not reinterpret shape points.
+
 Audio Rack `RebindNative` is one format-neutral author mutation for CLAP and
 VST3. The App probes the selected binary and compares parameter schemas first;
 Timeline then requires the same stable plugin identity, vendor where the format

@@ -4,7 +4,7 @@
 //! placement identities. Track placement and Clip-local author time are always
 //! re-derived from the current Authoring Session at dispatch.
 
-use mondrian_core::automation::{AnimationParameterAddress, PropertyValue};
+use mondrian_core::automation::ParameterValueWrite;
 use mondrian_core::mask_data::{
     MaskComponent, MaskShape, MaskShapeInterpolation, MaskTrackingDirection, MaskTrackingModel,
     MaskTrackingSettings,
@@ -162,10 +162,8 @@ pub struct VisualMaskSetParameterValuePayload {
     pub clip_id: ClipId,
     /// Stable Mask identity.
     pub mask_id: MaskId,
-    /// Stable parameter instance plus definition identity.
-    pub parameter: AnimationParameterAddress,
-    /// Value to write statically or at the current Clip-local author time.
-    pub value: PropertyValue,
+    /// Complete or sparse edit resolved against the current parameter owner.
+    pub write: ParameterValueWrite,
 }
 
 /// Stable target plus bounded analysis intent for a new tracking request.
@@ -256,12 +254,7 @@ pub(super) fn visual_mask_action_available(
                     .and_then(|time| {
                         target
                             .clip
-                            .prepare_mask_parameter_value(
-                                payload.mask_id,
-                                &payload.parameter,
-                                time,
-                                payload.value.clone(),
-                            )
+                            .prepare_mask_parameter_write(payload.mask_id, &payload.write, time)
                             .ok()
                             .flatten()
                     })

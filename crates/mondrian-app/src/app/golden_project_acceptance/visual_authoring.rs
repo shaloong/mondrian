@@ -26,8 +26,8 @@ use crate::app::ui_actions::{
     visual_effect_set_parameter_value_action, visual_mask_add_to_clip_action,
     visual_mask_set_parameter_value_action, visual_mask_set_shape_animation_enabled_action,
     visual_mask_write_shape_action, AssetsCreateAssetPayload, ClipCurveEditPayload,
-    ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload, ClipParameterValueWrite,
-    ClipSetSolidColorPayload, ClipWriteParameterValuesPayload, TimelineDropAssetPayload,
+    ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload, ClipSetSolidColorPayload,
+    ClipWriteParameterValuesPayload, ParameterValueWrite, TimelineDropAssetPayload,
     TimelineTrimClipsPayload, TimelineTrimPayloadEdge, VideoTransitionCreateCrossDissolvePayload,
     VideoTransitionHandlePolicy, VisualEffectAddToClipPayload,
     VisualEffectSetParameterValuePayload, VisualMaskAddToClipPayload,
@@ -535,8 +535,7 @@ fn set_mask_parameter(
         visual_mask_set_parameter_value_action(VisualMaskSetParameterValuePayload {
             clip_id,
             mask_id,
-            parameter: property.address(),
-            value,
+            write: ParameterValueWrite::Value { parameter: property.address(), value },
         }),
     )
 }
@@ -574,8 +573,7 @@ fn set_effect_parameter(
         visual_effect_set_parameter_value_action(VisualEffectSetParameterValuePayload {
             clip_id,
             effect_id,
-            parameter,
-            value,
+            write: ParameterValueWrite::Value { parameter, value },
         }),
     )
 }
@@ -1367,7 +1365,7 @@ pub(super) fn execute_visual_stage(
         "set-basic-title-text",
         clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
             clip_id: title_clip_id,
-            writes: vec![ClipParameterValueWrite::Value {
+            writes: vec![ParameterValueWrite::Value {
                 parameter: title_text_parameter,
                 value: PropertyValue::Text(TITLE_TEXT.to_owned()),
             }],

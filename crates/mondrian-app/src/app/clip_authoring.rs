@@ -12,8 +12,7 @@ use mondrian_core::{BlendMode, ClipId, Color, MondrianError, Result};
 
 use super::animation_authoring::{ClipNumericCurveEdit, NormalizedCurvePoint};
 use super::product_action::{
-    ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipParameterValueWrite,
-    ClipWriteParameterValuesPayload,
+    ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipWriteParameterValuesPayload,
 };
 use super::*;
 
@@ -209,13 +208,7 @@ fn prepare_clip_parameter_writes(
                 ),
             ));
         }
-        let mutation = match write {
-            ClipParameterValueWrite::Value { value, .. } => {
-                parameters.prepare_value_write_by_address(parameter, author_time, value.clone())?
-            }
-            ClipParameterValueWrite::Channels { channel_values, .. } => parameters
-                .prepare_channel_write_by_address(parameter, author_time, channel_values)?,
-        };
+        let mutation = parameters.prepare_parameter_write(write, author_time)?;
         if let Some(mutation) = mutation {
             mutations.push(mutation);
         }
