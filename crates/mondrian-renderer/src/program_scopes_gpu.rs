@@ -238,6 +238,11 @@ impl GpuProgramScopesRuntime {
             self.diagnostics.pipeline_creations =
                 self.diagnostics.pipeline_creations.saturating_add(1);
         }
+        let aggregate_pipeline = self
+            .pipelines
+            .as_mut()
+            .ok_or(GpuProgramScopesError::InternalState)?
+            .aggregate_pipeline(device, request.waveform_mode);
         let key = ScopesResourceKey { request };
         if self.resources.as_ref().is_none_or(|resources| resources.key != key) {
             let display_layout = &self
@@ -300,11 +305,7 @@ impl GpuProgramScopesRuntime {
                 label: Some("program-scopes-aggregate-pass"),
                 timestamp_writes: None,
             });
-            let aggregate_pipeline = match request.waveform_mode {
-                WaveformMode::Luma => &pipelines.aggregate_luma_pipeline,
-                WaveformMode::RgbParade => &pipelines.aggregate_rgb_pipeline,
-            };
-            pass.set_pipeline(aggregate_pipeline);
+            pass.set_pipeline(&aggregate_pipeline);
             pass.set_bind_group(0, &aggregate_bind_group, &[]);
             if pipelines.use_subgroups {
                 let row_invocations = input_width.div_ceil(PIXELS_PER_INVOCATION);
@@ -522,8 +523,10 @@ fn create_display_texture(
 struct ScopesPipelines {
     aggregate_bind_group_layout: wgpu::BindGroupLayout,
     display_bind_group_layout: wgpu::BindGroupLayout,
-    aggregate_luma_pipeline: wgpu::ComputePipeline,
-    aggregate_rgb_pipeline: wgpu::ComputePipeline,
+    aggregate_module: wgpu::ShaderModule,
+    aggregate_pipeline_layout: wgpu::PipelineLayout,
+    aggregate_luma_pipeline: Option<wgpu::ComputePipeline>,
+    aggregate_rgb_pipeline: Option<wgpu::ComputePipeline>,
     reduce_histogram_pipeline: wgpu::ComputePipeline,
     display_pipeline: wgpu::ComputePipeline,
     use_subgroups: bool,
@@ -585,24 +588,6 @@ impl ScopesPipelines {
                 bind_group_layouts: &[Some(&display_bind_group_layout)],
                 immediate_size: 0,
             });
-        let aggregate_luma_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("program-scopes-aggregate-luma-pipeline"),
-                layout: Some(&aggregate_pipeline_layout),
-                module: &aggregate_module,
-                entry_point: Some("main_luma"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                cache: None,
-            });
-        let aggregate_rgb_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("program-scopes-aggregate-rgb-pipeline"),
-                layout: Some(&aggregate_pipeline_layout),
-                module: &aggregate_module,
-                entry_point: Some("main_rgb"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                cache: None,
-            });
         let reduce_histogram_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("program-scopes-reduce-histogram-pipeline"),
@@ -623,12 +608,46 @@ impl ScopesPipelines {
         Self {
             aggregate_bind_group_layout,
             display_bind_group_layout,
-            aggregate_luma_pipeline,
-            aggregate_rgb_pipeline,
+            aggregate_module,
+            aggregate_pipeline_layout,
+            aggregate_luma_pipeline: None,
+            aggregate_rgb_pipeline: None,
             reduce_histogram_pipeline,
             display_pipeline,
             use_subgroups,
         }
+    }
+
+    // Compile only the requested mode, keeping each native pipeline for this
+    // device generation so a mode switch back does not rebuild it.
+    fn aggregate_pipeline(
+        &mut self,
+        device: &wgpu::Device,
+        mode: WaveformMode,
+    ) -> wgpu::ComputePipeline {
+        let (slot, label, entry_point) = match mode {
+            WaveformMode::Luma => (
+                &mut self.aggregate_luma_pipeline,
+                "program-scopes-aggregate-luma-pipeline",
+                "main_luma",
+            ),
+            WaveformMode::RgbParade => (
+                &mut self.aggregate_rgb_pipeline,
+                "program-scopes-aggregate-rgb-pipeline",
+                "main_rgb",
+            ),
+        };
+        slot.get_or_insert_with(|| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(label),
+                layout: Some(&self.aggregate_pipeline_layout),
+                module: &self.aggregate_module,
+                entry_point: Some(entry_point),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            })
+        })
+        .clone()
     }
 }
 
@@ -1365,76 +1384,94 @@ mod tests {
                 depth_or_array_layers: 1,
             },
         );
-        let request =
-            GpuProgramScopesRequest::new(ColorSpace::Rec709, WaveformMode::RgbParade, 256, WIDTH)
-                .expect("high-entropy scope request");
         let mut runtime = GpuProgramScopesRuntime::default();
-        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("program-scopes-high-entropy-test-encoder"),
-        });
-        let record = runtime
-            .record(
-                &context.device,
-                &context.queue,
-                &mut encoder,
-                &input.create_view(&wgpu::TextureViewDescriptor::default()),
+        for (index, mode) in [
+            WaveformMode::RgbParade,
+            WaveformMode::Luma,
+            WaveformMode::RgbParade,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let request = GpuProgramScopesRequest::new(ColorSpace::Rec709, mode, 256, WIDTH)
+                .expect("high-entropy scope request");
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("program-scopes-high-entropy-test-encoder"),
+                });
+            let record = runtime
+                .record(
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    &input.create_view(&wgpu::TextureViewDescriptor::default()),
+                    WIDTH,
+                    HEIGHT,
+                    request,
+                )
+                .expect("record high-entropy GPU scopes");
+            let pipelines = runtime.pipelines.as_ref().expect("retained pipelines");
+            assert!(pipelines.aggregate_rgb_pipeline.is_some());
+            assert_eq!(
+                pipelines.aggregate_luma_pipeline.is_some(),
+                index > 0,
+                "the unrequested mode must remain uncompiled until its first use"
+            );
+            let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("program-scopes-overflow-test-readback"),
+                size: record.buffer_layout.byte_size(),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_buffer_to_buffer(
+                record.counts(),
+                0,
+                &readback,
+                0,
+                record.buffer_layout.byte_size(),
+            );
+            context.queue.submit(std::iter::once(encoder.finish()));
+            let bytes = map_test_readback(&context.device, &readback);
+            let actual = bytemuck::cast_slice::<u8, u32>(&bytes);
+            let cpu = compute_program_color_scopes_rgba8_with_scale(
+                &pixels,
                 WIDTH,
                 HEIGHT,
-                request,
+                ColorSpace::Rec709,
+                mode,
+                ProgramScopeScale::Ire,
+                256,
             )
-            .expect("record high-entropy GPU scopes");
-        let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("program-scopes-overflow-test-readback"),
-            size: record.buffer_layout.byte_size(),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        encoder.copy_buffer_to_buffer(
-            record.counts(),
-            0,
-            &readback,
-            0,
-            record.buffer_layout.byte_size(),
-        );
-        context.queue.submit(std::iter::once(encoder.finish()));
-        let bytes = map_test_readback(&context.device, &readback);
-        let actual = bytemuck::cast_slice::<u8, u32>(&bytes);
-        let cpu = compute_program_color_scopes_rgba8_with_scale(
-            &pixels,
-            WIDTH,
-            HEIGHT,
-            ColorSpace::Rec709,
-            WaveformMode::RgbParade,
-            ProgramScopeScale::Ire,
-            256,
-        )
-        .expect("CPU high-entropy scopes reference");
+            .expect("CPU high-entropy scopes reference");
 
-        assert_eq!(&actual[..8], &[0; 8]);
-        let histogram = record.buffer_layout.histogram_offset as usize;
-        assert_eq!(&actual[histogram..histogram + 256], cpu.histogram.red);
-        assert_eq!(
-            &actual[histogram + 256..histogram + 512],
-            cpu.histogram.green
-        );
-        assert_eq!(
-            &actual[histogram + 512..histogram + 768],
-            cpu.histogram.blue
-        );
-        assert_eq!(
-            &actual[histogram + 768..histogram + 1024],
-            cpu.histogram.luma
-        );
-        let waveform = record.buffer_layout.waveform_offset as usize;
-        let vectorscope = record.buffer_layout.vectorscope_offset as usize;
-        assert_eq!(&actual[waveform..vectorscope], cpu.waveform.values);
-        let mut expected_vectorscope = vec![0_u32; 64 * 64];
-        for sample in cpu.vectorscope {
-            let x = ((sample.u + 0.5) * 64.0).floor().clamp(0.0, 63.0) as usize;
-            let y = ((sample.v + 0.5) * 64.0).floor().clamp(0.0, 63.0) as usize;
-            expected_vectorscope[y * 64 + x] = sample.weight;
+            assert_eq!(&actual[..8], &[0; 8]);
+            let histogram = record.buffer_layout.histogram_offset as usize;
+            assert_eq!(&actual[histogram..histogram + 256], cpu.histogram.red);
+            assert_eq!(
+                &actual[histogram + 256..histogram + 512],
+                cpu.histogram.green
+            );
+            assert_eq!(
+                &actual[histogram + 512..histogram + 768],
+                cpu.histogram.blue
+            );
+            assert_eq!(
+                &actual[histogram + 768..histogram + 1024],
+                cpu.histogram.luma
+            );
+            let waveform = record.buffer_layout.waveform_offset as usize;
+            let vectorscope = record.buffer_layout.vectorscope_offset as usize;
+            assert_eq!(&actual[waveform..vectorscope], cpu.waveform.values);
+            let mut expected_vectorscope = vec![0_u32; 64 * 64];
+            for sample in cpu.vectorscope {
+                let x = ((sample.u + 0.5) * 64.0).floor().clamp(0.0, 63.0) as usize;
+                let y = ((sample.v + 0.5) * 64.0).floor().clamp(0.0, 63.0) as usize;
+                expected_vectorscope[y * 64 + x] = sample.weight;
+            }
+            assert_eq!(&actual[vectorscope..], expected_vectorscope);
         }
-        assert_eq!(&actual[vectorscope..], expected_vectorscope);
+        assert_eq!(runtime.diagnostics().pipeline_creations, 1);
+        assert_eq!(runtime.diagnostics().frames_recorded, 3);
     }
     #[tokio::test]
     async fn grouped_gpu_counts_preserve_float_excursions_vectors_and_tail_pixels() {
