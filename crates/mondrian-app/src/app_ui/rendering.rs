@@ -394,18 +394,23 @@ impl AppUiFrameRenderer {
         commands: Vec<DrawCommand>,
     ) -> AppUiFrameResult {
         let frame_started = Instant::now();
-        let resolved_text = resolve_text_commands(commands, &mut self.text_renderer);
+        let resolved_text = observe_ui_frame_stage("resolve_text", || {
+            resolve_text_commands(commands, &mut self.text_renderer)
+        });
         let text_stats = resolved_text.stats;
         let commands = resolved_text.commands;
         let pending = renderer_glyph_uploads(self.text_renderer.take_pending_uploads());
         let uploaded_glyphs = !pending.is_empty();
         let glyph_upload_stats = if uploaded_glyphs {
-            self.ui_renderer.upload_glyphs(queue, &pending)
+            observe_ui_frame_stage("upload_glyphs", || {
+                self.ui_renderer.upload_glyphs(queue, &pending)
+            })
         } else {
             mondrian_ui_renderer::GlyphUploadStats::default()
         };
 
-        let (output, backend_event) = match surface.get_current_texture() {
+        let acquired = observe_ui_frame_stage("acquire_surface", || surface.get_current_texture());
+        let (output, backend_event) = match acquired {
             wgpu::CurrentSurfaceTexture::Success(output) => (output, None),
             wgpu::CurrentSurfaceTexture::Suboptimal(output) => {
                 (output, Some(AppUiBackendEvent::SurfaceSuboptimal))
@@ -454,14 +459,16 @@ impl AppUiFrameRenderer {
             };
         }
         let view = output.texture.create_view(&Default::default());
-        let render_stats = self.ui_renderer.render_resolved_commands(
-            device,
-            queue,
-            &view,
-            &commands,
-            (extent.width, extent.height),
-        );
-        queue.present(output);
+        let render_stats = observe_ui_frame_stage("record_ui", || {
+            self.ui_renderer.render_resolved_commands(
+                device,
+                queue,
+                &view,
+                &commands,
+                (extent.width, extent.height),
+            )
+        });
+        observe_ui_frame_stage("present_surface", || queue.present(output));
         presented_result(
             frame_started,
             glyph_upload_stats.upload_bytes,
@@ -471,6 +478,16 @@ impl AppUiFrameRenderer {
             backend_event,
         )
     }
+}
+
+fn observe_ui_frame_stage<T>(stage: &'static str, operation: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let result = operation();
+    let elapsed_us = started.elapsed().as_micros();
+    if elapsed_us >= 5_000 {
+        tracing::debug!(stage, elapsed_us, "slow app UI frame stage");
+    }
+    result
 }
 
 fn presented_result(

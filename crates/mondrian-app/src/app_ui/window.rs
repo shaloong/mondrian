@@ -3812,6 +3812,11 @@ fn run_app_ui_with_initial_state_on_event_loop(
         validation_shutdown_deadline.unwrap_or_else(product_startup_deadline);
     #[cfg(not(feature = "validation"))]
     let host_startup_deadline = product_startup_deadline();
+    // Evidence identity is immutable process startup work. Reading and hashing
+    // the executable must finish before live Window callbacks collect a frame.
+    if viewer_gpu_output_diagnostics_output_path().is_some() {
+        let _ = viewer_runtime_image_sha256();
+    }
     #[cfg(feature = "validation")]
     let background_runtime = match AppUiBackgroundRuntimeOwner::start(host_startup_deadline) {
         Ok(owner) => owner,
@@ -6257,6 +6262,7 @@ fn viewer_runtime_image_sha256() -> Option<String> {
     static RUNTIME_IMAGE_SHA256: OnceLock<Option<String>> = OnceLock::new();
     RUNTIME_IMAGE_SHA256
         .get_or_init(|| {
+            let started = Instant::now();
             #[cfg(target_os = "linux")]
             let mut file = File::open("/proc/self/exe").ok()?;
             #[cfg(not(target_os = "linux"))]
@@ -6270,7 +6276,12 @@ fn viewer_runtime_image_sha256() -> Option<String> {
                 }
                 hasher.update(&buffer[..read]);
             }
-            Some(format!("{:x}", hasher.finalize()))
+            let identity = format!("{:x}", hasher.finalize());
+            tracing::debug!(
+                elapsed_us = started.elapsed().as_micros(),
+                "Viewer runtime image identity initialized"
+            );
+            Some(identity)
         })
         .clone()
 }
