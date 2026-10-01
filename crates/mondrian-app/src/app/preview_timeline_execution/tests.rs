@@ -1088,6 +1088,7 @@ fn preview_executes_cross_dissolve_through_shared_working_compositor() {
         &resolved.plan.elements,
         &resolved.plan.color_context,
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("Preview Cross Dissolve composite");
     let pixel = output.frame.rgba_f32().data[0];
@@ -1305,6 +1306,7 @@ fn nested_temporal_preview_and_export_share_prepared_semantics_and_pixels() {
         &preview.plan.elements,
         &preview.plan.color_context,
         &mut preview_scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("Preview working composite");
 

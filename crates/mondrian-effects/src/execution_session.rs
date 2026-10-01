@@ -241,6 +241,12 @@ impl EffectExecutionSession {
         self.temporal_outputs.clear();
     }
 
+    /// Retire reusable native processors when their execution owner stops.
+    /// Static plans and semantically valid pixel caches remain independently owned.
+    pub fn retire_processor_resources(&mut self) {
+        self.processors.clear();
+    }
+
     /// Current bounded-residency diagnostics.
     pub fn diagnostics(&self) -> EffectExecutionSessionDiagnostics {
         EffectExecutionSessionDiagnostics {

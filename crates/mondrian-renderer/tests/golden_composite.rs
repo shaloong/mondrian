@@ -120,6 +120,7 @@ fn composite_single_layer(w: u32, h: u32, rgba: &[u8], opacity: f32, blend: Blen
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite reference frame");
     encode_rec709(&frame)
@@ -192,6 +193,7 @@ fn golden_transparent_canvas() {
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite transparent frame");
     let result = encode_rec709(&frame);
@@ -259,6 +261,7 @@ fn golden_two_layers_normal() {
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite two-layer frame");
     let result = encode_rec709(&frame);
@@ -297,6 +300,7 @@ fn preview_display_and_export_delivery_boundaries_match_with_stable_hash() {
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite display/export parity frame");
 
@@ -397,6 +401,7 @@ fn golden_multilayer_float_linear_blend() {
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite screen-blend frame");
     let result = encode_rec709(&frame);
@@ -424,6 +429,7 @@ fn golden_non_identity_transform_float_path() {
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite transformed frame");
     let result = encode_rec709(&frame);
@@ -462,6 +468,7 @@ fn golden_preview_export_parity_across_color_spaces() {
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite HDR parity frame");
 

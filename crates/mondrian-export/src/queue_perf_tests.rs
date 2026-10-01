@@ -223,6 +223,7 @@ fn compose_frame_layers_with_diagnostics(
             WorkingColorSpace::LinearRec709,
         ),
         scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite export simulation frame");
     // This gate measures real pixel execution, not just diagnostic control

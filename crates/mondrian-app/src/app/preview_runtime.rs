@@ -539,6 +539,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             );
         }
         let request = PreviewCpuFallbackRequest {
+            cancellation: self.execution.borrow().generation_cancellation(),
             cpu_materialization_active_bytes: resolved.cpu_materialization_active_bytes,
             cpu_working_set_grant: self.scratch.borrow().cpu_working_set_diagnostics().grant,
             generation,
@@ -2130,13 +2131,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         while let Some(result) = task.try_poll() {
             match result {
                 PreviewCpuFallbackResult::Ready(mut ready) => {
-                    if let Some(frame) = ready.render_cache_frame.take() {
-                        self.timeline_render_cache.borrow_mut().publish(frame);
-                    }
                     if ready.generation == active_generation
                         && active_epoch == Some(ready.epoch)
                         && self.viewer_cpu_fallback_active.get()
                     {
+                        if let Some(frame) = ready.render_cache_frame.take() {
+                            self.timeline_render_cache.borrow_mut().publish(frame);
+                        }
                         self.cpu_fallback_in_flight.borrow_mut().take();
                         self.cpu_fallback_failure.borrow_mut().take();
                         self.record_composite(ready.execution.composite_diagnostics);

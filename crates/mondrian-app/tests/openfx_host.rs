@@ -593,13 +593,29 @@ fn authored_native_factory_reuses_instances_and_rejects_stale_output() {
     };
     let mut session = EffectExecutionSession::new(config);
     session.bind_generation(1);
-    assert!(session.apply_compiled_rgba_f32(&input, 1, 1, &graph, 0).is_err());
+    assert!(session
+        .apply_compiled_rgba_f32(
+            &input,
+            1,
+            1,
+            &graph,
+            0,
+            &mut mondrian_effects::EffectProcessorControl::uncancelled()
+        )
+        .is_err());
     assert_eq!(session.diagnostics().processor_instances, 0);
     config.max_working_bytes = 112;
     session.reconfigure(config);
     assert_eq!(
         session
-            .apply_compiled_rgba_f32(&input, 1, 1, &graph, 0)
+            .apply_compiled_rgba_f32(
+                &input,
+                1,
+                1,
+                &graph,
+                0,
+                &mut mondrian_effects::EffectProcessorControl::uncancelled()
+            )
             .expect("first native frame"),
         input
     );
@@ -607,13 +623,29 @@ fn authored_native_factory_reuses_instances_and_rejects_stale_output() {
     assert_eq!(session.diagnostics().processor_bytes, 80);
     // The probe only omits Output on its second render in the same native
     // instance. A fresh process per frame would incorrectly succeed here.
-    assert!(session.apply_compiled_rgba_f32(&input, 1, 1, &graph, 1).is_err());
+    assert!(session
+        .apply_compiled_rgba_f32(
+            &input,
+            1,
+            1,
+            &graph,
+            1,
+            &mut mondrian_effects::EffectProcessorControl::uncancelled()
+        )
+        .is_err());
     assert_eq!(input, [[-0.25, 1.5, 0.75, 0.5]]);
     assert_eq!(session.diagnostics().processor_instances, 0);
     session.bind_generation(2);
     assert_eq!(
         session
-            .apply_compiled_rgba_f32(&input, 1, 1, &graph, 0)
+            .apply_compiled_rgba_f32(
+                &input,
+                1,
+                1,
+                &graph,
+                0,
+                &mut mondrian_effects::EffectProcessorControl::uncancelled()
+            )
             .expect("fresh generation"),
         input
     );
@@ -723,6 +755,113 @@ fn authored_native_factory_observes_mixed_execution_deadline() {
     assert_eq!(input, [[0.25, 1.5, -0.75, 0.5]]);
     assert_eq!(session.diagnostics().processor_instances, 0);
     let status = effect_plugin_runtime_status(&key).expect("plugin status");
+    assert!(!status.disabled);
+    assert_eq!(status.last_error, None);
+}
+
+#[test]
+#[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and MONDRIAN_OPENFX_SESSION_PROBE_MODE=hang"]
+fn authored_native_factory_observes_scalar_and_timeline_owner_stops() {
+    use mondrian_effects::{
+        EffectExecutionSession, EffectFloatExecutionError, EffectProcessorControl,
+        EffectProcessorStopReason,
+    };
+    use mondrian_renderer::{
+        composite_timeline_elements_color_frame_with_diagnostics, TimelineCompositeElement,
+        TimelineCompositeError, TimelineCompositeOptions, TimelineCompositeScratch,
+        TimelineEffectColorRuntime, TimelineSolidColorLayer,
+    };
+    use std::time::{Duration, Instant};
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("probe mode"),
+        "hang"
+    );
+    let graph = authored_probe_graph(false);
+    let input = [[0.25, 1.5, -0.75, 0.5]];
+    let mut session = EffectExecutionSession::default();
+    let started = Instant::now();
+    let mut checkpoint = || {
+        (started.elapsed() >= Duration::from_millis(150))
+            .then_some(EffectProcessorStopReason::DeadlineExpired)
+    };
+    let result = session.apply_compiled_rgba_f32(
+        &input,
+        1,
+        1,
+        &graph,
+        0,
+        &mut EffectProcessorControl::new(&mut checkpoint),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(EffectFloatExecutionError::Stopped {
+                reason: EffectProcessorStopReason::DeadlineExpired
+            })
+        ),
+        "{result:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(session.diagnostics().processor_instances, 0);
+    assert_eq!(input, [[0.25, 1.5, -0.75, 0.5]]);
+
+    let cancellation = mondrian_core::ExecutionCancellationToken::new();
+    let cancel_owner = cancellation.clone();
+    let owner = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(150));
+        cancel_owner.cancel();
+    });
+    let elements = [TimelineCompositeElement::SolidColor(
+        TimelineSolidColorLayer {
+            color: mondrian_core::Color { r: 0.25, g: 1.5, b: -0.75, a: 0.5 },
+            opacity: 1.0,
+            blend_mode: mondrian_core::types::BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            effect_graph: graph.clone(),
+            frame_seed: 0,
+        },
+    )];
+    let color = mondrian_core::ProjectColorEnvironment::default();
+    let sequence = mondrian_timeline::Sequence::new("native cancellation");
+    let context = sequence.settings.root_program_color_context(&color).expect("color context");
+    let started = Instant::now();
+    let mut checkpoint =
+        || cancellation.is_canceled().then_some(EffectProcessorStopReason::Canceled);
+    let result = composite_timeline_elements_color_frame_with_diagnostics(
+        1,
+        1,
+        &elements,
+        TimelineCompositeOptions::default(),
+        TimelineEffectColorRuntime::new(context.engine(), context.working_color_space()),
+        &mut TimelineCompositeScratch::default(),
+        &mut EffectProcessorControl::new(&mut checkpoint),
+    );
+    owner.join().expect("owner");
+    assert!(
+        matches!(
+            result,
+            Err(TimelineCompositeError::FloatEffect {
+                reason: EffectFloatExecutionError::Stopped {
+                    reason: EffectProcessorStopReason::Canceled
+                }
+            })
+        ),
+        "{result:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let key = graph
+        .graph()
+        .nodes
+        .iter()
+        .find_map(|node| match &node.kind {
+            mondrian_effects::EffectGraphNodeKind::UnaryEffect {
+                op: mondrian_effects::EffectRenderOp::Custom { key, .. },
+                ..
+            } => Some(key),
+            _ => None,
+        })
+        .expect("native key");
+    let status = mondrian_effects::effect_plugin_runtime_status(key).expect("plugin status");
     assert!(!status.disabled);
     assert_eq!(status.last_error, None);
 }

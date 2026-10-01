@@ -84,6 +84,7 @@ fn bench_layers(c: &mut Criterion, name: &str, w: u32, h: u32, n: usize) {
                 TimelineCompositeOptions::default(),
                 TimelineEffectColorRuntime::new(&color_engine, WorkingColorSpace::LinearRec709),
                 &mut scratch,
+                &mut mondrian_effects::EffectProcessorControl::uncancelled(),
             )
             .expect("benchmark timeline composite");
             ProgramOutputModule::execute_cpu_rgba8(

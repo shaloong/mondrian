@@ -73,6 +73,12 @@ impl PreviewCpuExecutionError {
             Self::WorkingFrame(MediaPreviewWorkingFrameError::InputColorTransform { .. }) => {
                 PreviewUnavailability::failed(PreviewOutputStage::InputAdaptation, self.to_string())
             }
+            Self::TimelineComposite(TimelineCompositeError::FloatEffect {
+                reason: EffectFloatExecutionError::Stopped { .. },
+            }) => PreviewUnavailability::stopped(
+                PreviewOutputStage::TimelineComposite,
+                self.to_string(),
+            ),
             Self::TimelineComposite(error) if timeline_composite_is_blocked(error) => {
                 PreviewUnavailability::blocked(
                     PreviewOutputStage::TimelineComposite,
@@ -128,7 +134,8 @@ fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
         } => true,
         TimelineCompositeError::FloatEffect {
             reason:
-                EffectFloatExecutionError::InputSizeMismatch { .. }
+                EffectFloatExecutionError::Stopped { .. }
+                | EffectFloatExecutionError::InputSizeMismatch { .. }
                 | EffectFloatExecutionError::MissingOutput { .. },
         } => false,
         TimelineCompositeError::MediaFrameContractMismatch { .. }
@@ -197,13 +204,26 @@ enum PreviewWorkingTransitionInput {
     },
 }
 
+fn preview_processor_checkpoint(
+    control: &mut mondrian_effects::EffectProcessorControl<'_>,
+) -> Result<(), PreviewCpuExecutionError> {
+    control.checkpoint().map_err(|reason| {
+        TimelineCompositeError::FloatEffect {
+            reason: EffectFloatExecutionError::Stopped { reason },
+        }
+        .into()
+    })
+}
+
 pub(crate) fn composite_resolved_preview_working(
     width: u32,
     height: u32,
     resolved: &[ResolvedPreviewElement],
     color_context: &ProgramColorContext,
     scratch: &mut TimelineCompositeScratch,
+    control: &mut mondrian_effects::EffectProcessorControl<'_>,
 ) -> Result<PreviewWorkingCompositeOutput, PreviewCpuExecutionError> {
+    preview_processor_checkpoint(control)?;
     let working_prepare_started_at = Instant::now();
     let mut working_frames = Vec::new();
     let mut working_elements = Vec::with_capacity(resolved.len());
@@ -211,6 +231,7 @@ pub(crate) fn composite_resolved_preview_working(
     let mut input_color_stage_diagnostics = RenderColorStageDiagnostics::default();
 
     for element in resolved {
+        preview_processor_checkpoint(control)?;
         match element {
             ResolvedPreviewElement::SolidColor(layer) => {
                 working_elements.push(PreviewWorkingElement::SolidColor(layer.clone()));
@@ -315,6 +336,7 @@ pub(crate) fn composite_resolved_preview_working(
             color_context.working_color_space(),
         ),
         scratch,
+        control,
     )?;
     let cpu_composite_us = duration_us(cpu_composite_started_at.elapsed());
     Ok(PreviewWorkingCompositeOutput {
@@ -424,10 +446,19 @@ pub(crate) fn composite_resolved_preview(
     resolved: &[ResolvedPreviewElement],
     color_context: &ProgramColorContext,
     scratch: &mut TimelineCompositeScratch,
+    control: &mut mondrian_effects::EffectProcessorControl<'_>,
 ) -> Result<PreviewCompositeOutput, PreviewCpuExecutionError> {
-    let composite =
-        composite_resolved_preview_working(width, height, resolved, color_context, scratch)?;
-    present_preview_working(composite, color_context, scratch)
+    let composite = composite_resolved_preview_working(
+        width,
+        height,
+        resolved,
+        color_context,
+        scratch,
+        control,
+    )?;
+    let result = present_preview_working(composite, color_context, scratch);
+    preview_processor_checkpoint(control)?;
+    result
 }
 
 pub(crate) fn composite_resolved_preview_with_signal_monitoring(
@@ -438,10 +469,25 @@ pub(crate) fn composite_resolved_preview_with_signal_monitoring(
     tap: mondrian_core::ProgramScopesTap,
     settings: mondrian_core::SignalMonitoringSettings,
     scratch: &mut TimelineCompositeScratch,
+    control: &mut mondrian_effects::EffectProcessorControl<'_>,
 ) -> Result<PreviewCompositeOutput, PreviewCpuExecutionError> {
-    let composite =
-        composite_resolved_preview_working(width, height, resolved, color_context, scratch)?;
-    present_preview_working_with_signal_monitoring(composite, color_context, tap, settings, scratch)
+    let composite = composite_resolved_preview_working(
+        width,
+        height,
+        resolved,
+        color_context,
+        scratch,
+        control,
+    )?;
+    let result = present_preview_working_with_signal_monitoring(
+        composite,
+        color_context,
+        tap,
+        settings,
+        scratch,
+    );
+    preview_processor_checkpoint(control)?;
+    result
 }
 
 /// Apply only the production Program Output/monitor boundary to an already

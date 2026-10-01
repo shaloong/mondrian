@@ -436,3 +436,8 @@ verification remain separate production boundaries.
 Export forwards reusable custom processors through its exclusive Effect Session.
 The frozen resource adapter explicitly grants zero processor residency pending
 coordinated native-worker grants; no definition-global plugin instance is used.
+
+Export's ordinary CPU compositor borrows ExportFrameRenderContext's existing
+job cancellation token, matching temporal/mixed native execution. It creates
+no mirrored token or cancellation thread. A stopped native render produces no
+working frame and is classified by the existing job cancellation authority.

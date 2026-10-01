@@ -2008,8 +2008,15 @@ fn cpu_raster_preview_retains_program_output_before_srgb_adaptation() {
     let color_context = test_color_context(ColorSpace::Rec709);
     let mut scratch = TimelineCompositeScratch::default();
 
-    let output = composite_resolved_preview(2, 2, &resolved, &color_context, &mut scratch)
-        .expect("CPU raster Program Output and monitor adaptation");
+    let output = composite_resolved_preview(
+        2,
+        2,
+        &resolved,
+        &color_context,
+        &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+    )
+    .expect("CPU raster Program Output and monitor adaptation");
 
     assert_eq!(
         output.color_diagnostics.output.color_space,
@@ -9500,10 +9507,11 @@ fn transparent_timeline_presentation_completes_the_exact_playback_demand() {
     state.play().expect("play");
     let demand = state.pending_playback_frame_demand_identity().expect("playback demand");
 
-    assert!(matches!(
-        service.viewer_preview_for_state(&state),
-        ViewerPreviewState::Transparent
-    ));
+    let preview = service.viewer_preview_for_state(&state);
+    assert!(
+        matches!(preview, ViewerPreviewState::Transparent),
+        "{preview:?}"
+    );
     assert_eq!(
         ViewerPlaybackFeedback::from_preview_state(&ViewerPreviewState::Transparent),
         ViewerPlaybackFeedback::Ready
@@ -9915,8 +9923,15 @@ fn preview_working_composite_boundary_uses_resolved_display_view() {
     let color_context = test_color_context(ColorSpace::Rec709);
     let mut scratch = TimelineCompositeScratch::default();
 
-    let _output = composite_resolved_preview_working(2, 2, &[], &color_context, &mut scratch)
-        .expect("empty preview composite");
+    let _output = composite_resolved_preview_working(
+        2,
+        2,
+        &[],
+        &color_context,
+        &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+    )
+    .expect("empty preview composite");
 
     let boundary =
         output_boundary_from_color_context(&color_context).expect("encoded preview output");
@@ -10788,8 +10803,15 @@ fn preview_single_media_color_output_matches_export_composite_contract() {
     }];
     let mut preview_scratch = TimelineCompositeScratch::default();
     let preview_service = WindowPreviewAdapter::new();
-    let preview = composite_resolved_preview(1, 1, &resolved, &color_context, &mut preview_scratch)
-        .expect("preview color composite");
+    let preview = composite_resolved_preview(
+        1,
+        1,
+        &resolved,
+        &color_context,
+        &mut preview_scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+    )
+    .expect("preview color composite");
     preview_service.record_cpu_execution_evidence(&preview);
     assert_eq!(
         preview.color_diagnostics.output.domain,
@@ -10819,6 +10841,7 @@ fn preview_single_media_color_output_matches_export_composite_contract() {
             color_context.working_color_space(),
         ),
         &mut export_scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite expected export frame");
     assert_eq!(
@@ -10891,8 +10914,15 @@ fn preview_camera_log_input_matches_export_frame_hash() {
     }];
     let preview_service = WindowPreviewAdapter::new();
     let mut preview_scratch = TimelineCompositeScratch::default();
-    let preview = composite_resolved_preview(2, 2, &resolved, &color_context, &mut preview_scratch)
-        .expect("preview camera-log composite");
+    let preview = composite_resolved_preview(
+        2,
+        2,
+        &resolved,
+        &color_context,
+        &mut preview_scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+    )
+    .expect("preview camera-log composite");
     preview_service.record_cpu_execution_evidence(&preview);
 
     let mut export_color_session = RenderCpuColorExecutionSession::default();
@@ -10921,6 +10951,7 @@ fn preview_camera_log_input_matches_export_frame_hash() {
             color_context.working_color_space(),
         ),
         &mut export_scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite camera-log export frame");
     let export_boundary = ProgramOutputBoundary::from_intent(
@@ -11017,8 +11048,15 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
     ];
     let mut preview_scratch = TimelineCompositeScratch::default();
     let preview_service = WindowPreviewAdapter::new();
-    let preview = composite_resolved_preview(2, 2, &resolved, &color_context, &mut preview_scratch)
-        .expect("preview multilayer composite");
+    let preview = composite_resolved_preview(
+        2,
+        2,
+        &resolved,
+        &color_context,
+        &mut preview_scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+    )
+    .expect("preview multilayer composite");
     preview_service.record_cpu_execution_evidence(&preview);
 
     let export_media_working = media.working_frame().expect("export media working frame");
@@ -11045,6 +11083,7 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
                 color_context.working_color_space(),
             ),
             &mut export_scratch,
+            &mut mondrian_effects::EffectProcessorControl::uncancelled(),
         )
         .expect("composite multilayer export frame");
     let export_boundary = ProgramOutputBoundary::from_intent(

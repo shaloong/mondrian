@@ -149,6 +149,7 @@ fn execute_preview(
         &resolved.plan.elements,
         &resolved.plan.color_context,
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )?;
     let mut base_scratch = TimelineCompositeScratch::default();
     let base_only = composite_resolved_preview(
@@ -157,6 +158,7 @@ fn execute_preview(
         &resolved.plan.elements[..1],
         &resolved.plan.color_context,
         &mut base_scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )?
     .rgba;
     let mut program_scratch = TimelineCompositeScratch::default();
@@ -166,6 +168,7 @@ fn execute_preview(
         &resolved.plan.elements,
         &resolved.plan.color_context,
         &mut program_scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )?;
     let program_output_color = resolved
         .plan

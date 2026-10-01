@@ -34,16 +34,20 @@ impl<'a> EffectProcessorControl<'a> {
         Self { checkpoint: None, stopped: None }
     }
 
-    /// Poll before allocation, during bounded native waits and before publication.
-    pub fn check(&mut self) -> Result<()> {
+    /// Poll the owner and preserve its exact sticky stop reason.
+    pub fn checkpoint(&mut self) -> std::result::Result<(), EffectProcessorStopReason> {
         if self.stopped.is_none() {
             self.stopped = self.checkpoint.as_mut().and_then(|checkpoint| checkpoint());
         }
-        if self.stopped.is_some() {
-            Err(MondrianError::Cancelled)
-        } else {
-            Ok(())
+        match self.stopped {
+            Some(reason) => Err(reason),
+            None => Ok(()),
         }
+    }
+
+    /// Poll before allocation, during bounded native waits and before publication.
+    pub fn check(&mut self) -> Result<()> {
+        self.checkpoint().map_err(|_| MondrianError::Cancelled)
     }
 
     /// Exact scheduler reason observed by this invocation, when stopped.
@@ -429,7 +433,14 @@ mod tests {
         for (width, height) in [(0, 0), (0, 2), (3, 0)] {
             assert_eq!(
                 session
-                    .apply_compiled_rgba_f32(&[], width, height, &graph, 0)
+                    .apply_compiled_rgba_f32(
+                        &[],
+                        width,
+                        height,
+                        &graph,
+                        0,
+                        &mut crate::EffectProcessorControl::uncancelled()
+                    )
                     .expect("no pixels require no native instance"),
                 Vec::<[f32; 4]>::new()
             );
@@ -457,14 +468,32 @@ mod tests {
         let input = [[0.25, 0.5, 0.75, 1.0]];
         for _ in 0..2 {
             assert_eq!(
-                preview.apply_compiled_rgba_f32(&input, 1, 1, &graph, 0).expect("preview"),
+                preview
+                    .apply_compiled_rgba_f32(
+                        &input,
+                        1,
+                        1,
+                        &graph,
+                        0,
+                        &mut crate::EffectProcessorControl::uncancelled()
+                    )
+                    .expect("preview"),
                 [[1.0, 0.5, 0.75, 1.0]]
             );
         }
         assert_eq!(factory.created.load(Ordering::SeqCst), 2);
         assert_eq!(preview.diagnostics().processor_instances, 2);
         assert_eq!(preview.diagnostics().processor_bytes, 128);
-        export.apply_compiled_rgba_f32(&input, 1, 1, &graph, 0).expect("export");
+        export
+            .apply_compiled_rgba_f32(
+                &input,
+                1,
+                1,
+                &graph,
+                0,
+                &mut crate::EffectProcessorControl::uncancelled(),
+            )
+            .expect("export");
         assert_eq!(factory.created.load(Ordering::SeqCst), 4);
         preview.bind_generation(1);
         assert_eq!(preview.diagnostics().processor_instances, 0);
@@ -807,7 +836,14 @@ mod tests {
                 let input = [[0.25, 0.5, 0.75, 1.0]];
                 let result = match route {
                     "scalar" => session
-                        .apply_compiled_rgba_f32(&input, 1, 1, &graph, 0)
+                        .apply_compiled_rgba_f32(
+                            &input,
+                            1,
+                            1,
+                            &graph,
+                            0,
+                            &mut crate::EffectProcessorControl::uncancelled(),
+                        )
                         .map_err(|error| format!("{error:?}")),
                     "temporal" => {
                         let request = EffectTemporalExecutionRequest::new(
@@ -918,7 +954,16 @@ mod tests {
             let input = [[0.25, 0.5, 0.75, 1.0]];
             let mut provider = CountingProvider(0);
             let denied = match route {
-                "scalar" => session.apply_compiled_rgba_f32(&input, 1, 1, &graph, 0).is_err(),
+                "scalar" => session
+                    .apply_compiled_rgba_f32(
+                        &input,
+                        1,
+                        1,
+                        &graph,
+                        0,
+                        &mut crate::EffectProcessorControl::uncancelled(),
+                    )
+                    .is_err(),
                 "temporal" => {
                     let request = EffectTemporalExecutionRequest::new(
                         1,

@@ -948,6 +948,7 @@ fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualEx
         &resolved.plan.elements,
         &resolved.plan.color_context,
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )?;
     ensure!(
         output.rgba.len()

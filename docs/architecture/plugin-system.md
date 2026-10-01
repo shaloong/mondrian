@@ -473,11 +473,18 @@ native instance reuse from starting a new process every frame. The mixed
 CPU/GPU-prefix qualification interrupts the five-second native hang at the
 scheduler's deadline, preserves the input and leaves runtime quarantine empty.
 
-Cancellation qualification currently covers the temporal and heterogeneous
-CPU-prefix owner checkpoints. The ordinary scalar graph methods still use
-uncancelled control, and timeline_composite's ordinary media/solid/adjustment
-paths call those methods. Propagating the production owner through that path
-remains required; the factory binding alone does not qualify universal Preview
-or Export cancellation. The existing heterogeneous preparer also rejects a
-CPU-only graph ending with a GPU upload and no GPU dispatch suffix, so such a
-route must not be assumed to migrate native work off the ordinary path yet.
+Ordinary Float32 Session methods now require the borrowed execution owner as
+well. Renderer media, solids, adjustments and transitions forward that same
+control; Preview CPU fallback and nested materialization use the authoritative
+generation token, and Export uses its existing job token. Native owner stops
+retire retained instances, preserve source pixels, and never quarantine the
+plugin. Identity/cache outputs and final compositor publication also poll the
+owner. The product regression exercises the five-second native hang through
+both scalar and ordinary Timeline composition, including exact deadline and
+cancellation reasons. These are cooperative boundaries, not hard deadlines for
+arbitrary builtin color/blend kernels or arbitrary plugin heap allocation.
+
+The heterogeneous preparer still rejects a CPU-only graph ending with a GPU
+upload and no GPU dispatch suffix; such a route must not be assumed to migrate
+native work to that executor. Production retained-native grants and additional
+format/vendor qualification remain outstanding.

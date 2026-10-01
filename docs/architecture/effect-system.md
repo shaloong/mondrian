@@ -1221,3 +1221,12 @@ there is no raster or native instance to admit. A native recipe that rejects a
 zero extent must therefore never quarantine the definition for an empty request.
 The empty-frame regression covers zero width, zero height and both zero under
 a zero-byte execution grant, with no sizing error or instance preparation.
+
+### Ordinary scalar execution owner
+
+Float32 EffectExecutionSession methods require EffectProcessorControl. Cold
+recipe sizing, graph steps, controlled builtin and Mask raster execution, native
+prepare/render, cached/identity outputs and final publication use the same
+borrowed checkpoint. EffectFloatExecutionError::Stopped preserves the exact
+owner reason; stopping retires processor resources without runtime quarantine.
+Explicit uncancelled free functions remain standalone offline reference helpers.

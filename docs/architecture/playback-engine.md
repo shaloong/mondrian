@@ -2657,3 +2657,12 @@ anchors, stopped synthetic handoff and natural-end clamping preserve authored
 frame identity this way. Reverse frame exit and conservative presentation phase
 error retain their distinct floor policy; measured audio device phase is not
 replaced by an authored-frame estimate.
+
+### Preview CPU owner propagation
+
+CPU fallback requests carry the Runtime's existing generation cancellation
+token. Nested and synchronous CPU composition borrow that same authority.
+Shutdown cancels it before joining workers. Canceled fallback work delivers no
+result, and the Runtime gates both Viewer and render-cache publication on the
+current generation/epoch. Preview stopped evidence is distinct from no content,
+correctness blockers and execution failures.

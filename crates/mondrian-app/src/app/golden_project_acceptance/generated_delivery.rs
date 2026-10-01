@@ -560,6 +560,7 @@ fn render_program_reference(
         &resolved.plan.elements,
         &resolved.plan.color_context,
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )?;
     ensure!(
         working.composite_diagnostics.float_linear_composites == 1

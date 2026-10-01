@@ -111,3 +111,16 @@ calling the host session directly. Neither qualification requires a GPU device.
 When running all ignored integration tests in `hang` mode, skip the
 `authored_native_factory_reuses_instances_and_rejects_stale_output` test and
 run it separately in `unfetched` mode.
+
+The ordinary Float32 Session and Timeline compositor also carry the same owner:
+
+```sh
+# MONDRIAN_OPENFX_SESSION_PROBE_MODE=hang
+cargo test -p mondrian-app --all-features --test openfx_host \
+  authored_native_factory_observes_scalar_and_timeline_owner_stops \
+  -- --ignored --nocapture
+```
+
+This interrupts the five-second native action through the scalar Session with
+an owner deadline, then through the Timeline compositor with the owner token.
+Both produce an exact stopped result without quarantining the definition.

@@ -31,6 +31,7 @@ pub(super) fn composite_transition_input_f32(
     input: &TimelineTransitionInput<'_>,
     runtime: TimelineEffectColorRuntime<'_>,
     scratch: &mut TimelineCompositeScratch,
+    control: &mut mondrian_effects::EffectProcessorControl<'_>,
 ) -> Result<(), EffectFloatExecutionError> {
     match input {
         TimelineTransitionInput::Transparent => {}
@@ -49,6 +50,7 @@ pub(super) fn composite_transition_input_f32(
                     &layer.effect_graph,
                     layer.frame_seed,
                     runtime,
+                    control,
                 )?;
                 effect_output.as_slice()
             };
@@ -92,6 +94,7 @@ pub(super) fn composite_transition_input_f32(
                         &layer.effect_graph,
                         layer.frame_seed,
                         runtime,
+                        control,
                     )?;
                     scratch.solid_effect_f32.as_slice()
                 };

@@ -429,6 +429,7 @@ pub(crate) fn apply_custom_render_op_f32(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn apply_render_op_f32(
     working: &mut Vec<[f32; 4]>,
     width: u32,

@@ -37,6 +37,7 @@ const RESULT_CAPACITY: usize = 1;
 pub(crate) struct PreviewCpuFallbackRequest {
     pub(crate) cpu_materialization_active_bytes: u64,
     pub(crate) cpu_working_set_grant: mondrian_renderer::TimelineCpuWorkingSetGrant,
+    pub(crate) cancellation: mondrian_core::ExecutionCancellationToken,
     pub(crate) generation: u64,
     pub(crate) epoch: PlaybackEpoch,
     pub(crate) output_key: PreviewOutputKey,
@@ -188,6 +189,9 @@ fn cpu_fallback_worker(
             scratch = TimelineCompositeScratch::default();
             Err("Viewer CPU fallback worker panicked".to_owned())
         });
+        if request.cancellation.is_canceled() {
+            continue;
+        }
         let result = match result {
             Ok((frame, execution, render_cache_frame)) => {
                 PreviewCpuFallbackResult::Ready(Box::new(PreviewCpuFallbackReady {
@@ -224,6 +228,14 @@ fn execute_cpu_fallback(
     ),
     String,
 > {
+    let mut checkpoint = || {
+        request
+            .cancellation
+            .is_canceled()
+            .then_some(mondrian_effects::EffectProcessorStopReason::Canceled)
+    };
+    let mut control = mondrian_effects::EffectProcessorControl::new(&mut checkpoint);
+    control.check().map_err(|error| error.to_string())?;
     scratch.reconfigure_cpu_working_set(request.cpu_working_set_grant);
     scratch
         .admit_cpu_active_working_set(
@@ -255,9 +267,11 @@ fn execute_cpu_fallback(
             request.monitoring_tap,
             request.monitoring_settings,
             scratch,
+            &mut control,
         ),
     }
     .map_err(|error| error.to_string())?;
+    control.check().map_err(|error| error.to_string())?;
     let super::preview_cpu_execution::PreviewCompositeOutput {
         rgba,
         working_frame,
@@ -309,7 +323,8 @@ mod tests {
             max_active_bytes: 512 * 1024 * 1024,
             max_retained_scratch_bytes: 0,
         };
-        let request = PreviewCpuFallbackRequest {
+        let mut request = PreviewCpuFallbackRequest {
+            cancellation: mondrian_core::ExecutionCancellationToken::new(),
             cpu_materialization_active_bytes: 663_552_000,
             cpu_working_set_grant: grant,
             generation: 1,
@@ -339,6 +354,16 @@ mod tests {
             monitoring_settings: Default::default(),
         };
         let mut scratch = TimelineCompositeScratch::default();
+        let initial_grant = scratch.cpu_working_set_diagnostics().grant;
+        request.cancellation.cancel();
+        assert!(execute_cpu_fallback(&request, &mut scratch).is_err());
+        assert_eq!(scratch.cpu_working_set_diagnostics().grant, initial_grant);
+        assert_eq!(
+            scratch.cpu_working_set_diagnostics().retained_scratch_bytes,
+            0
+        );
+        request.cancellation = mondrian_core::ExecutionCancellationToken::new();
+
         let error = match execute_cpu_fallback(&request, &mut scratch) {
             Err(error) => error,
             Ok(_) => panic!("unfunded CPU root executed"),

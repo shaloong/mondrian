@@ -1197,6 +1197,7 @@ mod tests {
             &[crate::app::preview_viewer_plan::ResolvedPreviewElement::SolidColor(layer.clone())],
             &color_context,
             &mut preview_scratch,
+            &mut mondrian_effects::EffectProcessorControl::uncancelled(),
         )
         .expect("render Viewer LUT frame")
         .rgba;
@@ -1211,6 +1212,7 @@ mod tests {
                 color_context.working_color_space(),
             ),
             &mut export_scratch,
+            &mut mondrian_effects::EffectProcessorControl::uncancelled(),
         )
         .expect("render Export LUT frame");
         let boundary = ProgramOutputModule::boundary(ProgramOutputRole::Export, &color_context)

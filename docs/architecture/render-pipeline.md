@@ -3390,3 +3390,12 @@ Session, including heterogeneous CPU prefixes and finite temporal full-frame
 execution. Preview and Export do not share processor instances. Frame dimensions
 and definition implementation revisions retire incompatible resources. Existing
 ROI/custom-operation admission and cooperative outer checkpoints are preserved.
+
+### CPU composite cancellation
+
+The typed color-frame compositor requires a borrowed EffectProcessorControl
+for ordinary media, solid, adjustment and transition graphs. A stopped attempt
+returns no frame and retires retained processor resources. Identity passthrough
+and final publication observe the owner as well. Noncontrolled color/blend
+kernels poll at enclosing boundaries; this contract does not claim a hard
+realtime bound for all CPU operations.

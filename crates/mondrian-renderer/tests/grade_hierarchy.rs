@@ -254,6 +254,7 @@ fn composite_grade_plan(plan: &TimelineRenderPlan) -> Vec<[f32; 4]> {
         TimelineCompositeOptions::default(),
         TimelineEffectColorRuntime::new(&engine, WorkingColorSpace::LinearRec709),
         &mut TimelineCompositeScratch::default(),
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite grade plan")
     .rgba_f32()

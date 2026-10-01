@@ -449,6 +449,7 @@ fn execute_nested_frame(state: &AppState, frame: i64) -> anyhow::Result<NestedEx
         &resolved.plan.elements,
         &resolved.plan.color_context,
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )?;
     ensure!(
         output.composite_diagnostics.float_linear_composites == 1

@@ -260,6 +260,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         ));
                     }
                     let render_cache_hit = cached_working.is_some();
+                    let cancellation = self.execution.borrow().generation_cancellation();
+                    let mut checkpoint = || {
+                        cancellation
+                            .is_canceled()
+                            .then_some(mondrian_effects::EffectProcessorStopReason::Canceled)
+                    };
+                    let mut control =
+                        mondrian_effects::EffectProcessorControl::new(&mut checkpoint);
                     let execution = match cached_working {
                         Some(frame) => present_preview_working_with_signal_monitoring(
                             PreviewWorkingCompositeOutput {
@@ -283,8 +291,16 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                             monitoring_tap,
                             monitoring_settings,
                             &mut self.scratch.borrow_mut(),
+                            &mut control,
                         ),
                     };
+                    let execution = control.checkpoint().map_err(|reason| {
+                        super::super::preview_cpu_execution::PreviewCpuExecutionError::TimelineComposite(
+                            mondrian_renderer::TimelineCompositeError::FloatEffect {
+                                reason: mondrian_effects::EffectFloatExecutionError::Stopped { reason },
+                            },
+                        )
+                    }).and(execution);
                     let output = match execution {
                         Ok(rgba) => rgba,
                         Err(err) => {

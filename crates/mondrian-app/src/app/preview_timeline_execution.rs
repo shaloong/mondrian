@@ -516,6 +516,7 @@ where
     };
     let mut adapter = PreviewTimelineExecutionAdapter {
         closure: &closure,
+        cancellation: graph.cancellation,
         media_frame: &mut admitted_media,
         title_frame,
         scratch,
@@ -715,6 +716,7 @@ enum PreparedPreviewVisualOutput {
 }
 
 struct PreviewTimelineExecutionAdapter<'a, MediaFrame, TitleFrame> {
+    cancellation: &'a ExecutionCancellationToken,
     closure: &'a PreparedVisualFrameClosure<PreparedTimelinePreviewEffectRoutes>,
     media_frame: &'a mut MediaFrame,
     title_frame: &'a mut TitleFrame,
@@ -777,6 +779,7 @@ where
             resolved_visual_identity,
             self.scratch,
             &mut self.facts,
+            self.cancellation,
         )?;
         Ok(PreparedPreviewVisualOutput::Nested(frame))
     }
@@ -2042,6 +2045,7 @@ fn materialize_prepared_nested_node(
     resolved_visual_identity: Option<mondrian_renderer::ResolvedVisualFrameIdentity>,
     scratch: &RefCell<TimelineCompositeScratch>,
     facts: &mut Vec<PreviewTimelineExecutionFact>,
+    cancellation: &ExecutionCancellationToken,
 ) -> Result<MediaPreviewFrame, PreviewTimelineAbort> {
     let presentation_quality = resolved_preview_presentation_quality(&resolved);
     let decode_execution = resolved_preview_decode_execution(&resolved);
@@ -2055,12 +2059,19 @@ fn materialize_prepared_nested_node(
     .plan_identity;
     let cross_call_reusable = viewer_preview_plan_allows_cross_call_reuse(&resolved);
     let mut scratch = scratch.borrow_mut();
+    let mut checkpoint = || {
+        cancellation
+            .is_canceled()
+            .then_some(mondrian_effects::EffectProcessorStopReason::Canceled)
+    };
+    let mut control = mondrian_effects::EffectProcessorControl::new(&mut checkpoint);
     let output = composite_resolved_preview_working(
         target_resolution.width,
         target_resolution.height,
         &resolved,
         &color_context,
         &mut scratch,
+        &mut control,
     )
     .map_err(|error| {
         PreviewTimelineAbort::Unavailable(
@@ -2118,6 +2129,14 @@ fn materialize_prepared_nested_node(
         parent_working_color_space,
         &working_frame,
     );
+    if let Err(reason) = control.checkpoint() {
+        return Err(PreviewTimelineAbort::Unavailable(
+            PreviewUnavailability::stopped(
+                PreviewOutputStage::TimelineComposite,
+                format!("nested execution stopped: {reason:?}"),
+            ),
+        ));
+    }
     Ok(MediaPreviewFrame::from_working(
         working_frame,
         author_resolution,

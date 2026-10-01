@@ -348,6 +348,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     }
 
     fn begin_shutdown(&self) -> bool {
+        self.execution.borrow().generation_cancellation().cancel();
         self.work_watch.begin_shutdown();
         self.jobs.close();
         self.visual_dependencies.begin_shutdown();

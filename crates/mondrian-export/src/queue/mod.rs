@@ -9011,6 +9011,13 @@ fn render_prepared_visual_node_into(
     } else {
         TimelineCompositeOptions::default()
     };
+    let mut checkpoint = || {
+        context
+            .cancellation
+            .is_canceled()
+            .then_some(mondrian_effects::EffectProcessorStopReason::Canceled)
+    };
+    let mut control = mondrian_effects::EffectProcessorControl::new(&mut checkpoint);
     let rendered = composite_timeline_elements_color_frame_with_diagnostics(
         width,
         height,
@@ -9021,6 +9028,7 @@ fn render_prepared_visual_node_into(
             color_context.working_color_space(),
         ),
         &mut context.visual_session.composite_scratch,
+        &mut control,
     )
     .map_err(|error| format!("timeline composite failed: {error}"))?;
     if let Some(diagnostics) = context.composite_diagnostics.as_deref_mut() {

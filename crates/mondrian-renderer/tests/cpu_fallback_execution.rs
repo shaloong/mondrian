@@ -72,6 +72,7 @@ fn preview_export_cpu_seam_proves_parallel_simd_reuse_and_owned_adjustment() {
         TimelineCompositeOptions::default(),
         runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("parallel CPU fallback composite");
     assert!(layered.execution.owner_parallel_kernel_dispatches >= 1);
@@ -94,6 +95,7 @@ fn preview_export_cpu_seam_proves_parallel_simd_reuse_and_owned_adjustment() {
         TimelineCompositeOptions::default(),
         runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("first transition composite");
     assert_eq!(
@@ -117,6 +119,7 @@ fn preview_export_cpu_seam_proves_parallel_simd_reuse_and_owned_adjustment() {
         TimelineCompositeOptions::default(),
         runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("second transition composite");
     assert_eq!(
@@ -140,6 +143,7 @@ fn preview_export_cpu_seam_proves_parallel_simd_reuse_and_owned_adjustment() {
         TimelineCompositeOptions::default(),
         runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("owned adjustment composite");
     assert_eq!(adjustment.execution.owned_adjustment_base_reuses, 1);
@@ -160,6 +164,7 @@ fn optimized_cpu_execution_matches_serial_reference_pixels() {
         TimelineCompositeOptions::default(),
         runtime(),
         &mut serial,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("serial reference");
 
@@ -172,6 +177,7 @@ fn optimized_cpu_execution_matches_serial_reference_pixels() {
         TimelineCompositeOptions::default(),
         runtime(),
         &mut parallel,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("parallel execution");
 
@@ -211,6 +217,7 @@ fn optional_transition_reuse_never_bypasses_the_retained_scratch_grant() {
         TimelineCompositeOptions::default(),
         runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("transition executes within the active-frame grant");
 

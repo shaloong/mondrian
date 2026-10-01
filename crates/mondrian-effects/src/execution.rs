@@ -1,5 +1,5 @@
 use crate::adjustment::{
-    apply_custom_render_op_f32, apply_render_op, apply_render_op_f32, blend_adjustment_result,
+    apply_custom_render_op_f32, apply_render_op, blend_adjustment_result,
     blend_rgba_f32_pixel_seeded, blend_rgba_pixel_seeded, unit_to_u8, EffectRasterRegion,
 };
 #[cfg(test)]
@@ -130,6 +130,11 @@ pub enum EffectExecutionError {
 /// Error returned when an effect graph cannot execute on the float/linear CPU path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectFloatExecutionError {
+    /// The owning scheduler canceled the frame or expired its deadline.
+    Stopped {
+        /// Exact observed scheduler reason, never a plugin runtime fault.
+        reason: crate::EffectProcessorStopReason,
+    },
     /// The definition-bound program cannot enter this single-frame executor.
     ExecutionContract(EffectExecutionAdmissionError),
     /// A bound custom Float32 processor failed without publishing staged pixels.
@@ -737,7 +742,14 @@ pub fn apply_compiled_effect_graph_rgba_f32(
 ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
     let mut session =
         EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(usize::MAX));
-    session.apply_compiled_rgba_f32(input, width, height, compiled, frame_seed)
+    session.apply_compiled_rgba_f32(
+        input,
+        width,
+        height,
+        compiled,
+        frame_seed,
+        &mut crate::EffectProcessorControl::uncancelled(),
+    )
 }
 
 /// Execute a compiled float graph with renderer-owned color-domain processors.
@@ -769,6 +781,7 @@ where
         frame_seed,
         domain_cache_key,
         &mut processor,
+        &mut crate::EffectProcessorControl::uncancelled(),
     )
 }
 
@@ -781,6 +794,7 @@ fn scalar_processor_reservations(
     width: u32,
     height: u32,
     budget: usize,
+    control: &mut crate::EffectProcessorControl<'_>,
 ) -> Result<Option<Vec<usize>>, EffectFloatExecutionError> {
     let has_factory = compiled.schedule().ordered_nodes.iter().any(|id| {
         compiled.graph().node(*id).is_some_and(|node| matches!(&node.kind,
@@ -799,6 +813,7 @@ fn scalar_processor_reservations(
     let mut allocated = 0usize;
     let mut reservations = Vec::with_capacity(compiled.schedule().ordered_nodes.len());
     for id in &compiled.schedule().ordered_nodes {
+        scalar_checkpoint(control)?;
         let node = compiled
             .graph()
             .node(*id)
@@ -897,6 +912,45 @@ fn scalar_processor_reservations(
     Ok(Some(reservations))
 }
 
+fn scalar_checkpoint(
+    control: &mut crate::EffectProcessorControl<'_>,
+) -> Result<(), EffectFloatExecutionError> {
+    control
+        .checkpoint()
+        .map_err(|reason| EffectFloatExecutionError::Stopped { reason })
+}
+
+fn scalar_mask_error(
+    node_id: EffectGraphNodeId,
+    error: crate::mask_raster::ControlledMaskRasterError<EffectFloatExecutionError>,
+) -> EffectFloatExecutionError {
+    match error {
+        crate::mask_raster::ControlledMaskRasterError::Raster(source) => {
+            EffectFloatExecutionError::MaskRasterFailed { node_id, source }
+        }
+        crate::mask_raster::ControlledMaskRasterError::Checkpoint(error) => error,
+    }
+}
+
+fn finish_scalar_attempt(
+    session: &mut EffectExecutionSession,
+    control: &mut crate::EffectProcessorControl<'_>,
+    result: Result<Vec<[f32; 4]>, EffectFloatExecutionError>,
+) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
+    // Do not overwrite a completed plugin fault with a later owner stop.
+    // Successful output still needs its last publication checkpoint.
+    let stopped = if result.is_ok() {
+        control.checkpoint().err()
+    } else {
+        control.stop_reason()
+    };
+    if let Some(reason) = stopped {
+        session.processors.clear();
+        return Err(EffectFloatExecutionError::Stopped { reason });
+    }
+    result
+}
+
 fn apply_compiled_effect_graph_rgba_f32_inner(
     session: &mut EffectExecutionSession,
     input: &[[f32; 4]],
@@ -906,7 +960,9 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
     frame_seed: i64,
     domain_cache_key: Option<EffectDomainProcessorCacheKey>,
     mut processor: Option<&mut EffectDomainProcessor<'_>>,
+    control: &mut crate::EffectProcessorControl<'_>,
 ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
+    scalar_checkpoint(control)?;
     let required_len = width as usize * height as usize;
     if input.len() != required_len {
         return Err(EffectFloatExecutionError::InputSizeMismatch {
@@ -920,15 +976,22 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
         // not turn an empty request into a plugin fault or start a worker.
         return Ok(Vec::new());
     }
-    let reservations =
-        scalar_processor_reservations(compiled, width, height, session.max_working_bytes())?;
+    let reservations = scalar_processor_reservations(
+        compiled,
+        width,
+        height,
+        session.max_working_bytes(),
+        control,
+    )?;
     if reservations.is_none() {
         // A built-in-only graph cannot reuse the previous graph's workers.
         // Retire them before identity/cache output copies as well.
         session.processors.clear();
     }
     if compiled.graph().is_identity() {
-        return Ok(input.to_vec());
+        let output = input.to_vec();
+        scalar_checkpoint(control)?;
+        return Ok(output);
     }
     if let Some(cached) = get_cached_effect_output_f32(
         session,
@@ -939,6 +1002,7 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
         frame_seed,
         domain_cache_key,
     ) {
+        scalar_checkpoint(control)?;
         return Ok(cached);
     }
 
@@ -947,6 +1011,7 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
     let mut remaining_uses = compiled.node_use_counts().clone();
     let mut buffer_pool = Vec::<Vec<[f32; 4]>>::new();
     for (step, node_id) in compiled.schedule().ordered_nodes.iter().enumerate() {
+        scalar_checkpoint(control)?;
         if let Some(reservations) = &reservations {
             session
                 .processors
@@ -1000,12 +1065,19 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                         frame_seed,
                         Some(session),
                         caller_owned_bytes,
-                        &mut crate::EffectProcessorControl::uncancelled(),
+                        control,
                     )
                     .map_err(EffectFloatExecutionError::CustomProcessor)?;
                     true
                 } else {
-                    apply_render_op_f32(&mut source, width, height, op, frame_seed)
+                    crate::adjustment::apply_render_op_f32_controlled(
+                        &mut source,
+                        width,
+                        height,
+                        op,
+                        frame_seed,
+                        &mut || scalar_checkpoint(control),
+                    )?
                 };
                 if !supported {
                     return Err(EffectFloatExecutionError::UnsupportedNode {
@@ -1054,28 +1126,21 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                 outputs.insert(node.id, base_frame);
             }
             EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity, invert } => {
-                let cancellation = ExecutionCancellationToken::new();
-                let raster = crate::PreparedMaskRaster::prepare(
+                let raster = crate::PreparedMaskRaster::prepare_controlled(
                     shape,
                     crate::EffectFrameExtent::new(width, height),
                     *feather,
                     *expansion,
                     *opacity,
-                    &cancellation,
+                    &mut || scalar_checkpoint(control),
                 )
-                .map_err(|error| EffectFloatExecutionError::MaskRasterFailed {
-                    node_id: node.id,
-                    source: error,
-                })?;
+                .map_err(|error| scalar_mask_error(node.id, error))?;
                 let mut rgba = raster
-                    .rasterize_rgba_f32(
+                    .rasterize_rgba_f32_controlled(
                         crate::EffectPixelRoi::new(0, 0, width, height),
-                        &cancellation,
+                        &mut || scalar_checkpoint(control),
                     )
-                    .map_err(|error| EffectFloatExecutionError::MaskRasterFailed {
-                        node_id: node.id,
-                        source: error,
-                    })?;
+                    .map_err(|error| scalar_mask_error(node.id, error))?;
                 if *invert {
                     invert_alpha_mask_f32_in_place(&mut rgba);
                 }
@@ -1207,12 +1272,15 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
     }
 
     let Some(output_id) = compiled.graph().output else {
-        return Ok(input.to_vec());
+        let output = input.to_vec();
+        scalar_checkpoint(control)?;
+        return Ok(output);
     };
     let mut output = outputs
         .remove(&output_id)
         .ok_or(EffectFloatExecutionError::MissingOutput { node_id: output_id })?;
     apply_effect_domain_transition(compiled, None, output_id, &mut output, &mut processor)?;
+    scalar_checkpoint(control)?;
     put_cached_effect_output_f32(
         session,
         input,
@@ -1236,10 +1304,12 @@ impl EffectExecutionSession {
         height: u32,
         compiled: &CompiledEffectGraph,
         frame_seed: i64,
+        control: &mut crate::EffectProcessorControl<'_>,
     ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
-        apply_compiled_effect_graph_rgba_f32_inner(
-            self, input, width, height, compiled, frame_seed, None, None,
-        )
+        let result = apply_compiled_effect_graph_rgba_f32_inner(
+            self, input, width, height, compiled, frame_seed, None, None, control,
+        );
+        finish_scalar_attempt(self, control, result)
     }
 
     /// Execute one current-frame Float32 graph while resolving explicit RGB
@@ -1253,11 +1323,12 @@ impl EffectExecutionSession {
         frame_seed: i64,
         domain_cache_key: EffectDomainProcessorCacheKey,
         mut processor: F,
+        control: &mut crate::EffectProcessorControl<'_>,
     ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError>
     where
         F: FnMut(&mut [[f32; 4]], EffectDomainTransition) -> Result<(), String>,
     {
-        apply_compiled_effect_graph_rgba_f32_inner(
+        let result = apply_compiled_effect_graph_rgba_f32_inner(
             self,
             input,
             width,
@@ -1266,7 +1337,9 @@ impl EffectExecutionSession {
             frame_seed,
             Some(domain_cache_key),
             Some(&mut processor),
-        )
+            control,
+        );
+        finish_scalar_attempt(self, control, result)
     }
 }
 
@@ -1317,7 +1390,14 @@ pub fn apply_compiled_effect_graph_pass_rgba_f32(
     let mut session =
         EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(usize::MAX));
     session.apply_compiled_pass_rgba_f32(
-        base, width, height, compiled, opacity, blend_mode, frame_seed,
+        base,
+        width,
+        height,
+        compiled,
+        opacity,
+        blend_mode,
+        frame_seed,
+        &mut crate::EffectProcessorControl::uncancelled(),
     )
 }
 
@@ -1333,7 +1413,11 @@ impl EffectExecutionSession {
         opacity: f32,
         blend_mode: Option<BlendMode>,
         frame_seed: i64,
+        control: &mut crate::EffectProcessorControl<'_>,
     ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
+        if let Err(error) = scalar_checkpoint(control) {
+            return finish_scalar_attempt(self, control, Err(error));
+        }
         let required_len = width as usize * height as usize;
         if base.len() != required_len {
             return Err(EffectFloatExecutionError::InputSizeMismatch {
@@ -1349,6 +1433,7 @@ impl EffectExecutionSession {
             opacity,
             blend_mode,
             frame_seed,
+            control,
         )
     }
 
@@ -1367,7 +1452,11 @@ impl EffectExecutionSession {
         opacity: f32,
         blend_mode: Option<BlendMode>,
         frame_seed: i64,
+        control: &mut crate::EffectProcessorControl<'_>,
     ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
+        if let Err(error) = scalar_checkpoint(control) {
+            return finish_scalar_attempt(self, control, Err(error));
+        }
         let required_len = width as usize * height as usize;
         if base.len() != required_len {
             return Err(EffectFloatExecutionError::InputSizeMismatch {
@@ -1390,9 +1479,11 @@ impl EffectExecutionSession {
             return Ok(base);
         }
 
-        let processed = self.apply_compiled_rgba_f32(&base, width, height, compiled, frame_seed)?;
+        let processed =
+            self.apply_compiled_rgba_f32(&base, width, height, compiled, frame_seed, control)?;
         blend_rgba_f32_in_place(&mut base, &processed, opacity, mode, frame_seed);
-        Ok(base)
+        let result = scalar_checkpoint(control).map(|()| base);
+        finish_scalar_attempt(self, control, result)
     }
 }
 
@@ -1423,6 +1514,7 @@ where
         frame_seed,
         domain_cache_key,
         processor,
+        &mut crate::EffectProcessorControl::uncancelled(),
     )
 }
 
@@ -1441,10 +1533,14 @@ impl EffectExecutionSession {
         frame_seed: i64,
         domain_cache_key: EffectDomainProcessorCacheKey,
         processor: F,
+        control: &mut crate::EffectProcessorControl<'_>,
     ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError>
     where
         F: FnMut(&mut [[f32; 4]], EffectDomainTransition) -> Result<(), String>,
     {
+        if let Err(error) = scalar_checkpoint(control) {
+            return finish_scalar_attempt(self, control, Err(error));
+        }
         let required_len = width as usize * height as usize;
         if base.len() != required_len {
             return Err(EffectFloatExecutionError::InputSizeMismatch {
@@ -1462,6 +1558,7 @@ impl EffectExecutionSession {
             frame_seed,
             domain_cache_key,
             processor,
+            control,
         )
     }
 
@@ -1482,10 +1579,14 @@ impl EffectExecutionSession {
         frame_seed: i64,
         domain_cache_key: EffectDomainProcessorCacheKey,
         processor: F,
+        control: &mut crate::EffectProcessorControl<'_>,
     ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError>
     where
         F: FnMut(&mut [[f32; 4]], EffectDomainTransition) -> Result<(), String>,
     {
+        if let Err(error) = scalar_checkpoint(control) {
+            return finish_scalar_attempt(self, control, Err(error));
+        }
         let required_len = width as usize * height as usize;
         if base.len() != required_len {
             return Err(EffectFloatExecutionError::InputSizeMismatch {
@@ -1516,9 +1617,11 @@ impl EffectExecutionSession {
             frame_seed,
             domain_cache_key,
             processor,
+            control,
         )?;
         blend_rgba_f32_in_place(&mut base, &processed, opacity, mode, frame_seed);
-        Ok(base)
+        let result = scalar_checkpoint(control).map(|()| base);
+        finish_scalar_attempt(self, control, result)
     }
 }
 
@@ -2269,6 +2372,65 @@ pub(crate) fn apply_alpha_mask_f32_region_controlled<E>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scalar_owner_stop_blocks_empty_identity_and_cached_output() {
+        use crate::{EffectProcessorControl, EffectProcessorStopReason};
+        let graph = crate::compile_reference_effect_graph(&crate::EffectRenderPlan {
+            ops: vec![crate::EffectRenderOp::ColorAdjust {
+                exposure: 1.0,
+                contrast: 1.0,
+                saturation: 1.0,
+                working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
+            }],
+        })
+        .expect("graph");
+        let mut session = crate::EffectExecutionSession::default();
+        let input = [[0.25, 0.5, 1.5, 0.5]];
+        session
+            .apply_compiled_rgba_f32(
+                &input,
+                1,
+                1,
+                &graph,
+                0,
+                &mut EffectProcessorControl::uncancelled(),
+            )
+            .expect("populate");
+        let mut checkpoint = || Some(EffectProcessorStopReason::Canceled);
+        assert_eq!(
+            session.apply_compiled_rgba_f32(
+                &input,
+                1,
+                1,
+                &graph,
+                0,
+                &mut EffectProcessorControl::new(&mut checkpoint)
+            ),
+            Err(super::EffectFloatExecutionError::Stopped {
+                reason: EffectProcessorStopReason::Canceled
+            })
+        );
+        let identity = crate::compile_reference_effect_graph(&crate::EffectRenderPlan::default())
+            .expect("identity");
+        for (pixels, width, height) in [(&input[..], 1, 1), (&[][..], 0, 0)] {
+            let mut checkpoint = || Some(EffectProcessorStopReason::DeadlineExpired);
+            assert_eq!(
+                session.apply_compiled_rgba_f32(
+                    pixels,
+                    width,
+                    height,
+                    &identity,
+                    0,
+                    &mut EffectProcessorControl::new(&mut checkpoint)
+                ),
+                Err(super::EffectFloatExecutionError::Stopped {
+                    reason: EffectProcessorStopReason::DeadlineExpired
+                })
+            );
+        }
+        assert_eq!(input, [[0.25, 0.5, 1.5, 0.5]]);
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2704,6 +2866,7 @@ mod tests {
                         processor_calls += 1;
                         Ok(())
                     },
+                    &mut crate::EffectProcessorControl::uncancelled(),
                 )
                 .expect("execute cacheable domain graph");
         }
@@ -2776,6 +2939,7 @@ mod tests {
                 0.5,
                 Some(BlendMode::Normal),
                 0,
+                &mut crate::EffectProcessorControl::uncancelled(),
             )
             .expect("owned float color adjust pass");
 
@@ -2826,7 +2990,14 @@ mod tests {
             get_cached_effect_output_f32(&mut session, &input, 1, 1, &compiled, 7, None).is_none()
         );
         let output = session
-            .apply_compiled_rgba_f32(&input, 1, 1, &compiled, 7)
+            .apply_compiled_rgba_f32(
+                &input,
+                1,
+                1,
+                &compiled,
+                7,
+                &mut crate::EffectProcessorControl::uncancelled(),
+            )
             .expect("float chain");
 
         assert_eq!(
@@ -2850,7 +3021,14 @@ mod tests {
         assert!(!compiled.output_cache_enabled());
         assert!(effect_output_cache_key_f32(&input, 1, 1, &compiled, 7, None).is_none());
         session
-            .apply_compiled_rgba_f32(&input, 1, 1, &compiled, 7)
+            .apply_compiled_rgba_f32(
+                &input,
+                1,
+                1,
+                &compiled,
+                7,
+                &mut crate::EffectProcessorControl::uncancelled(),
+            )
             .expect("low-cost float chain");
         assert!(
             get_cached_effect_output_f32(&mut session, &input, 1, 1, &compiled, 7, None).is_none()
