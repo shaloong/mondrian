@@ -167,7 +167,8 @@ impl AppState {
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(
-                AppMessage::new("status-import-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-import-failed")
+                    .with_message("reason", AppMessage::new("reason-library-disconnected")),
                 true,
             );
             MondrianError::WorkflowStepFailed { step_id: "import_media".to_string(), reason }
@@ -178,7 +179,10 @@ impl AppState {
         {
             let reason = format!("目标素材文件夹不存在：{folder_id}");
             self.set_status_hint(
-                AppMessage::new("status-import-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-import-failed").with_message(
+                    "reason",
+                    AppMessage::new("reason-import-folder-missing").with_text("folder", folder_id),
+                ),
                 true,
             );
             return Err(MondrianError::WorkflowStepFailed {
@@ -190,7 +194,8 @@ impl AppState {
         let admission = self.media_import.admit_batch(paths, folder_id).map_err(|error| {
             let reason = error.to_string();
             self.set_status_hint(
-                AppMessage::new("status-import-failed").with_text("reason", reason.clone()),
+                AppMessage::new("status-import-failed")
+                    .with_message("reason", media_import_admission_message(&error)),
                 true,
             );
             MondrianError::WorkflowStepFailed { step_id: "import_media".to_string(), reason }
@@ -467,3 +472,35 @@ impl AppState {
         );
     }
 }
+
+/// Project execution admission facts without parsing diagnostic text.
+pub(super) fn media_import_admission_message(
+    error: &execution::MediaImportAdmissionError,
+) -> AppMessage {
+    use execution::MediaImportAdmissionError;
+    match error {
+        MediaImportAdmissionError::ProjectUnavailable => {
+            AppMessage::new("reason-import-project-unavailable")
+        }
+        MediaImportAdmissionError::WorkerUnavailable => {
+            AppMessage::new("reason-import-worker-unavailable")
+        }
+        MediaImportAdmissionError::EmptyBatch => AppMessage::new("reason-import-empty-batch"),
+        MediaImportAdmissionError::BatchCapacityExceeded { capacity } => {
+            AppMessage::new("reason-import-batch-capacity").with_count("capacity", *capacity)
+        }
+        MediaImportAdmissionError::BatchTooLarge { files, capacity } => {
+            AppMessage::new("reason-import-batch-too-large")
+                .with_count("files", *files)
+                .with_count("capacity", *capacity)
+        }
+        MediaImportAdmissionError::FileCapacityExceeded { files, available } => {
+            AppMessage::new("reason-import-file-capacity")
+                .with_count("files", *files)
+                .with_count("available", *available)
+        }
+    }
+}
+
+#[cfg(test)]
+mod product_message_tests;

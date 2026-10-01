@@ -307,3 +307,18 @@ Regression coverage dispatches the same invalid import twice, requires the same
 specific localized error and one history row, then dispatches an unreported
 failure and requires the generic typed fallback. Further cases cover clearing,
 success-only reporting and unchanged author generation.
+
+
+### Media import admission reasons
+
+The App projects all six typed Media Import admission variants exhaustively at
+its product boundary. Missing project/worker, empty batch, batch capacity, batch
+size and outstanding file capacity retain catalog identities and exact counts.
+Both library import and deferred Timeline file admission use this projection;
+the execution owner retains its diagnostic Display and has no locale dependency.
+Disconnected library and missing destination folder choose nested reasons at
+their decision branches. Folder identifiers remain opaque arguments, including
+braces and non-English text. Status/history resolve these retained facts in the
+current locale. Rejection does not enqueue files or mutate authoring/library
+state. Foreign probe and publication diagnostic details remain a separate
+migration task; this does not claim full import failure localization.

@@ -51,10 +51,17 @@ impl AppState {
         if !self.can_queue_file_on_timeline(&payload) {
             return Err(placement_error("文件或目标轨道不可用"));
         }
-        let admission = self
-            .media_import
-            .admit_deferred_file(payload.path.clone())
-            .map_err(|error| placement_error(format!("无法排队探测外部文件：{error}")))?;
+        let admission =
+            self.media_import.admit_deferred_file(payload.path.clone()).map_err(|error| {
+                self.set_status_hint(
+                    AppMessage::new("status-drop-failed").with_message(
+                        "reason",
+                        super::media_import::media_import_admission_message(&error),
+                    ),
+                    true,
+                );
+                placement_error(format!("无法排队探测外部文件：{error}"))
+            })?;
         self.pending_timeline_file_drops.insert(admission.batch_id, payload);
         let _ = self.refresh_internal_execution_resource_decision();
         self.set_status_hint(AppMessage::new("status-drop-probing"), false);

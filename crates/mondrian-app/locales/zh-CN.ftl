@@ -1118,3 +1118,11 @@ reason-time-domain-mismatch = 时间属于不同域，需要显式时间映射
 reason-time-non-invertible = 时间映射不可逆
 reason-time-negative-duration = 时间范围的持续时间不能为负
 reason-time-non-finite = 时间输入必须是有限值
+
+reason-import-folder-missing = 目标素材文件夹不存在：{ $folder }
+reason-import-project-unavailable = 请先打开项目再导入媒体
+reason-import-worker-unavailable = 媒体导入工作线程不可用，请重启应用后重试
+reason-import-empty-batch = 请至少选择一个媒体文件
+reason-import-batch-capacity = 排队的导入批次已达上限 { $capacity }，请等待导入完成或取消一个批次
+reason-import-batch-too-large = 本次导入包含 { $files } 个文件，每批最多可选择 { $capacity } 个
+reason-import-file-capacity = 本次导入需要 { $files } 个文件槽位，当前仅剩 { $available } 个，请等待导入完成或减少所选文件

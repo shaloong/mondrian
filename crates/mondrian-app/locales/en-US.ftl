@@ -1183,3 +1183,11 @@ reason-time-domain-mismatch = Times belong to different domains; an explicit tim
 reason-time-non-invertible = Time mapping is not invertible
 reason-time-negative-duration = Time range duration must not be negative
 reason-time-non-finite = Time input must be finite
+
+reason-import-folder-missing = The destination asset folder does not exist: { $folder }
+reason-import-project-unavailable = Open a project before importing media
+reason-import-worker-unavailable = Media import workers are unavailable; restart the application and try again
+reason-import-empty-batch = Choose at least one media file
+reason-import-batch-capacity = Too many import batches are queued (limit: { $capacity }); wait for an import to finish or cancel one
+reason-import-batch-too-large = This import contains { $files } files; select no more than { $capacity } files per batch
+reason-import-file-capacity = This import needs { $files } file slots, but only { $available } are available; wait for an import to finish or select fewer files
