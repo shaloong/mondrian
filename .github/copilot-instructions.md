@@ -179,9 +179,9 @@
 ### 11.1 Rust 代码质量基线
 
 - 提交前必须通过：`cargo fmt`。
-- 提交前必须通过：`cargo clippy --workspace`。
+- 提交前必须通过：`cargo clippy --workspace --all-targets --all-features -- -D warnings`（与 CI 一致）。
 - 公共 API 必须提供文档注释（`///`）。
-- 生产代码禁止 `unwrap()`（测试代码可例外，但应尽量可读且可定位失败原因）。
+- 生产代码避免 `unwrap()`/`expect()`；仅不可失败且已说明的不变量允许例外，口径以 `docs/dev/coding-style.md` 为准。测试应保持可读且失败原因可定位。
 - 错误类型优先使用 `thiserror` 进行结构化定义。
 
 ### 11.2 测试与性能校验基线
@@ -193,7 +193,7 @@
 
 ### 11.3 分支与协作约定
 
-- 分支命名建议：`feat/*`、`fix/*`、`perf/*`。
+- 分支命名建议：`feature/*`、`fix/*`、`perf/*`；外部 PR 提交到 `develop`，`main` 仅接受本仓库 `develop` 的 promotion PR。
 - PR 描述建议包含：改动摘要、验证步骤、潜在风险、回滚思路。
 
 ### 11.4 仓库文档对齐要求
@@ -201,9 +201,9 @@
 涉及以下模块时，必须同步更新对应架构文档：
 
 - `mondrian-media`：`docs/architecture/media-pipeline.md`
-- `mondrian-renderer`：`docs/architecture/renderer.md`
-- `mondrian-timeline`：`docs/architecture/timeline-system.md`
-- `mondrian-ai`：`docs/architecture/ai-workflow.md`
-- `mondrian-assets`：`docs/architecture/asset-system.md`
-- `mondrian-effects`：`docs/architecture/effects-system.md`
-- `mondrian-export`：`docs/architecture/export-system.md`
+- `mondrian-renderer`：`docs/architecture/render-pipeline.md`
+- `mondrian-timeline`：`docs/architecture/timeline-model.md`
+- `mondrian-ai`：`docs/architecture/overview.md`
+- `mondrian-assets`：`docs/architecture/project-model.md`
+- `mondrian-effects`：`docs/architecture/effect-system.md`
+- `mondrian-export`：`docs/architecture/professional-delivery.md`

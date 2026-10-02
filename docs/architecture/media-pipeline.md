@@ -69,7 +69,7 @@ outstanding handles and deadline facts separately. A live borrower prevents a
 successful close and quarantines the owner instead of deleting a live namespace.
 Ordinary development may omit a runtime closure without claiming namespace
 ownership; a qualified campaign requires the complete declared closure before
-starting a phase. Native coverage is in `tests/approved_bmx.rs` and must be run
+starting a phase. Native coverage is in `crates/mondrian-media/tests/approved_bmx.rs` and must be run
 explicitly with the approved official BMX installation.
 
 Float OpenEXR admission maps FFmpeg GBRPF32/GBRAPF32 (LE and BE) into exact Core sampling facts. The existing direct Float32 materializer preserves negative values, highlights and Alpha; no 8/16-bit fallback or invented native YUV surface may authorize this path. A source color override and full-range interpretation remain explicit authoring inputs for untagged analytic EXR fixtures. Storage precision does not imply a transfer function: a planar Float32 source interpreted as encoded RGB or non-color data must retain its samples and carry that explicit contract instead of entering an integer scaler.

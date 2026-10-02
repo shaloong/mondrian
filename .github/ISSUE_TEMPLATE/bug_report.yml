@@ -1,0 +1,48 @@
+name: Bug report / 缺陷报告
+description: Report a reproducible problem in Mondrian / 报告可复现的问题
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Suspected security issue? Report privately using [SECURITY.md](https://github.com/shaloong/mondrian/blob/main/.github/SECURITY.md).
+        支持中文和英文。请脱敏日志和路径，不要上传私人媒体、凭证或未公开漏洞。
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit / 版本或提交
+      description: Release tag or exact commit; say if this is a source build.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment / 环境
+      description: OS/build, CPU/RAM, GPU/driver, and relevant runtime versions. For media problems include codec, container, resolution and frame rate.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction / 复现步骤
+      description: Numbered steps and a small synthetic or redistributable sample when needed. State how often this occurs.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior / 预期行为
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and evidence / 实际行为与证据
+      description: Include the error and sanitized logs or screenshots. A crash alone does not establish its cause.
+    validations:
+      required: true
+  - type: textarea
+    id: regression
+    attributes:
+      label: Regression or workaround / 回退与临时解决方法
+      description: Last known working version, related issues, or a workaround if known.

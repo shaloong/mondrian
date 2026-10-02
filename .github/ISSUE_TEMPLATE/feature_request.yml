@@ -1,0 +1,26 @@
+name: Feature request / 功能建议
+description: Describe a user problem and a proposed improvement / 描述需求与改进
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: Check existing issues and the [roadmap](https://github.com/shaloong/mondrian/blob/main/docs/ROADMAP.md). English and Chinese are welcome.
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem / 用户问题
+      description: Explain the editing or delivery workflow and who needs this.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome / 期望结果
+      description: Describe observable behavior and how success could be verified.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and constraints / 替代方案与约束
+      description: Current workaround, platform/format requirements, compatibility, or useful references.

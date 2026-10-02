@@ -1,3 +1,4 @@
 self-hosted-runner:
   labels:
     - mondrian-reference
+    - mondrian-gpu-color

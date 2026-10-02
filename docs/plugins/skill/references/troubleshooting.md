@@ -81,7 +81,7 @@
 1. Plugin crate is listed in root `Cargo.toml` `[workspace].members`
 2. All path dependencies use correct relative paths (e.g., `path = "../mondrian-core"`)
 3. Dependency versions are compatible with the workspace
-4. Plugin crate uses `edition = "2021"`
+4. Workspace plugin crate inherits `edition.workspace = true` and `rust-version.workspace = true`
 5. `mondrian-app` (or wherever `register()` is called) has the plugin as a dependency
 
 **Common causes:**

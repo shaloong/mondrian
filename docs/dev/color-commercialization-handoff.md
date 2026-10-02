@@ -1150,7 +1150,7 @@ Detailed implementation history and remaining boundaries:
    `preview_visual_protocol` now has a validation-only Cargo example/libtest
    entry, not a top-level integration target. The original 26 private tests across
    the real worker-lifecycle, notifier, visual-task and dependency-observer
-   Modules live in independent `tests/protocol/` files, excluded from ordinary
+   Modules live in independent `crates/mondrian-app/tests/protocol/` files, excluded from ordinary
    library source inputs. One additional test covers already-terminal string
    and opaque panics at an expired join deadline. Run `cargo test --release -p
    mondrian-app --features validation --example preview_visual_protocol -j 1 -- --test-threads=1` with

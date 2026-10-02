@@ -1,8 +1,8 @@
 # CLA Assistant 接入与签署记录 / CLA Assistant procedure
 
-状态：Gist 已公开并已关联 CLA Assistant；签署页已展示。尚未完成真实签署及导出验收；CLA 合并规则已创建但处于停用状态。在线入口：https://cla-assistant.io/shaloong/mondrian 。在上线验收完成前，不将外部贡献视为已完成授权核验。
+状态：Gist 已公开并已关联 CLA Assistant；签署页已展示。尚未完成真实签署及导出验收；截至 2026-10-02，GitHub CLA 规则已启用并要求 main/develop 的 `license/cla`；规则状态不能替代真实签署、隐私与导出验收。在线入口：https://cla-assistant.io/shaloong/mondrian 。在上线验收完成前，不将外部贡献视为已完成授权核验。
 
-Status: the public Gist is linked and the signing page is displayed. Execution/export testing remains incomplete and the prepared CLA ruleset is disabled. Entry: https://cla-assistant.io/shaloong/mondrian . Do not treat external contributions as authority-verified solely from this setup.
+Status: the public Gist is linked and the signing page is displayed. Execution/export testing remains incomplete and as of 2026-10-02, the GitHub CLA ruleset is active and requires `license/cla` on main/develop. Rule activation does not establish signing, privacy or export acceptance. Entry: https://cla-assistant.io/shaloong/mondrian . Do not treat external contributions as authority-verified solely from this setup.
 
 公开正文：[CLA Gist](https://gist.github.com/shalomwang/ffaa6f1c3c54b09b1e9f4b84c3097cae) · revision `670475906da5e878495cf5aa50c9930e506466f5` · SHA-256 `7442c81ad95361aba24ac7e65e3a3fc8ae3527aaf295ab3bde237a5496b3a416`。仓库正文与该修订字节一致。
 

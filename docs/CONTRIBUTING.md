@@ -6,50 +6,46 @@
 
 The [Contributor License Agreement](legal/CLA.md) grants the stated rights in Contributions, including commercial relicensing; contributors retain their copyright. Merely using the project, maintaining a fork or independently publishing a plugin does not require a CLA. The CLA does not change the licenses applicable to existing code.
 
-签署前请阅读[隐私告知](legal/CLA-PRIVACY.md)。在线入口、当前验收状态及记录方式见[接入说明](legal/CLA-SERVICE.md)。目前合并检查尚未强制启用；维护者不得仅凭页面可访问就认定授权核验完成。私人授权材料通过 contact@shaloong.com 联系，不放公开 PR。
+签署前请阅读[隐私告知](legal/CLA-PRIVACY.md)。在线入口、当前验收状态及记录方式见[接入说明](legal/CLA-SERVICE.md)。截至 2026-10-02，GitHub main/develop 规则已启用并要求 `license/cla`；真实签署、导出及隐私流程的验收证据仍需核实。维护者不得仅凭规则启用或页面可访问就认定授权核验完成。私人授权材料通过 contact@shaloong.com 联系，不放公开 PR。
 
-Read the [privacy notice](legal/CLA-PRIVACY.md) before signing. See the [service procedure](legal/CLA-SERVICE.md) for the entry point, validation status and records. Merge enforcement is not yet active; an accessible signing page alone does not establish verified authorization. Contact contact@shaloong.com for private authority materials; do not post them in public PRs.
+Read the [privacy notice](legal/CLA-PRIVACY.md) before signing. See the [service procedure](legal/CLA-SERVICE.md) for the entry point, validation status and records. As of 2026-10-02, active GitHub rules require `license/cla` on main/develop; signing, export and privacy acceptance evidence still requires verification. Neither an active rule nor an accessible signing page establishes verified authorization. Contact contact@shaloong.com for private authority materials; do not post them in public PRs.
+
+## 社区与提交入口 / Community and submission
+
+中文和英文 Issue/PR 均可。请遵守[行为准则](../CODE_OF_CONDUCT.md)。
+Bug 和功能建议通过 [GitHub Issues](https://github.com/shaloong/mondrian/issues/new/choose)
+提交；疑似漏洞走[私密安全报告](../.github/SECURITY.md)。
+
+External PRs target **develop**; maintainers promote this repository's develop
+branch to main. Explain the problem and validation using the PR template.
+See [review requirements](dev/code-review.md), [governance](../GOVERNANCE.md),
+and [support](../SUPPORT.md). Local agent tickets do not replace public issues.
+
+Maintainers should label small, bounded tasks `good first issue` or `help wanted`
+when they can provide a reproducer, expected result and validation instructions.
+A label alone is insufficient; keep the task actionable and acknowledge reports.
 
 ## 开发环境搭建
 
-```bash
-# 1. 安装 Rust（stable channel）
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-rustup default stable
+先按[开发环境说明](dev/setup.md)安装仓库锁定的 Rust 工具链与平台依赖。
+Windows 使用 PowerShell 7，并按 [Windows 开发指南](dev/windows-development.md)
+准备 MSVC、LLVM 和与 CI 一致的 vcpkg 媒体运行时；不必更改全局 Rust channel。
 
-# 2. 安装工具链
-cargo install cargo-watch
-cargo install cargo-nextest    # 更快的测试运行器
-cargo install cargo-audit      # 安全审计
-
-# 3. 安装 FFmpeg（Windows，推荐与 CI 对齐）
-git clone --branch 2026.07.29 --depth 1 https://github.com/microsoft/vcpkg C:\vcpkg
-C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-C:\vcpkg\vcpkg.exe install "ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom,nvcodec]:x64-windows" --recurse --overlay-ports=vcpkg-overlay
-# 设置环境变量（PowerShell）
-$env:VCPKG_ROOT="C:\vcpkg"
-$env:VCPKGRS_TRIPLET="x64-windows"
-$env:VCPKGRS_DYNAMIC="1"
-$env:VCPKG_DEFAULT_TRIPLET="x64-windows"
-$env:FFMPEG_DIR="C:\vcpkg\installed\x64-windows"
-$env:PKG_CONFIG_PATH="C:\vcpkg\installed\x64-windows\lib\pkgconfig"
-$env:PKG_CONFIG="C:\vcpkg\installed\x64-windows\tools\pkgconf\pkgconf.exe"
-
-# 4. 安装 Vulkan SDK（Windows）
-# 下载: https://vulkan.lunarg.com/sdk/home
-
-# 5. Clone & Build
-git clone https://github.com/mondrian-studio/mondrian
-cd mondrian
-cargo build
+```powershell
+# Windows：从仓库根目录激活当前终端的原生依赖环境
+. ./scripts/enter-windows-development.ps1
+cargo build --locked
 ```
+
+Linux/macOS 按开发环境说明设置原生库后，同样运行 `cargo build --locked`。
+日常质量检查以 CI 使用的 `cargo deny` 和下方格式、Clippy、测试命令为准。
 
 ## 代码规范
 
 - 运行 `cargo fmt` 格式化代码
 - 运行 `cargo clippy --workspace --all-targets --all-features -- -D warnings` 检查代码质量（与 CI 一致）
 - 所有公共 API 必须有文档注释（`///`）
-- 错误处理用 `thiserror` 定义，禁止 `unwrap()`（测试代码除外）
+- 可恢复的领域错误使用 `thiserror`/结构化错误；生产代码避免 `unwrap()`/`expect()`，仅不可失败且已说明的不变量允许例外（测试代码除外），详见[代码风格](dev/coding-style.md)
 - Tokio 只承载明确的异步 I/O；CPU/媒体工作使用领域 Module 自有的有界执行器，并显式传递资源 grant、取消与终态证据，禁止引入全局通用线程池
 
 ## 提交规范（Conventional Commits）
@@ -66,9 +62,9 @@ refactor(core): 重构事件总线类型参数
 ## 分支策略
 
 ```text
-main           正式发布（只接受 PR）
-dev            开发主分支
-feat/xxx       功能分支
+main           发布分支（只接受本仓库 develop 的 promotion PR）
+develop        开发主分支（外部贡献提交至此）
+feature/xxx    功能分支
 fix/xxx        修复分支
 perf/xxx       性能优化分支
 ```
@@ -107,8 +103,8 @@ git push origin v0.1.1
 - Tag 和手动 `release_tag` 必须是严格的 `v<major>.<minor>.<patch>` SemVer；
   workflow 输入只经环境变量进入 PowerShell，制品身份 Module 会在任何目录创建或清理前
   拒绝脚本元字符、路径分隔符和仓库外解析结果。
-- CI 与 Release 固定同一不可变 vcpkg registry tag、`Cargo.lock` 和
-  `vcpkg-overlay` 内容，禁止从 vcpkg HEAD 隐式解析不同依赖图。
+- CI 与 Release 固定同一 vcpkg registry 版本标签、`Cargo.lock` 和
+  `vcpkg-overlay` 内容，禁止从 vcpkg HEAD 隐式解析不同依赖图。标签本身仍可移动；独立可复现构建还需要记录并验证 registry 的精确提交。
 - 所有外部 GitHub Action 必须固定到完整的 40 位提交 SHA；可在同行注释
   人类可读版本，但禁止用 branch、tag 或 floating major 作为执行身份。
   `scripts/validation/validate-github-actions-pins.ps1` 在 CI 中持续执行此契约。

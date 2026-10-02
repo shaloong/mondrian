@@ -4,6 +4,10 @@
 [![Rust](https://img.shields.io/badge/rust-1.97.1%2B-orange)](https://rustup.rs)
 [![Build](https://github.com/shaloong/mondrian/actions/workflows/ci.yml/badge.svg)](https://github.com/shaloong/mondrian/actions)
 
+Mondrian 是使用 Rust 构建的原生非线性视频编辑器，提供多轨时间线、GPU 预览、色彩处理和媒体导出。
+
+Mondrian is a native non-linear video editor built in Rust, with a multitrack timeline, GPU preview, color processing, and media export.
+
 > [!NOTE]
 > Mondrian is in active development. The core editing, preview, and export pipeline is functional. Expect continued iteration on effects, audio, and plugin APIs.
 
@@ -36,7 +40,7 @@
      ↑ 全局共享：mondrian-core（类型 / 错误 / 事件）
 ```
 
-## 📦 Crate 结构
+## 📦 核心 Crate 结构
 
 | Crate               | 职责                                  | 关键依赖               |
 | ------------------- | ------------------------------------- | ---------------------- |
@@ -46,37 +50,44 @@
 | `mondrian-timeline` | 多轨时间线、关键帧、贝塞尔曲线、变速  | mondrian-core          |
 | `mondrian-renderer` | wgpu GPU 渲染管线、实时帧合成         | wgpu, bytemuck, glam   |
 | `mondrian-assets`   | 素材库、角色/场景/模板、跨项目复用    | serde, sqlite          |
-| `mondrian-ai`       | AI Agent 编排、视频生成 API、自动剪辑 | reqwest, tokio         |
+| `mondrian-ai`       | 实验性 Provider 接口与工作流 schema | serde_yaml, tokio         |
 | `mondrian-effects`  | DAG 效果图、GPU compute 加速效果、LUT 调色、滤镜、转场 | mondrian-core          |
 | `mondrian-export`   | 导出编码、渲染队列、硬件加速          | ffmpeg-next            |
-| `mondrian-app`      | 主程序入口、自研 UI 壳、UI 状态机、面板布局 | winit, wgpu, legacy egui reference |
+| `mondrian-app`      | 主程序入口、自研 UI 壳、UI 状态机、面板布局 | winit, wgpu |
 
 ## 🚀 快速开始
 
 ### 环境要求
 
 - Rust 1.97.1+
-- FFmpeg 开发库与 `ffmpeg`/`ffprobe` CLI（仅源码构建需要；发行包自带私有动态运行时）
+- FFmpeg 开发库与 `ffmpeg`/`ffprobe` CLI（源码构建需要；当前 Windows 候选包工作流收集私有动态运行时）
 - Vulkan / Metal / DirectX 12 驱动
 - Windows 11 / macOS 13+ / Ubuntu 22.04+
 
-### 构建
+当前发行资格面向 Windows x86_64；Linux/macOS 仍是源码构建和 CI 目标，其发行资格尚未建立。AI crate 当前提供实验性接口与工作流模型，尚无生产 Provider 或编辑器变更 Adapter。
 
-```bash
+### 构建（Windows PowerShell）
+
+完整平台与原生依赖说明见[开发环境](docs/dev/setup.md)和[Windows 开发](docs/dev/windows-development.md)。
+
+```powershell
 # 克隆仓库
-git clone https://github.com/mondrian-studio/mondrian
+git clone https://github.com/shaloong/mondrian
 cd mondrian
 
 # 安装与 CI 同构的 Windows 媒体运行时
-git clone https://github.com/microsoft/vcpkg C:\vcpkg
+git clone --branch 2026.07.29 --depth 1 https://github.com/microsoft/vcpkg C:\vcpkg
 C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-C:\vcpkg\vcpkg.exe install "ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom,nvcodec]:x64-windows" --recurse
+C:\vcpkg\vcpkg.exe install "ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom,nvcodec]:x64-windows" --recurse --overlay-ports=vcpkg-overlay
+
+# 已按 Windows 开发指南安装 MSVC 与 LLVM；激活当前 PowerShell 7 终端
+. ./scripts/enter-windows-development.ps1 -VcpkgRoot C:\vcpkg
 
 # Debug 构建
-cargo build
+cargo build --locked
 
-# Release 构建（优化 + LTO）
-cargo build --release
+# Release 源码构建（不等同于已验证的发行包）
+cargo build --release --locked
 
 # 运行主程序
 cargo run -p mondrian-app
@@ -142,21 +153,23 @@ cargo test -p mondrian-renderer golden
 | --------------------------------------------------- | ----------------- |
 | [架构总览](docs/architecture/overview.md)           | 系统设计全貌      |
 | [媒体处理管线](docs/architecture/media-pipeline.md) | FFmpeg + 代理缓存 |
-| [时间线系统](docs/architecture/timeline-system.md)  | 非线编核心设计    |
-| [渲染引擎](docs/architecture/renderer.md)           | GPU 渲染管线      |
-| [AI 工作流](docs/architecture/ai-workflow.md)       | Agent 系统设计    |
-| [素材资产系统](docs/architecture/asset-system.md)   | 跨项目复用架构    |
-| [效果系统](docs/architecture/effects-system.md)     | LUT / 滤镜 / 转场 |
+| [时间线系统](docs/architecture/timeline-model.md)  | 非线编核心设计    |
+| [渲染引擎](docs/architecture/render-pipeline.md)           | GPU 渲染管线      |
+| [执行资源协调](docs/architecture/execution-resource-coordination.md) | 媒体与 CPU 工作调度    |
+| [素材资产系统](docs/architecture/project-model.md)   | 跨项目复用架构    |
+| [效果系统](docs/architecture/effect-system.md)     | LUT / 滤镜 / 转场 |
 | [插件开发手册](docs/plugins/README.md) | 插件开发者完整手册 |
-| [导出系统](docs/architecture/export-system.md)      | 渲染队列设计      |
-| [设计准则](docs/DESIGN_GUIDELINES.md)               | UI/UX 设计基线    |
-| [技术栈选型](docs/TECH_STACK.md)                    | 选型理由与对比    |
+| [导出系统](docs/architecture/professional-delivery.md)      | 渲染队列设计      |
+| [设计准则](docs/ui/design-system.md)               | UI/UX 设计基线    |
+| [技术栈选型](docs/architecture/overview.md)                    | 选型理由与对比    |
 | [路线图](docs/ROADMAP.md)                           | 版本规划          |
 | [贡献指南](docs/CONTRIBUTING.md)                    | 开发规范          |
 
 ## 🤝 贡献
 
-请阅读 [CONTRIBUTING.md](docs/CONTRIBUTING.md)。
+请阅读 [贡献指南](docs/CONTRIBUTING.md)，外部 PR 提交至 `develop`。
+
+[支持与反馈](SUPPORT.md) · [行为准则](CODE_OF_CONDUCT.md) · [安全报告](.github/SECURITY.md) · [项目治理](GOVERNANCE.md)
 
 ## 📄 许可证
 

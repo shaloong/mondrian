@@ -15,3 +15,10 @@ These docs are the product and engineering contract for Mondrian's current self-
 - Prefer documenting stable principles and current constraints over implementation trivia.
 - If code and docs disagree, either update the code or explicitly mark the doc section as a target direction with migration notes.
 - Do not resurrect legacy egui architecture as a compatibility target. The self-hosted UI is now the main product line.
+
+## Community and Security
+
+- [Contribution guide](CONTRIBUTING.md) and [code review requirements](dev/code-review.md).
+- [Governance](../GOVERNANCE.md), [support](../SUPPORT.md), and [code of conduct](../CODE_OF_CONDUCT.md).
+- [Private vulnerability reporting](../.github/SECURITY.md) and [security design evidence](security/design.md).
+- [Project governance](../GOVERNANCE.md) and [dependency security](security/dependencies.md).

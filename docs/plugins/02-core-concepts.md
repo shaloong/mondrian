@@ -4,30 +4,13 @@
 
 ## 1. 插件模型概览
 
-一个 Mondrian 插件是一个独立的 Rust crate，通过统一的 `PluginManifest` 向运行时声明自己提供的能力。
+本手册中的源码特效插件是一个独立的 Rust crate，由应用显式调用注册入口。
+一个 crate 可注册多个 `EffectDefinition`；每个定义包含参数、执行能力和
+`EffectPluginContract`，由运行时按稳定 key 发现。
 
-```text
-┌──────────────────────────────────────────┐
-│              PluginManifest              │
-│                                          │
-│  ┌──────────────┐  ┌──────────────────┐ │
-│  │ Effect       │  │ UI Extension     │ │
-│  │ Capabilities │  │ Capabilities     │ │
-│  │              │  │                  │ │
-│  │ - effect key │  │ - panels         │ │
-│  │ - parameters │  │ - menu items     │ │
-│  │ - graph      │  │ - toolbar buttons│ │
-│  └──────────────┘  └──────────────────┘ │
-│                                          │
-│  ┌──────────────────────────────────────┐│
-│  │         Plugin Contract              ││
-│  │  - version      - failure policy     ││
-│  │  - api version  - degradation policy ││
-│  └──────────────────────────────────────┘│
-└──────────────────────────────────────────┘
-```
-
-当前已实现特效能力；UI 扩展等其他能力在后续版本中开放。
+统一 SDK 插件包 Manifest 和 UI/资产源扩展接口仍属规划。原生 OpenFX、CLAP/VST3
+由各自的受监督子进程 Adapter 加载，支持范围见[插件架构](../architecture/plugin-system.md)；
+它们不构成源码特效 crate 的动态加载 ABI。
 
 ## 2. 能力类型
 
@@ -116,14 +99,14 @@ let status = effect_plugin_runtime_status("plugin.example.hello");
             用户应用到片段                   执行中可能失败
                     │                               │
                     ▼                               ▼
-            参与渲染管线                   按契约策略降级/禁用
+            参与渲染管线                   报告错误/隔离本次定义
 ```
 
 关键点：
 - **注册发生在应用启动时**，早于任何项目加载
-- **注册是幂等的**，重复注册同一 key 会覆盖之前的定义
-- **失败隔离**：插件执行失败不会传播到渲染主链，按契约策略降级
-- **禁用是会话级的**：被禁用的插件在应用重启后会重置
+- **每次注册都会推进 Registry Revision**；同一 key 替换旧定义并形成新一代，缓存绑定必须据此失效
+- **失败报告**：执行错误或 panic 由运行时记录并向调用方返回结构化错误，不能把失败帧当作无效果的成功帧
+- **隔离绑定定义代**：`DisableDefinition` 以 `(effect_key, definition_registry_revision)` 隔离失败定义；重新注册产生独立的新代，旧代迟到的失败不会禁用新代
 
 ## 6. 核心约束
 
