@@ -21,8 +21,8 @@ const WORKGROUP_SIZE: u32 = 16;
 const PIXELS_PER_INVOCATION: u32 = 4;
 // Map each one-dimensional subgroup workgroup to a narrow image tile so nearby
 // lanes can share waveform-column keys without giving up texture locality.
-const SUBGROUP_TILE_WIDTH: u32 = 4;
-const SUBGROUP_TILE_HEIGHT: u32 = 64;
+const SUBGROUP_TILE_WIDTH: u32 = 1;
+const SUBGROUP_TILE_HEIGHT: u32 = 256;
 const DISPLAY_WORKGROUP_SIZE: u32 = 8;
 
 /// Bounded configuration for one GPU Program Output scope request.
