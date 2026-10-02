@@ -564,16 +564,17 @@ Duplicate captions are allowed; invalid defaults, mixed/duplicate ranks, gaps,
 and numeric bounds on Choice are rejected before catalog registration.
 
 The native instance stores its integer value and validates reads/writes against
-the instance's current option count. Timed access uses the explicit current-frame
-contract. Snapshot application validates all controls before assigning values
+the instance's current option count. Non-animatable snapshots are constant at
+any finite query time; potentially animated values currently require the current
+frame until their complete temporal author binding is implemented. Snapshot application validates all controls before assigning values
 and sending grouped change notifications. Render callbacks use timed reads;
 current-value reads and writes are exercised in change callbacks.
 
 The external pinned official Basic wrapper qualifies indices 0/1/2, default
 restoration, same-instance edits, invalid values/types, signed extreme display
 ranks, and equal direct/compiled-graph Float32 pixels. An invalid plugin write
-in InstanceChanged preserves the current index. This does not qualify StrChoice,
-historical-time access, dynamic option rebinding, or the wider vendor matrix.
+in InstanceChanged preserves the current index. This does not qualify
+animated temporal access, dynamic option rebinding, or the wider vendor matrix.
 
 ## Native String Choice parameters
 
@@ -586,7 +587,8 @@ value CStrings for each serialized resident call.
 
 HostSupport registers the StrChoice type and Option/Enum/Order properties. Native
 instances retain string keys, reject unknown assignments, and provide timed access
-only at the current frame. Unspecified StrChoice defaults select the first enum
+at any finite time for non-animatable snapshots, or only at the current frame for
+potentially animated controls. Unspecified StrChoice defaults select the first enum
 per SDK semantics. Description validation rejects mismatched arrays, unknown
 defaults and duplicate keys. Effects author Enum values using the original keys
 and pass those same strings to the prepared native processor.
@@ -598,3 +600,11 @@ String default storage, choice arrays and descriptor-owned strings outlive the
 synchronous metadata callback; Rust copies the borrowed payload before returning.
 Full temporal, dynamic metadata, editor/interact and vendor-format qualification
 remain separate requirements.
+
+Invalid scalar query times return ErrValue without changing caller output.
+HostSupport Boolean varargs reads publish only successful values, avoiding
+uninitialized reads after a rejected query. String varargs reads likewise retain
+caller output on failure. The owned discrete probe now asks past/future fractional
+times and NaN/infinity for static Double, Boolean, Integer and Choice/StrChoice
+controls. Three real native scenarios qualify those static queries; full
+animation/temporal support still requires authoritative author-curve evaluation.

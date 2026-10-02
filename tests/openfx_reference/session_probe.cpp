@@ -11,6 +11,7 @@
 #include <thread>
 #include <map>
 #include <string>
+#include <limits>
 
 namespace {
 struct ActionState { bool changing = false; int changes = 0; int renders = 0; };
@@ -107,6 +108,54 @@ bool applyDiscreteGain(const void* handle, OfxPropertySetHandle in, const char* 
   }
   return gEffectHost->clipReleaseImage(image) == kOfxStatOK && valid;
 }
+// These controls are declared non-animatable in the owned Choice fixtures.
+// Other finite times must see the same immutable authored snapshot.
+bool staticQueries(const void* handle, OfxPropertySetHandle in, bool stringChoice) {
+  OfxParamSetHandle params = nullptr;
+  double time = 0.0;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+      gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK) { return false; }
+  for (const char* name : { "scale", "scaleComponents", "staticCount", "mode" }) {
+    OfxParamHandle parameter = nullptr;
+    if (gParamHost->paramGetHandle(params, name, &parameter, nullptr) != kOfxStatOK) { return false; }
+    if (std::string(name) == "scale") {
+      double current = 0.0;
+      if (gParamHost->paramGetValueAtTime(parameter, time, &current) != kOfxStatOK) { return false; }
+      for (double query : {time - 3.25, time + 9.5}) {
+        double value = -999.0;
+        if (gParamHost->paramGetValueAtTime(parameter, query, &value) != kOfxStatOK || value != current) { return false; }
+      }
+      for (double query : {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
+        double value = -999.0;
+        if (gParamHost->paramGetValueAtTime(parameter, query, &value) != kOfxStatErrValue || value != -999.0) { return false; }
+      }
+    } else if (std::string(name) == "mode" && stringChoice) {
+      char* value = nullptr;
+      if (gParamHost->paramGetValueAtTime(parameter, time, &value) != kOfxStatOK || !value) { return false; }
+      const std::string current(value);
+      for (double query : {time - 3.25, time + 9.5}) {
+        if (gParamHost->paramGetValueAtTime(parameter, query, &value) != kOfxStatOK || !value || current != value) { return false; }
+      }
+      for (double query : {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
+        value = nullptr;
+        if (gParamHost->paramGetValueAtTime(parameter, query, &value) != kOfxStatErrValue || value) { return false; }
+      }
+    } else {
+      int current = 0;
+      if (gParamHost->paramGetValueAtTime(parameter, time, &current) != kOfxStatOK) { return false; }
+      for (double query : {time - 3.25, time + 9.5}) {
+        int value = -999;
+        if (gParamHost->paramGetValueAtTime(parameter, query, &value) != kOfxStatOK || value != current) { return false; }
+      }
+      for (double query : {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
+        int value = -999;
+        if (gParamHost->paramGetValueAtTime(parameter, query, &value) != kOfxStatErrValue || value != -999) { return false; }
+      }
+    }
+  }
+  return true;
+}
+
 OfxStatus probe(const char* action, const void* handle,
                 OfxPropertySetHandle in, OfxPropertySetHandle out) {
   const std::string operation(action);
@@ -274,6 +323,24 @@ OfxStatus probe(const char* action, const void* handle,
       if (gParamHost->paramSetValue(parameter, "vendor.unknown") != kOfxStatErrValue ||
           gParamHost->paramGetValue(parameter, &value) != kOfxStatOK || !value || before != value) { return kOfxStatFailed; }
     } else if (operation == kOfxImageEffectActionRender && !applyDiscreteGain(handle, in, "mode", true)) { return kOfxStatFailed; }
+  }
+  if ((selected == "choice" || selected.find("strchoice") == 0) && result == kOfxStatOK) {
+    if (operation == kOfxImageEffectActionDescribeInContext) {
+      OfxParamSetHandle params = nullptr;
+      OfxParamHandle scale = nullptr;
+      OfxPropertySetHandle props = nullptr;
+      if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+          gParamHost->paramGetHandle(params, "scale", &scale, &props) != kOfxStatOK ||
+          gPropHost->propSetInt(props, kOfxParamPropAnimates, 0, 0) != kOfxStatOK ||
+          gParamHost->paramDefine(params, kOfxParamTypeInteger, "staticCount", &props) != kOfxStatOK) { return kOfxStatFailed; }
+      gPropHost->propSetInt(props, kOfxParamPropDefault, 0, 2);
+      gPropHost->propSetInt(props, kOfxParamPropMin, 0, 0);
+      gPropHost->propSetInt(props, kOfxParamPropMax, 0, 9);
+      gPropHost->propSetInt(props, kOfxParamPropDisplayMin, 0, 0);
+      gPropHost->propSetInt(props, kOfxParamPropDisplayMax, 0, 9);
+      gPropHost->propSetInt(props, kOfxParamPropAnimates, 0, 0);
+    } else if (operation == kOfxImageEffectActionRender &&
+               !staticQueries(handle, in, selected != "choice")) { return kOfxStatFailed; }
   }
   return result;
 }

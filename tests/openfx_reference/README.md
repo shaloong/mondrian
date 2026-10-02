@@ -178,3 +178,9 @@ For `strchoice_duplicate`, `strchoice_gap`, `strchoice_missing_enum` and
 Each scenario must reject both description and effect registration before
 any processor instance is authored. These fixtures do not establish historical
 time access, dynamic option rebinding or the broader vendor matrix.
+
+The Choice/StrChoice scenarios also declare static Double, Boolean and Integer
+controls. They compare current values against past/future fractional-time queries
+for all five scalar kinds and require NaN/infinity to return ErrValue without
+publishing output values. This qualifies constant non-animatable snapshots;
+potentially animated parameters still require separate complete temporal binding.

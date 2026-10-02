@@ -976,11 +976,11 @@ namespace OFX {
       /// implementation of var args function
       OfxStatus BooleanInstance::getV(va_list arg)
       {
-        bool v;
+        bool v = false;
         OfxStatus stat = get(v);
 
         int *value = va_arg(arg, int*);
-        *value = v;
+        if (stat == kOfxStatOK) { *value = v; }
 #       ifdef OFX_DEBUG_PARAMETERS
         if (stat == kOfxStatOK) {
           std::cout << ' ' << *value;
@@ -992,11 +992,11 @@ namespace OFX {
       /// implementation of var args function
       OfxStatus BooleanInstance::getV(OfxTime time, va_list arg)
       {
-        bool v;
+        bool v = false;
         OfxStatus stat = get(time, v);
 
         int *value = va_arg(arg, int*);
-        *value = v;
+        if (stat == kOfxStatOK) { *value = v; }
 #       ifdef OFX_DEBUG_PARAMETERS
         if (stat == kOfxStatOK) {
           std::cout << ' ' << *value;
@@ -1597,7 +1597,7 @@ namespace OFX {
         const char **value = va_arg(arg, const char **);
 
         OfxStatus stat = get(_returnValue); // I so don't like this, temp storage should be delegated to the implementation
-        *value = _returnValue.c_str();
+        if (stat == kOfxStatOK) { *value = _returnValue.c_str(); }
 #       ifdef OFX_DEBUG_PARAMETERS
         if (stat == kOfxStatOK) {
           std::cout << ' ' << *value;
@@ -1612,7 +1612,7 @@ namespace OFX {
         const char **value = va_arg(arg, const char **);
 
         OfxStatus stat = get(time, _returnValue); // I so don't like this, temp storage should be delegated to the implementation
-        *value = _returnValue.c_str();
+        if (stat == kOfxStatOK) { *value = _returnValue.c_str(); }
 #       ifdef OFX_DEBUG_PARAMETERS
         if (stat == kOfxStatOK) {
           std::cout << ' ' << *value;

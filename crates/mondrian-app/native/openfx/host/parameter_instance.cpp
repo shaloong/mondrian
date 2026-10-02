@@ -49,7 +49,9 @@ namespace MondrianOpenFx {
 
   OfxStatus IntegerParameter::get(OfxTime time, int& value)
   {
-    return std::isfinite(time) && time == _effect->frameState().info.frame ? get(value) : kOfxStatErrMissingHostFeature;
+    if (!std::isfinite(time)) { return kOfxStatErrValue; }
+    return !getCanAnimate() || time == _effect->frameState().info.frame
+        ? get(value) : kOfxStatErrMissingHostFeature;
   }
 
   OfxStatus IntegerParameter::set(int value)
@@ -83,7 +85,8 @@ namespace MondrianOpenFx {
 
   OfxStatus DoubleParameter::get(OfxTime time, double& d)
   {
-    return std::isfinite(time) && time == _effect->frameState().info.frame
+    if (!std::isfinite(time)) { return kOfxStatErrValue; }
+    return !getCanAnimate() || time == _effect->frameState().info.frame
         ? get(d) : kOfxStatErrMissingHostFeature;
   }
 
@@ -134,7 +137,8 @@ namespace MondrianOpenFx {
 
   OfxStatus BooleanParameter::get(OfxTime time, bool& b)
   {
-    return std::isfinite(time) && time == _effect->frameState().info.frame
+    if (!std::isfinite(time)) { return kOfxStatErrValue; }
+    return !getCanAnimate() || time == _effect->frameState().info.frame
         ? get(b) : kOfxStatErrMissingHostFeature;
   }
 
@@ -171,7 +175,8 @@ namespace MondrianOpenFx {
 
   OfxStatus ChoiceParameter::get(OfxTime time, int& value)
   {
-    return std::isfinite(time) && time == _effect->frameState().info.frame
+    if (!std::isfinite(time)) { return kOfxStatErrValue; }
+    return !getCanAnimate() || time == _effect->frameState().info.frame
         ? get(value) : kOfxStatErrMissingHostFeature;
   }
 
@@ -213,7 +218,8 @@ namespace MondrianOpenFx {
     return kOfxStatOK;
   }
   OfxStatus StrChoiceParameter::get(OfxTime time, std::string& value) {
-    return std::isfinite(time) && time == _effect->frameState().info.frame
+    if (!std::isfinite(time)) { return kOfxStatErrValue; }
+    return !getCanAnimate() || time == _effect->frameState().info.frame
         ? get(value) : kOfxStatErrMissingHostFeature;
   }
   OfxStatus StrChoiceParameter::set(const char* value) {
