@@ -739,6 +739,7 @@ impl AuthoringCommand {
 struct AuthoringHistoryEntry {
     command: AuthoringCommand,
     group: Option<crate::session::AuthoringHistoryGroup>,
+    net_zero: bool,
     footprint_roots: [AuthoringAllocationFootprint; 2],
     metadata_bytes: u64,
 }
@@ -778,7 +779,16 @@ impl AuthoringHistoryEntry {
                     ),
                 )
             })?;
-        Ok(Self { command, group, footprint_roots, metadata_bytes })
+        let net_zero = group.is_some()
+            && matches!(&command, AuthoringCommand::Sequence { before, after, .. }
+                if before.author_state_eq_ignoring_revision(after));
+        Ok(Self {
+            command,
+            group,
+            net_zero,
+            footprint_roots,
+            metadata_bytes,
+        })
     }
 
     fn description(&self) -> &str {
@@ -1295,6 +1305,11 @@ impl AuthoringHistory {
             self.descriptor_cache.clone(),
             group,
         )?);
+        // An interrupted interaction that returned to its authored origin is
+        // removed only with installation of this new validated command. Its
+        // endpoint roots and metadata are released by the same footprint plan.
+        let elide_previous_zero =
+            !coalesced && self.state.undo_stack.back().is_some_and(|entry| entry.net_zero);
         let branch_discarded_entries = self.state.redo_stack.len();
         let mut undo_stack = clone_history_stack(&self.state.undo_stack)?;
         let redo_stack = VecDeque::new();
@@ -1315,7 +1330,8 @@ impl AuthoringHistory {
             let footprint_plan = overlay.finish()?;
             self.reserve_footprint_plan(&footprint_plan)?;
             let retained_bytes = footprint_plan.retained_bytes()?;
-            let barrier_discarded_entries = self.state.undo_stack.len();
+            let barrier_discarded_entries =
+                self.state.undo_stack.len() - usize::from(elide_previous_zero);
             let candidate = AuthoringHistoryState {
                 revision: next_revision,
                 undo_stack: VecDeque::new(),
@@ -1365,7 +1381,7 @@ impl AuthoringHistory {
                 format!("could not reserve Undo history storage: {error}"),
             )
         })?;
-        let replaced = if coalesced {
+        let replaced = if coalesced || elide_previous_zero {
             undo_stack.pop_back()
         } else {
             None
@@ -1397,7 +1413,8 @@ impl AuthoringHistory {
                 // roots, so this is the exact standalone command charge. Do
                 // not rebuild a second manifest over the same descriptor DAG.
                 let command_only_charge = retained_bytes;
-                let barrier_discarded_entries = self.state.undo_stack.len();
+                let barrier_discarded_entries =
+                    self.state.undo_stack.len() - usize::from(elide_previous_zero);
                 let mut barrier_overlay = FootprintOverlay::new(&self.footprint_index);
                 for discarded in &self.state.undo_stack {
                     barrier_overlay.remove_entry(discarded)?;
@@ -1580,7 +1597,7 @@ impl AuthoringHistory {
         &self,
         document: &ProjectDocument,
     ) -> Result<Option<PreparedAuthoringHistoryRestore>> {
-        let Some(entry) = self.state.undo_stack.back() else {
+        let Some(entry) = self.next_undo_entry() else {
             return Ok(None);
         };
         entry.prepare_restore_before(document).map(Some)
@@ -1597,7 +1614,8 @@ impl AuthoringHistory {
         entry.prepare_restore_after(document).map(Some)
     }
 
-    /// Move the entry whose detached Undo payload has already validated.
+    /// Move the validated Undo entry and discard trailing net-zero interactions
+    /// with one fallible preparation followed by one atomic history install.
     pub(crate) fn commit_prepared_undo(&mut self) -> Result<()> {
         let next_revision = self.state.revision.checked_add(1).ok_or_else(|| {
             authoring_error(
@@ -1605,20 +1623,55 @@ impl AuthoringHistory {
                 "History revision exhausted",
             )
         })?;
-        self.state.redo_stack.try_reserve(1).map_err(|error| {
+        let mut undo_stack = clone_history_stack(&self.state.undo_stack)?;
+        let mut redo_stack = clone_history_stack(&self.state.redo_stack)?;
+        redo_stack.try_reserve(1).map_err(|error| {
             authoring_error(
                 "commit_prepared_authoring_undo",
                 format!("could not reserve Redo history storage: {error}"),
             )
         })?;
-        let entry = self.state.undo_stack.pop_back().ok_or_else(|| {
+        let mut overlay = FootprintOverlay::new(&self.footprint_index);
+        while undo_stack.back().is_some_and(|entry| entry.net_zero) {
+            let entry = undo_stack.pop_back().ok_or_else(|| {
+                authoring_error("commit_prepared_authoring_undo", "zero entry disappeared")
+            })?;
+            overlay.remove_entry(&entry)?;
+        }
+        let entry = undo_stack.pop_back().ok_or_else(|| {
             authoring_error(
                 "commit_prepared_authoring_undo",
                 "prepared Undo entry is no longer available",
             )
         })?;
-        self.state.redo_stack.push_back(entry);
-        self.state.revision = next_revision;
+        redo_stack.push_back(entry);
+        let footprint_plan = overlay.finish()?;
+        self.reserve_footprint_plan(&footprint_plan)?;
+        let candidate = AuthoringHistoryState {
+            revision: next_revision,
+            undo_stack,
+            redo_stack,
+            retained_bytes: footprint_plan.retained_bytes()?,
+            budget_evicted_entries: self.state.budget_evicted_entries,
+            budget_evicted_bytes: self.state.budget_evicted_bytes,
+            branch_discarded_entries: self.state.branch_discarded_entries,
+            barrier_discarded_entries: self.state.barrier_discarded_entries,
+            retention_disabled_entries: self.state.retention_disabled_entries,
+            oversize_dropped_entries: self.state.oversize_dropped_entries,
+        };
+        self.commit_prepared_record(PreparedAuthoringHistoryRecord {
+            expected_revision: self.state.revision,
+            candidate,
+            footprint_plan,
+            outcome: AuthoringHistoryRecordOutcome {
+                retained: false,
+                budget_evicted_entries: 0,
+                budget_evicted_bytes: 0,
+                branch_discarded_entries: 0,
+                barrier_discarded_entries: 0,
+            },
+            unretained_command: None,
+        })?;
         Ok(())
     }
 
@@ -1656,9 +1709,7 @@ impl AuthoringHistory {
         else {
             return Ok(false);
         };
-        if !matches!(&entry.command, AuthoringCommand::Sequence { before, after, .. }
-            if before.author_state_eq_ignoring_revision(after))
-        {
+        if !entry.net_zero {
             return Ok(false);
         }
         let next_revision = self.state.revision.checked_add(1).ok_or_else(|| {
@@ -1699,9 +1750,13 @@ impl AuthoringHistory {
         Ok(true)
     }
 
-    /// Whether an Undo entry exists.
+    fn next_undo_entry(&self) -> Option<&Arc<AuthoringHistoryEntry>> {
+        self.state.undo_stack.iter().rev().find(|entry| !entry.net_zero)
+    }
+
+    /// Whether a meaningful Undo entry exists; an active net-zero gesture is skipped.
     pub fn can_undo(&self) -> bool {
-        !self.state.undo_stack.is_empty()
+        self.next_undo_entry().is_some()
     }
 
     /// Whether a Redo entry exists.
@@ -1711,7 +1766,7 @@ impl AuthoringHistory {
 
     /// User-facing label for the next Undo operation.
     pub fn undo_description(&self) -> Option<&str> {
-        self.state.undo_stack.back().map(|entry| entry.description())
+        self.next_undo_entry().map(|entry| entry.description())
     }
 
     /// User-facing label for the next Redo operation.
@@ -1906,6 +1961,111 @@ mod tests {
             collector.collect(*value).expect("collect cold diamond root");
         }
         usize::try_from(collector.finish().total_bytes()).expect("cold charge fits usize")
+    }
+
+    #[test]
+    fn zero_group_interruption_releases_exact_roots_without_budget_eviction() {
+        for next in 0..3 {
+            let mut document = project_with_sequence();
+            let original = document.sequences.active().expect("Sequence").clone();
+            let baseline = renamed(&original, "baseline");
+            let mut history =
+                AuthoringHistory::with_budget(AuthoringHistoryBudget::new(2, 1024 * 1024));
+            history.record_sequence("baseline", &original, &baseline).expect("baseline");
+            let group = crate::session::AuthoringHistoryGroup {
+                gesture: mondrian_core::AuthoringGestureId::new(),
+                started_generation: crate::session::AuthorGeneration::INITIAL,
+            };
+            let temporary = renamed(&baseline, "temporary");
+            for (before, after) in [(&baseline, &temporary), (&temporary, &baseline)] {
+                let prepared = history
+                    .prepare_sequence_group_record("drag", before, after, group)
+                    .expect("prepare live");
+                history.commit_prepared_record(prepared).expect("live");
+            }
+            assert_incremental_matches_cold(&history);
+            document.sequences.sequences[0] = baseline.clone();
+            let before = history.diagnostics();
+            if next == 0 {
+                let restored =
+                    history.prepare_undo(&document).expect("prepare Undo").expect("Undo");
+                assert_eq!(
+                    history.diagnostics(),
+                    before,
+                    "preparing cannot remove the zero group"
+                );
+                history.commit_prepared_undo().expect("Undo");
+                apply_restore(&mut document, restored);
+                assert_eq!(
+                    document.sequences.active().expect("original").name,
+                    original.name
+                );
+                assert_eq!(history.diagnostics().undo_entries, 0);
+                assert_eq!(history.diagnostics().redo_entries, 1);
+            } else {
+                let after = renamed(&baseline, if next == 1 { "next" } else { "placeholder" });
+                if next == 2 {
+                    history.budget.max_retained_bytes = before.retained_bytes;
+                }
+                let after = if next == 2 {
+                    renamed(&after, &"oversize".repeat(before.retained_bytes))
+                } else {
+                    after
+                };
+                let expected = history.diagnostics();
+                let prepared = history
+                    .prepare_sequence_record("next", &baseline, &after)
+                    .expect("prepare next");
+                assert_eq!(history.diagnostics(), expected);
+                assert_incremental_matches_cold(&history);
+                let outcome = history.commit_prepared_record(prepared).expect("install");
+                if next == 1 {
+                    assert!(outcome.retained);
+                    assert_eq!(history.diagnostics().undo_entries, 2);
+                } else {
+                    assert!(!outcome.retained);
+                    assert_eq!(
+                        outcome.barrier_discarded_entries, 1,
+                        "zero interactions are not discarded author commands"
+                    );
+                    assert_eq!(history.diagnostics().retained_bytes, 0);
+                }
+            }
+            assert_eq!(
+                history.diagnostics().budget_evicted_entries,
+                0,
+                "net-zero elimination is not a budget eviction"
+            );
+            assert_eq!(history.diagnostics().budget_evicted_bytes, 0);
+            assert_incremental_matches_cold(&history);
+        }
+    }
+
+    #[test]
+    fn zero_group_undo_revision_exhaustion_leaves_both_stacks_and_charge_unchanged() {
+        let mut document = project_with_sequence();
+        let original = document.sequences.active().expect("Sequence").clone();
+        let baseline = renamed(&original, "baseline");
+        let mut history = AuthoringHistory::default();
+        history.record_sequence("baseline", &original, &baseline).expect("baseline");
+        let group = crate::session::AuthoringHistoryGroup {
+            gesture: mondrian_core::AuthoringGestureId::new(),
+            started_generation: crate::session::AuthorGeneration::INITIAL,
+        };
+        let temporary = renamed(&baseline, "temporary");
+        for (before, after) in [(&baseline, &temporary), (&temporary, &baseline)] {
+            let prepared = history
+                .prepare_sequence_group_record("drag", before, after, group)
+                .expect("prepare live");
+            history.commit_prepared_record(prepared).expect("live");
+        }
+        document.sequences.sequences[0] = baseline;
+        history.state.revision = u64::MAX;
+        let before = history.diagnostics();
+        assert!(history.prepare_undo(&document).expect("payload").is_some());
+        assert!(history.commit_prepared_undo().is_err());
+        assert_eq!(history.diagnostics(), before);
+        assert_incremental_matches_cold(&history);
     }
 
     #[test]

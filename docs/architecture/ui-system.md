@@ -2939,3 +2939,11 @@ authoring session before discarding its input widgets, including preferences,
 asset-folder navigation and startup/workspace transitions. A failed history
 seal retains the existing controls and schedules a retry; a delayed event cannot
 continue writing through the removed interaction identity.
+
+Undo during a captured parameter slider interaction uses the Session's next
+meaningful history command. If the drag returned to its authored origin, Undo
+removes that zero entry atomically with restoring the preceding command. The
+resulting author generation invalidates the captured gesture; Host discards its
+controls before transient deferral, and late pointer events cannot recreate a
+write or a redundant Redo entry. This is author-history policy, not a UI snapshot
+restore or a hidden extra Undo action.

@@ -1232,6 +1232,135 @@ mod tests {
     use mondrian_timeline::{AudioRouteDestination, Clip, SequenceCollection, SequenceSettings};
 
     #[test]
+    fn interrupted_zero_gesture_is_not_an_undo_step() {
+        assert_zero_gesture_interruption(&[0]);
+    }
+
+    #[test]
+    fn zero_gesture_is_removed_by_same_other_sequence_and_project_commands() {
+        assert_zero_gesture_interruption(&[1, 2, 3]);
+    }
+
+    fn assert_zero_gesture_interruption(next_commands: &[u8]) {
+        for &next_command in next_commands {
+            let mut session = session_with_two_sequences(false);
+            let id = session.active_sequence().expect("Sequence").id;
+            session
+                .edit_sequence(id, "baseline", |sequence| {
+                    sequence.name = "baseline".into();
+                    Ok(())
+                })
+                .expect("baseline");
+            let gesture = mondrian_core::AuthoringGestureId::new();
+            session.begin_sequence_gesture(gesture, id).expect("begin");
+            for name in ["temporary", "baseline"] {
+                session
+                    .edit_sequence_in_gesture(gesture, id, "drag", |sequence| {
+                        sequence.name = name.into();
+                        Ok(())
+                    })
+                    .expect("live update");
+            }
+            if next_command == 0 {
+                assert_eq!(
+                    session.history.undo_description(),
+                    Some("baseline"),
+                    "an active net-zero drag must not obscure the real Undo command"
+                );
+            } else if next_command == 3 {
+                let before = session.document().clone();
+                let mut after = before.clone();
+                after.meta.name = "new project name".into();
+                session
+                    .commit_project_snapshot("project rename", before, after)
+                    .expect("project edit");
+            } else {
+                let target = if next_command == 1 {
+                    id
+                } else {
+                    session.document().sequences.sequences[1].id
+                };
+                session
+                    .edit_sequence(target, "next edit", |sequence| {
+                        sequence.name = "next edit".into();
+                        Ok(())
+                    })
+                    .expect("next edit");
+            }
+            if next_command != 0 {
+                assert_eq!(
+                    session.history.diagnostics().undo_entries,
+                    2,
+                    "an intervening author command must atomically remove the net-zero drag"
+                );
+                assert!(session.undo().expect("Undo next command").is_some());
+                assert_eq!(session.sequence(id).expect("baseline").name, "baseline");
+            }
+            assert!(session.undo().expect("Undo baseline").is_some());
+            assert_eq!(
+                session.sequence(id).expect("original").name,
+                "Primary",
+                "Undo must skip the net-zero gesture"
+            );
+            assert!(!session.sequence_gesture_is_current(gesture, id));
+            assert_eq!(session.history.diagnostics().undo_entries, 0);
+            assert_eq!(
+                session.history.diagnostics().redo_entries,
+                if next_command == 0 { 1 } else { 2 }
+            );
+            assert!(session.redo().expect("Redo baseline").is_some());
+            assert_eq!(
+                session.sequence(id).expect("redone baseline").name,
+                "baseline"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_gesture_cleanup_waits_for_validated_author_installation() {
+        let mut session = session_with_two_sequences(false);
+        let id = session.active_sequence().expect("Sequence").id;
+        let gesture = mondrian_core::AuthoringGestureId::new();
+        session.begin_sequence_gesture(gesture, id).expect("begin");
+        for name in ["temporary", "Primary"] {
+            session
+                .edit_sequence_in_gesture(gesture, id, "drag", |sequence| {
+                    sequence.name = name.into();
+                    Ok(())
+                })
+                .expect("live");
+        }
+        let document = session.document().clone();
+        let history = session.history.diagnostics();
+        let generation = session.author_generation();
+        assert!(session
+            .edit_sequence(id, "failed", |_| {
+                Err::<(), _>(session_error("injected", "failure"))
+            })
+            .is_err());
+        for install in [false, true] {
+            let (_, prepared) = session
+                .prepare_sequence_edit(id, "new command", |sequence| {
+                    sequence.name = "installed".into();
+                    Ok(())
+                })
+                .expect("prepare");
+            assert_eq!(session.document(), &document);
+            assert_eq!(session.history.diagnostics(), history);
+            assert_eq!(session.author_generation(), generation);
+            assert!(session.sequence_gesture_is_current(gesture, id));
+            if install {
+                session.install_prepared_sequence_edit(prepared.expect("changed"));
+            }
+        }
+        assert_eq!(session.history.diagnostics().undo_entries, 1);
+        assert!(!session.sequence_gesture_is_current(gesture, id));
+        session.undo().expect("Undo only real command");
+        assert_eq!(session.sequence(id).expect("original").name, "Primary");
+        assert_eq!(session.history.diagnostics().undo_entries, 0);
+    }
+
+    #[test]
     fn gesture_retention_failure_cannot_create_a_partial_drag_restore_point() {
         for max_entries in [0, 1] {
             let mut session = session_with_two_sequences(false);

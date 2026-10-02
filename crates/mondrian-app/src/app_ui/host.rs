@@ -5362,6 +5362,129 @@ mod tests {
     }
 
     #[test]
+    fn undo_during_a_net_zero_slider_drag_restores_previous_command_and_retires_capture() {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+        let mut state = workspace_app_state_with_timed_solid();
+        let clip_id = state.active_sequence().expect("Sequence").video_tracks[0].clips[0].id;
+        state.select_clip_by_id(clip_id).expect("select");
+        let original = state.active_sequence().expect("original").clone();
+        state
+            .authoring
+            .as_mut()
+            .expect("Session")
+            .edit_sequence(original.id, "baseline", |sequence| {
+                sequence.name = "baseline".into();
+                Ok(())
+            })
+            .expect("fixture baseline author command");
+        let baseline = state.active_sequence().expect("baseline").clone();
+        let history_at_baseline = state.authoring_history().expect("history").diagnostics();
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("net-zero-slider-undo"),
+        );
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let slider_id = inspector_slider(host.active_root(), false).expect("opacity slider");
+        let point = {
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let slider = tree.get(slider_id).expect("slider");
+            (0..720)
+                .step_by(4)
+                .find_map(|y| {
+                    (0..1280).step_by(4).find_map(|x| {
+                        let point = Point::new(x as f32, y as f32);
+                        slider.hit_test(point).then_some(point)
+                    })
+                })
+                .expect("visible slider point")
+        };
+        let pending = PendingUiActions::default();
+        let dispatch = |action| pending.push(action);
+        let mut router = EventRouter::new(host.active_root().id());
+        router.route(
+            UiEvent::MouseDown {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &dispatch,
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert!(!host
+            .app_state()
+            .active_sequence()
+            .expect("changed")
+            .author_state_eq_ignoring_revision(&baseline));
+        router.route(
+            UiEvent::MouseMove {
+                position: Point::new(10_000.0, point.y),
+                modifiers: Modifiers::none(),
+            },
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &dispatch,
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("net zero")
+            .author_state_eq_ignoring_revision(&baseline));
+        assert_eq!(router.captured(), Some(slider_id));
+        assert!(host.app_state().parameter_gesture_is_current());
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").undo_description(),
+            Some("baseline")
+        );
+        pending.push(Action::Undo);
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("Undo baseline")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(host.app_state().active_parameter_gesture.is_none());
+        assert!(WidgetTreeView::new(host.active_root_mut()).get(slider_id).is_none());
+        for event in [
+            UiEvent::MouseMove { position: point, modifiers: Modifiers::none() },
+            UiEvent::MouseUp {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            router.route(
+                event,
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &dispatch,
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        }
+        assert_eq!(router.captured(), None);
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("no stale update")
+            .author_state_eq_ignoring_revision(&original));
+        pending.push(Action::Redo);
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("Redo baseline")
+            .author_state_eq_ignoring_revision(&baseline));
+        let diagnostics = host.app_state().authoring_history().expect("history").diagnostics();
+        assert_eq!(
+            diagnostics, history_at_baseline,
+            "net-zero drag and Undo/Redo leave no extra entry, charge or discard"
+        );
+    }
+
+    #[test]
     fn invalid_parameter_gesture_discards_captured_slider_and_refuses_late_writes() {
         use crate::app::ui_actions::{
             track_set_author_control_action, TrackAuthorControl, TrackSetAuthorControlPayload,

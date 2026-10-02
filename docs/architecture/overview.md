@@ -407,3 +407,13 @@ Replacing history endpoints uses the existing footprint overlay and retention
 budget; unretained origins cannot later produce a misleading partial Undo.
 A finished net-zero interaction drops its redundant entry and retained charge
 without an author mutation or a history-budget warning.
+
+A continuous interaction whose authored endpoints match is a net-zero history
+entry. This identity is cached when the typed command is compiled. Undo queries
+and restore preparation select the nearest meaningful command without moving
+history; validated Undo atomically removes trailing zero interactions and moves
+only that command to Redo. An intervening validated Sequence or Project command
+removes a previous zero interaction in its own prepared history/footprint plan.
+Abandoned preparation and author validation errors do not seal or alter the
+active interaction. Zero elimination releases exact roots and metadata and is
+not counted as budget eviction or a discarded author command.
