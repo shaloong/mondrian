@@ -2922,3 +2922,20 @@ rebuilding Inspector curve projections. Removed/locked/switched owners cancel
 the modal immediately; valid focused drafts retain their widgets and IME.
 Each resource update and browse request uses the same current-author check, so
 a delayed event cannot open a picker or retain input against an invalid owner.
+
+Slider exposes explicit begin/update/finish edit callbacks with a fresh typed
+identity for each pointer drag. Begin is emitted even if the value is unchanged;
+release/focus loss finish once. Keyboard edits are independent. The common
+numeric property builder wraps only canonical Clip/Effect/Mask parameter intents
+in a typed gesture action; preferences/form draft callbacks remain local. App
+validates the selected owner, actual lock and current Session/Sequence/generation
+lease on every update, then invokes the same property author modules. A failed
+or stale lease cannot keep authoring an obsolete captured control. Boundary/no-op
+actions do not request another Viewer evaluation; live changes retain the bounded
+Viewer update path and defer dock rebuilding until release.
+
+All Host Root model replacements seal an active parameter gesture through the
+authoring session before discarding its input widgets, including preferences,
+asset-folder navigation and startup/workspace transitions. A failed history
+seal retains the existing controls and schedules a retry; a delayed event cannot
+continue writing through the removed interaction identity.

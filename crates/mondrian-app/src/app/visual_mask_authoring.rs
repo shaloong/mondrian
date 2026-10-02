@@ -152,13 +152,16 @@ impl AppState {
                         &write,
                         context.clip_time,
                     )?
-                }
-                .ok_or_else(|| {
-                    mask_action_error(
+                };
+                let Some(mutation) = mutation else {
+                    if self.parameter_gesture_command.is_some() {
+                        return Ok(());
+                    }
+                    return Err(mask_action_error(
                         "visual_mask_set_parameter_value",
                         "Mask parameter already has the requested value at the current author time",
-                    )
-                })?;
+                    ));
+                };
                 self.commit_sequence_edit(context.sequence_id, "修改蒙版属性", |sequence| {
                     video_clip_mut(sequence, clip_id)?
                         .apply_mask_parameter_mutation(mask_id, mutation)

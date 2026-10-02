@@ -102,6 +102,7 @@ pub struct PreparedSequenceEdit {
     next_generation: AuthorGeneration,
     replacement: PreparedProjectSequenceReplacement,
     history: PreparedAuthoringHistoryRecord,
+    group: Option<AuthoringHistoryGroup>,
 }
 
 /// Explicit editor navigation operation for a Sequence target.
@@ -113,6 +114,19 @@ pub enum SequenceNavigationIntent {
     EnterNested,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AuthoringHistoryGroup {
+    pub(crate) gesture: mondrian_core::AuthoringGestureId,
+    pub(crate) started_generation: AuthorGeneration,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SequenceGesture {
+    group: AuthoringHistoryGroup,
+    sequence: SequenceId,
+    expected_generation: AuthorGeneration,
+}
+
 /// Sole mutable authority for one open project's authored state.
 pub struct AuthoringSession {
     session_id: AuthoringSessionId,
@@ -122,6 +136,7 @@ pub struct AuthoringSession {
     asset_library: Arc<AssetLibrary>,
     navigation_stack: Vec<SequenceId>,
     history: AuthoringHistory,
+    sequence_gesture: Option<SequenceGesture>,
     authoring_validation: ProjectAuthoringValidationCertificate,
     #[cfg(any(test, feature = "test-support"))]
     authoring_validation_fixture_dirty: bool,
@@ -182,6 +197,7 @@ impl AuthoringSession {
             asset_library,
             navigation_stack: Vec::new(),
             history: AuthoringHistory::default(),
+            sequence_gesture: None,
             authoring_validation,
             #[cfg(any(test, feature = "test-support"))]
             authoring_validation_fixture_dirty: false,
@@ -428,7 +444,7 @@ impl AuthoringSession {
         before: Sequence,
         after: Sequence,
     ) -> Result<Option<AuthoringCommit>> {
-        self.prepare_sequence_candidate(description, before, after)
+        self.prepare_sequence_candidate(description, before, after, None)
             .map(|prepared| prepared.map(|prepared| self.install_prepared_sequence_edit(prepared)))
     }
 
@@ -437,6 +453,7 @@ impl AuthoringSession {
         description: impl Into<String>,
         before: Sequence,
         mut after: Sequence,
+        group: Option<AuthoringHistoryGroup>,
     ) -> Result<Option<PreparedSequenceEdit>> {
         self.refresh_test_fixture_authoring_validation()?;
         if before.id != after.id {
@@ -479,11 +496,21 @@ impl AuthoringSession {
             .authoring_validation
             .prepare_sequence_replacement(&self.document, after)
             .map_err(|error| session_context_error("validate_sequence_replacement", error))?;
-        let prepared_history = self.history.prepare_sequence_record(
-            description.into(),
-            &before,
-            prepared_replacement.replacement(),
-        )?;
+        let description = description.into();
+        let prepared_history = if let Some(group) = group {
+            self.history.prepare_sequence_group_record(
+                description,
+                &before,
+                prepared_replacement.replacement(),
+                group,
+            )?
+        } else {
+            self.history.prepare_sequence_record(
+                description,
+                &before,
+                prepared_replacement.replacement(),
+            )?
+        };
         Ok(Some(PreparedSequenceEdit {
             session_id: self.session_id,
             expected_generation: self.author_generation,
@@ -492,6 +519,7 @@ impl AuthoringSession {
             next_generation,
             replacement: prepared_replacement,
             history: prepared_history,
+            group,
         }))
     }
 
@@ -510,6 +538,14 @@ impl AuthoringSession {
         self.sequence_revision_high_water
             .insert(prepared.sequence_id, prepared.installed_revision);
         self.author_generation = prepared.next_generation;
+        if let Some(gesture) = self.sequence_gesture.as_mut()
+            && Some(gesture.group) == prepared.group
+            && (outcome.retained || self.history.diagnostics().budget.max_entries == 0)
+        {
+            gesture.expected_generation = self.author_generation;
+        } else {
+            self.sequence_gesture = None;
+        }
         sequence_commit(self.author_generation, prepared.sequence_id, outcome)
     }
 
@@ -528,7 +564,7 @@ impl AuthoringSession {
         })?;
         let mut after = before.clone();
         let value = edit(&mut after)?;
-        let prepared = self.prepare_sequence_candidate(description, before, after)?;
+        let prepared = self.prepare_sequence_candidate(description, before, after, None)?;
         Ok((value, prepared))
     }
 
@@ -641,6 +677,90 @@ impl AuthoringSession {
         let mut after = before.clone();
         let value = edit(&mut after)?;
         let commit = self.commit_sequence_candidate(description, before, after)?;
+        Ok((value, commit))
+    }
+
+    /// Open a continuous edit without creating history or advancing author state.
+    /// Every live update remains a validated commit with a fresh author generation.
+    pub fn begin_sequence_gesture(
+        &mut self,
+        gesture: mondrian_core::AuthoringGestureId,
+        sequence: SequenceId,
+    ) -> Result<()> {
+        if self.sequence(sequence).is_none() {
+            return Err(session_error(
+                "begin_sequence_gesture",
+                "gesture Sequence does not exist",
+            ));
+        }
+        if let Some(active) = self.sequence_gesture {
+            self.end_sequence_gesture(active.group.gesture)?;
+        }
+        self.sequence_gesture = Some(SequenceGesture {
+            group: AuthoringHistoryGroup {
+                gesture,
+                started_generation: self.author_generation,
+            },
+            sequence,
+            expected_generation: self.author_generation,
+        });
+        Ok(())
+    }
+
+    /// Whether an interaction still owns the current author generation and Sequence.
+    pub fn sequence_gesture_is_current(
+        &self,
+        gesture: mondrian_core::AuthoringGestureId,
+        sequence: SequenceId,
+    ) -> bool {
+        self.sequence_gesture.is_some_and(|active| {
+            active.group.gesture == gesture
+                && active.sequence == sequence
+                && active.expected_generation == self.author_generation
+        })
+    }
+
+    /// Seal an interaction; delayed finishes cannot terminate a newer interaction.
+    pub fn end_sequence_gesture(
+        &mut self,
+        gesture: mondrian_core::AuthoringGestureId,
+    ) -> Result<bool> {
+        let Some(active) = self.sequence_gesture.filter(|active| active.group.gesture == gesture)
+        else {
+            return Ok(false);
+        };
+        if active.expected_generation == self.author_generation {
+            self.history.elide_zero_group(active.group)?;
+        }
+        self.sequence_gesture = None;
+        Ok(true)
+    }
+
+    /// Commit a live update into one bounded interaction restore point.
+    /// Unrelated author commits invalidate the lease instead of joining its history.
+    pub fn edit_sequence_in_gesture<T>(
+        &mut self,
+        gesture: mondrian_core::AuthoringGestureId,
+        sequence_id: SequenceId,
+        description: impl Into<String>,
+        edit: impl FnOnce(&mut Sequence) -> Result<T>,
+    ) -> Result<(T, Option<AuthoringCommit>)> {
+        if !self.sequence_gesture_is_current(gesture, sequence_id) {
+            return Err(session_error(
+                "edit_sequence_in_gesture",
+                "authoring gesture is stale or has a different owner",
+            ));
+        }
+        let group = self.sequence_gesture.map(|active| active.group);
+        let before = self
+            .sequence(sequence_id)
+            .cloned()
+            .ok_or_else(|| session_error("edit_sequence_in_gesture", "Sequence does not exist"))?;
+        let mut after = before.clone();
+        let value = edit(&mut after)?;
+        let commit = self
+            .prepare_sequence_candidate(description, before, after, group)?
+            .map(|prepared| self.install_prepared_sequence_edit(prepared));
         Ok((value, commit))
     }
 
@@ -1110,6 +1230,190 @@ mod tests {
     use super::*;
     use mondrian_core::{ProgramOutputId, ProjectColorEnvironment, ProjectSettings, TimelineTime};
     use mondrian_timeline::{AudioRouteDestination, Clip, SequenceCollection, SequenceSettings};
+
+    #[test]
+    fn gesture_retention_failure_cannot_create_a_partial_drag_restore_point() {
+        for max_entries in [0, 1] {
+            let mut session = session_with_two_sequences(false);
+            session.history =
+                AuthoringHistory::with_budget(crate::history::AuthoringHistoryBudget::new(
+                    max_entries,
+                    if max_entries == 0 { 1024 * 1024 } else { 0 },
+                ));
+            let id = session.active_sequence().expect("Sequence").id;
+            let gesture = mondrian_core::AuthoringGestureId::new();
+            session.begin_sequence_gesture(gesture, id).expect("begin");
+            let commit = session
+                .edit_sequence_in_gesture(gesture, id, "first", |sequence| {
+                    sequence.name = "first".into();
+                    Ok(())
+                })
+                .expect("first live change")
+                .1
+                .expect("commit");
+            assert!(!commit.undo_retained);
+            assert!(!session.history.can_undo());
+            let next = session.edit_sequence_in_gesture(gesture, id, "second", |sequence| {
+                sequence.name = "second".into();
+                Ok(())
+            });
+            if max_entries == 0 {
+                assert!(
+                    next.is_ok(),
+                    "explicitly disabled history still permits continuous editing"
+                );
+                assert_eq!(session.sequence(id).expect("Sequence").name, "second");
+            } else {
+                assert!(
+                    next.is_err(),
+                    "a lost origin must never become a partial Undo"
+                );
+                assert_eq!(session.sequence(id).expect("Sequence").name, "first");
+            }
+            assert!(!session.history.can_undo());
+        }
+    }
+
+    #[test]
+    fn continuous_gesture_commits_live_and_restores_the_entire_bounded_drag() {
+        let mut session = session_with_two_sequences(false);
+        session.history = AuthoringHistory::with_budget(
+            crate::history::AuthoringHistoryBudget::new(1, 1024 * 1024),
+        );
+        let original = session.active_sequence().expect("Sequence").clone();
+        let id = original.id;
+        let gesture = mondrian_core::AuthoringGestureId::new();
+        session.begin_sequence_gesture(gesture, id).expect("begin");
+        let mut generation = session.author_generation();
+        for index in 0..100 {
+            let (_, commit) = session
+                .edit_sequence_in_gesture(gesture, id, "drag", |sequence| {
+                    sequence.name = format!("Live {index}");
+                    Ok(())
+                })
+                .expect("validated live update");
+            assert!(commit.expect("real change").undo_retained);
+            assert!(session.author_generation() > generation);
+            generation = session.author_generation();
+            assert_eq!(
+                session.sequence(id).expect("live").name,
+                format!("Live {index}")
+            );
+            assert_eq!(session.history.diagnostics().undo_entries, 1);
+            assert_eq!(session.history.diagnostics().budget_evicted_entries, 0);
+        }
+        assert!(session.end_sequence_gesture(gesture).expect("finish"));
+        assert!(!session.sequence_gesture_is_current(gesture, id));
+        assert!(session.undo().expect("Undo").is_some());
+        assert!(session
+            .sequence(id)
+            .expect("restored")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(session.redo().expect("Redo").is_some());
+        assert_eq!(session.sequence(id).expect("redone").name, "Live 99");
+    }
+
+    #[test]
+    fn gesture_noops_failures_stale_updates_and_reused_tokens_do_not_merge_other_commands() {
+        let mut session = session_with_two_sequences(false);
+        let id = session.active_sequence().expect("Sequence").id;
+        let gesture = mondrian_core::AuthoringGestureId::new();
+        session.begin_sequence_gesture(gesture, id).expect("begin");
+        let generation = session.author_generation();
+        assert!(session
+            .edit_sequence_in_gesture(gesture, id, "noop", |_| Ok(()))
+            .expect("noop")
+            .1
+            .is_none());
+        assert_eq!(session.author_generation(), generation);
+        assert!(!session.history.can_undo());
+        let error = session.edit_sequence_in_gesture(gesture, id, "failed", |sequence| {
+            sequence.name = "must not install".into();
+            Err::<(), _>(session_error("injected", "failure"))
+        });
+        assert!(error.is_err());
+        assert_eq!(session.author_generation(), generation);
+        session
+            .edit_sequence_in_gesture(gesture, id, "first", |sequence| {
+                sequence.name = "first".into();
+                Ok(())
+            })
+            .expect("first");
+        session
+            .edit_sequence(id, "unrelated", |sequence| {
+                sequence.name = "unrelated".into();
+                Ok(())
+            })
+            .expect("ordinary command");
+        let generation = session.author_generation();
+        let history = session.history.diagnostics();
+        assert!(session
+            .edit_sequence_in_gesture(gesture, id, "stale", |sequence| {
+                sequence.name = "stale".into();
+                Ok(())
+            })
+            .is_err());
+        assert_eq!(session.author_generation(), generation);
+        assert_eq!(session.history.diagnostics(), history);
+        session
+            .begin_sequence_gesture(gesture, id)
+            .expect("new scope even with reused input token");
+        session
+            .edit_sequence_in_gesture(gesture, id, "second", |sequence| {
+                sequence.name = "second".into();
+                Ok(())
+            })
+            .expect("second");
+        assert!(!session
+            .end_sequence_gesture(mondrian_core::AuthoringGestureId::new())
+            .expect("late foreign finish"));
+        assert!(session.sequence_gesture_is_current(gesture, id));
+        assert!(session.end_sequence_gesture(gesture).expect("finish"));
+        assert_eq!(session.history.diagnostics().undo_entries, 3);
+        session.undo().expect("Undo second");
+        assert_eq!(session.sequence(id).expect("Sequence").name, "unrelated");
+        session.undo().expect("Undo unrelated");
+        assert_eq!(session.sequence(id).expect("Sequence").name, "first");
+        session.undo().expect("Undo first");
+        assert_eq!(session.sequence(id).expect("Sequence").name, "Primary");
+    }
+
+    #[test]
+    fn finishing_zero_gesture_elides_its_history_and_charge_without_author_mutation() {
+        let mut session = session_with_two_sequences(false);
+        let id = session.active_sequence().expect("Sequence").id;
+        session
+            .edit_sequence(id, "ordinary", |sequence| {
+                sequence.name = "baseline".into();
+                Ok(())
+            })
+            .expect("baseline");
+        let history = session.history.diagnostics();
+        let gesture = mondrian_core::AuthoringGestureId::new();
+        session.begin_sequence_gesture(gesture, id).expect("begin");
+        for name in ["temporary", "baseline"] {
+            session
+                .edit_sequence_in_gesture(gesture, id, "drag", |sequence| {
+                    sequence.name = name.into();
+                    Ok(())
+                })
+                .expect("update");
+        }
+        assert_eq!(session.history.diagnostics().undo_entries, 2);
+        let generation = session.author_generation();
+        session.end_sequence_gesture(gesture).expect("finish");
+        assert_eq!(session.author_generation(), generation);
+        assert_eq!(
+            session.history.diagnostics().undo_entries,
+            history.undo_entries
+        );
+        assert_eq!(
+            session.history.diagnostics().retained_bytes,
+            history.retained_bytes
+        );
+        session.undo().expect("Undo ordinary");
+        assert_eq!(session.sequence(id).expect("Sequence").name, "Primary");
+    }
 
     fn session_with_two_sequences(saved: bool) -> AuthoringSession {
         let root = tempfile::tempdir().expect("runtime tempdir").keep();

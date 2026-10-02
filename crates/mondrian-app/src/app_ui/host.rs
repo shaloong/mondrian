@@ -1121,8 +1121,20 @@ impl AppUiHost {
         // A live draft may defer rebuilding its widgets, but never defer
         // validation of the author owner it is allowed to edit.
         self.root.cancel_stale_resource_draft(&self.app_state.borrow());
+        let stale_parameter_gesture = {
+            let state = self.app_state.borrow();
+            state.active_parameter_gesture.is_some() && !state.parameter_gesture_is_current()
+        };
+        if stale_parameter_gesture
+            && let Err(error) = self.app_state.borrow_mut().finish_parameter_gesture()
+        {
+            tracing::warn!(%error, "failed to seal invalid parameter gesture");
+        }
         let next_mode = mode_for_app_state(&self.app_state.borrow());
-        if next_mode == self.mode && widget_tree_has_transient_interaction(self.active_root()) {
+        if next_mode == self.mode
+            && !stale_parameter_gesture
+            && widget_tree_has_transient_interaction(self.active_root())
+        {
             self.ui_dirty.set(true);
             // Retain input widgets without retaining an obsolete author picture.
             // Full author dirtiness requires the same current Preview projection
@@ -1137,6 +1149,18 @@ impl AppUiHost {
         self.asset_thumbnails
             .set_color_context(self.app_state.borrow().thumbnail_color_context().ok());
         self.refresh_window_preview_state();
+        self.refresh_root_models();
+        self.sync_mode_from_app_state(bounds);
+        TreeWalker::layout(self.active_root_mut(), bounds);
+    }
+
+    /// Seal author interactions before any path replaces their input widgets.
+    fn refresh_root_models(&mut self) {
+        if let Err(error) = self.app_state.borrow_mut().finish_parameter_gesture() {
+            tracing::warn!(%error, "failed to seal parameter gesture before model replacement");
+            self.ui_dirty.set(true);
+            return;
+        }
         let window_preview_state = self.window_preview_state.borrow().clone();
         let window_preview_snapshot =
             WindowPreviewSnapshot::new(&window_preview_state, &self.preview_service);
@@ -1147,8 +1171,6 @@ impl AppUiHost {
             Some(&window_preview_snapshot),
             Some(self.waveform_service.source()),
         );
-        self.sync_mode_from_app_state(bounds);
-        TreeWalker::layout(self.active_root_mut(), bounds);
     }
 
     fn refresh_preview_state_without_rebuild(&mut self) {
@@ -1548,6 +1570,17 @@ impl AppUiHost {
                 continue;
             }
             tracing::debug!(?action, "custom UI action");
+            let parameter_gesture =
+                crate::app::parameter_gesture::ParameterGestureAction::decode(&action)
+                    .ok()
+                    .flatten()
+                    .is_some();
+            let generation_before = self
+                .app_state
+                .borrow()
+                .authoring
+                .as_ref()
+                .map(mondrian_editor_state::AuthoringSession::author_generation);
             let lightweight_transport_refresh =
                 action_prefers_transport_refresh_without_preview(&action);
             if let Err(err) = self.dispatch_editor_action(action) {
@@ -1557,7 +1590,15 @@ impl AppUiHost {
             self.preview_service.synchronize_transport_intent(transport_intent);
             if lightweight_transport_refresh {
                 self.refresh_transport_intent_without_preview();
-            } else {
+            } else if !parameter_gesture
+                || self
+                    .app_state
+                    .borrow()
+                    .authoring
+                    .as_ref()
+                    .map(mondrian_editor_state::AuthoringSession::author_generation)
+                    != generation_before
+            {
                 self.mark_dirty();
             }
             needs_layout = true;
@@ -1575,16 +1616,7 @@ impl AppUiHost {
         if self.mode != next {
             self.mode = next;
             self.refresh_window_preview_state();
-            let window_preview_state = self.window_preview_state.borrow().clone();
-            let window_preview_snapshot =
-                WindowPreviewSnapshot::new(&window_preview_state, &self.preview_service);
-            self.root.refresh_from_app_state_with_preferences_thumbnails_and_preview(
-                &self.app_state.borrow(),
-                &self.preferences,
-                Some(&self.asset_thumbnails),
-                Some(&window_preview_snapshot),
-                Some(self.waveform_service.source()),
-            );
+            self.refresh_root_models();
             TreeWalker::layout(self.active_root_mut(), bounds);
         }
     }
@@ -1989,16 +2021,7 @@ impl AppUiHost {
                     );
                 }
                 self.refresh_window_preview_state();
-                let window_preview_state = self.window_preview_state.borrow().clone();
-                let window_preview_snapshot =
-                    WindowPreviewSnapshot::new(&window_preview_state, &self.preview_service);
-                self.root.refresh_from_app_state_with_preferences_thumbnails_and_preview(
-                    &self.app_state.borrow(),
-                    &self.preferences,
-                    Some(&self.asset_thumbnails),
-                    Some(&window_preview_snapshot),
-                    Some(self.waveform_service.source()),
-                );
+                self.refresh_root_models();
                 TreeWalker::layout(&mut self.root, bounds);
                 true
             }
@@ -2024,16 +2047,7 @@ impl AppUiHost {
                 let folder_id = self.valid_asset_folder_id(payload.folder_id);
                 self.root.set_asset_folder_id(folder_id);
                 self.refresh_window_preview_state();
-                let window_preview_state = self.window_preview_state.borrow().clone();
-                let window_preview_snapshot =
-                    WindowPreviewSnapshot::new(&window_preview_state, &self.preview_service);
-                self.root.refresh_from_app_state_with_preferences_thumbnails_and_preview(
-                    &self.app_state.borrow(),
-                    &self.preferences,
-                    Some(&self.asset_thumbnails),
-                    Some(&window_preview_snapshot),
-                    Some(self.waveform_service.source()),
-                );
+                self.refresh_root_models();
                 TreeWalker::layout(&mut self.root, bounds);
                 true
             }
@@ -5203,25 +5217,27 @@ mod tests {
         }
     }
 
+    fn inspector_slider(
+        widget: &dyn Widget,
+        in_inspector: bool,
+    ) -> Option<mondrian_ui_core::WidgetId> {
+        let in_inspector = in_inspector || widget.panel_kind() == Some(PanelKind::Inspector);
+        if in_inspector
+            && widget
+                .accessibility()
+                .is_some_and(|node| node.role == mondrian_ui_core::AccessibilityRole::Slider)
+        {
+            return Some(widget.id());
+        }
+        (0..widget.child_count()).find_map(|index| {
+            widget.child(index).and_then(|child| inspector_slider(child, in_inspector))
+        })
+    }
+
     #[test]
     fn inspector_slider_capture_survives_author_refresh_until_release() {
         use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
-        use mondrian_ui_core::{AccessibilityRole, WidgetId};
         use mondrian_ui_events::EventRouter;
-
-        fn inspector_slider(widget: &dyn Widget, in_inspector: bool) -> Option<WidgetId> {
-            let in_inspector = in_inspector || widget.panel_kind() == Some(PanelKind::Inspector);
-            if in_inspector
-                && widget
-                    .accessibility()
-                    .is_some_and(|node| node.role == AccessibilityRole::Slider)
-            {
-                return Some(widget.id());
-            }
-            (0..widget.child_count()).find_map(|index| {
-                widget.child(index).and_then(|child| inspector_slider(child, in_inspector))
-            })
-        }
 
         for lose_focus in [false, true] {
             let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
@@ -5327,6 +5343,140 @@ mod tests {
                 WidgetTreeView::new(host.active_root_mut()).get(slider_id).is_none(),
                 "deferred models must refresh after release"
             );
+            let completed_drag = host.app_state().active_sequence().expect("drag").clone();
+            assert!(host.app_state.borrow_mut().undo_timeline().expect("undo slider gesture"));
+            assert!(
+                host.app_state()
+                    .active_sequence()
+                    .expect("Sequence")
+                    .author_state_eq_ignoring_revision(&before),
+                "one Undo must restore the complete drag, including its first pointer-down edit"
+            );
+            assert!(host.app_state.borrow_mut().redo_timeline().expect("redo slider gesture"));
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("redone")
+                .author_state_eq_ignoring_revision(&completed_drag));
+        }
+    }
+
+    #[test]
+    fn invalid_parameter_gesture_discards_captured_slider_and_refuses_late_writes() {
+        use crate::app::ui_actions::{
+            track_set_author_control_action, TrackAuthorControl, TrackSetAuthorControlPayload,
+        };
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+        for change in 0..4 {
+            let lock = change == 1;
+            let mut state = workspace_app_state_with_timed_solid();
+            let clip_id = state.active_sequence().expect("Sequence").video_tracks[0].clips[0].id;
+            let track_id = state.active_sequence().expect("Sequence").video_tracks[0].id;
+            state.select_clip_by_id(clip_id).expect("select");
+            let original = state.active_sequence().expect("original").clone();
+            let mut host = AppUiHost::new_with_preferences_path(
+                state,
+                AppUiPreferences::default(),
+                temp_preferences_path("stale-parameter-gesture"),
+            );
+            TreeWalker::layout(host.active_root_mut(), bounds);
+            let slider_id = inspector_slider(host.active_root(), false).expect("slider");
+            let point = {
+                let tree = WidgetTreeView::new(host.active_root_mut());
+                let slider = tree.get(slider_id).expect("slider");
+                (0..720)
+                    .step_by(4)
+                    .find_map(|y| {
+                        (0..1280).step_by(4).find_map(|x| {
+                            let point = Point::new(x as f32, y as f32);
+                            slider.hit_test(point).then_some(point)
+                        })
+                    })
+                    .expect("visible point")
+            };
+            let pending = PendingUiActions::default();
+            let dispatch = |action| pending.push(action);
+            let mut router = EventRouter::new(host.active_root().id());
+            for event in [
+                UiEvent::MouseDown {
+                    position: point,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::MouseMove {
+                    position: Point::new(point.x + 24.0, point.y),
+                    modifiers: Modifiers::none(),
+                },
+            ] {
+                router.route(
+                    event,
+                    &mut WidgetTreeView::new(host.active_root_mut()),
+                    &dispatch,
+                );
+                host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            }
+            assert_eq!(router.captured(), Some(slider_id));
+            assert!(host.app_state().parameter_gesture_is_current());
+            pending.push(if lock {
+                track_set_author_control_action(TrackSetAuthorControlPayload {
+                    track_id,
+                    control: TrackAuthorControl::Lock,
+                    enabled: true,
+                })
+            } else if change == 0 {
+                Action::DeselectAll
+            } else if change == 2 {
+                crate::app::ui_actions::app_shell_preferences_locale_changed_action(
+                    crate::app_ui::localization::AppUiLocalePreference::EnUs,
+                )
+            } else {
+                crate::app::ui_actions::assets_open_folder_action(
+                    crate::app::ui_actions::AssetsOpenFolderPayload { folder_id: None },
+                )
+            });
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            assert!(host.app_state().active_parameter_gesture.is_none());
+            assert!(
+                WidgetTreeView::new(host.active_root_mut()).get(slider_id).is_none(),
+                "invalid author owner must not preserve captured stale controls"
+            );
+            let after_invalidation =
+                host.app_state().active_sequence().expect("after invalidation").clone();
+            for event in [
+                UiEvent::MouseMove {
+                    position: Point::new(point.x + 80.0, point.y),
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::MouseUp {
+                    position: point,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+            ] {
+                router.route(
+                    event,
+                    &mut WidgetTreeView::new(host.active_root_mut()),
+                    &dispatch,
+                );
+                host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            }
+            assert_eq!(router.captured(), None);
+            assert_eq!(
+                host.app_state().active_sequence().expect("no stale writes"),
+                &after_invalidation
+            );
+            if lock {
+                assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo lock"));
+            }
+            assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo whole drag"));
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("restored")
+                .author_state_eq_ignoring_revision(&original));
         }
     }
 

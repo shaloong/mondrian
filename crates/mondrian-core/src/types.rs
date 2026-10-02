@@ -58,6 +58,10 @@ define_id!(SceneId, "场景 ID");
 define_id!(EffectId, "效果节点 ID");
 define_id!(AnimationTrackId, "动画轨道 ID");
 define_id!(KeyframeId, "关键帧 ID");
+define_id!(
+    AuthoringGestureId,
+    "Identity of one continuous authoring interaction"
+);
 define_id!(AudioComponentEditId, "音频组件编辑 ID");
 define_id!(AudioProcessingScopeId, "音频处理作用域 ID");
 define_id!(AudioSourceComponentId, "音频源组件 ID");

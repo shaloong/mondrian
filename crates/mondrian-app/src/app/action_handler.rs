@@ -72,6 +72,10 @@ impl AppState {
             });
         }
 
+        if let Some(gesture) = super::parameter_gesture::ParameterGestureAction::decode(&action)? {
+            return self.dispatch_parameter_gesture(gesture);
+        }
+
         if let Some(product_action) = ProductAction::decode_external(&action).map_err(|error| {
             let step_id = error.dispatch_step_id();
             MondrianError::WorkflowStepFailed { step_id, reason: error.to_string() }
@@ -1256,7 +1260,7 @@ impl AppState {
         self.authoring_history().is_some_and(|history| history.can_redo())
     }
 
-    fn dispatch_product_action(&mut self, action: ProductAction) -> Result<()> {
+    pub(super) fn dispatch_product_action(&mut self, action: ProductAction) -> Result<()> {
         match action {
             ProductAction::Timeline(action) => self.dispatch_timeline_product_action(action),
             ProductAction::Track(action) => self.dispatch_track_product_action(action),
@@ -1541,11 +1545,14 @@ impl AppState {
                 "visual_effect_reorder",
                 "Effect chain already has the requested relative order",
             ),
-            VisualEffectProductAction::SetParameterValue(payload) => require_action_executed(
-                self.set_effect_parameter_value(*payload)?,
-                "visual_effect_set_parameter_value",
-                "Effect parameter already has the requested value at the current author time",
-            ),
+            VisualEffectProductAction::SetParameterValue(payload) => {
+                let changed = self.set_effect_parameter_value(*payload)?;
+                if self.parameter_gesture_command.is_some() {
+                    Ok(())
+                } else {
+                    require_action_executed(changed, "visual_effect_set_parameter_value", "Effect parameter already has the requested value at the current author time")
+                }
+            }
             VisualEffectProductAction::EditNumericCurve(payload) => {
                 let edit = super::clip_authoring::numeric_curve_edit_from_payload(&payload.edit)?;
                 let clip_id = payload.clip_id;
@@ -1697,11 +1704,14 @@ impl AppState {
                 "clip_hold_frame",
                 "Clip already holds the requested source picture",
             ),
-            ClipProductAction::WriteParameterValues(payload) => require_action_executed(
-                self.write_clip_parameter_values(*payload)?,
-                "clip_write_parameter_values",
-                "Clip parameters already have the requested values at the current author time",
-            ),
+            ClipProductAction::WriteParameterValues(payload) => {
+                let changed = self.write_clip_parameter_values(*payload)?;
+                if self.parameter_gesture_command.is_some() {
+                    Ok(())
+                } else {
+                    require_action_executed(changed, "clip_write_parameter_values", "Clip parameters already have the requested values at the current author time")
+                }
+            }
             ClipProductAction::EditNumericCurve(payload) => {
                 let clip_id = payload.clip_id;
                 let property = payload.parameter.clone();

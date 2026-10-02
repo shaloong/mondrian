@@ -1,0 +1,504 @@
+//! Continuous parameter edits over the canonical Clip/Effect/Mask author paths.
+
+use super::product_action::{
+    ClipProductAction, ClipWriteParameterValuesPayload, ProductAction, VisualEffectProductAction,
+    VisualEffectSetParameterValuePayload, VisualMaskProductAction,
+    VisualMaskSetParameterValuePayload,
+};
+use super::AppState;
+use mondrian_core::{
+    AnimationParameterAddress, AuthoringGestureId, ClipId, EffectId, MaskId, MondrianError, Result,
+    SequenceId,
+};
+use mondrian_editor_state::{Action, AuthoringSessionId};
+use serde::{Deserialize, Serialize};
+
+const NAMESPACE: &str = "mondrian.parameter_gesture";
+const NAME: &str = "edit";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "owner",
+    content = "edit",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+/// A canonical parameter intent accepted by continuous authoring interactions.
+pub(crate) enum ParameterGestureEdit {
+    Clip(ClipWriteParameterValuesPayload),
+    Effect(VisualEffectSetParameterValuePayload),
+    Mask(VisualMaskSetParameterValuePayload),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
+/// Explicit lifecycle events; no nested or opaque author commands are admitted.
+pub(crate) enum ParameterGestureAction {
+    Begin {
+        gesture_id: AuthoringGestureId,
+        edit: ParameterGestureEdit,
+    },
+    Update {
+        gesture_id: AuthoringGestureId,
+        edit: ParameterGestureEdit,
+    },
+    Finish {
+        gesture_id: AuthoringGestureId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ParameterOwner {
+    Clip,
+    Effect(EffectId),
+    Mask(MaskId),
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParameterGestureTarget {
+    clip: ClipId,
+    owner: ParameterOwner,
+    parameters: Vec<(AnimationParameterAddress, Option<Vec<usize>>)>,
+}
+
+/// Ephemeral UI owner identity, separate from authoritative project content.
+pub(crate) struct ActiveParameterGesture {
+    id: AuthoringGestureId,
+    session: AuthoringSessionId,
+    sequence: SequenceId,
+    target: ParameterGestureTarget,
+}
+
+impl ParameterGestureEdit {
+    /// Extract only canonical parameter edits from a widget action.
+    pub(crate) fn from_action(action: &Action) -> Option<Self> {
+        match ProductAction::decode_external(action).ok().flatten()? {
+            ProductAction::Clip(ClipProductAction::WriteParameterValues(edit)) => {
+                Some(Self::Clip(*edit))
+            }
+            ProductAction::VisualEffect(VisualEffectProductAction::SetParameterValue(edit)) => {
+                Some(Self::Effect(*edit))
+            }
+            ProductAction::VisualMask(VisualMaskProductAction::SetParameterValue(edit)) => {
+                Some(Self::Mask(*edit))
+            }
+            _ => None,
+        }
+    }
+    fn into_product(self) -> ProductAction {
+        match self {
+            Self::Clip(edit) => {
+                ProductAction::Clip(ClipProductAction::WriteParameterValues(Box::new(edit)))
+            }
+            Self::Effect(edit) => ProductAction::VisualEffect(
+                VisualEffectProductAction::SetParameterValue(Box::new(edit)),
+            ),
+            Self::Mask(edit) => ProductAction::VisualMask(
+                VisualMaskProductAction::SetParameterValue(Box::new(edit)),
+            ),
+        }
+    }
+    fn target(&self) -> ParameterGestureTarget {
+        use mondrian_core::automation::ParameterValueWrite;
+        let parameter = |write: &ParameterValueWrite| {
+            (
+                write.parameter().clone(),
+                match write {
+                    ParameterValueWrite::Channels { channel_values, .. } => {
+                        Some(channel_values.iter().map(|(index, _)| *index).collect())
+                    }
+                    ParameterValueWrite::Value { .. } => None,
+                },
+            )
+        };
+        match self {
+            Self::Clip(edit) => ParameterGestureTarget {
+                clip: edit.clip_id,
+                owner: ParameterOwner::Clip,
+                parameters: edit.writes.iter().map(parameter).collect(),
+            },
+            Self::Effect(edit) => ParameterGestureTarget {
+                clip: edit.clip_id,
+                owner: ParameterOwner::Effect(edit.effect_id),
+                parameters: vec![parameter(&edit.write)],
+            },
+            Self::Mask(edit) => ParameterGestureTarget {
+                clip: edit.clip_id,
+                owner: ParameterOwner::Mask(edit.mask_id),
+                parameters: vec![parameter(&edit.write)],
+            },
+        }
+    }
+}
+
+impl ParameterGestureAction {
+    /// Encode one typed interaction event for the shared action dispatch seam.
+    pub(crate) fn action(self) -> Action {
+        Action::Custom {
+            namespace: NAMESPACE.into(),
+            name: NAME.into(),
+            payload: serde_json::json!(self),
+        }
+    }
+    /// Decode this registered protocol, rejecting malformed or unknown operations.
+    pub(crate) fn decode(action: &Action) -> Result<Option<Self>> {
+        let Action::Custom { namespace, name, payload } = action else {
+            return Ok(None);
+        };
+        if namespace != NAMESPACE {
+            return Ok(None);
+        }
+        if name != NAME {
+            return Err(gesture_error("unknown parameter gesture operation"));
+        }
+        serde_json::from_value(payload.clone())
+            .map(Some)
+            .map_err(|error| gesture_error(error.to_string()))
+    }
+}
+
+impl AppState {
+    fn parameter_target_is_current(&self, target: &ParameterGestureTarget) -> bool {
+        if self
+            .primary_selected_clip()
+            .is_none_or(|selection| selection.clip_id != target.clip)
+        {
+            return false;
+        }
+        let Some(sequence) = self.active_sequence() else {
+            return false;
+        };
+        if sequence
+            .clip_track_location(target.clip)
+            .is_none_or(|location| location.is_locked)
+        {
+            return false;
+        }
+        let Some(clip) = sequence.find_clip(target.clip) else {
+            return false;
+        };
+        match target.owner {
+            ParameterOwner::Clip => true,
+            ParameterOwner::Effect(id) => clip.effects.iter().any(|effect| effect.id == id),
+            ParameterOwner::Mask(id) => clip.mask(id).is_some_and(|mask| !mask.locked),
+        }
+    }
+
+    /// Whether the UI owner and its authoritative author-generation lease still match.
+    pub(crate) fn parameter_gesture_is_current(&self) -> bool {
+        self.active_parameter_gesture.as_ref().is_some_and(|active| {
+            self.authoring_session_id() == Some(active.session)
+                && self.active_sequence_id() == Some(active.sequence)
+                && self.parameter_target_is_current(&active.target)
+                && self.authoring.as_ref().is_some_and(|session| {
+                    session.sequence_gesture_is_current(active.id, active.sequence)
+                })
+        })
+    }
+
+    /// Seal the active interaction before discarding its UI owner identity.
+    pub(crate) fn finish_parameter_gesture(&mut self) -> Result<()> {
+        let Some((id, owner)) =
+            self.active_parameter_gesture.as_ref().map(|active| (active.id, active.session))
+        else {
+            return Ok(());
+        };
+        if self.authoring_session_id() == Some(owner)
+            && let Some(session) = self.authoring.as_mut()
+        {
+            session.end_sequence_gesture(id)?;
+        }
+        // Keep the lease available for retry if atomic history sealing fails.
+        self.active_parameter_gesture = None;
+        Ok(())
+    }
+
+    /// Apply live parameter intent through the existing author modules in one explicit group.
+    pub(super) fn dispatch_parameter_gesture(
+        &mut self,
+        action: ParameterGestureAction,
+    ) -> Result<()> {
+        let (id, edit, begin) = match action {
+            ParameterGestureAction::Begin { gesture_id, edit } => (gesture_id, edit, true),
+            ParameterGestureAction::Update { gesture_id, edit } => (gesture_id, edit, false),
+            ParameterGestureAction::Finish { gesture_id } => {
+                if self
+                    .active_parameter_gesture
+                    .as_ref()
+                    .is_some_and(|active| active.id == gesture_id)
+                {
+                    self.finish_parameter_gesture()?;
+                }
+                return Ok(());
+            }
+        };
+        let target = edit.target();
+        if begin {
+            self.finish_parameter_gesture()?;
+            if !self.parameter_target_is_current(&target) {
+                return Ok(());
+            }
+            let sequence =
+                self.active_sequence_id().ok_or_else(|| gesture_error("no active Sequence"))?;
+            let session =
+                self.authoring.as_mut().ok_or_else(|| gesture_error("no authoring Session"))?;
+            session.begin_sequence_gesture(id, sequence)?;
+            self.active_parameter_gesture = Some(ActiveParameterGesture {
+                id,
+                session: session.session_id(),
+                sequence,
+                target,
+            });
+        } else if !self.parameter_gesture_is_current()
+            || self
+                .active_parameter_gesture
+                .as_ref()
+                .is_none_or(|active| active.id != id || active.target != target)
+        {
+            return Ok(());
+        }
+        self.parameter_gesture_command = Some(id);
+        let result = self.dispatch_product_action(edit.into_product());
+        self.parameter_gesture_command = None;
+        if result.is_err() {
+            self.finish_parameter_gesture()?;
+        }
+        result
+    }
+}
+
+fn gesture_error(reason: impl Into<String>) -> MondrianError {
+    MondrianError::WorkflowStepFailed {
+        step_id: "parameter_gesture".into(),
+        reason: reason.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mondrian_core::automation::{ParameterValueWrite, PropertyValue};
+    use mondrian_core::{
+        mask_data::{MaskComponent, MaskEvaluation, MASK_PROP_OPACITY},
+        TimelineTime,
+    };
+    use mondrian_effects::EffectType;
+    use mondrian_timeline::{clip::Transform2D, Clip, Sequence};
+
+    #[derive(Clone, Copy)]
+    enum TestOwner {
+        Clip,
+        Effect,
+        Mask,
+    }
+
+    fn fixture(owner: TestOwner) -> (AppState, ParameterGestureEdit) {
+        let mut clip = Clip::new_basic_title(
+            "Title",
+            "Arial",
+            TimelineTime::ZERO,
+            TimelineTime::new(1, 1).expect("duration"),
+        )
+        .expect("generated Clip");
+        let clip_id = clip.id;
+        let edit = match owner {
+            TestOwner::Clip => {
+                let parameter = clip
+                    .intrinsic_parameter_bag()
+                    .address_for_path(Transform2D::OPACITY_PATH)
+                    .expect("opacity");
+                ParameterGestureEdit::Clip(ClipWriteParameterValuesPayload {
+                    clip_id,
+                    writes: vec![ParameterValueWrite::Value {
+                        parameter,
+                        value: PropertyValue::Float(0.2),
+                    }],
+                })
+            }
+            TestOwner::Effect => {
+                let effect = mondrian_effects::instantiate_effect_node(EffectType::GaussianBlur)
+                    .expect("effect");
+                let parameter = effect
+                    .properties
+                    .iter()
+                    .find(|(_, property)| {
+                        matches!(property.static_value(), PropertyValue::Float(_))
+                    })
+                    .expect("numeric property")
+                    .1
+                    .address();
+                let effect_id = effect.id;
+                clip.add_effect_node(effect);
+                ParameterGestureEdit::Effect(VisualEffectSetParameterValuePayload {
+                    clip_id,
+                    effect_id,
+                    write: ParameterValueWrite::Value {
+                        parameter,
+                        value: PropertyValue::Float(0.2),
+                    },
+                })
+            }
+            TestOwner::Mask => {
+                let mask = MaskComponent::new("Mask".into(), MaskEvaluation::default());
+                let parameter =
+                    mask.properties.property(MASK_PROP_OPACITY).expect("opacity").address();
+                let mask_id = mask.id;
+                clip.add_mask_component(mask);
+                ParameterGestureEdit::Mask(VisualMaskSetParameterValuePayload {
+                    clip_id,
+                    mask_id,
+                    write: ParameterValueWrite::Value {
+                        parameter,
+                        value: PropertyValue::Float(0.2),
+                    },
+                })
+            }
+        };
+        let mut sequence = Sequence::new("Gesture acceptance");
+        sequence.video_tracks[0].add_clip(clip).expect("Clip");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("select owner");
+        (state, edit)
+    }
+
+    fn with_value(mut edit: ParameterGestureEdit, value: f32) -> ParameterGestureEdit {
+        let write = match &mut edit {
+            ParameterGestureEdit::Clip(edit) => &mut edit.writes[0],
+            ParameterGestureEdit::Effect(edit) => &mut edit.write,
+            ParameterGestureEdit::Mask(edit) => &mut edit.write,
+        };
+        let ParameterValueWrite::Value { value: current, .. } = write else {
+            panic!("scalar fixture");
+        };
+        *current = PropertyValue::Float(value);
+        edit
+    }
+
+    #[test]
+    fn clip_effect_and_mask_parameter_gestures_share_live_authoring_and_one_undo_redo() {
+        for owner in [TestOwner::Clip, TestOwner::Effect, TestOwner::Mask] {
+            let (mut state, edit) = fixture(owner);
+            let before = state.active_sequence().expect("Sequence").clone();
+            let entries = state.authoring_history().expect("history").diagnostics().undo_entries;
+            let gesture_id = AuthoringGestureId::new();
+            state
+                .dispatch_action(
+                    ParameterGestureAction::Begin { gesture_id, edit: edit.clone() }.action(),
+                )
+                .expect("begin live");
+            let first = state.active_sequence().expect("first").clone();
+            assert!(!first.author_state_eq_ignoring_revision(&before));
+            for value in [0.4, 0.6] {
+                state
+                    .dispatch_action(
+                        ParameterGestureAction::Update {
+                            gesture_id,
+                            edit: with_value(edit.clone(), value),
+                        }
+                        .action(),
+                    )
+                    .expect("live update");
+                assert!(state.parameter_gesture_is_current());
+                assert_eq!(
+                    state.authoring_history().expect("history").diagnostics().undo_entries,
+                    entries + 1
+                );
+            }
+            let after = state.active_sequence().expect("last").clone();
+            assert!(!after.author_state_eq_ignoring_revision(&first));
+            state
+                .dispatch_action(ParameterGestureAction::Finish { gesture_id }.action())
+                .expect("finish");
+            assert!(state.active_parameter_gesture.is_none());
+            assert!(state.undo_timeline().expect("one Undo"));
+            assert!(state
+                .active_sequence()
+                .expect("restored")
+                .author_state_eq_ignoring_revision(&before));
+            assert!(state.redo_timeline().expect("one Redo"));
+            assert!(state
+                .active_sequence()
+                .expect("redone")
+                .author_state_eq_ignoring_revision(&after));
+        }
+    }
+
+    #[test]
+    fn interleaved_owner_lock_and_delayed_gesture_events_do_not_mutate_or_close_newer_edit() {
+        use crate::app::ui_actions::{
+            track_set_author_control_action, TrackAuthorControl, TrackSetAuthorControlPayload,
+        };
+        let (mut state, edit) = fixture(TestOwner::Clip);
+        let original = state.active_sequence().expect("Sequence").clone();
+        let old = AuthoringGestureId::new();
+        state
+            .dispatch_action(
+                ParameterGestureAction::Begin { gesture_id: old, edit: edit.clone() }.action(),
+            )
+            .expect("begin");
+        state
+            .dispatch_action(
+                ParameterGestureAction::Update {
+                    gesture_id: old,
+                    edit: with_value(edit.clone(), 0.4),
+                }
+                .action(),
+            )
+            .expect("update");
+        let track_id = state.active_sequence().expect("Sequence").video_tracks[0].id;
+        state
+            .dispatch_action(track_set_author_control_action(
+                TrackSetAuthorControlPayload {
+                    track_id,
+                    control: TrackAuthorControl::Lock,
+                    enabled: true,
+                },
+            ))
+            .expect("lock");
+        let locked = state.active_sequence().expect("locked").clone();
+        state
+            .dispatch_action(
+                ParameterGestureAction::Update {
+                    gesture_id: old,
+                    edit: with_value(edit.clone(), 0.8),
+                }
+                .action(),
+            )
+            .expect("stale event handled");
+        assert_eq!(state.active_sequence().expect("unchanged"), &locked);
+        assert!(state.undo_timeline().expect("Undo lock"));
+        let restored_drag = state.active_sequence().expect("drag").clone();
+        let new = AuthoringGestureId::new();
+        state
+            .dispatch_action(
+                ParameterGestureAction::Begin {
+                    gesture_id: new,
+                    edit: with_value(edit.clone(), 0.6),
+                }
+                .action(),
+            )
+            .expect("new gesture");
+        let latest = state.active_sequence().expect("new").clone();
+        for action in [
+            ParameterGestureAction::Finish { gesture_id: old },
+            ParameterGestureAction::Update { gesture_id: old, edit: with_value(edit, 0.8) },
+        ] {
+            state.dispatch_action(action.action()).expect("delayed old event");
+            assert!(state.parameter_gesture_is_current());
+            assert_eq!(state.active_sequence().expect("unchanged new"), &latest);
+        }
+        state
+            .dispatch_action(ParameterGestureAction::Finish { gesture_id: new }.action())
+            .expect("finish new");
+        state.undo_timeline().expect("Undo new");
+        assert!(state
+            .active_sequence()
+            .expect("first drag")
+            .author_state_eq_ignoring_revision(&restored_drag));
+        state.undo_timeline().expect("Undo original gesture");
+        assert!(state
+            .active_sequence()
+            .expect("original")
+            .author_state_eq_ignoring_revision(&original));
+    }
+}

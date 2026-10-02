@@ -738,6 +738,7 @@ impl AuthoringCommand {
 #[derive(Debug)]
 struct AuthoringHistoryEntry {
     command: AuthoringCommand,
+    group: Option<crate::session::AuthoringHistoryGroup>,
     footprint_roots: [AuthoringAllocationFootprint; 2],
     metadata_bytes: u64,
 }
@@ -758,6 +759,7 @@ impl AuthoringHistoryEntry {
     fn compile(
         command: AuthoringCommand,
         descriptor_cache: AuthoringFootprintDescriptorCache,
+        group: Option<crate::session::AuthoringHistoryGroup>,
     ) -> Result<Self> {
         let metadata_bytes = Self::conservative_metadata_bytes(&command)?;
         let mut collector =
@@ -776,7 +778,7 @@ impl AuthoringHistoryEntry {
                     ),
                 )
             })?;
-        Ok(Self { command, footprint_roots, metadata_bytes })
+        Ok(Self { command, group, footprint_roots, metadata_bytes })
     }
 
     fn description(&self) -> &str {
@@ -1183,7 +1185,23 @@ impl AuthoringHistory {
         before: &Sequence,
         after: &Sequence,
     ) -> Result<PreparedAuthoringHistoryRecord> {
-        self.prepare_record(AuthoringCommand::sequence(description, before, after)?)
+        self.prepare_record(
+            AuthoringCommand::sequence(description, before, after)?,
+            None,
+        )
+    }
+
+    pub(crate) fn prepare_sequence_group_record(
+        &mut self,
+        description: impl Into<String>,
+        before: &Sequence,
+        after: &Sequence,
+        group: crate::session::AuthoringHistoryGroup,
+    ) -> Result<PreparedAuthoringHistoryRecord> {
+        self.prepare_record(
+            AuthoringCommand::sequence(description, before, after)?,
+            Some(group),
+        )
     }
 
     /// Prepare a typed Project command without mutating either History stack.
@@ -1194,12 +1212,10 @@ impl AuthoringHistory {
         before: &ProjectDocument,
         after: &ProjectDocument,
     ) -> Result<PreparedAuthoringHistoryRecord> {
-        self.prepare_record(AuthoringCommand::project(
-            description,
-            affected_sequence_ids,
-            before,
-            after,
-        )?)
+        self.prepare_record(
+            AuthoringCommand::project(description, affected_sequence_ids, before, after)?,
+            None,
+        )
     }
 
     #[cfg(test)]
@@ -1229,6 +1245,7 @@ impl AuthoringHistory {
     fn prepare_record(
         &mut self,
         command: AuthoringCommand,
+        group: Option<crate::session::AuthoringHistoryGroup>,
     ) -> Result<PreparedAuthoringHistoryRecord> {
         let expected_revision = self.state.revision;
         let next_revision = expected_revision.checked_add(1).ok_or_else(|| {
@@ -1237,9 +1254,46 @@ impl AuthoringHistory {
                 "History revision exhausted",
             )
         })?;
+        // Only adjacent validated Sequence commits in the same explicitly
+        // opened interaction may share a restore point. An intervening author
+        // command, owner change or Undo/Redo must never be absorbed.
+        let previous = self.state.undo_stack.back().filter(|entry| {
+            group.is_some() && entry.group == group && self.state.redo_stack.is_empty()
+        });
+        let (command, coalesced) = match (previous, command) {
+            (
+                Some(previous),
+                AuthoringCommand::Sequence { description, sequence_id, before, after },
+            ) => match &previous.command {
+                AuthoringCommand::Sequence {
+                    sequence_id: previous_id,
+                    before: original,
+                    after: previous_after,
+                    ..
+                } if *previous_id == sequence_id
+                    && previous_after.author_state_eq_ignoring_revision(&before) =>
+                {
+                    (
+                        AuthoringCommand::Sequence {
+                            description,
+                            sequence_id,
+                            before: original.clone(),
+                            after,
+                        },
+                        true,
+                    )
+                }
+                _ => (
+                    AuthoringCommand::Sequence { description, sequence_id, before, after },
+                    false,
+                ),
+            },
+            (_, command) => (command, false),
+        };
         let entry = Arc::new(AuthoringHistoryEntry::compile(
             command,
             self.descriptor_cache.clone(),
+            group,
         )?);
         let branch_discarded_entries = self.state.redo_stack.len();
         let mut undo_stack = clone_history_stack(&self.state.undo_stack)?;
@@ -1311,11 +1365,19 @@ impl AuthoringHistory {
                 format!("could not reserve Undo history storage: {error}"),
             )
         })?;
+        let replaced = if coalesced {
+            undo_stack.pop_back()
+        } else {
+            None
+        };
         undo_stack.push_back(Arc::clone(&entry));
         let mut overlay = FootprintOverlay::new(&self.footprint_index);
         // Add the new roots before removing Redo roots. Shared descendants then
         // stay active across a branch instead of being torn down and rebuilt.
         overlay.add_entry(&entry)?;
+        if let Some(replaced) = replaced {
+            overlay.remove_entry(&replaced)?;
+        }
         for discarded in &self.state.redo_stack {
             overlay.remove_entry(discarded)?;
         }
@@ -1585,6 +1647,58 @@ impl AuthoringHistory {
         Ok(())
     }
 
+    /// Remove a finished interaction that returned exactly to its authored start.
+    pub(crate) fn elide_zero_group(
+        &mut self,
+        group: crate::session::AuthoringHistoryGroup,
+    ) -> Result<bool> {
+        let Some(entry) = self.state.undo_stack.back().filter(|entry| entry.group == Some(group))
+        else {
+            return Ok(false);
+        };
+        if !matches!(&entry.command, AuthoringCommand::Sequence { before, after, .. }
+            if before.author_state_eq_ignoring_revision(after))
+        {
+            return Ok(false);
+        }
+        let next_revision = self.state.revision.checked_add(1).ok_or_else(|| {
+            authoring_error("seal_authoring_gesture", "History revision exhausted")
+        })?;
+        let mut undo_stack = clone_history_stack(&self.state.undo_stack)?;
+        undo_stack.pop_back();
+        let redo_stack = clone_history_stack(&self.state.redo_stack)?;
+        let mut overlay = FootprintOverlay::new(&self.footprint_index);
+        overlay.remove_entry(entry)?;
+        let footprint_plan = overlay.finish()?;
+        self.reserve_footprint_plan(&footprint_plan)?;
+        let candidate = AuthoringHistoryState {
+            revision: next_revision,
+            undo_stack,
+            redo_stack,
+            retained_bytes: footprint_plan.retained_bytes()?,
+            budget_evicted_entries: self.state.budget_evicted_entries,
+            budget_evicted_bytes: self.state.budget_evicted_bytes,
+            branch_discarded_entries: self.state.branch_discarded_entries,
+            barrier_discarded_entries: self.state.barrier_discarded_entries,
+            retention_disabled_entries: self.state.retention_disabled_entries,
+            oversize_dropped_entries: self.state.oversize_dropped_entries,
+        };
+        self.commit_prepared_record(PreparedAuthoringHistoryRecord {
+            expected_revision: self.state.revision,
+            candidate,
+            footprint_plan,
+            outcome: AuthoringHistoryRecordOutcome {
+                retained: false,
+                budget_evicted_entries: 0,
+                budget_evicted_bytes: 0,
+                branch_discarded_entries: 0,
+                barrier_discarded_entries: 0,
+            },
+            unretained_command: None,
+        })?;
+        Ok(true)
+    }
+
     /// Whether an Undo entry exists.
     pub fn can_undo(&self) -> bool {
         !self.state.undo_stack.is_empty()
@@ -1794,6 +1908,42 @@ mod tests {
         usize::try_from(collector.finish().total_bytes()).expect("cold charge fits usize")
     }
 
+    #[test]
+    fn grouped_endpoint_replacement_and_zero_sealing_match_cold_footprint_accounting() {
+        let project = project_with_sequence();
+        let original = project.sequences.active().expect("Sequence");
+        let mut history =
+            AuthoringHistory::with_budget(AuthoringHistoryBudget::new(2, 1024 * 1024));
+        let baseline = renamed(original, "baseline");
+        history.record_sequence("ordinary", original, &baseline).expect("ordinary");
+        let charge = history.diagnostics().retained_bytes;
+        let group = crate::session::AuthoringHistoryGroup {
+            gesture: mondrian_core::AuthoringGestureId::new(),
+            started_generation: crate::session::AuthorGeneration::INITIAL,
+        };
+        let mut current = baseline.clone();
+        for index in 0..128 {
+            let after = renamed(&current, &format!("drag {index}"));
+            let prepared = history
+                .prepare_sequence_group_record("drag", &current, &after, group)
+                .expect("prepare");
+            history.commit_prepared_record(prepared).expect("install");
+            current = after;
+            assert_eq!(history.diagnostics().undo_entries, 2);
+            assert_eq!(history.diagnostics().budget_evicted_entries, 0);
+            assert_incremental_matches_cold(&history);
+        }
+        let prepared = history
+            .prepare_sequence_group_record("back to start", &current, &baseline, group)
+            .expect("prepare zero");
+        history.commit_prepared_record(prepared).expect("install zero");
+        assert_incremental_matches_cold(&history);
+        assert!(history.elide_zero_group(group).expect("seal zero"));
+        assert_eq!(history.diagnostics().undo_entries, 1);
+        assert_eq!(history.diagnostics().retained_bytes, charge);
+        assert_incremental_matches_cold(&history);
+    }
+
     fn project_with_sequence() -> ProjectDocument {
         ProjectDocument::new(
             "History",
@@ -1812,7 +1962,7 @@ mod tests {
 
     fn command_retained_bytes(command: AuthoringCommand) -> usize {
         let entry =
-            AuthoringHistoryEntry::compile(command, AuthoringFootprintDescriptorCache::new())
+            AuthoringHistoryEntry::compile(command, AuthoringFootprintDescriptorCache::new(), None)
                 .expect("compile command footprint");
         let mut undo_stack = VecDeque::new();
         undo_stack.push_back(Arc::new(entry));
@@ -1865,7 +2015,7 @@ mod tests {
             expected as u64
         );
         let entry =
-            AuthoringHistoryEntry::compile(command, AuthoringFootprintDescriptorCache::new())
+            AuthoringHistoryEntry::compile(command, AuthoringFootprintDescriptorCache::new(), None)
                 .expect("compile entry");
         assert_eq!(entry.metadata_bytes, expected as u64);
         let mut undo_stack = VecDeque::new();

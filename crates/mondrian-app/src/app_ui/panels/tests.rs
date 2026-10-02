@@ -6110,21 +6110,14 @@ fn inspector_effect_vec3_property_widget_dispatches_component_change() {
     assert_eq!(result, EventResult::Handled);
     let recorded = actions.borrow();
     assert_eq!(recorded.len(), 1);
-    let Action::Custom { namespace, name, payload } = &recorded[0] else {
-        panic!("expected inspector custom action, got {:?}", recorded[0]);
+    let Some(crate::app::parameter_gesture::ParameterGestureAction::Begin {
+        edit: crate::app::parameter_gesture::ParameterGestureEdit::Effect(payload),
+        ..
+    }) = crate::app::parameter_gesture::ParameterGestureAction::decode(&recorded[0])
+        .expect("valid gesture envelope")
+    else {
+        panic!("expected effect gesture begin, got {:?}", recorded[0]);
     };
-    assert_eq!(namespace, VISUAL_EFFECT_NAMESPACE);
-    assert_eq!(name, VISUAL_EFFECT_SET_PARAMETER_VALUE);
-    assert_eq!(
-        payload
-            .get("write")
-            .and_then(|write| write.get("kind"))
-            .and_then(serde_json::Value::as_str),
-        Some("channels"),
-        "one axis control must emit a sparse write, never captured sibling values"
-    );
-    let payload: VisualEffectSetParameterValuePayload =
-        serde_json::from_value(payload.clone()).expect("set effect property payload");
     assert_eq!(payload.clip_id, selection.clip_id);
     assert_eq!(payload.effect_id, effect_id);
     let ParameterValueWrite::Channels { parameter, channel_values } = payload.write else {
@@ -6582,13 +6575,14 @@ fn inspector_disabled_effect_property_row_remains_editable_for_unlocked_clip() {
 
     let recorded = actions.borrow();
     assert_eq!(recorded.len(), 1);
-    let Action::Custom { namespace, name, payload } = &recorded[0] else {
-        panic!("expected inspector custom action, got {:?}", recorded[0]);
+    let Some(crate::app::parameter_gesture::ParameterGestureAction::Begin {
+        edit: crate::app::parameter_gesture::ParameterGestureEdit::Effect(payload),
+        ..
+    }) = crate::app::parameter_gesture::ParameterGestureAction::decode(&recorded[0])
+        .expect("valid gesture envelope")
+    else {
+        panic!("expected effect gesture begin, got {:?}", recorded[0]);
     };
-    assert_eq!(namespace, VISUAL_EFFECT_NAMESPACE);
-    assert_eq!(name, VISUAL_EFFECT_SET_PARAMETER_VALUE);
-    let payload: VisualEffectSetParameterValuePayload =
-        serde_json::from_value(payload.clone()).expect("set effect property payload");
     let ParameterValueWrite::Value { parameter, value } = payload.write else {
         panic!("expected complete property write");
     };

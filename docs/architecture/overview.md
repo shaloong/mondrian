@@ -393,3 +393,17 @@ defaults and persisted values, including NUL-containing external paths, before
 author mutation. Offline path existence is evaluated at execution rather than
 used to erase recoverable author intent. UI Core roots declare modal keyboard
 scope; UI Events owns scope focus, traversal, restoration and shortcut isolation.
+
+### Continuous authoring interactions
+
+Core supplies a strongly typed AuthoringGestureId. Editor State opens a
+Sequence/generation lease and validates every live edit through the normal
+replacement certificate. History retains only the interaction's original and
+latest Sequence endpoints; each update still advances author generations and
+publishes ordinary post-commit invalidation. Adjacent entries merge only with
+the same explicit gesture and begin generation, matching authored endpoints
+and Sequence ownership. Intervening commands or Undo/Redo invalidate the lease.
+Replacing history endpoints uses the existing footprint overlay and retention
+budget; unretained origins cannot later produce a misleading partial Undo.
+A finished net-zero interaction drops its redundant entry and retained charge
+without an author mutation or a history-budget warning.

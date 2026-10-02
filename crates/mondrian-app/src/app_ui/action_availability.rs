@@ -34,6 +34,11 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
                         && name == APP_SHELL_CANCEL_PORTABLE_PACKAGE_EXPORT
             ) && state.portable_project_export_active();
     }
+    match crate::app::parameter_gesture::ParameterGestureAction::decode(action) {
+        Ok(Some(_)) => return state.has_open_project(),
+        Err(_) => return false,
+        Ok(None) => {}
+    }
     match ProductAction::decode_external(action) {
         Ok(Some(action)) => {
             return state.product_action_availability().allows(&action);

@@ -249,6 +249,7 @@ pub use project_packaging::{
     verify_portable_project_package, PortableDependencyFile, PortableDependencyInventory,
     PortableDependencyIssue, PortablePackageFile, PortablePackageManifest,
 };
+pub(crate) mod parameter_gesture;
 mod project_persistence;
 mod project_recovery;
 pub(crate) mod project_runtime;
@@ -438,6 +439,8 @@ pub struct AppState {
     /// Sole mutable authority for the open Project document, asset library,
     /// navigation, author generations, and project-wide Undo/Redo.
     pub(crate) authoring: Option<AuthoringSession>,
+    pub(crate) active_parameter_gesture: Option<parameter_gesture::ActiveParameterGesture>,
+    pub(super) parameter_gesture_command: Option<mondrian_core::AuthoringGestureId>,
     /// Kernel-backed exclusive authority for the open Project runtime.
     ///
     /// Background persistence requests clone this same lease; Project
@@ -658,6 +661,8 @@ impl AppState {
         Self {
             event_bus: EventBus::new(),
             authoring: None,
+            active_parameter_gesture: None,
+            parameter_gesture_command: None,
             project_runtime_lease: None,
             retired_project_libraries: Vec::new(),
             project_persistence: ProjectPersistenceService::new(),

@@ -379,14 +379,17 @@ impl AppState {
         description: impl Into<String>,
         edit: impl FnOnce(&mut Sequence) -> mondrian_core::Result<T>,
     ) -> mondrian_core::Result<T> {
-        let (value, commit) = self
-            .authoring
-            .as_mut()
-            .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+        let session = self.authoring.as_mut().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "commit_sequence_edit".to_owned(),
                 reason: "当前没有打开的项目".to_owned(),
-            })?
-            .edit_sequence(sequence_id, description, edit)?;
+            }
+        })?;
+        let (value, commit) = if let Some(gesture) = self.parameter_gesture_command {
+            session.edit_sequence_in_gesture(gesture, sequence_id, description, edit)?
+        } else {
+            session.edit_sequence(sequence_id, description, edit)?
+        };
         if let Some(commit) = commit {
             self.consume_authoring_commit(commit);
         }

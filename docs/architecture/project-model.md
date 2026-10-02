@@ -747,3 +747,11 @@ save/reopen tests.
 Checked current-document and pre-current SQLite fixtures must cover idempotent
 open, migration where supported, save, reopen, and semantic fingerprint
 retention.
+
+Continuous parameter interaction history belongs to AuthoringSession. Its
+Sequence/generation lease is ephemeral and is not serialized into .mdp files.
+Each live update commits canonical state independently, allowing saved snapshots
+to represent the exact current value. Only adjacent commands sharing an explicit
+interaction group replace their history endpoint; a single Undo/Redo restores
+the complete drag. Group endpoint replacement and net-zero sealing update the
+same bounded descriptor footprint index as ordinary author commands.

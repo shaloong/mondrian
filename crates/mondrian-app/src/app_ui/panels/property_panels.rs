@@ -1898,8 +1898,30 @@ where
         }
     }
     let slider_action = Rc::clone(&action);
-    slider = slider
-        .on_change(move |ratio| slider_action(T::from_ratio(ratio, soft_min, soft_max, step)));
+    slider = slider.on_edit(move |phase, ratio| {
+        use crate::app::parameter_gesture::{ParameterGestureAction, ParameterGestureEdit};
+        use mondrian_ui_widgets::SliderEdit;
+        let action = slider_action(T::from_ratio(ratio, soft_min, soft_max, step));
+        let Some(edit) = action.as_ref().and_then(ParameterGestureEdit::from_action) else {
+            return if matches!(phase, SliderEdit::Finish(_)) {
+                None
+            } else {
+                action
+            };
+        };
+        match phase {
+            SliderEdit::Single => action,
+            SliderEdit::Begin(gesture_id) => {
+                Some(ParameterGestureAction::Begin { gesture_id, edit }.action())
+            }
+            SliderEdit::Update(gesture_id) => {
+                Some(ParameterGestureAction::Update { gesture_id, edit }.action())
+            }
+            SliderEdit::Finish(gesture_id) => {
+                Some(ParameterGestureAction::Finish { gesture_id }.action())
+            }
+        }
+    });
 
     let mut input = NumberInput::new(value, hard_min, hard_max)
         .with_width(72.0)

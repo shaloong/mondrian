@@ -75,7 +75,7 @@ pub use property_panel::{PropertyPanel, PropertyPanelOptions, PropertyRow, Prope
 pub use raster_image::RasterImage;
 pub use scroll::{ScrollView, ScrollViewState};
 pub use segmented_button_group::{SegmentedButtonGroup, SegmentedButtonItem};
-pub use slider::Slider;
+pub use slider::{Slider, SliderEdit};
 pub use text_input::{
     MultilineTextInput, TabBehavior, TextInput, TextInputChangeAction, TextInputCommitAction,
 };
