@@ -237,3 +237,25 @@ created by selection, cancellation or the owned render probe.
 Existing input bytes must remain unchanged; a save-dialog sentinel detects
 accidental routing to an overwrite-oriented picker. Localized input hints state
 whether a path must exist or may be new.
+
+Changed paths with an existence policy are inspected by a separate product
+process before the author transaction. The path acceptance above uses the actual
+current product helper for this step, followed by the actual SDK render worker.
+The UI remains cancellable while inspection is pending. Stale, timed-out and
+cancelled results cannot commit a draft.
+
+To qualify the inspection adapter separately, point
+`MONDRIAN_RESOURCE_INSPECTION_HELPER` at the current product executable and run:
+
+```powershell
+cargo test -p mondrian-app --all-features --lib actual_product_helper_preserves_native_paths_and_reports_local_objects -- --ignored --nocapture
+cargo test -p mondrian-app --all-features --lib resource_inspection_actual_host_commits_only_after_the_owned_helper_finishes -- --ignored --nocapture
+```
+
+The helper must be rebuilt with the resource inspection entrypoint; older product
+binaries do not implement this mode. Supervisor fault tests use
+`MONDRIAN_RESOURCE_INSPECTION_TEST_PYTHON` pointing to Python and run the ignored
+`supervised_process_cancellation_timeout_and_retry_reap_the_owned_child` and
+`failed_helper_responses_are_bounded_and_leave_the_service_reusable` tests.
+These exercise owned-process termination, bounded responses and retry. They do
+not qualify physical network stalls or every platform's process termination.

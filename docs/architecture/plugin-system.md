@@ -660,6 +660,10 @@ rejects non-Unicode paths and values exceeding the SDK's 64 KiB UTF-8 bound
 before authoring. The processor remains uncacheable; authoring
 path selection does not create output objects or resolve them every frame.
 Label and RTF authoring still require their own product contracts.
+SDK path availability is checked by the App's isolated resource inspection helper
+at explicit confirmation, independently of native rendering. No per-frame stat
+or alternate processor interpretation is added; the effect still receives the
+exact authored UTF-8 value after the guarded author transaction commits.
 
 The SDK existence flag is an availability constraint, not an input/output role.
 Allowing an absent path must not imply that the plugin writes that path or that

@@ -169,6 +169,7 @@ pub struct AppUiHost {
     recovery_candidates: Vec<CrashRecoveryCandidate>,
     asset_thumbnails: AssetThumbnailAdapter,
     audio_device_catalog: AudioOutputDeviceCatalogAdapter,
+    resource_inspector: Option<crate::resource_inspection::PathInspectionService>,
     waveform_service: Arc<AudioWaveformService>,
     preview_service: WindowPreviewAdapter,
     // Declaration order is destruction order. The unique App must outlive all
@@ -1191,6 +1192,7 @@ impl AppUiHost {
 
     /// Poll background host tasks without conflating repaint and drain policy.
     pub(crate) fn poll_background_tasks(&mut self, bounds: Rect) -> AppUiBackgroundTaskPollOutcome {
+        let resource_inspection_changed = self.poll_resource_inspection();
         // Keep the waveform service's library reference in sync with the
         // current app state (e.g. when a new project opens).
         if self.quiescing_close_action.is_some() {
@@ -1279,7 +1281,8 @@ impl AppUiHost {
         if preview_outcome.visible_change {
             self.preview_dirty.set(true);
         }
-        let full_model_changed = native_audio_catalog_changed
+        let full_model_changed = resource_inspection_changed
+            || native_audio_catalog_changed
             || openfx_catalog_changed
             || persistence_changed
             || project_close_changed
@@ -1306,6 +1309,39 @@ impl AppUiHost {
         self.refresh_if_dirty(bounds);
         self.sync_playback_feedback_from_viewer();
         outcome
+    }
+
+    pub(crate) fn resource_inspection_next_wake_delay(&self) -> Option<Duration> {
+        self.resource_inspector
+            .as_ref()
+            .filter(|service| service.has_work())
+            .map(|_| Duration::from_millis(10))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_resource_inspection_helper_for_test(&mut self, helper: PathBuf) {
+        self.resource_inspector = Some(crate::resource_inspection::PathInspectionService::new(
+            helper,
+        ));
+    }
+
+    fn poll_resource_inspection(&mut self) -> bool {
+        let ticket = self.root.resource_inspection_ticket(&self.app_state.borrow());
+        let Some(service) = self.resource_inspector.as_mut() else {
+            return false;
+        };
+        service.cancel_except(ticket);
+        let Some((ticket, outcome)) = service.poll() else {
+            return false;
+        };
+        let action =
+            self.root.finish_resource_inspection(ticket, outcome, &self.app_state.borrow());
+        if let Some(action) = action
+            && let Err(error) = self.dispatch_editor_action(action)
+        {
+            tracing::warn!(%error, "resource inspection author action failed");
+        }
+        true
     }
 
     fn poll_quiescing_project_close(&mut self) -> (bool, bool) {
@@ -1522,6 +1558,26 @@ impl AppUiHost {
                 &self.app_state.borrow(),
                 platform,
             ) {
+                Ok(crate::app_ui::resource_dialog::ResourceActionOutcome::Inspect(request)) => {
+                    match std::env::current_exe() {
+                        Ok(helper) => {
+                            self.resource_inspector
+                                .get_or_insert_with(|| {
+                                    crate::resource_inspection::PathInspectionService::new(helper)
+                                })
+                                .submit(request.ticket, request.path);
+                        }
+                        Err(_) => {
+                            self.root.finish_resource_inspection(
+                                request.ticket,
+                                crate::resource_inspection::PathInspectionOutcome::Unavailable,
+                                &self.app_state.borrow(),
+                            );
+                        }
+                    }
+                    needs_layout = true;
+                    continue;
+                }
                 Ok(crate::app_ui::resource_dialog::ResourceActionOutcome::Unhandled) => action,
                 Ok(crate::app_ui::resource_dialog::ResourceActionOutcome::Handled(Some(
                     author,

@@ -1171,6 +1171,7 @@ impl AppUiAppRoot {
                 if !dialog.draft.allows_browse(folder) || dialog.is_composing() {
                     return Ok(ResourceActionOutcome::Handled(None));
                 }
+                dialog.clear_inspection();
                 let filters = dialog
                     .draft
                     .schema
@@ -1216,7 +1217,7 @@ impl AppUiAppRoot {
                 }
             }
             ResourceEditorAction::Confirm { .. } => {
-                if dialog.is_composing() {
+                if dialog.is_composing() || dialog.pending_inspection.is_some() {
                     return Ok(ResourceActionOutcome::Handled(None));
                 }
                 let value = match dialog.draft.confirmed_value() {
@@ -1230,6 +1231,26 @@ impl AppUiAppRoot {
                         return Ok(ResourceActionOutcome::Handled(None));
                     }
                 };
+                if let mondrian_core::ParameterResourceReference::ExternalFile { path } = &value
+                    && dialog
+                        .draft
+                        .schema
+                        .resource
+                        .as_ref()
+                        .and_then(|contract| contract.path)
+                        .is_some_and(|contract| {
+                            contract.selection != mondrian_core::ResourcePathSelection::Reference
+                        })
+                {
+                    let ticket = crate::resource_inspection::InspectionTicket::new();
+                    dialog.begin_inspection(ticket);
+                    return Ok(ResourceActionOutcome::Inspect(
+                        crate::app_ui::resource_dialog::ResourceInspectionRequest {
+                            ticket,
+                            path: path.clone(),
+                        },
+                    ));
+                }
                 if let mondrian_core::ParameterResourceReference::ProjectAsset { asset_id } = value
                 {
                     let current = state
@@ -1250,6 +1271,65 @@ impl AppUiAppRoot {
             ResourceEditorAction::Open { .. } => {}
         }
         Ok(ResourceActionOutcome::Handled(None))
+    }
+
+    pub(crate) fn resource_inspection_ticket(
+        &self,
+        state: &AppState,
+    ) -> Option<crate::resource_inspection::InspectionTicket> {
+        self.modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .filter(|dialog| {
+                dialog.draft.matches_state(state) && !state.project_close_blocks_actions()
+            })
+            .and_then(|dialog| dialog.pending_inspection)
+    }
+
+    pub(crate) fn finish_resource_inspection(
+        &mut self,
+        ticket: crate::resource_inspection::InspectionTicket,
+        outcome: crate::resource_inspection::PathInspectionOutcome,
+        state: &AppState,
+    ) -> Option<Action> {
+        let dialog = self.modal.as_mut().and_then(ShellModal::as_resource_mut)?;
+        if dialog.pending_inspection != Some(ticket) {
+            return None;
+        }
+        dialog.clear_inspection();
+        if !dialog.draft.matches_state(state) || state.project_close_blocks_actions() {
+            self.modal = None;
+            return None;
+        }
+        let value = match dialog.draft.confirmed_value() {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                self.modal = None;
+                return None;
+            }
+            Err(key) => {
+                dialog.set_error(key);
+                return None;
+            }
+        };
+        let contract = dialog.draft.schema.resource.as_ref().and_then(|contract| contract.path)?;
+        if let Err(key) = outcome.validate(contract) {
+            dialog.set_error(key);
+            return None;
+        }
+        if dialog.is_composing() {
+            dialog.set_error("resource-path-confirm-again");
+            return None;
+        }
+        let action = dialog.draft.author_action(value);
+        if action.as_ref().is_some_and(|action| {
+            !crate::app_ui::action_availability::app_state_action_enabled(action, state)
+        }) {
+            dialog.set_error("resource-owner-unavailable");
+            return None;
+        }
+        self.modal = None;
+        action
     }
 
     /// Build a root widget from the current application state snapshot.
@@ -5492,6 +5572,276 @@ mod tests {
         assert_eq!(router.focus_manager().focused_widget(), Some(background));
     }
 
+    fn async_resource_fixture() -> (
+        AppState,
+        mondrian_core::ClipId,
+        crate::app_ui::resource_dialog::InspectorPropertyTarget,
+    ) {
+        use mondrian_core::{
+            ParameterResourceContract, ParameterResourceReference, PropertyDescriptor,
+            PropertyValue, ResourcePathKind, ResourcePathSelection, TimelineTime,
+        };
+        use mondrian_effects::*;
+        let kind = EffectType::Plugin(format!("test.resource.async.{}", uuid::Uuid::new_v4()));
+        let builder = EffectPluginDefinitionBuilder::new(
+            kind.key(),
+            "Async resource",
+            EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            determinism: EffectDeterminism::Deterministic,
+            state_model: EffectStateModel::Stateless,
+            temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+            resource_lifetime: EffectResourceLifetime::Frame,
+            topology: EffectGraphTopology::LinearChain,
+        })
+        .with_branching_graph(|_, _, graph| {
+            graph.apply(EffectRenderOp::Sharpen { amount: 0.0 });
+        })
+        .property(
+            PropertyDescriptor::new(
+                "path",
+                "Path",
+                PropertyValue::Resource(ParameterResourceReference::Unbound),
+            )
+            .with_parameter_id(kind.parameter_id("path").expect("parameter"))
+            .with_resource_contract(ParameterResourceContract::external_path(
+                ResourcePathKind::File,
+                ResourcePathSelection::ExistingOrNew,
+            )),
+        );
+        register_effect_definition(builder.build()).expect("definition");
+        let effect = instantiate_effect_node(kind).expect("effect");
+        let target = crate::app_ui::resource_dialog::InspectorPropertyTarget::Effect {
+            effect_id: effect.id,
+            parameter: effect.properties.property("path").expect("path").address(),
+        };
+        let mut clip = mondrian_timeline::Clip::new_basic_title(
+            "Title",
+            "Arial",
+            TimelineTime::ZERO,
+            TimelineTime::new(1, 1).expect("duration"),
+        )
+        .expect("clip");
+        let id = clip.id;
+        clip.add_effect_node(effect);
+        let mut sequence = mondrian_timeline::Sequence::new("Async resource");
+        sequence.video_tracks[0].add_clip(clip).expect("clip");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(id).expect("selection");
+        (state, id, target)
+    }
+
+    #[test]
+    fn resource_inspection_rejects_edited_cancelled_locked_and_replaced_drafts() {
+        use crate::app_ui::resource_dialog::{
+            ResourceActionOutcome, ResourceEditorAction, ResourceKind, ResourceUpdate,
+        };
+        use crate::resource_inspection::PathInspectionOutcome;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let (mut state, clip_id, target) = async_resource_fixture();
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let platform = FakePlatform::default();
+        let open = ResourceEditorAction::Open { clip_id, target };
+        let prepare = |root: &mut AppUiAppRoot, state: &AppState| {
+            root.try_handle_resource_action(&open.clone().action(), state, &platform)
+                .expect("open");
+            let id =
+                root.modal.as_ref().and_then(ShellModal::as_resource).expect("dialog").draft.id;
+            for update in [
+                ResourceUpdate::Kind(ResourceKind::ExternalFile),
+                ResourceUpdate::Text("未创建/输出🙂.cube".to_owned()),
+            ] {
+                root.try_handle_resource_action(
+                    &ResourceEditorAction::Update { id, update }.action(),
+                    state,
+                    &platform,
+                )
+                .expect("update");
+            }
+            id
+        };
+        let confirm = |root: &mut AppUiAppRoot, state: &AppState, id| match root
+            .try_handle_resource_action(
+                &ResourceEditorAction::Confirm { id }.action(),
+                state,
+                &platform,
+            )
+            .expect("confirm")
+        {
+            ResourceActionOutcome::Inspect(request) => request.ticket,
+            _ => panic!("new path requires inspection"),
+        };
+        let id = prepare(&mut root, &state);
+        let first = confirm(&mut root, &state, id);
+        assert!(!root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .expect("dialog")
+            .child(8)
+            .expect("apply")
+            .can_focus());
+        assert!(root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .expect("dialog")
+            .child(7)
+            .expect("cancel")
+            .can_focus());
+        assert!(!state.can_undo_action());
+        assert!(matches!(
+            root.try_handle_resource_action(
+                &ResourceEditorAction::Confirm { id }.action(),
+                &state,
+                &platform
+            )
+            .expect("duplicate"),
+            ResourceActionOutcome::Handled(None)
+        ));
+        for text in ["another.cube", "未创建/输出🙂.cube"] {
+            root.try_handle_resource_action(
+                &ResourceEditorAction::Update { id, update: ResourceUpdate::Text(text.into()) }
+                    .action(),
+                &state,
+                &platform,
+            )
+            .expect("edit");
+        }
+        assert!(root
+            .finish_resource_inspection(first, PathInspectionOutcome::File, &state)
+            .is_none());
+        assert!(root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .expect("dialog")
+            .child(8)
+            .expect("apply")
+            .can_focus());
+        assert!(root.modal.is_some());
+        let browsed = confirm(&mut root, &state, id);
+        root.try_handle_resource_action(
+            &ResourceEditorAction::Browse { id, folder: false }.action(),
+            &state,
+            &platform,
+        )
+        .expect("cancelled picker");
+        let dialog = root.modal.as_ref().and_then(ShellModal::as_resource).expect("retained draft");
+        assert!(dialog.pending_inspection.is_none());
+        assert!(dialog.child(8).expect("apply").can_focus());
+        assert!(!state.can_undo_action());
+        assert!(root
+            .finish_resource_inspection(browsed, PathInspectionOutcome::File, &state)
+            .is_none());
+        let second = confirm(&mut root, &state, id);
+        assert!(root
+            .finish_resource_inspection(second, PathInspectionOutcome::TimedOut, &state)
+            .is_none());
+        assert!(root.modal.is_some());
+        assert!(!state.can_undo_action());
+        let third = confirm(&mut root, &state, id);
+        let action = root
+            .finish_resource_inspection(third, PathInspectionOutcome::Missing, &state)
+            .expect("one commit");
+        state.dispatch_action(action).expect("author commit");
+        assert!(root.modal.is_none());
+        assert!(state.undo_timeline().expect("undo"));
+        assert!(!state.can_undo_action());
+        let id = prepare(&mut root, &state);
+        let cancelled = confirm(&mut root, &state, id);
+        root.try_handle_resource_action(
+            &ResourceEditorAction::Cancel { id }.action(),
+            &state,
+            &platform,
+        )
+        .expect("cancel");
+        let id = prepare(&mut root, &state);
+        assert!(root
+            .finish_resource_inspection(cancelled, PathInspectionOutcome::File, &state)
+            .is_none());
+        let locked = confirm(&mut root, &state, id);
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
+        assert_eq!(root.resource_inspection_ticket(&state), None);
+        assert!(root
+            .finish_resource_inspection(locked, PathInspectionOutcome::File, &state)
+            .is_none());
+        assert!(root.modal.is_none());
+        assert!(!state.can_undo_action());
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked =
+            false;
+        let id = prepare(&mut root, &state);
+        let replaced = confirm(&mut root, &state, id);
+        state.clear_selection();
+        assert!(root
+            .finish_resource_inspection(replaced, PathInspectionOutcome::File, &state)
+            .is_none());
+        assert!(root.modal.is_none());
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    #[ignore = "requires a rebuilt MONDRIAN_RESOURCE_INSPECTION_HELPER product executable"]
+    fn resource_inspection_actual_host_commits_only_after_the_owned_helper_finishes() {
+        use crate::app_ui::action_queue::PendingUiActions;
+        use crate::app_ui::host::AppUiHost;
+        use crate::app_ui::resource_dialog::{ResourceEditorAction, ResourceKind, ResourceUpdate};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let (state, clip_id, target) = async_resource_fixture();
+        let temp = tempfile::tempdir().expect("workspace");
+        let destination = temp.path().join("新目录").join("输出🙂.cube");
+        let helper =
+            std::env::var_os("MONDRIAN_RESOURCE_INSPECTION_HELPER").expect("rebuilt helper");
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp.path().join("prefs.json"),
+        );
+        host.set_resource_inspection_helper_for_test(helper.into());
+        let pending = PendingUiActions::default();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+        let platform = FakePlatform::default();
+        pending.push(ResourceEditorAction::Open { clip_id, target }.action());
+        host.drain_pending_actions(&pending, bounds, &platform);
+        let id = host
+            .root()
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .expect("dialog")
+            .draft
+            .id;
+        for update in [
+            ResourceUpdate::Kind(ResourceKind::ExternalFile),
+            ResourceUpdate::Text(destination.to_str().expect("path").into()),
+        ] {
+            pending.push(ResourceEditorAction::Update { id, update }.action());
+        }
+        pending.push(ResourceEditorAction::Confirm { id }.action());
+        host.drain_pending_actions(&pending, bounds, &platform);
+        assert!(!host.app_state().can_undo_action());
+        assert!(host.root().modal.is_some());
+        assert!(host.resource_inspection_next_wake_delay().is_some());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while host.root().modal.is_some() {
+            host.poll_background_tasks(bounds);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "resource helper did not complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(host.app_state().can_undo_action());
+        assert_eq!(host.resource_inspection_next_wake_delay(), None);
+        assert!(!destination.parent().expect("parent").exists());
+        drop(host);
+    }
+
     #[test]
     fn resource_catalog_refreshes_during_ime_without_replacing_draft_controls() {
         use crate::app_ui::action_queue::PendingUiActions;
@@ -5857,6 +6207,22 @@ mod tests {
                 .expect("route")
             {
                 ResourceActionOutcome::Handled(action) => action,
+                ResourceActionOutcome::Inspect(request) => {
+                    let mut inspector =
+                        crate::resource_inspection::PathInspectionService::new(helper.clone());
+                    inspector.submit(request.ticket, request.path);
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    loop {
+                        if let Some((ticket, outcome)) = inspector.poll() {
+                            break root.finish_resource_inspection(ticket, outcome, state);
+                        }
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "actual resource inspector did not finish"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }
                 ResourceActionOutcome::Unhandled => panic!("typed path event"),
             }
         };
@@ -6151,6 +6517,9 @@ mod tests {
                 .expect("shell resource event")
             {
                 ResourceActionOutcome::Handled(action) => action,
+                ResourceActionOutcome::Inspect(_) => {
+                    panic!("reference-only LUT paths do not inspect the filesystem")
+                }
                 ResourceActionOutcome::Unhandled => panic!("typed resource event must be handled"),
             };
         let revision = state.active_sequence().expect("sequence").revision;

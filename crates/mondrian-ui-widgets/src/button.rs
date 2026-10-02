@@ -112,13 +112,19 @@ impl Button {
 
     /// Set whether the button accepts user input and participates in focus.
     pub fn enabled(mut self, enabled: bool) -> Self {
+        self.set_enabled(enabled);
+        self
+    }
+
+    /// Update input and focus availability without replacing the widget.
+    /// Disabling clears a pending press so re-enabling cannot emit a stale click.
+    pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
         if !enabled {
             self.state = ButtonState::Normal;
             self.focused = false;
             self.focus_visible = false;
         }
-        self
     }
 
     /// Disable the button.
@@ -616,6 +622,41 @@ mod tests {
         );
         assert_eq!(b.state(), ButtonState::Pressed);
         assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn button_disabling_during_a_press_cannot_click_after_reenable() {
+        let mut button = Button::new("Apply").on_click(Some(Action::Undo));
+        let id = button.id();
+        button.layout(Rect::new(0.0, 0.0, 100.0, 30.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = event_ctx_with_capture(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        button.event(
+            &UiEvent::MouseDown {
+                position: Point::new(50.0, 15.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        button.set_enabled(false);
+        assert!(!button.can_focus());
+        assert!(button.accessibility().expect("button").state.disabled);
+        button.set_enabled(true);
+        button.event(
+            &UiEvent::MouseUp {
+                position: Point::new(50.0, 15.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(button.id(), id);
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]

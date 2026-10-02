@@ -38,6 +38,12 @@ impl Eq for ResourceAssetCatalogRevision {}
 pub(crate) enum ResourceActionOutcome {
     Unhandled,
     Handled(Option<Action>),
+    Inspect(ResourceInspectionRequest),
+}
+
+pub(crate) struct ResourceInspectionRequest {
+    pub(crate) ticket: crate::resource_inspection::InspectionTicket,
+    pub(crate) path: PathBuf,
 }
 
 pub(crate) const RESOURCE_EDITOR: &str = "resource_editor";
@@ -397,32 +403,6 @@ impl ResourceDraft {
         if self.schema.resource.as_ref().is_none_or(|contract| !contract.admits(&value)) {
             return Err("resource-not-admitted");
         }
-        if let ParameterResourceReference::ExternalFile { path } = &value
-            && let Some(contract) = self.schema.resource.as_ref().and_then(|contract| contract.path)
-            && contract.selection != ResourcePathSelection::Reference
-        {
-            match std::fs::metadata(path) {
-                Ok(metadata) => {
-                    let valid = match contract.kind {
-                        ResourcePathKind::File => metadata.is_file(),
-                        ResourcePathKind::Directory => metadata.is_dir(),
-                        ResourcePathKind::FileOrDirectory => {
-                            metadata.is_file() || metadata.is_dir()
-                        }
-                    };
-                    if !valid {
-                        return Err("resource-path-wrong-kind");
-                    }
-                }
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::NotFound
-                        && contract.selection == ResourcePathSelection::ExistingOrNew => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    return Err("resource-path-missing");
-                }
-                Err(_) => return Err("resource-path-unavailable"),
-            }
-        }
         Ok(value)
     }
     /// Validate against author authority without rebuilding Inspector curves.
@@ -491,6 +471,7 @@ impl ResourceDraft {
 pub struct ResourceDialog {
     id: WidgetId,
     pub(crate) draft: ResourceDraft,
+    pub(crate) pending_inspection: Option<crate::resource_inspection::InspectionTicket>,
     pub(crate) asset_catalog_revision: Option<ResourceAssetCatalogRevision>,
     assets: Vec<ResourceAssetChoice>,
     asset_search_keys: Vec<String>,
@@ -525,6 +506,7 @@ impl ResourceDialog {
         let mut dialog = Self {
             id: WidgetId::new(),
             draft,
+            pending_inspection: None,
             asset_catalog_revision,
             assets,
             asset_search_keys,
@@ -647,6 +629,7 @@ impl ResourceDialog {
         self.rebuild_asset_choices();
     }
     pub(crate) fn apply_update(&mut self, update: ResourceUpdate) {
+        self.clear_inspection();
         let replace_input = matches!(update, ResourceUpdate::Kind(_));
         let search = matches!(update, ResourceUpdate::Search(_) | ResourceUpdate::Asset(_));
         self.draft.update(update);
@@ -657,10 +640,27 @@ impl ResourceDialog {
         }
     }
     pub(crate) fn selected_path(&mut self, path: PathBuf) {
+        self.clear_inspection();
         self.draft.file = Some(path);
         self.error_key = None;
         self.rebuild_controls(true);
         self.error.set_text(String::new());
+    }
+    pub(crate) fn begin_inspection(
+        &mut self,
+        ticket: crate::resource_inspection::InspectionTicket,
+    ) {
+        self.pending_inspection = Some(ticket);
+        self.apply.set_enabled(false);
+        self.set_error("resource-path-checking");
+    }
+    pub(crate) fn clear_inspection(&mut self) {
+        self.pending_inspection = None;
+        self.apply.set_enabled(true);
+        if self.error_key.as_deref() == Some("resource-path-checking") {
+            self.error_key = None;
+            self.error.set_text(String::new());
+        }
     }
     pub(crate) fn set_error(&mut self, key: &str) {
         self.error_key = Some(key.to_owned());
@@ -863,6 +863,15 @@ mod tests {
 
     #[test]
     fn external_path_selection_checks_new_intent_and_preserves_missing_original() {
+        let checked = |draft: &ResourceDraft| {
+            let value = draft.confirmed_value()?;
+            if let Some(ParameterResourceReference::ExternalFile { path }) = &value {
+                let contract =
+                    draft.schema.resource.as_ref().expect("resource").path.expect("path");
+                crate::resource_inspection::inspect_local_path(path).validate(contract)?;
+            }
+            Ok(value)
+        };
         let temp = tempfile::tempdir().expect("paths");
         let file = temp.path().join("输入🙂.cube");
         std::fs::write(&file, b"fixture").expect("file");
@@ -879,16 +888,20 @@ mod tests {
         input.update(ResourceUpdate::Text(
             missing.to_str().expect("UTF-8").to_owned(),
         ));
-        assert_eq!(input.confirmed_value(), Err("resource-path-missing"));
+        assert!(
+            input.confirmed_value().is_ok(),
+            "draft confirmation performs no filesystem check"
+        );
+        assert_eq!(checked(&input), Err("resource-path-missing"));
         input.update(ResourceUpdate::Text(
             directory.to_str().expect("UTF-8").to_owned(),
         ));
-        assert_eq!(input.confirmed_value(), Err("resource-path-wrong-kind"));
+        assert_eq!(checked(&input), Err("resource-path-wrong-kind"));
         input.update(ResourceUpdate::Text(
             file.to_str().expect("UTF-8").to_owned(),
         ));
         assert_eq!(
-            input.confirmed_value(),
+            checked(&input),
             Ok(Some(ParameterResourceReference::ExternalFile {
                 path: file.clone()
             }))
@@ -907,7 +920,7 @@ mod tests {
         ));
         assert_eq!(input.file_browse_message(), "resource-browse-existing-file");
         assert_eq!(input.input_message(), "resource-path-existing-or-new");
-        assert!(input.confirmed_value().is_ok());
+        assert!(checked(&input).is_ok());
         assert!(!missing.exists());
         assert!(!missing.parent().expect("parent").exists());
         input
@@ -922,11 +935,11 @@ mod tests {
         input.update(ResourceUpdate::Text(
             file.to_str().expect("UTF-8").to_owned(),
         ));
-        assert_eq!(input.confirmed_value(), Err("resource-path-wrong-kind"));
+        assert_eq!(checked(&input), Err("resource-path-wrong-kind"));
         input.update(ResourceUpdate::Text(
             directory.to_str().expect("UTF-8").to_owned(),
         ));
-        assert!(input.confirmed_value().is_ok());
+        assert!(checked(&input).is_ok());
         let mut original = draft(ParameterResourceReference::ExternalFile { path: missing });
         original.schema.resource = Some(mondrian_core::ParameterResourceContract::external_path(
             ResourcePathKind::File,
@@ -1196,6 +1209,25 @@ mod tests {
             Localizer::new(AppUiLocale::ZhCn).expect("catalog").text("resource-uri-invalid")
         );
         assert_eq!(dialog.title.text(), "资源");
+        let ticket = crate::resource_inspection::InspectionTicket::new();
+        dialog.begin_inspection(ticket);
+        dialog.set_locale(AppUiLocale::EnUs, "Resource".to_owned());
+        assert_eq!(dialog.pending_inspection, Some(ticket));
+        assert_eq!(
+            dialog.error.text(),
+            dialog.localizer.text("resource-path-checking")
+        );
+        assert!(!dialog.apply.can_focus());
+        dialog.clear_inspection();
+        dialog.set_locale(AppUiLocale::ZhCn, "资源".to_owned());
+        assert!(
+            dialog.error.text().is_empty(),
+            "withdrawn progress must not reappear after localization"
+        );
+        assert!(dialog.pending_inspection.is_none());
+        assert!(dialog.apply.can_focus());
+        assert!(dialog.is_composing());
+        assert_eq!(dialog.input.id(), input_id);
     }
     #[test]
     fn resource_uri_validation_keeps_the_authored_spelling() {

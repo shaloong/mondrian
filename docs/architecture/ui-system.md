@@ -3039,7 +3039,35 @@ Browsing/cancellation never creates or imports files
 or emits author changes. Confirmation remains one reversible editor transaction;
 all stale owner/schema/focus/IME guards apply to the new selection policies.
 
-Availability inspection currently uses synchronous metadata at confirmation,
-never while typing or rendering. This is qualified for local paths only. Bounded,
-cancellable inspection for unavailable network paths remains necessary before
-the workflow is considered fully qualified.
+ResourceDraft validation is pure: confirming a changed path under an existence
+policy returns a typed inspection request, retaining the modal. Host lazily owns
+one supervised path inspection process and at most one replacement request.
+Only the private product helper performs filesystem metadata. Native OsStr paths
+are passed without lossy conversion; the helper emits one exact response of at
+most 32 bytes and starts before graphics/platform initialization.
+
+Both queued and running requests have a five-second UI deadline. Editing,
+browsing, cancellation, owner replacement and Project close revoke admission.
+Timeout remains bounded even if process creation or OS termination is delayed;
+the supervisor retains the child and no replacement process starts until its
+cleanup completes. The main thread never waits on a live child or joins a live
+supervisor. Window scheduling adds a ten-millisecond timed wake only while
+inspection work exists; it does not claim immediately drainable Preview work or
+spin the event loop through ControlFlow::Poll.
+
+Completion must match the current opaque ticket, Session, Sequence, selected
+owner, unlocked Track/Mask, schema and original author value. Every draft update
+revokes the ticket, including editing away and back to identical text. IME
+composition at completion requires another explicit confirmation. Only a current,
+valid success produces the same single author command used by synchronous resource
+edits. Relative-path resolution ownership and fresh-process/platform recovery
+remain separate qualification obligations.
+
+While inspection is pending, Apply is disabled in place through
+`Button::set_enabled`, preserving its widget identity and callback. Disabling
+clears pressed/focus state, so an outstanding pointer release cannot click after
+re-enabling. Modal traversal skips Apply but retains Cancel and editable controls;
+editing revokes the inspection and re-enables explicit confirmation.
+Opening a browser also withdraws the progress message before invoking the
+native picker. Cancelling that picker retains the draft without stale progress;
+locale changes cannot resurrect the withdrawn message.

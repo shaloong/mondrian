@@ -347,3 +347,6 @@ browse caption, and locale changes refresh that caption while retaining draft
 paths, input composition and focus.
 Input hints distinguish required existing paths from existing-or-new paths;
 file browsing uses the open picker and never presents overwrite confirmation.
+Inspection progress, timeout and IME reconfirmation use shared English/Chinese
+messages. Locale refresh changes presentation while keeping the inspection ticket
+and editable candidate; it does not initiate a filesystem request.

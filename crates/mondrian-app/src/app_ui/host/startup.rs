@@ -562,6 +562,7 @@ impl AppUiHostStartupOwner {
             recovery_candidates,
             asset_thumbnails,
             audio_device_catalog,
+            resource_inspector: None,
             waveform_service,
             preview_service,
             window_preview_state: RefCell::new(window_preview_state),
