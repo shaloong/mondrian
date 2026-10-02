@@ -756,23 +756,13 @@ const GROUPED_GLOBAL_SHADER: &str = r#"fn add_grouped_global(keys: vec4<u32>) {
     }
 }"#;
 
-const GROUPED_SUBGROUP_SHADER: &str = r#"fn first_ballot_lane(mask: vec4<u32>) -> u32 {
-    if mask.x != 0u { return firstTrailingBit(mask.x); }
-    if mask.y != 0u { return 32u + firstTrailingBit(mask.y); }
-    if mask.z != 0u { return 64u + firstTrailingBit(mask.z); }
-    return 96u + firstTrailingBit(mask.w);
-}
-
-fn add_subgroup_key(key: u32, amount: u32, enabled: bool, subgroup_invocation_id: u32) {
-    let active_mask = subgroupBallot(enabled);
-    if all(active_mask == vec4<u32>(0u)) {
-        return;
-    }
-    let leader = first_ballot_lane(active_mask);
-    let leader_key = subgroupShuffle(key, leader);
+const GROUPED_SUBGROUP_SHADER: &str = r#"fn add_subgroup_key(key: u32, amount: u32, enabled: bool, subgroup_invocation_id: u32) {
+    // Disabled lanes still participate. An invalid first key has no enabled
+    // matches, so its zero total cannot index counts; other keys retain theirs.
+    let leader_key = subgroupBroadcastFirst(key);
     let matches_leader = enabled && key == leader_key;
     let leader_total = subgroupAdd(select(0u, amount, matches_leader));
-    if subgroup_invocation_id == leader {
+    if subgroup_invocation_id == 0u && leader_total != 0u {
         atomicAdd(&counts[leader_key], leader_total);
     }
     if enabled && !matches_leader {
