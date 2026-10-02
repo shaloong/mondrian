@@ -193,6 +193,22 @@ pub(crate) fn chinese_product_message(message: &crate::app::AppMessage) -> Strin
     Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog").message(message)
 }
 
+/// App-owned caption identity for a typed keyframe interpolation mode.
+pub(crate) fn keyframe_interpolation_message_id(
+    interpolation: mondrian_core::automation::InterpolationType,
+) -> &'static str {
+    use mondrian_core::automation::InterpolationType;
+    match interpolation {
+        InterpolationType::Hold => "keyframe-interpolation-hold",
+        InterpolationType::Linear => "keyframe-interpolation-linear",
+        InterpolationType::Bezier => "keyframe-interpolation-bezier",
+        InterpolationType::AutoBezier => "keyframe-interpolation-auto-bezier",
+        InterpolationType::ContinuousBezier => "keyframe-interpolation-continuous-bezier",
+        InterpolationType::EaseIn => "keyframe-interpolation-ease-in",
+        InterpolationType::EaseOut => "keyframe-interpolation-ease-out",
+    }
+}
+
 /// Shared product message ID for the exact Export lifecycle phase.
 pub(crate) fn export_progress_phase_message_id(
     phase: mondrian_export::ExportProgressPhase,
@@ -921,6 +937,28 @@ mod tests {
         let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
         for (_, items) in crate::app_ui::menu_bar::default_menu_items() {
             visit(&items, &chinese, &english);
+        }
+        use mondrian_core::automation::InterpolationType;
+        for interpolation in [
+            InterpolationType::Hold,
+            InterpolationType::Linear,
+            InterpolationType::Bezier,
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+            InterpolationType::EaseIn,
+            InterpolationType::EaseOut,
+        ] {
+            let id = keyframe_interpolation_message_id(interpolation);
+            visit(
+                &[MenuItem::inert(chinese.text(id)).with_message_id(id)],
+                &chinese,
+                &english,
+            );
+            assert_ne!(
+                chinese.text(id),
+                english.text(id),
+                "each keyframe mode must have localized copy"
+            );
         }
     }
 

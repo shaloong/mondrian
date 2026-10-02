@@ -7,6 +7,7 @@ use super::*;
 use crate::app::parameter_gesture::{
     ParameterCurveGestureTarget, ParameterGestureAction, ParameterGestureEdit,
 };
+use crate::app_ui::localization::keyframe_interpolation_message_id;
 use mondrian_ui_widgets::CurveGestureEvent;
 
 pub(super) fn audio_mixer_panel(
@@ -138,7 +139,7 @@ pub(super) fn audio_mixer_panel(
             section = section.with_row(
                 PropertyRow::new(
                     localizer.text("mixer-fader-curve"),
-                    audio_automation_curve_control(automation),
+                    audio_automation_curve_control(automation, localizer),
                 )
                 .with_height(118.0),
             );
@@ -273,7 +274,7 @@ pub(super) fn audio_mixer_panel(
                 route_section = route_section.with_row(
                     PropertyRow::new(
                         localizer.text("mixer-level-curve"),
-                        audio_automation_curve_control(automation),
+                        audio_automation_curve_control(automation, localizer),
                     )
                     .with_height(118.0),
                 );
@@ -421,6 +422,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
     }
     let curve = if let Some(curve_model) = model.opacity_curve.clone() {
         numeric_curve_editor(
+            localizer,
             selected_clip.map(|selection| ParameterCurveGestureTarget::Clip {
                 clip_id: selection.clip_id,
                 parameter: curve_model.property.clone(),
@@ -579,7 +581,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 section = section.with_row(
                     PropertyRow::new(
                         localizer.text("inspector-audio-volume-curve"),
-                        audio_automation_curve_control(automation),
+                        audio_automation_curve_control(automation, localizer),
                     )
                     .with_height(118.0),
                 );
@@ -588,7 +590,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 section = section.with_row(
                     PropertyRow::new(
                         localizer.text("inspector-audio-pan-curve"),
-                        audio_automation_curve_control(automation),
+                        audio_automation_curve_control(automation, localizer),
                     )
                     .with_height(118.0),
                 );
@@ -1477,6 +1479,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                                 &property.label,
                             ),
                             Box::new(numeric_curve_editor(
+                                localizer,
                                 selected_clip.map(|selection| {
                                     ParameterCurveGestureTarget::Effect {
                                         clip_id: selection.clip_id,
@@ -1610,7 +1613,7 @@ pub(super) fn with_audio_processor_rack_sections(
             rack_section = rack_section.with_row(
                 PropertyRow::new(
                     localizer.text("audio-rack-scope-input-curve"),
-                    audio_automation_curve_control(automation),
+                    audio_automation_curve_control(automation, localizer),
                 )
                 .with_height(118.0),
             );
@@ -1733,7 +1736,7 @@ pub(super) fn with_audio_processor_rack_sections(
                     section = section.with_row(
                         PropertyRow::new(
                             localizer.format_text("audio-rack-parameter-curve", "name", &label),
-                            audio_automation_curve_control(automation),
+                            audio_automation_curve_control(automation, localizer),
                         )
                         .with_height(118.0),
                     );
@@ -1776,7 +1779,10 @@ pub(super) fn audio_processor_parameter_decimals(step: Option<f64>) -> usize {
     }
 }
 
-pub(super) fn audio_automation_curve_control(model: &AudioAutomationCurveModel) -> Box<dyn Widget> {
+pub(super) fn audio_automation_curve_control(
+    model: &AudioAutomationCurveModel,
+    localizer: &Localizer,
+) -> Box<dyn Widget> {
     let action_model = model.clone();
     let interpolation_menus = model
         .keys
@@ -1786,17 +1792,19 @@ pub(super) fn audio_automation_curve_control(model: &AudioAutomationCurveModel) 
             let keyframe = key.keyframe.as_ref()?;
             Some(
                 [
-                    ("保持", InterpolationType::Hold),
-                    ("线性", InterpolationType::Linear),
-                    ("贝塞尔", InterpolationType::Bezier),
-                    ("自动贝塞尔", InterpolationType::AutoBezier),
-                    ("连续贝塞尔", InterpolationType::ContinuousBezier),
+                    InterpolationType::Hold,
+                    InterpolationType::Linear,
+                    InterpolationType::Bezier,
+                    InterpolationType::AutoBezier,
+                    InterpolationType::ContinuousBezier,
                 ]
                 .into_iter()
-                .filter_map(|(label, interpolation)| {
+                .filter_map(|interpolation| {
+                    let message_id = keyframe_interpolation_message_id(interpolation);
                     audio_automation_interpolation_action(model, index, interpolation).map(
                         |action| {
-                            MenuItem::new(label, action)
+                            MenuItem::new(localizer.text(message_id), action)
+                                .with_message_id(message_id)
                                 .checked(audio_keyframe_interpolation(keyframe) == interpolation)
                         },
                     )
@@ -2427,6 +2435,7 @@ pub(super) fn inspector_reorder_mask_action(
 }
 
 fn numeric_curve_editor(
+    localizer: &Localizer,
     target: Option<ParameterCurveGestureTarget>,
     model: InspectorCurveModel,
     can_edit: bool,
@@ -2453,16 +2462,16 @@ fn numeric_curve_editor(
             let id = key.keyframe_id?;
             Some(
                 [
-                    ("保持", InterpolationType::Hold),
-                    ("线性", InterpolationType::Linear),
-                    ("贝塞尔", InterpolationType::Bezier),
-                    ("自动贝塞尔", InterpolationType::AutoBezier),
-                    ("连续贝塞尔", InterpolationType::ContinuousBezier),
-                    ("缓入", InterpolationType::EaseIn),
-                    ("缓出", InterpolationType::EaseOut),
+                    InterpolationType::Hold,
+                    InterpolationType::Linear,
+                    InterpolationType::Bezier,
+                    InterpolationType::AutoBezier,
+                    InterpolationType::ContinuousBezier,
+                    InterpolationType::EaseIn,
+                    InterpolationType::EaseOut,
                 ]
                 .into_iter()
-                .filter(|(_, interpolation)| {
+                .filter(|interpolation| {
                     allowed_interpolations.as_ref().is_none_or(|allowed| {
                         let schema_interpolation = match interpolation {
                             InterpolationType::Hold => ParameterInterpolation::Hold,
@@ -2472,9 +2481,14 @@ fn numeric_curve_editor(
                         allowed.contains(&schema_interpolation)
                     })
                 })
-                .map(|(label, interpolation)| {
-                    MenuItem::new(label, on_interpolation(&model, id, interpolation))
-                        .checked(key.interpolation == Some(interpolation))
+                .map(|interpolation| {
+                    let message_id = keyframe_interpolation_message_id(interpolation);
+                    MenuItem::new(
+                        localizer.text(message_id),
+                        on_interpolation(&model, id, interpolation),
+                    )
+                    .with_message_id(message_id)
+                    .checked(key.interpolation == Some(interpolation))
                 })
                 .collect(),
             )

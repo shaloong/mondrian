@@ -1355,3 +1355,11 @@ resource-uri-invalid = 请输入含协议、不含空格或控制字符的绝对
 resource-browse-failed = 无法打开系统选择器。可以输入路径或重试。
 resource-select-one-file = 请为此参数选择一个文件。
 resource-not-admitted = 此参数不接受该资源类型或文件扩展名。
+
+keyframe-interpolation-hold = 保持
+keyframe-interpolation-linear = 线性
+keyframe-interpolation-bezier = 贝塞尔
+keyframe-interpolation-auto-bezier = 自动贝塞尔
+keyframe-interpolation-continuous-bezier = 连续贝塞尔
+keyframe-interpolation-ease-in = 缓入
+keyframe-interpolation-ease-out = 缓出

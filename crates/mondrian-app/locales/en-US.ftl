@@ -1420,3 +1420,11 @@ resource-uri-invalid = Enter an absolute URI with a scheme and no spaces or cont
 resource-browse-failed = The native picker could not open. You can enter a path or try again.
 resource-select-one-file = Select one file for this parameter.
 resource-not-admitted = This resource type or file extension is not accepted by the parameter.
+
+keyframe-interpolation-hold = Hold
+keyframe-interpolation-linear = Linear
+keyframe-interpolation-bezier = Bezier
+keyframe-interpolation-auto-bezier = Auto Bezier
+keyframe-interpolation-continuous-bezier = Continuous Bezier
+keyframe-interpolation-ease-in = Ease In
+keyframe-interpolation-ease-out = Ease Out

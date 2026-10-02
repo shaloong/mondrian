@@ -2994,3 +2994,12 @@ contract. Finish/Cancel of a matching numeric curve draft refreshes its canonica
 model even if frame/value lowering yielded no author change, so local normalized
 points cannot remain as misleading unsaved curve geometry. No-op updates do not
 advance author generations or publish author invalidations.
+
+
+Numeric Clip/Effect curve menus and audio automation curve menus translate
+interpolation captions through one exhaustive App-owned mode-to-message mapping.
+Menu rows retain stable message IDs alongside localized captions and typed
+commands. Locale changes affect presentation only: schema admission, supported
+mode sets, current interpolation checkmarks and key identities remain author
+facts. Chinese and English catalogs declare every mode, including automatic and
+continuous Bezier and the numeric-curve ease presets.
