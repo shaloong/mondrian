@@ -614,13 +614,16 @@ impl Widget for CurveEditor {
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::Escape, .. } if self.selected.is_some() => {
+                let was_dragging = self.dragging.is_some();
                 let changed = self.cancel_drag_state();
                 self.selected = None;
                 if changed {
                     self.dispatch_change(ctx);
-                    ctx.request_repaint();
+                }
+                if was_dragging {
                     ctx.release_pointer_capture(self.id);
                 }
+                ctx.request_repaint();
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::Delete | KeyCode::Backspace, .. }
@@ -1099,6 +1102,77 @@ mod tests {
                 point: inserted,
             })]
         );
+    }
+
+    #[test]
+    fn escape_releases_capture_for_unchanged_and_round_trip_curve_drags() {
+        for round_trip in [false, true] {
+            let actions = RefCell::new(Vec::new());
+            let dispatch = |action: Action| actions.borrow_mut().push(action);
+            let mut focus = DummyFocus;
+            let mut shortcut = DummyShortcut;
+            let mut tooltip = DummyTooltip;
+            let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+            let original = CurvePoint::new(0.5, 0.5);
+            let mut editor = CurveEditor::with_points(vec![
+                CurvePoint::new(0.0, 0.0),
+                original,
+                CurvePoint::new(1.0, 1.0),
+            ])
+            .on_edit(curve_edit_action);
+            editor.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+            let start = editor.to_screen(original);
+            editor.event(
+                &UiEvent::MouseDown {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            assert!(editor.has_active_pointer_interaction());
+            if round_trip {
+                for position in [Point::new(start.x + 20.0, start.y - 15.0), start] {
+                    editor.event(
+                        &UiEvent::MouseMove { position, modifiers: Modifiers::none() },
+                        &mut ctx,
+                    );
+                }
+            }
+            assert_eq!(editor.points()[1], original);
+            *ctx.requests = Default::default();
+            assert_eq!(
+                editor.event(
+                    &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                    &mut ctx
+                ),
+                EventResult::Handled
+            );
+            assert!(!editor.has_active_pointer_interaction());
+            assert_eq!(
+                ctx.requests.pointer_capture,
+                Some(mondrian_ui_core::widget::PointerCaptureRequest::Release(
+                    editor.id()
+                ))
+            );
+            assert!(ctx.requests.repaint);
+            for event in [
+                UiEvent::MouseMove {
+                    position: Point::new(start.x + 30.0, start.y),
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::MouseUp {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::FocusLost,
+            ] {
+                editor.event(&event, &mut ctx);
+            }
+            assert_eq!(editor.points()[1], original);
+            assert!(actions.borrow().is_empty());
+        }
     }
 
     #[test]

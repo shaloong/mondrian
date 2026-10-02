@@ -2954,3 +2954,11 @@ a net-zero drag releases its pending command while restoring the preceding
 command. Host discards invalidated controls before transient deferral, and late
 pointer events cannot recreate a write. This policy preserves original Redo on
 cancellation and net-zero finish without UI snapshot restoration.
+
+
+CurveEditor Escape clears selection and repaints independently of whether its
+point value changed. Any active drag releases pointer capture, including an
+unchanged press and a drag returned to its origin. Cancellation emits no
+incremental key edit; late pointer release or focus loss cannot commit a cancelled
+drag. Capture ownership is an interaction fact rather than a value-difference
+heuristic.
