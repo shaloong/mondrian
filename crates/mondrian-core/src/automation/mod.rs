@@ -434,15 +434,41 @@ pub enum ResourcePathKind {
     FileOrDirectory,
 }
 
+/// Availability required when choosing a new external path in the editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourcePathSelection {
+    /// Retain recoverable author intent even while its target is unavailable.
+    Reference,
+    /// Choose an existing object of the declared shape.
+    Existing,
+    /// Choose an existing object or a path for a new object of the declared shape.
+    ExistingOrNew,
+}
+
+/// Shape and selection policy of an external path control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourcePathContract {
+    /// File or directory shape admitted by the provider.
+    pub kind: ResourcePathKind,
+    /// Availability checked for new selections, independently of stored recovery.
+    pub selection: ResourcePathSelection,
+    /// If present, require a UTF-8 path within this nonzero byte limit.
+    /// Absence admits native platform path representations.
+    pub max_utf8_bytes: Option<usize>,
+}
+
 /// Definition-owned resource admission shared by authoring and UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ParameterResourceContract {
     /// Unique admitted nonempty binding families. Unbound is always allowed.
     pub allowed_kinds: Vec<ParameterResourceKind>,
     /// Required exactly when external paths are admitted.
-    pub path_kind: Option<ResourcePathKind>,
+    pub path: Option<ResourcePathContract>,
     /// Lowercase file suffixes without dots; empty admits any extension.
-    /// Restrictions require File path_kind and never test filesystem availability.
+    /// Restrictions require File shape and never test filesystem availability.
     pub file_extensions: Vec<String>,
 }
 impl ParameterResourceContract {
@@ -454,7 +480,11 @@ impl ParameterResourceContract {
                 ParameterResourceKind::ProjectAsset,
                 ParameterResourceKind::Uri,
             ],
-            path_kind: Some(ResourcePathKind::FileOrDirectory),
+            path: Some(ResourcePathContract {
+                kind: ResourcePathKind::FileOrDirectory,
+                selection: ResourcePathSelection::Reference,
+                max_utf8_bytes: None,
+            }),
             file_extensions: Vec::new(),
         }
     }
@@ -462,8 +492,33 @@ impl ParameterResourceContract {
     pub fn external_file(file_extensions: Vec<String>) -> Self {
         Self {
             allowed_kinds: vec![ParameterResourceKind::ExternalFile],
-            path_kind: Some(ResourcePathKind::File),
+            path: Some(ResourcePathContract {
+                kind: ResourcePathKind::File,
+                selection: ResourcePathSelection::Reference,
+                max_utf8_bytes: None,
+            }),
             file_extensions,
+        }
+    }
+    /// Admit one external path shape with an explicit selection policy.
+    pub fn external_path(kind: ResourcePathKind, selection: ResourcePathSelection) -> Self {
+        Self {
+            allowed_kinds: vec![ParameterResourceKind::ExternalFile],
+            path: Some(ResourcePathContract { kind, selection, max_utf8_bytes: None }),
+            file_extensions: Vec::new(),
+        }
+    }
+    /// Admit external paths for a UTF-8 processor with an explicit byte limit.
+    /// A zero limit is rejected by [`Self::validate`].
+    pub fn external_utf8_path(
+        kind: ResourcePathKind,
+        selection: ResourcePathSelection,
+        max_bytes: usize,
+    ) -> Self {
+        Self {
+            allowed_kinds: vec![ParameterResourceKind::ExternalFile],
+            path: Some(ResourcePathContract { kind, selection, max_utf8_bytes: Some(max_bytes) }),
+            file_extensions: Vec::new(),
         }
     }
     /// Validate a complete provider declaration independently from host availability.
@@ -474,9 +529,11 @@ impl ParameterResourceContract {
                 .iter()
                 .enumerate()
                 .any(|(index, kind)| self.allowed_kinds[..index].contains(kind))
-            || self.path_kind.is_some()
+            || self.path.is_some_and(|path| path.max_utf8_bytes == Some(0))
+            || self.path.is_some()
                 != self.allowed_kinds.contains(&ParameterResourceKind::ExternalFile)
-            || (!self.file_extensions.is_empty() && self.path_kind != Some(ResourcePathKind::File))
+            || (!self.file_extensions.is_empty()
+                && self.path.map(|path| path.kind) != Some(ResourcePathKind::File))
             || self.file_extensions.iter().enumerate().any(|(index, extension)| {
                 extension.is_empty()
                     || !extension
@@ -497,6 +554,10 @@ impl ParameterResourceContract {
                 self.allowed_kinds.contains(&ParameterResourceKind::ExternalFile)
                     && !path.as_os_str().is_empty()
                     && !path.as_os_str().as_encoded_bytes().contains(&0)
+                    && self
+                        .path
+                        .and_then(|contract| contract.max_utf8_bytes)
+                        .is_none_or(|limit| path.to_str().is_some_and(|text| text.len() <= limit))
                     && (self.file_extensions.is_empty()
                         || path.extension().and_then(|extension| extension.to_str()).is_some_and(
                             |extension| {
@@ -3810,7 +3871,7 @@ impl crate::AuthoringFootprint for ParameterResourceContract {
         &self,
         collector: &mut crate::AuthoringFootprintCollector,
     ) -> std::result::Result<(), crate::AuthoringFootprintError> {
-        let Self { allowed_kinds, path_kind: _, file_extensions } = self;
+        let Self { allowed_kinds, path: _, file_extensions } = self;
         collector.collect(allowed_kinds)?;
         collector.collect(file_extensions)
     }
@@ -4774,6 +4835,85 @@ mod tests {
     }
 
     #[test]
+    fn resource_path_contract_preserves_selection_policy_without_resolving_author_intent() {
+        for kind in [
+            ResourcePathKind::File,
+            ResourcePathKind::Directory,
+            ResourcePathKind::FileOrDirectory,
+        ] {
+            for selection in [
+                ResourcePathSelection::Reference,
+                ResourcePathSelection::Existing,
+                ResourcePathSelection::ExistingOrNew,
+            ] {
+                let contract = ParameterResourceContract::external_path(kind, selection);
+                contract.validate().expect("external path");
+                let json = serde_json::to_vec(&contract).expect("serialize");
+                let restored: ParameterResourceContract =
+                    serde_json::from_slice(&json).expect("restore");
+                assert_eq!(restored, contract);
+                assert!(contract.admits(&ParameterResourceReference::ExternalFile {
+                    path: PathBuf::from("unavailable/输入🙂.cube")
+                }));
+                let schema = ParameterSchema::v1(
+                    ParameterId::new_static("test.external_path"),
+                    PropertyValue::Resource(ParameterResourceReference::Unbound),
+                )
+                .with_resource_contract(contract)
+                .with_cache_impact(ParameterCacheImpact::Resource);
+                schema.validate().expect("pure author schema");
+                assert!(!schema.is_animatable);
+            }
+        }
+        assert!(serde_json::from_str::<ResourcePathContract>(r#"{"kind":"file"}"#).is_err());
+        assert!(serde_json::from_str::<ResourcePathContract>(
+            r#"{"kind":"file","selection":"existing","unknown":true}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn external_utf8_paths_enforce_byte_limits_before_authoring() {
+        let contract = ParameterResourceContract::external_utf8_path(
+            ResourcePathKind::File,
+            ResourcePathSelection::ExistingOrNew,
+            6,
+        );
+        contract.validate().expect("UTF-8 path contract");
+        assert!(contract
+            .admits(&ParameterResourceReference::ExternalFile { path: PathBuf::from("汉字") }));
+        assert!(!contract.admits(&ParameterResourceReference::ExternalFile {
+            path: PathBuf::from("汉字🙂")
+        }));
+        assert!(contract.admits(&ParameterResourceReference::Unbound));
+        assert!(ParameterResourceContract::external_utf8_path(
+            ResourcePathKind::File,
+            ResourcePathSelection::Existing,
+            0
+        )
+        .validate()
+        .is_err());
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            let reference = ParameterResourceReference::ExternalFile {
+                path: PathBuf::from(std::ffi::OsString::from_wide(&[0xd800])),
+            };
+            assert!(!contract.admits(&reference));
+            assert!(ParameterResourceContract::external_file(Vec::new()).admits(&reference));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let reference = ParameterResourceReference::ExternalFile {
+                path: PathBuf::from(std::ffi::OsString::from_vec(vec![0xff])),
+            };
+            assert!(!contract.admits(&reference));
+            assert!(ParameterResourceContract::external_file(Vec::new()).admits(&reference));
+        }
+    }
+
+    #[test]
     fn resource_contract_rejects_unsupported_bindings_before_author_mutation() {
         let contract = ParameterResourceContract::external_file(vec!["cube".to_owned()]);
         contract.validate().expect("file contract");
@@ -4845,7 +4985,7 @@ mod tests {
             Err(ParameterSchemaError::InvalidResourceContract)
         );
         invalid.allowed_kinds.pop();
-        invalid.path_kind = Some(ResourcePathKind::Directory);
+        invalid.path.as_mut().expect("path contract").kind = ResourcePathKind::Directory;
         assert_eq!(
             invalid.validate(),
             Err(ParameterSchemaError::InvalidResourceContract)

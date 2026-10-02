@@ -118,7 +118,7 @@ bool stringValues(const void* handle, OfxPropertySetHandle in, bool render) {
   const char* names[] = {"single", "multi", "existingFile", "newFile",
     "existingDirectory", "newDirectory", "status", "rich"};
   size_t bytes = 0;
-  const int count = mode() == "strings_text" ? 2 : 8;
+  const int count = mode() == "strings_text" ? 2 : mode() == "strings_paths" ? 6 : 8;
   for (int index = 0; index < count; ++index) {
     OfxParamHandle parameter = nullptr;
     char* value = nullptr;
@@ -385,7 +385,7 @@ OfxStatus probe(const char* action, const void* handle,
       u8"Ready ✓", "{\\rtf1\\ansi hello}"};
     OfxParamSetHandle params = nullptr;
     if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK) { return kOfxStatFailed; }
-    const int count = selected == "strings_text" ? 2 : 8;
+    const int count = selected == "strings_text" ? 2 : selected == "strings_paths" ? 6 : 8;
     for (int index = 0; index < count; ++index) {
       OfxPropertySetHandle props = nullptr;
       if (gParamHost->paramDefine(params, kOfxParamTypeString, names[index], &props) != kOfxStatOK ||

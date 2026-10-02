@@ -1354,7 +1354,7 @@ resource-asset-missing = 此资源已不可用，请选择其他资源。
 resource-uri-invalid = 请输入含协议、不含空格或控制字符的绝对 URI。
 resource-browse-failed = 无法打开系统选择器。可以输入路径或重试。
 resource-select-one-file = 请为此参数选择一个文件。
-resource-not-admitted = 此参数不接受该资源类型或文件扩展名。
+resource-not-admitted = 此参数不接受该资源类型、文件扩展名、路径格式或路径长度。
 
 keyframe-interpolation-hold = 保持
 keyframe-interpolation-linear = 线性
@@ -1363,3 +1363,10 @@ keyframe-interpolation-auto-bezier = 自动贝塞尔
 keyframe-interpolation-continuous-bezier = 连续贝塞尔
 keyframe-interpolation-ease-in = 缓入
 keyframe-interpolation-ease-out = 缓出
+
+resource-browse-existing-file = 浏览已有文件…
+resource-path-existing = 输入已有路径
+resource-path-existing-or-new = 输入已有或新路径
+resource-path-missing = 此路径不存在，请选择现有文件或文件夹。
+resource-path-wrong-kind = 此路径不是参数要求的文件或文件夹类型。
+resource-path-unavailable = 无法检查此路径，请确认其可用性及访问权限。

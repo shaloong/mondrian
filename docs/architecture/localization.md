@@ -339,3 +339,11 @@ rank, retaining schema order for naturally ordered definitions. Ranks are signed
 vector order, checked state, current value and Hold keyframes remain unchanged;
 locale changes only replace captions. Duplicate translated/vendor captions never
 merge choices or become action payload values.
+
+
+External resource selection uses shared English/Chinese path-selection, missing-path,
+wrong-shape and unavailable-path messages. Selection intent controls the file
+browse caption, and locale changes refresh that caption while retaining draft
+paths, input composition and focus.
+Input hints distinguish required existing paths from existing-or-new paths;
+file browsing uses the open picker and never presents overwrite confirmation.

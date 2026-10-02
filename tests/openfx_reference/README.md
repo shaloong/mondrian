@@ -207,7 +207,7 @@ The same worker processes defaults, Unicode/multiline/empty edits, a 64 KiB valu
 and default restoration. The plugin probes finite past/future static reads, rejected
 nonfinite times, null/oversized setters and preservation of caller output/value.
 Rejected host snapshots must leave the worker reusable. Native metadata support
-is separate from product editing: path/Label/RTF controls currently reject effect
+is separate from product editing: Label/RTF controls currently reject effect
 registration until their faithful authoring contracts are implemented.
 
 
@@ -216,3 +216,24 @@ qualifies SingleLine/MultiLine presentation metadata and authored empty/multilin
 values through the compiled effect graph. Successful plugin writes are exercised
 in CreateInstance, before SDK change notification becomes active; invalid writes
 are exercised inside InstanceChanged without introducing recursive edits.
+
+`strings_paths` declares only the two text controls and four file/directory
+controls. To qualify native paths through the application, set
+`MONDRIAN_OPENFX_PRODUCT_BINARY` to the current `mondrian.exe`,
+`MONDRIAN_OPENFX_SESSION_PROBE_BINARY` to the built SessionProbe binary and
+`MONDRIAN_OPENFX_SESSION_PROBE_MODE=strings_paths`, then run:
+
+```powershell
+cargo test -p mondrian-app --all-features --lib native_path_resource_draft_cancel_undo_save_reopen_preserves_output_pixels -- --ignored --nocapture
+```
+
+This checks external-only resource contracts and their UTF-8 bounds, native
+open-picker service routing, cancellation, typed new paths, one-step Undo/Redo,
+clearing to the empty SDK String, Unicode `.mdp` save/reopen and real
+compiled-graph Float32 pixels.
+The picker service is simulated; physical OS dialogs and network-path response
+time require separate qualification. No selected file or parent directory is
+created by selection, cancellation or the owned render probe.
+Existing input bytes must remain unchanged; a save-dialog sentinel detects
+accidental routing to an overwrite-oriented picker. Localized input hints state
+whether a path must exist or may be new.

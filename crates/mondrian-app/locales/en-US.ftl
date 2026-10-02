@@ -1419,7 +1419,7 @@ resource-asset-missing = This asset is no longer available. Select another asset
 resource-uri-invalid = Enter an absolute URI with a scheme and no spaces or control characters.
 resource-browse-failed = The native picker could not open. You can enter a path or try again.
 resource-select-one-file = Select one file for this parameter.
-resource-not-admitted = This resource type or file extension is not accepted by the parameter.
+resource-not-admitted = This parameter does not accept this resource type, file extension, path format or path length.
 
 keyframe-interpolation-hold = Hold
 keyframe-interpolation-linear = Linear
@@ -1428,3 +1428,10 @@ keyframe-interpolation-auto-bezier = Auto Bezier
 keyframe-interpolation-continuous-bezier = Continuous Bezier
 keyframe-interpolation-ease-in = Ease In
 keyframe-interpolation-ease-out = Ease Out
+
+resource-browse-existing-file = Browse existing…
+resource-path-existing = Enter an existing path
+resource-path-existing-or-new = Enter an existing or new path
+resource-path-missing = This path does not exist. Choose an existing file or folder.
+resource-path-wrong-kind = This path does not have the required file or folder type.
+resource-path-unavailable = This path cannot be checked. Verify its availability and permissions.

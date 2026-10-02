@@ -626,9 +626,9 @@ and caller outputs. Animated historical access remains a separate temporal bindi
 Resident transport owns its CStrings through each synchronous native call and
 reuses the same supervised worker across accepted edits.
 
-SingleLine and MultiLine bind to the shared author Text modes. Other String modes
+SingleLine and MultiLine bind to the shared author Text modes. Label and RTF modes
 are described and executable by the native session but reject product registration
-until faithful path/output, read-only Label and rich-text authoring contracts exist.
+until faithful read-only Label and rich-text authoring contracts exist.
 They must not silently become generic editable text. The owned reference wrapper
 qualifies metadata and String-dependent Float32 pixels through the real SDK suite;
 this is not a complete third-party plugin or native editor qualification.
@@ -649,3 +649,20 @@ with no payload. An empty struct wire variant enforces surplus-field rejection;
 Serde internally tagged unit variants alone do not enforce that requirement.
 The public typed modes and their canonical serialized representation remain
 simple; the strict wire seam does not introduce alternate authoring values.
+
+
+Native FilePath and DirectoryPath controls bind to shared Resource properties,
+with external-only references and the SDK existence policy preserved as Existing
+or ExistingOrNew. Empty values map to Unbound; execution lowers only exact UTF-8
+external paths back to SDK String values through the sole compiled graph. Paths
+are not canonicalized, expanded or converted lossily. The resource contract
+rejects non-Unicode paths and values exceeding the SDK's 64 KiB UTF-8 bound
+before authoring. The processor remains uncacheable; authoring
+path selection does not create output objects or resolve them every frame.
+Label and RTF authoring still require their own product contracts.
+
+The SDK existence flag is an availability constraint, not an input/output role.
+Allowing an absent path must not imply that the plugin writes that path or that
+packaging may discard it. The owned `strings_paths` probe qualifies all four
+file/directory existence variants through real native Float32 rendering and
+the resource dialog's authoring, Undo/Redo and durable reopen workflow.

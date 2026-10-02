@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mondrian_core::automation::{
-    ParameterInvalidValuePolicy, ParameterNumericContract, ParameterNumericRange, ParameterUnit,
-    PropertyBag, PropertyDescriptor, PropertyValue,
+    ParameterInvalidValuePolicy, ParameterNumericContract, ParameterNumericRange,
+    ParameterResourceContract, ParameterResourceReference, ParameterUnit, PropertyBag,
+    PropertyDescriptor, PropertyValue, ResourcePathKind, ResourcePathSelection,
 };
 use mondrian_core::{MondrianError, ParameterId};
 use mondrian_effects::{
@@ -24,6 +25,7 @@ use crate::openfx_adapter::OpenFxBinaryInspection;
 use crate::openfx_host::{
     describe_openfx_filter, OpenFxDoubleType, OpenFxFilterDescription, OpenFxFilterSession,
     OpenFxFloatFrame, OpenFxHostError, OpenFxParameterValue, OpenFxRenderTiming, OpenFxStringMode,
+    OPENFX_MAX_STRING_BYTES,
 };
 
 /// A selected Filter cannot be represented by the admitted visual effect contract.
@@ -207,11 +209,16 @@ fn build_definition(
         if matches!(parameter.default_value, OpenFxParameterValue::String(_))
             && !matches!(
                 parameter.string_mode,
-                Some(OpenFxStringMode::SingleLine | OpenFxStringMode::MultiLine)
+                Some(
+                    OpenFxStringMode::SingleLine
+                        | OpenFxStringMode::MultiLine
+                        | OpenFxStringMode::FilePath { .. }
+                        | OpenFxStringMode::DirectoryPath { .. }
+                )
             )
         {
             return Err(OpenFxEffectRegistrationError::Schema(format!(
-                "parameter `{}` requires a path, read-only label or rich-text authoring contract",
+                "parameter `{}` requires a read-only label or rich-text authoring contract",
                 parameter.name,
             )));
         }
@@ -229,22 +236,55 @@ fn build_definition(
                 OpenFxParameterValue::Integer(value) => PropertyValue::Int(i64::from(value)),
                 OpenFxParameterValue::Choice(value) => PropertyValue::Enum(value.to_string()),
                 OpenFxParameterValue::StrChoice(key) => PropertyValue::Enum(key),
-                OpenFxParameterValue::String(text) => PropertyValue::Text(text),
+                OpenFxParameterValue::String(text) => match parameter.string_mode {
+                    Some(
+                        OpenFxStringMode::FilePath { .. } | OpenFxStringMode::DirectoryPath { .. },
+                    ) => PropertyValue::Resource(if text.is_empty() {
+                        ParameterResourceReference::Unbound
+                    } else {
+                        ParameterResourceReference::ExternalFile { path: PathBuf::from(text) }
+                    }),
+                    _ => PropertyValue::Text(text),
+                },
             };
             let mut descriptor = PropertyDescriptor::try_new(path, &parameter.label, default_value)
                 .map_err(|error| OpenFxEffectRegistrationError::Schema(error.to_string()))?
                 .with_parameter_id(parameter_id.clone())
                 .with_animatable(parameter.can_animate);
             if let Some(mode) = parameter.string_mode {
-                descriptor = descriptor.with_text_mode(match mode {
-                    OpenFxStringMode::SingleLine => mondrian_core::ParameterTextMode::SingleLine,
-                    OpenFxStringMode::MultiLine => mondrian_core::ParameterTextMode::MultiLine,
+                descriptor = match mode {
+                    OpenFxStringMode::SingleLine => {
+                        descriptor.with_text_mode(mondrian_core::ParameterTextMode::SingleLine)
+                    }
+                    OpenFxStringMode::MultiLine => {
+                        descriptor.with_text_mode(mondrian_core::ParameterTextMode::MultiLine)
+                    }
+                    OpenFxStringMode::FilePath { must_exist }
+                    | OpenFxStringMode::DirectoryPath { must_exist } => {
+                        let kind = if matches!(mode, OpenFxStringMode::FilePath { .. }) {
+                            ResourcePathKind::File
+                        } else {
+                            ResourcePathKind::Directory
+                        };
+                        let selection = if must_exist {
+                            ResourcePathSelection::Existing
+                        } else {
+                            ResourcePathSelection::ExistingOrNew
+                        };
+                        descriptor.with_resource_contract(
+                            ParameterResourceContract::external_utf8_path(
+                                kind,
+                                selection,
+                                OPENFX_MAX_STRING_BYTES,
+                            ),
+                        )
+                    }
                     _ => {
                         return Err(OpenFxEffectRegistrationError::Schema(
                             "unsupported String authoring contract".to_owned(),
                         ))
                     }
-                });
+                };
             }
             if matches!(
                 parameter.default_value,
@@ -408,6 +448,32 @@ fn build_definition(
                                     OpenFxParameterValue::String(_)
                                 ) =>
                             {
+                                OpenFxParameterValue::String(text)
+                            }
+                            Some(PropertyValue::Resource(reference))
+                                if matches!(
+                                    parameter.default_value,
+                                    OpenFxParameterValue::String(_)
+                                ) =>
+                            {
+                                let text = match reference {
+                                    ParameterResourceReference::Unbound => String::new(),
+                                    ParameterResourceReference::ExternalFile { path } => path
+                                        .to_str()
+                                        .ok_or_else(|| {
+                                            invalid(format!(
+                                                "parameter `{}` requires a UTF-8 path",
+                                                parameter.name
+                                            ))
+                                        })?
+                                        .to_owned(),
+                                    _ => {
+                                        return Err(invalid(format!(
+                                            "parameter `{}` requires an external path",
+                                            parameter.name
+                                        )))
+                                    }
+                                };
                                 OpenFxParameterValue::String(text)
                             }
                             Some(PropertyValue::Bool(value)) => {

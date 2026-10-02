@@ -1260,3 +1260,18 @@ caller outputs. Animatable definitions still reject calculus until Core owns
 the complete temporal query path; static support does not advertise animation.
 The owned native Choice/StrChoice fixture exercises these suite queries through
 resident and compiled graph execution while checking unchanged Float32 pixels.
+
+
+### External path selection contracts
+
+Core stores external path shape and selection intent together in
+`ResourcePathContract`: file/directory/either plus Reference, Existing or
+ExistingOrNew, with an optional nonzero UTF-8 byte bound.
+`ParameterResourceContract.path` is required exactly for external paths.
+An SDK-bound resource rejects non-Unicode and oversized paths before authoring;
+generic references retain native path support. Author admission and persistence remain independent of filesystem
+availability: a lost input reference is recoverable project intent. New editor
+selections with Existing policy require a matching existing object; ExistingOrNew
+also admits an absent target. Untouched unavailable references remain no-ops.
+The schema has one canonical representation, without the former flat path_kind
+field or compatibility conversion. Resource cache impact remains mandatory.

@@ -1189,7 +1189,10 @@ impl AppUiAppRoot {
                         .map(|outcome| outcome.into_selection())
                 } else {
                     platform
-                        .open_file_dialog(&self.localizer.text("resource-browse-file"), &filters)
+                        .open_file_dialog(
+                            &self.localizer.text(dialog.draft.file_browse_message()),
+                            &filters,
+                        )
                         .map(|outcome| {
                             outcome.into_selection().and_then(|mut paths| {
                                 if paths.len() == 1 {
@@ -5734,6 +5737,351 @@ mod tests {
             host.app_state().authoring_history().expect("history").diagnostics(),
             history
         );
+    }
+
+    #[test]
+    #[ignore = "set MONDRIAN_OPENFX_PRODUCT_BINARY, SESSION_PROBE_BINARY and probe mode strings_paths"]
+    fn native_path_resource_draft_cancel_undo_save_reopen_preserves_output_pixels() {
+        use crate::app_ui::resource_dialog::{
+            InspectorPropertyTarget, ResourceActionOutcome, ResourceEditorAction, ResourceKind,
+            ResourceUpdate,
+        };
+        use mondrian_core::{ParameterResourceReference, PropertyValue, TimelineTime};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        assert_eq!(
+            std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
+            "strings_paths"
+        );
+        let helper = PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").expect("product worker"),
+        );
+        let binary =
+            PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));
+        let inspection =
+            crate::openfx_adapter::inspect_openfx_binary(&helper, &binary).expect("inspect");
+        let kind = crate::openfx_effect::register_selected_openfx_filter(
+            &helper,
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+        )
+        .expect("register native path controls");
+        let temp = tempfile::tempdir().expect("workspace");
+        let destination = temp.path().join("尚未创建").join("输出🙂.cube");
+        let existing = temp.path().join("已有🙂.cube");
+        std::fs::write(&existing, b"existing input").expect("existing file");
+        let effect = mondrian_effects::instantiate_effect_node(kind).expect("native effect");
+        for (name, kind, selection) in [
+            (
+                "existingFile",
+                mondrian_core::ResourcePathKind::File,
+                mondrian_core::ResourcePathSelection::Existing,
+            ),
+            (
+                "newFile",
+                mondrian_core::ResourcePathKind::File,
+                mondrian_core::ResourcePathSelection::ExistingOrNew,
+            ),
+            (
+                "existingDirectory",
+                mondrian_core::ResourcePathKind::Directory,
+                mondrian_core::ResourcePathSelection::Existing,
+            ),
+            (
+                "newDirectory",
+                mondrian_core::ResourcePathKind::Directory,
+                mondrian_core::ResourcePathSelection::ExistingOrNew,
+            ),
+        ] {
+            let schema = &effect
+                .properties
+                .iter()
+                .find(|(_, p)| p.descriptor.display_name == name)
+                .expect("native path")
+                .1
+                .descriptor
+                .schema;
+            let contract = schema.resource.as_ref().expect("Resource");
+            assert_eq!(
+                contract.allowed_kinds,
+                vec![mondrian_core::ParameterResourceKind::ExternalFile]
+            );
+            let path = contract.path.expect("path");
+            assert_eq!(path.kind, kind);
+            assert_eq!(path.selection, selection);
+            assert_eq!(
+                path.max_utf8_bytes,
+                Some(crate::openfx_host::OPENFX_MAX_STRING_BYTES)
+            );
+        }
+        let effect_id = effect.id;
+        let parameter = effect
+            .properties
+            .iter()
+            .find(|(_, property)| property.descriptor.display_name == "newFile")
+            .expect("destination")
+            .1
+            .address();
+        let original = effect
+            .properties
+            .property_by_address(&parameter)
+            .expect("path")
+            .1
+            .static_value()
+            .clone();
+        let mut clip = mondrian_timeline::Clip::new_basic_title(
+            "Title",
+            "Arial",
+            TimelineTime::ZERO,
+            TimelineTime::new(1, 1).expect("duration"),
+        )
+        .expect("clip");
+        let clip_id = clip.id;
+        clip.add_effect_node(effect);
+        let mut sequence = mondrian_timeline::Sequence::new("Native paths");
+        sequence.video_tracks[0].add_clip(clip).expect("add");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("select");
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let open = ResourceEditorAction::Open {
+            clip_id,
+            target: InspectorPropertyTarget::Effect { effect_id, parameter: parameter.clone() },
+        };
+        let route = |root: &mut AppUiAppRoot,
+                     state: &AppState,
+                     event: ResourceEditorAction,
+                     platform: &FakePlatform| {
+            match root
+                .try_handle_resource_action(&event.action(), state, platform)
+                .expect("route")
+            {
+                ResourceActionOutcome::Handled(action) => action,
+                ResourceActionOutcome::Unhandled => panic!("typed path event"),
+            }
+        };
+        let picker = FakePlatform {
+            save_path: Some(temp.path().join("wrong-save-picker.cube")),
+            open_paths: Some(vec![existing.clone()]),
+            ..FakePlatform::default()
+        };
+        let revision = state.active_sequence().expect("sequence").revision;
+        assert!(route(&mut root, &state, open.clone(), &picker).is_none());
+        let id = root.modal.as_ref().and_then(ShellModal::as_resource).expect("draft").draft.id;
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Browse { id, folder: false },
+            &picker
+        )
+        .is_none());
+        assert!(picker.dialog_default_names.lock().expect("names").is_empty());
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Browse { id, folder: false },
+            &FakePlatform::default()
+        )
+        .is_none());
+        assert_eq!(
+            root.modal
+                .as_ref()
+                .and_then(ShellModal::as_resource)
+                .expect("draft")
+                .draft
+                .value()
+                .expect("selected"),
+            ParameterResourceReference::ExternalFile { path: existing.clone() }
+        );
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Update {
+                id,
+                update: ResourceUpdate::Text(destination.to_str().expect("UTF-8").to_owned())
+            },
+            &picker
+        )
+        .is_none());
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Cancel { id },
+            &picker
+        )
+        .is_none());
+        assert!(!state.can_undo_action());
+        assert_eq!(
+            state.active_sequence().expect("sequence").revision,
+            revision
+        );
+        assert!(!destination.exists());
+        assert!(!destination.parent().expect("parent").exists());
+        assert!(route(&mut root, &state, open, &picker).is_none());
+        let id = root.modal.as_ref().and_then(ShellModal::as_resource).expect("draft").draft.id;
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Update {
+                id,
+                update: ResourceUpdate::Kind(ResourceKind::ExternalFile)
+            },
+            &picker
+        )
+        .is_none());
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Browse { id, folder: false },
+            &picker
+        )
+        .is_none());
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Update {
+                id,
+                update: ResourceUpdate::Text(destination.to_str().expect("UTF-8").to_owned())
+            },
+            &picker
+        )
+        .is_none());
+        let action = route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Confirm { id },
+            &picker,
+        )
+        .expect("one author action");
+        state.dispatch_action(action).expect("atomic commit");
+        let resource = |state: &AppState| {
+            state
+                .active_sequence()
+                .expect("sequence")
+                .find_clip(clip_id)
+                .expect("clip")
+                .effects
+                .iter()
+                .find(|effect| effect.id == effect_id)
+                .expect("effect")
+                .properties
+                .property_by_address(&parameter)
+                .expect("path")
+                .1
+                .static_value()
+                .clone()
+        };
+        let bound = PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+            path: destination.clone(),
+        });
+        assert_eq!(resource(&state), bound);
+        assert!(state.undo_timeline().expect("undo"));
+        assert_eq!(resource(&state), original);
+        assert!(!state.can_undo_action());
+        assert!(state.redo_timeline().expect("redo"));
+        assert_eq!(resource(&state), bound);
+        let execute = |state: &AppState| {
+            use mondrian_core::{
+                Rational, SampleAspectRatio, TimelineTimeRange, WorkingColorSpace,
+            };
+            use mondrian_effects::{
+                EffectFrameContext, LutPreparationCache, PreparedEffectProgram,
+            };
+            let clip = state.active_sequence().expect("sequence").find_clip(clip_id).expect("clip");
+            let bytes: usize = clip.effects[0]
+                .properties
+                .iter()
+                .map(|(_, p)| match p.static_value() {
+                    PropertyValue::Text(text) => text.len(),
+                    PropertyValue::Resource(ParameterResourceReference::ExternalFile { path }) => {
+                        path.to_str().expect("UTF-8").len()
+                    }
+                    _ => 0,
+                })
+                .sum();
+            let range =
+                TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::new(1, 1).expect("end"))
+                    .expect("range");
+            let context =
+                EffectFrameContext::new(Rational::FPS_24, SampleAspectRatio::SQUARE, range)
+                    .expect("context");
+            let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+                &clip.effects,
+                &[],
+                &[],
+                &[],
+                WorkingColorSpace::LinearRec709,
+                context,
+                &LutPreparationCache::uncached(),
+            )
+            .expect("compile native paths");
+            let graph = program.evaluate(TimelineTime::ZERO).expect("evaluate");
+            let input = vec![[0.1, 0.2, 0.3, 0.05]; 4];
+            let pixels =
+                mondrian_effects::apply_compiled_effect_graph_rgba_f32(&input, 2, 2, &graph, 1193)
+                    .expect("actual native pixels");
+            let gain = 1.0 + (bytes % 11) as f32 / 10.0;
+            for (actual, original) in pixels.iter().zip(&input) {
+                for channel in 0..4 {
+                    assert!((actual[channel] - original[channel] * gain).abs() < 1e-6);
+                }
+            }
+            pixels
+        };
+        let before = execute(&state);
+        assert_eq!(
+            state.asset_library().expect("library").list_assets().expect("assets").len(),
+            0
+        );
+        let project = temp.path().join("验收.mdp");
+        state.save_project_file_as(project.clone()).expect("durable save");
+        drop(root);
+        drop(state);
+        let mut reopened = AppState::new();
+        reopened.open_project_file(project).expect("reopen");
+        assert_eq!(resource(&reopened), bound);
+        assert_eq!(execute(&reopened), before);
+        assert_eq!(
+            std::fs::read(&existing).expect("existing input"),
+            b"existing input"
+        );
+        reopened.select_clip_by_id(clip_id).expect("select reopened clip");
+        let mut root = AppUiAppRoot::from_app_state(&reopened);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let open = ResourceEditorAction::Open {
+            clip_id,
+            target: InspectorPropertyTarget::Effect { effect_id, parameter: parameter.clone() },
+        };
+        assert!(route(&mut root, &reopened, open, &picker).is_none());
+        let id = root.modal.as_ref().and_then(ShellModal::as_resource).expect("draft").draft.id;
+        assert!(route(
+            &mut root,
+            &reopened,
+            ResourceEditorAction::Update {
+                id,
+                update: ResourceUpdate::Kind(ResourceKind::Unbound)
+            },
+            &picker
+        )
+        .is_none());
+        let action = route(
+            &mut root,
+            &reopened,
+            ResourceEditorAction::Confirm { id },
+            &picker,
+        )
+        .expect("clear author action");
+        reopened.dispatch_action(action).expect("clear");
+        assert_eq!(
+            resource(&reopened),
+            PropertyValue::Resource(ParameterResourceReference::Unbound)
+        );
+        execute(&reopened);
+        assert!(reopened.undo_timeline().expect("undo clear"));
+        assert_eq!(resource(&reopened), bound);
+        assert_eq!(execute(&reopened), before);
+        assert!(!destination.exists());
+        assert!(!destination.parent().expect("parent").exists());
     }
 
     #[test]

@@ -3024,3 +3024,22 @@ commands. Locale changes affect presentation only: schema admission, supported
 mode sets, current interpolation checkmarks and key identities remain author
 facts. Chinese and English catalogs declare every mode, including automatic and
 continuous Bezier and the numeric-curve ease presets.
+
+
+Resource drafts inspect external path availability only when confirming changed
+intent under an explicit Existing/ExistingOrNew contract. Wrong object shapes,
+missing required inputs and inspection failures retain the draft with localized
+feedback. File browsing calls the native open picker for both existence policies.
+ExistingOrNew captions say Browse existing, and localized input hints explain
+that a new path can be typed. Selection never invokes a save dialog or its
+overwrite confirmation; permissive availability does not imply an output role.
+Directory browsing selects existing directories, while typed paths can specify
+new directory paths. The SDK flag does not declare an output destination.
+Browsing/cancellation never creates or imports files
+or emits author changes. Confirmation remains one reversible editor transaction;
+all stale owner/schema/focus/IME guards apply to the new selection policies.
+
+Availability inspection currently uses synchronous metadata at confirmation,
+never while typing or rendering. This is qualified for local paths only. Bounded,
+cancellable inspection for unavailable network paths remains necessary before
+the workflow is considered fully qualified.

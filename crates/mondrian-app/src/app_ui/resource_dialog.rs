@@ -9,7 +9,8 @@ use crate::app_ui::localization::{AppUiLocale, Localizer};
 use crate::app_ui::panels::{InspectorEffectPropertyModel, InspectorPanelModel};
 use mondrian_core::{
     AnimationParameterAddress, AssetId, ClipId, EffectId, MaskId, ParameterResourceKind,
-    ParameterResourceReference, ParameterSchema, PropertyValue, ResourcePathKind, SequenceId,
+    ParameterResourceReference, ParameterSchema, PropertyValue, ResourcePathKind,
+    ResourcePathSelection, SequenceId,
 };
 use mondrian_editor_state::{Action, AuthoringSessionId};
 use mondrian_ui_core::types::*;
@@ -260,7 +261,12 @@ impl ResourceDraft {
 
     fn kind_message(&self, kind: ResourceKind) -> &'static str {
         if kind == ResourceKind::ExternalFile {
-            match self.schema.resource.as_ref().and_then(|contract| contract.path_kind) {
+            match self
+                .schema
+                .resource
+                .as_ref()
+                .and_then(|contract| contract.path.map(|path| path.kind))
+            {
                 Some(ResourcePathKind::File) => return "resource-file-only",
                 Some(ResourcePathKind::Directory) => return "resource-folder-only",
                 Some(ResourcePathKind::FileOrDirectory) | None => {}
@@ -295,12 +301,37 @@ impl ResourceDraft {
                 .schema
                 .resource
                 .as_ref()
-                .and_then(|contract| contract.path_kind)
+                .and_then(|contract| contract.path.map(|path| path.kind))
                 .is_some_and(|kind| match kind {
                     ResourcePathKind::File => !folder,
                     ResourcePathKind::Directory => folder,
                     ResourcePathKind::FileOrDirectory => true,
                 })
+    }
+    fn path_selection(&self) -> Option<ResourcePathSelection> {
+        self.schema
+            .resource
+            .as_ref()
+            .and_then(|contract| contract.path)
+            .map(|path| path.selection)
+    }
+    pub(crate) fn file_browse_message(&self) -> &'static str {
+        if self.path_selection() == Some(ResourcePathSelection::ExistingOrNew) {
+            "resource-browse-existing-file"
+        } else {
+            "resource-browse-file"
+        }
+    }
+    fn input_message(&self) -> &'static str {
+        match self.kind {
+            ResourceKind::ProjectAsset => "resource-search-assets",
+            ResourceKind::ExternalFile => match self.path_selection() {
+                Some(ResourcePathSelection::Existing) => "resource-path-existing",
+                Some(ResourcePathSelection::ExistingOrNew) => "resource-path-existing-or-new",
+                _ => "resource-value",
+            },
+            _ => "resource-value",
+        }
     }
     fn text(&self) -> String {
         match self.kind {
@@ -365,6 +396,32 @@ impl ResourceDraft {
         }?;
         if self.schema.resource.as_ref().is_none_or(|contract| !contract.admits(&value)) {
             return Err("resource-not-admitted");
+        }
+        if let ParameterResourceReference::ExternalFile { path } = &value
+            && let Some(contract) = self.schema.resource.as_ref().and_then(|contract| contract.path)
+            && contract.selection != ResourcePathSelection::Reference
+        {
+            match std::fs::metadata(path) {
+                Ok(metadata) => {
+                    let valid = match contract.kind {
+                        ResourcePathKind::File => metadata.is_file(),
+                        ResourcePathKind::Directory => metadata.is_dir(),
+                        ResourcePathKind::FileOrDirectory => {
+                            metadata.is_file() || metadata.is_dir()
+                        }
+                    };
+                    if !valid {
+                        return Err("resource-path-wrong-kind");
+                    }
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        && contract.selection == ResourcePathSelection::ExistingOrNew => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err("resource-path-missing");
+                }
+                Err(_) => return Err("resource-path-unavailable"),
+            }
         }
         Ok(value)
     }
@@ -462,6 +519,7 @@ impl ResourceDialog {
     ) -> Self {
         let localizer = Localizer::new(locale).expect("bundled UI catalogs must be valid");
         let id = draft.id;
+        let file_browse_message = draft.file_browse_message();
         let theme = mondrian_ui_theme::current_theme();
         let asset_search_keys = assets.iter().map(|asset| asset.label.to_lowercase()).collect();
         let mut dialog = Self {
@@ -482,7 +540,7 @@ impl ResourceDialog {
             kind: Dropdown::new("", Vec::new()),
             input: TextInput::new(""),
             choices: Dropdown::new("", Vec::new()).with_max_visible_items(8),
-            file: Button::new(localizer.text("resource-browse-file")).on_click(Some(
+            file: Button::new(localizer.text(file_browse_message)).on_click(Some(
                 ResourceEditorAction::Browse { id, folder: false }.action(),
             )),
             folder: Button::new(localizer.text("resource-browse-folder")).on_click(Some(
@@ -523,24 +581,20 @@ impl ResourceDialog {
         );
         if replace_input {
             let asset = self.draft.kind == ResourceKind::ProjectAsset;
-            self.input = TextInput::new(self.localizer.text(if asset {
-                "resource-search-assets"
-            } else {
-                "resource-value"
-            }))
-            .with_text(self.draft.text())
-            .enabled(self.draft.kind != ResourceKind::Unbound)
-            .on_change(move |text| {
-                ResourceEditorAction::Update {
-                    id,
-                    update: if asset {
-                        ResourceUpdate::Search(text.to_owned())
-                    } else {
-                        ResourceUpdate::Text(text.to_owned())
-                    },
-                }
-                .action()
-            });
+            self.input = TextInput::new(self.localizer.text(self.draft.input_message()))
+                .with_text(self.draft.text())
+                .enabled(self.draft.kind != ResourceKind::Unbound)
+                .on_change(move |text| {
+                    ResourceEditorAction::Update {
+                        id,
+                        update: if asset {
+                            ResourceUpdate::Search(text.to_owned())
+                        } else {
+                            ResourceUpdate::Text(text.to_owned())
+                        },
+                    }
+                    .action()
+                });
         }
         self.rebuild_asset_choices();
         self.layout(self.bounds);
@@ -619,15 +673,11 @@ impl ResourceDialog {
             return;
         }
         self.localizer = Localizer::new(locale).expect("bundled UI catalogs must be valid");
-        self.file.set_label(self.localizer.text("resource-browse-file"));
+        self.file.set_label(self.localizer.text(self.draft.file_browse_message()));
         self.folder.set_label(self.localizer.text("resource-browse-folder"));
         self.apply.set_label(self.localizer.text("resource-apply"));
         self.cancel.set_label(self.localizer.text("resource-cancel"));
-        self.input.set_placeholder(self.localizer.text(if self.asset_mode() {
-            "resource-search-assets"
-        } else {
-            "resource-value"
-        }));
+        self.input.set_placeholder(self.localizer.text(self.draft.input_message()));
         self.rebuild_controls(false);
         self.error.set_text(
             self.error_key
@@ -809,6 +859,80 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[test]
+    fn external_path_selection_checks_new_intent_and_preserves_missing_original() {
+        let temp = tempfile::tempdir().expect("paths");
+        let file = temp.path().join("输入🙂.cube");
+        std::fs::write(&file, b"fixture").expect("file");
+        let directory = temp.path().join("目录");
+        std::fs::create_dir(&directory).expect("directory");
+        let missing = temp.path().join("新目录").join("输出.cube");
+        let mut input = draft(ParameterResourceReference::Unbound);
+        input.schema.resource = Some(mondrian_core::ParameterResourceContract::external_path(
+            ResourcePathKind::File,
+            ResourcePathSelection::Existing,
+        ));
+        input.update(ResourceUpdate::Kind(ResourceKind::ExternalFile));
+        assert_eq!(input.input_message(), "resource-path-existing");
+        input.update(ResourceUpdate::Text(
+            missing.to_str().expect("UTF-8").to_owned(),
+        ));
+        assert_eq!(input.confirmed_value(), Err("resource-path-missing"));
+        input.update(ResourceUpdate::Text(
+            directory.to_str().expect("UTF-8").to_owned(),
+        ));
+        assert_eq!(input.confirmed_value(), Err("resource-path-wrong-kind"));
+        input.update(ResourceUpdate::Text(
+            file.to_str().expect("UTF-8").to_owned(),
+        ));
+        assert_eq!(
+            input.confirmed_value(),
+            Ok(Some(ParameterResourceReference::ExternalFile {
+                path: file.clone()
+            }))
+        );
+        input
+            .schema
+            .resource
+            .as_mut()
+            .expect("contract")
+            .path
+            .as_mut()
+            .expect("path")
+            .selection = ResourcePathSelection::ExistingOrNew;
+        input.update(ResourceUpdate::Text(
+            missing.to_str().expect("UTF-8").to_owned(),
+        ));
+        assert_eq!(input.file_browse_message(), "resource-browse-existing-file");
+        assert_eq!(input.input_message(), "resource-path-existing-or-new");
+        assert!(input.confirmed_value().is_ok());
+        assert!(!missing.exists());
+        assert!(!missing.parent().expect("parent").exists());
+        input
+            .schema
+            .resource
+            .as_mut()
+            .expect("contract")
+            .path
+            .as_mut()
+            .expect("path")
+            .kind = ResourcePathKind::Directory;
+        input.update(ResourceUpdate::Text(
+            file.to_str().expect("UTF-8").to_owned(),
+        ));
+        assert_eq!(input.confirmed_value(), Err("resource-path-wrong-kind"));
+        input.update(ResourceUpdate::Text(
+            directory.to_str().expect("UTF-8").to_owned(),
+        ));
+        assert!(input.confirmed_value().is_ok());
+        let mut original = draft(ParameterResourceReference::ExternalFile { path: missing });
+        original.schema.resource = Some(mondrian_core::ParameterResourceContract::external_path(
+            ResourcePathKind::File,
+            ResourcePathSelection::Existing,
+        ));
+        assert_eq!(original.confirmed_value(), Ok(None));
     }
 
     #[test]
