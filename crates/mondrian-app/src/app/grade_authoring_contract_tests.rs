@@ -108,6 +108,228 @@ fn dispatch_product(state: &mut AppState, action: ProductAction) -> mondrian_cor
 }
 
 #[test]
+fn grade_graph_relative_resources_bind_once_and_survive_undo_and_reopen() {
+    use mondrian_core::{
+        GradeGraphNode, GradeGraphNodeId, GradeGraphNodeKind, ParameterResourceReference,
+        PropertyValue,
+    };
+
+    let fixture = FixtureRoot::new();
+    let mut state = AppState::new();
+    state
+        .create_new_project_at(
+            fixture.project_file(),
+            "Resource Grade",
+            16,
+            16,
+            Rational::new(24, 1),
+        )
+        .expect("create Project");
+    dispatch_product(
+        &mut state,
+        ProductAction::Grade(GradeProductAction::CreateDefinition(
+            GradeCreateDefinitionPayload {
+                name: "Look".into(),
+                assign_to: Some(GradeScope::Timeline),
+            },
+        )),
+    )
+    .expect("create Grade");
+    let definition_id = state.active_sequence().expect("Sequence").grade_definitions[0].id;
+    let original = state
+        .active_sequence()
+        .expect("Sequence")
+        .grade_definition(definition_id)
+        .expect("Grade")
+        .active()
+        .expect("version")
+        .graph
+        .clone();
+    let mut graph = original.clone();
+    let mut effect = mondrian_effects::instantiate_effect_node(EffectType::Lut3D).expect("LUT");
+    let path_id = EffectType::Lut3D.parameter_id("path").expect("path identity");
+    let relative = PathBuf::from("resources").join("调色.cube");
+    let absolute = fixture.0.join(&relative);
+    std::fs::create_dir_all(absolute.parent().expect("resource directory")).expect("directory");
+    std::fs::write(
+        &absolute,
+        "LUT_3D_SIZE 2\n0 0 0\n0 0 1\n0 1 0\n0 1 1\n1 0 0\n1 0 1\n1 1 0\n1 1 1\n",
+    )
+    .expect("LUT file");
+    effect
+        .set_static_value_by_parameter(
+            &EffectType::Lut3D.parameter_id("processing_space").expect("space identity"),
+            PropertyValue::Enum("scene_linear".into()),
+        )
+        .expect("explicit LUT space");
+    effect
+        .set_static_value_by_parameter(
+            &path_id,
+            PropertyValue::Resource(ParameterResourceReference::ExternalFile { path: relative }),
+        )
+        .expect("relative input");
+    let node_id = GradeGraphNodeId::new();
+    graph.nodes.push(GradeGraphNode {
+        id: node_id,
+        kind: GradeGraphNodeKind::Effect { input: graph.output, effect },
+    });
+    graph.output = node_id;
+    let history = state.authoring_history().expect("History").diagnostics().undo_entries;
+    let replace = |graph| {
+        ProductAction::Grade(GradeProductAction::ReplaceActiveGraph(Box::new(
+            GradeReplaceActiveGraphPayload { definition_id, graph },
+        )))
+    };
+    dispatch_product(&mut state, replace(graph.clone())).expect("replace graph");
+    let committed = state
+        .active_sequence()
+        .expect("Sequence")
+        .grade_definition(definition_id)
+        .expect("Grade")
+        .active()
+        .expect("version")
+        .graph
+        .clone();
+    let GradeGraphNodeKind::Effect { effect, .. } = &committed.nodes[1].kind else {
+        panic!("LUT node");
+    };
+    assert_eq!(
+        effect.evaluate_parameter(&path_id, mondrian_core::TimelineTime::ZERO),
+        Some(PropertyValue::Resource(
+            ParameterResourceReference::ExternalFile { path: absolute.clone() }
+        ))
+    );
+    assert_eq!(
+        state.authoring_history().expect("History").diagnostics().undo_entries,
+        history + 1
+    );
+    let execute = |state: &AppState| {
+        use mondrian_core::{TimelineTime, WorkingColorSpace};
+        let graph = &state
+            .active_sequence()
+            .expect("Sequence")
+            .grade_definition(definition_id)
+            .expect("Grade")
+            .active()
+            .expect("version")
+            .graph;
+        let grade =
+            mondrian_effects::PreparedGradeGraph::prepare(graph, WorkingColorSpace::LinearRec709)
+                .expect("prepare real Grade LUT");
+        let cache = mondrian_effects::LutPreparationCache::new(
+            mondrian_effects::LutPreparationCacheConfig::uncached(),
+        );
+        let compiled =
+            mondrian_effects::PreparedEffectProgram::prepare_hierarchical_with_lut_cache(
+                &[],
+                &[],
+                &[],
+                &[grade],
+                WorkingColorSpace::LinearRec709,
+                &cache,
+            )
+            .expect("prepare hierarchy")
+            .evaluate(TimelineTime::ZERO)
+            .expect("compile hierarchy");
+        mondrian_effects::apply_compiled_effect_graph_rgba_f32(
+            &[[0.125, 0.25, 0.75, 0.375], [0.75, 0.5, 0.125, 0.0]],
+            2,
+            1,
+            &compiled,
+            0,
+        )
+        .expect("execute pixels")
+    };
+    let pixels = execute(&state);
+    assert_eq!(
+        pixels,
+        vec![[0.75, 0.25, 0.125, 0.375], [0.75, 0.5, 0.125, 0.0]],
+        "LUT transforms fractional RGB, preserves alpha and zero-alpha hidden RGB"
+    );
+    state.dispatch_action(Action::Undo).expect("Undo");
+    assert_eq!(
+        state
+            .active_sequence()
+            .expect("Sequence")
+            .grade_definition(definition_id)
+            .expect("Grade")
+            .active()
+            .expect("version")
+            .graph,
+        original
+    );
+    state.dispatch_action(Action::Redo).expect("Redo");
+    assert_eq!(
+        state
+            .active_sequence()
+            .expect("Sequence")
+            .grade_definition(definition_id)
+            .expect("Grade")
+            .active()
+            .expect("version")
+            .graph,
+        committed
+    );
+    assert!(
+        dispatch_product(&mut state, replace(graph)).is_err(),
+        "equivalent relative spelling is a no-op after binding"
+    );
+    assert_eq!(
+        state.authoring_history().expect("History").diagnostics().undo_entries,
+        history + 1
+    );
+    #[cfg(windows)]
+    {
+        let mut rejected = committed.clone();
+        let GradeGraphNodeKind::Effect { effect, .. } = &mut rejected.nodes[1].kind else {
+            panic!("LUT node");
+        };
+        effect
+            .set_static_value_by_parameter(
+                &path_id,
+                PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+                    path: PathBuf::from("D:ambiguous.cube"),
+                }),
+            )
+            .expect("schema accepts native path input");
+        let generation = state.project_author_generation();
+        assert!(dispatch_product(&mut state, replace(rejected)).is_err());
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(
+            state.authoring_history().expect("History").diagnostics().undo_entries,
+            history + 1
+        );
+        assert_eq!(
+            execute(&state),
+            pixels,
+            "failed graph write leaves output unchanged"
+        );
+    }
+    let save = state.request_project_save().expect("save");
+    state.wait_for_persistence_request(save).expect("durable save");
+    state.close_project().expect("close");
+    state.open_project_file(fixture.project_file()).expect("reopen");
+    assert_eq!(
+        state
+            .active_sequence()
+            .expect("Sequence")
+            .grade_definition(definition_id)
+            .expect("Grade")
+            .active()
+            .expect("version")
+            .graph,
+        committed
+    );
+    assert!(absolute.is_file());
+    assert_eq!(
+        execute(&state),
+        pixels,
+        "reopened graph produces the same real LUT pixels"
+    );
+    state.close_project().expect("release Project");
+}
+
+#[test]
 fn grade_authoring_is_atomic_undoable_and_lock_aware() {
     let fixture = FixtureRoot::new();
     let mut state = AppState::new();

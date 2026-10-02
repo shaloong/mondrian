@@ -443,6 +443,13 @@ without changing the reference. App Clip/Effect/Mask typed parameter writes bind
 relative input against the open Project directory before ordinary schema admission
 and author commit; absolute and non-resource edits use borrowed writes.
 
+Whole Grade graph replacement uses the same resource-write resolver before the
+single Sequence transaction. It validates incoming author state, binds static
+Effect resource values, and revalidates provider limits before comparing the
+graph for a no-op. Definition defaults and graph/Effect/parameter identities are
+preserved; a rejected graph cannot change canonical state or history. Resource
+schemas do not admit animation, so this seam does not invent resource keyframes.
+
 Windows binding uses the standard PathBuf join rules for drive/share roots and
 verbatim paths, including their native dot-component normalization. It preserves
 unpaired UTF-16 filename units without UTF-8 conversion. Absolute references

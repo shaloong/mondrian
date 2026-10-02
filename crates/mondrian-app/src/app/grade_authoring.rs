@@ -113,9 +113,9 @@ impl AppState {
 
     fn replace_active_grade_graph(
         &mut self,
-        payload: GradeReplaceActiveGraphPayload,
+        mut payload: GradeReplaceActiveGraphPayload,
     ) -> Result<()> {
-        payload.graph.validate_author_state()?;
+        self.resolve_grade_graph_resources(&mut payload.graph)?;
         self.commit_active_sequence_edit("编辑调色图", move |sequence| {
             let definition = sequence
                 .grade_definitions
