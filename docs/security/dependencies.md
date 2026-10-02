@@ -1,7 +1,10 @@
 # Dependency Security and Exceptions
 
 Rust dependency policy is [deny.toml](../../deny.toml), with sources and exact
-Git revisions visible in [Cargo.lock](../../Cargo.lock). PR/push CI checks
+Git revisions visible in [Cargo.lock](../../Cargo.lock). Git sources must use an
+explicit revision and belong to the repository allowlist; it includes the
+existing pinned OCIO and native CLAP/VST3 adapters and fixtures. New repositories
+require review before allowance. PR/push CI checks
 advisories, licenses, bans and sources. A separate weekly audit refreshes advisory
 knowledge even without source changes; Dependabot proposes Rust and Action
 updates to develop. These workflows take effect after merge and do not imply
