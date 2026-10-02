@@ -186,11 +186,7 @@ $gateWorkRoot = Join-Path $runDirectory "work"
 $assetReportPath = Join-Path $runDirectory "reference-assets.json"
 $buildLogPath = Join-Path $runDirectory "build.log"
 $aggregateReportPath = Join-Path $runDirectory "complete-golden-consecutive-report.json"
-$cargoTargetDirectory = if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
-    Join-Path $repositoryRoot "target"
-} else {
-    Resolve-RepositoryPath $env:CARGO_TARGET_DIR
-}
+$cargoTargetDirectory = Resolve-CargoTargetDirectory -RepositoryRoot $repositoryRoot
 $productExecutable = Join-Path $cargoTargetDirectory "debug/mondrian.exe"
 $goldenExecutable = Join-Path $cargoTargetDirectory "debug/mondrian-golden.exe"
 $buildArguments = @(
