@@ -199,6 +199,7 @@ pub(crate) struct ResourceDraft {
     pub(crate) id: ResourceDialogId,
     pub(crate) session: Option<AuthoringSessionId>,
     pub(crate) sequence: Option<SequenceId>,
+    project_file: Option<PathBuf>,
     pub(crate) clip_id: ClipId,
     pub(crate) target: InspectorPropertyTarget,
     pub(crate) original: ParameterResourceReference,
@@ -217,6 +218,7 @@ impl ResourceDraft {
         schema: ParameterSchema,
         session: Option<AuthoringSessionId>,
         sequence: Option<SequenceId>,
+        project_file: Option<PathBuf>,
     ) -> Self {
         let (kind, file, uri, asset) = match &original {
             ParameterResourceReference::Unbound => {
@@ -240,6 +242,7 @@ impl ResourceDraft {
             id: ResourceDialogId(uuid::Uuid::new_v4()),
             session,
             sequence,
+            project_file,
             clip_id,
             target,
             original,
@@ -299,7 +302,20 @@ impl ResourceDraft {
             // No new author intent exists to validate, resolve or allocate.
             return Ok(None);
         }
-        self.value().map(Some)
+        let mut value = self.value()?;
+        if matches!(&value, ParameterResourceReference::ExternalFile { path } if !path.is_absolute())
+        {
+            let owner = self
+                .project_file
+                .as_deref()
+                .and_then(std::path::Path::parent)
+                .ok_or("resource-path-owner-required")?;
+            value.resolve_external_path(owner).map_err(|_| "resource-path-ambiguous")?;
+            if self.schema.resource.as_ref().is_none_or(|contract| !contract.admits(&value)) {
+                return Err("resource-not-admitted");
+            }
+        }
+        Ok((value != self.original).then_some(value))
     }
     pub(crate) fn allows_browse(&self, folder: bool) -> bool {
         self.kind == ResourceKind::ExternalFile
@@ -407,6 +423,9 @@ impl ResourceDraft {
     }
     /// Validate against author authority without rebuilding Inspector curves.
     pub(crate) fn matches_state(&self, state: &crate::app::AppState) -> bool {
+        if self.project_file.as_deref() != state.current_project_path() {
+            return false;
+        }
         if self.session != state.authoring_session_id()
             || self.sequence != state.active_sequence_id()
             || state
@@ -858,7 +877,50 @@ mod tests {
             schema,
             None,
             None,
+            Some(std::env::temp_dir().join("resource-unit.mdp")),
         )
+    }
+
+    #[test]
+    fn relative_confirmation_checks_resolved_limits_and_equivalent_noops() {
+        let owner = std::env::temp_dir();
+        let original = ParameterResourceReference::ExternalFile { path: owner.join("same.cube") };
+        let mut input = draft(original);
+        input.update(ResourceUpdate::Text("same.cube".into()));
+        assert_eq!(
+            input.confirmed_value(),
+            Ok(None),
+            "equivalent input adds no history or inspection"
+        );
+        let mut input = draft(ParameterResourceReference::Unbound);
+        input.update(ResourceUpdate::Kind(ResourceKind::ExternalFile));
+        input.update(ResourceUpdate::Text("short.cube".into()));
+        input
+            .schema
+            .resource
+            .as_mut()
+            .expect("resource contract")
+            .path
+            .as_mut()
+            .expect("path contract")
+            .max_utf8_bytes = Some(11);
+        assert!(input.value().is_ok(), "raw input fits the contract");
+        assert_eq!(
+            input.confirmed_value(),
+            Err("resource-not-admitted"),
+            "resolved path must also fit"
+        );
+        input
+            .schema
+            .resource
+            .as_mut()
+            .expect("resource contract")
+            .path
+            .as_mut()
+            .expect("path contract")
+            .max_utf8_bytes = None;
+        input.project_file = None;
+        assert_eq!(input.confirmed_value(), Err("resource-path-owner-required"));
     }
 
     #[test]

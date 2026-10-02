@@ -1131,6 +1131,7 @@ impl AppUiAppRoot {
                 property.schema.clone(),
                 state.authoring_session_id(),
                 state.active_sequence_id(),
+                state.current_project_path().map(Path::to_path_buf),
             );
             let (catalog_revision, assets) =
                 if draft.allows_kind(crate::app_ui::resource_dialog::ResourceKind::ProjectAsset) {
@@ -5633,6 +5634,178 @@ mod tests {
         state.test_set_sequence(Some(sequence));
         state.select_clip_by_id(id).expect("selection");
         (state, id, target)
+    }
+
+    #[test]
+    fn relative_resource_inspection_and_authoring_use_the_project_directory() {
+        use crate::app_ui::panels::InspectorPanelModel;
+        use crate::app_ui::resource_dialog::{
+            ResourceActionOutcome, ResourceEditorAction, ResourceKind, ResourceUpdate,
+        };
+        use crate::resource_inspection::PathInspectionOutcome;
+        use mondrian_core::{ParameterResourceReference, PropertyValue};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let (mut state, clip_id, target) = async_resource_fixture();
+        let project_directory = state
+            .current_project_path()
+            .expect("saved authoring owner")
+            .parent()
+            .expect("project directory")
+            .to_path_buf();
+        let relative = PathBuf::from("relative-resources").join("output.cube");
+        let expected = project_directory.join(&relative);
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        let platform = FakePlatform::default();
+        root.try_handle_resource_action(
+            &ResourceEditorAction::Open { clip_id, target: target.clone() }.action(),
+            &state,
+            &platform,
+        )
+        .expect("open");
+        let id = root.modal.as_ref().and_then(ShellModal::as_resource).expect("draft").draft.id;
+        for update in [
+            ResourceUpdate::Kind(ResourceKind::ExternalFile),
+            ResourceUpdate::Text(relative.to_string_lossy().into_owned()),
+        ] {
+            root.try_handle_resource_action(
+                &ResourceEditorAction::Update { id, update }.action(),
+                &state,
+                &platform,
+            )
+            .expect("update");
+        }
+        let ResourceActionOutcome::Inspect(request) = root
+            .try_handle_resource_action(
+                &ResourceEditorAction::Confirm { id }.action(),
+                &state,
+                &platform,
+            )
+            .expect("confirm")
+        else {
+            panic!("new external path requires inspection");
+        };
+        assert_eq!(
+            request.path, expected,
+            "inspection must not depend on child CWD"
+        );
+        assert!(!state.can_undo_action(), "inspection is not an edit");
+        let action = root
+            .finish_resource_inspection(request.ticket, PathInspectionOutcome::Missing, &state)
+            .expect("accepted new path");
+        state.dispatch_action(action).expect("one author transaction");
+        let property = target
+            .property(
+                clip_id,
+                &InspectorPanelModel::from_app_state(&state, &root.localizer),
+            )
+            .expect("resource property")
+            .value
+            .clone();
+        assert_eq!(
+            property,
+            PropertyValue::Resource(ParameterResourceReference::ExternalFile { path: expected }),
+            "saved author value must refer to the same inspected resource",
+        );
+        state.dispatch_action(Action::Undo).expect("Undo");
+        assert!(
+            !state.can_undo_action(),
+            "one confirmation creates one history entry"
+        );
+        state.dispatch_action(Action::Redo).expect("Redo");
+        assert_eq!(
+            target
+                .property(
+                    clip_id,
+                    &InspectorPanelModel::from_app_state(&state, &root.localizer)
+                )
+                .expect("resource after Redo")
+                .value,
+            property,
+        );
+        let direct_relative = PathBuf::from("direct-author").join("resource.cube");
+        state
+            .dispatch_action(target.write_action(clip_id, |parameter| {
+                mondrian_core::automation::ParameterValueWrite::Value {
+                    parameter,
+                    value: PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+                        path: direct_relative.clone(),
+                    }),
+                }
+            }))
+            .expect("direct typed author action uses the same owner");
+        assert_eq!(
+            target
+                .property(
+                    clip_id,
+                    &InspectorPanelModel::from_app_state(&state, &root.localizer)
+                )
+                .expect("direct resource")
+                .value,
+            PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+                path: project_directory.join(direct_relative),
+            }),
+        );
+    }
+
+    #[test]
+    fn resource_inspection_does_not_commit_against_a_new_save_as_directory() {
+        use crate::app_ui::resource_dialog::{
+            ResourceActionOutcome, ResourceEditorAction, ResourceKind, ResourceUpdate,
+        };
+        use crate::resource_inspection::PathInspectionOutcome;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let (mut state, clip_id, target) = async_resource_fixture();
+        let session = state.authoring_session_id();
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        let platform = FakePlatform::default();
+        root.try_handle_resource_action(
+            &ResourceEditorAction::Open { clip_id, target }.action(),
+            &state,
+            &platform,
+        )
+        .expect("open");
+        let id = root.modal.as_ref().and_then(ShellModal::as_resource).expect("draft").draft.id;
+        for update in [
+            ResourceUpdate::Kind(ResourceKind::ExternalFile),
+            ResourceUpdate::Text("pending-resource.cube".into()),
+        ] {
+            root.try_handle_resource_action(
+                &ResourceEditorAction::Update { id, update }.action(),
+                &state,
+                &platform,
+            )
+            .expect("update");
+        }
+        let ResourceActionOutcome::Inspect(request) = root
+            .try_handle_resource_action(
+                &ResourceEditorAction::Confirm { id }.action(),
+                &state,
+                &platform,
+            )
+            .expect("inspect")
+        else {
+            panic!("expected inspection");
+        };
+        let destination = tempfile::tempdir().expect("new project directory");
+        let project_file = destination.path().join("saved-as.mdp");
+        let save = state.request_project_save_as(project_file.clone()).expect("Save As");
+        state.wait_for_persistence_request(save).expect("durable Save As");
+        assert_eq!(state.current_project_path(), Some(project_file.as_path()));
+        assert_eq!(
+            state.authoring_session_id(),
+            session,
+            "Save As preserves Session identity"
+        );
+        assert!(root.resource_inspection_ticket(&state).is_none());
+        assert!(root
+            .finish_resource_inspection(request.ticket, PathInspectionOutcome::Missing, &state)
+            .is_none());
+        assert!(root.modal.is_none());
+        assert!(
+            !state.can_undo_action(),
+            "stale inspection creates no author history"
+        );
+        state.close_project().expect("release saved project and destination");
     }
 
     #[test]

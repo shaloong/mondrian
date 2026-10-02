@@ -107,6 +107,7 @@ mod audio_authoring;
 mod audio_idle_warmup;
 mod audio_monitoring;
 mod clip_authoring;
+mod resource_authoring;
 #[cfg(test)]
 mod test_fixture;
 pub use audio_monitoring::ActiveAudioMonitoringPathEvidence;

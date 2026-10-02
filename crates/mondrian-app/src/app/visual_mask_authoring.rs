@@ -140,6 +140,7 @@ impl AppState {
                     Some(mask_id),
                 )?;
                 ensure_track_unlocked("visual_mask_set_parameter_value", context)?;
+                let write = self.resolve_resource_parameter_write(&write)?;
                 let mutation = {
                     let sequence = self.active_sequence().ok_or_else(|| {
                         mask_action_error(

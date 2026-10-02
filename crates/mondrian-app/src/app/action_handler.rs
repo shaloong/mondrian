@@ -1953,6 +1953,7 @@ impl AppState {
         let Some(sequence_id) = self.active_sequence_id() else {
             return Err(missing_sequence_error("visual_effect_set_parameter_value"));
         };
+        let write = self.resolve_resource_parameter_write(&write)?;
         let mutation = {
             let sequence = self
                 .active_sequence()

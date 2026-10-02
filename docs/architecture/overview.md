@@ -432,3 +432,20 @@ forwards to the sole named-Sequence commit adapter. Both paths therefore honor
 the same explicit gesture command and authoring lease; an active Clip property
 mutation cannot silently bypass staging or invalidate its own gesture generation.
 Ordinary commands still commit independently when no gesture command is present.
+
+### Explicit resource path binding
+
+Core resource references provide lexical `resolve_external_path` with an explicit
+absolute owner directory. No current working directory, canonicalization or file
+creation participates. Native filename units and nonexistent targets
+are preserved using platform PathBuf join semantics. Ambiguous Windows drive-relative input fails
+without changing the reference. App Clip/Effect/Mask typed parameter writes bind
+relative input against the open Project directory before ordinary schema admission
+and author commit; absolute and non-resource edits use borrowed writes.
+
+Windows binding uses the standard PathBuf join rules for drive/share roots and
+verbatim paths, including their native dot-component normalization. It preserves
+unpaired UTF-16 filename units without UTF-8 conversion. Absolute references
+retain their exact representation. Actual long-path file reads cover backslash
+and forward-slash relative input with parent components. See
+[standard path join semantics](https://doc.rust-lang.org/std/path/struct.PathBuf.html#method.push).

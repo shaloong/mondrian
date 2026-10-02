@@ -208,7 +208,8 @@ fn prepare_clip_parameter_writes(
                 ),
             ));
         }
-        let mutation = parameters.prepare_parameter_write(write, author_time)?;
+        let write = state.resolve_resource_parameter_write(write)?;
+        let mutation = parameters.prepare_parameter_write(&write, author_time)?;
         if let Some(mutation) = mutation {
             mutations.push(mutation);
         }

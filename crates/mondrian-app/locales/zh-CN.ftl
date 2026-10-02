@@ -1374,3 +1374,6 @@ resource-owner-unavailable = 此参数当前无法编辑。
 resource-path-missing = 此路径不存在，请选择现有文件或文件夹。
 resource-path-wrong-kind = 此路径不是参数要求的文件或文件夹类型。
 resource-path-unavailable = 无法检查此路径，请确认其可用性及访问权限。
+
+resource-path-owner-required = 请先打开或保存项目，再输入相对资源路径。
+resource-path-ambiguous = 请输入完整路径或相对于项目目录的路径；驱动器相对路径无法确定位置。

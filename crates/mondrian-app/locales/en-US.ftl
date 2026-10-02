@@ -1439,3 +1439,6 @@ resource-owner-unavailable = This parameter can no longer be edited.
 resource-path-missing = This path does not exist. Choose an existing file or folder.
 resource-path-wrong-kind = This path does not have the required file or folder type.
 resource-path-unavailable = This path cannot be checked. Verify its availability and permissions.
+
+resource-path-owner-required = Open or save a project before entering a relative resource path.
+resource-path-ambiguous = Enter a full path or a path relative to the project directory; drive-relative paths are ambiguous.

@@ -587,6 +587,52 @@ pub enum ParameterResourceReference {
     Uri { uri: String },
 }
 
+/// An external path cannot be bound without an unambiguous directory owner.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ParameterResourcePathError {
+    /// Empty paths do not identify a resource.
+    #[error("external resource path is empty")]
+    EmptyPath,
+    /// Relative input requires an explicitly supplied absolute owner directory.
+    #[error("external resource path owner must be absolute")]
+    InvalidOwner,
+    /// A drive-relative path cannot be resolved using the supplied directory.
+    #[error("external resource path remains relative after owner binding")]
+    AmbiguousPath,
+}
+
+impl ParameterResourceReference {
+    /// Bind relative external input to an explicit absolute owner directory.
+    ///
+    /// This is lexical and performs no filesystem access. Native path units
+    /// and nonexistent targets are retained using platform PathBuf join semantics.
+    /// Absolute references and non-file bindings retain their exact values.
+    /// Windows drive-relative paths never consult per-drive process directories.
+    pub fn resolve_external_path(
+        &mut self,
+        owner_directory: &std::path::Path,
+    ) -> std::result::Result<(), ParameterResourcePathError> {
+        let Self::ExternalFile { path } = self else {
+            return Ok(());
+        };
+        if path.as_os_str().is_empty() {
+            return Err(ParameterResourcePathError::EmptyPath);
+        }
+        if path.is_absolute() {
+            return Ok(());
+        }
+        if !owner_directory.is_absolute() {
+            return Err(ParameterResourcePathError::InvalidOwner);
+        }
+        let resolved = owner_directory.join(&*path);
+        if !resolved.is_absolute() {
+            return Err(ParameterResourcePathError::AmbiguousPath);
+        }
+        *path = resolved;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct AnimatablePropertyUiMetadata {
     #[serde(default)]
@@ -6429,5 +6475,133 @@ mod tests {
         assert!(!first.temporal_flags.continuous);
         assert!(middle.temporal_flags.continuous);
         assert!(!last.temporal_flags.continuous);
+    }
+}
+
+#[cfg(test)]
+mod resource_path_owner_tests {
+    use super::*;
+    fn owner() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\project")
+        } else {
+            PathBuf::from("/project")
+        }
+    }
+    #[test]
+    fn relative_resource_binding_preserves_native_path_and_nonexistent_intent() {
+        let relative = PathBuf::from("missing").join("..").join("resource.cube");
+        let mut reference = ParameterResourceReference::ExternalFile { path: relative.clone() };
+        reference.resolve_external_path(&owner()).expect("explicit owner");
+        assert_eq!(
+            reference,
+            ParameterResourceReference::ExternalFile { path: owner().join(relative) }
+        );
+        let bound = reference.clone();
+        reference
+            .resolve_external_path(std::path::Path::new("invalid-owner"))
+            .expect("bound reference does not consult a new owner");
+        assert_eq!(reference, bound);
+    }
+    #[test]
+    fn invalid_resource_binding_leaves_author_intent_unchanged() {
+        for path in [PathBuf::new(), PathBuf::from("resource.cube")] {
+            let mut reference = ParameterResourceReference::ExternalFile { path };
+            let original = reference.clone();
+            assert!(reference
+                .resolve_external_path(std::path::Path::new("relative-owner"))
+                .is_err());
+            assert_eq!(reference, original);
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn relative_resource_binding_preserves_non_unicode_path_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+        let path = PathBuf::from(std::ffi::OsString::from_vec(vec![b'l', 0xff, b't']));
+        let mut reference = ParameterResourceReference::ExternalFile { path: path.clone() };
+        reference.resolve_external_path(&owner()).expect("native path binding");
+        assert_eq!(
+            reference,
+            ParameterResourceReference::ExternalFile { path: owner().join(path) }
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn long_verbatim_resource_owner_reads_the_same_real_file_with_parent_components() {
+        let root = tempfile::tempdir().expect("owned resource fixture");
+        let mut directory = root.path().to_path_buf();
+        for _ in 0..5 {
+            directory.push("long-resource-directory".repeat(3));
+        }
+        std::fs::create_dir_all(directory.join("child")).expect("long directory");
+        std::fs::write(directory.join("resource.cube"), b"owned resource").expect("resource");
+        let owner = std::fs::canonicalize(&directory).expect("native verbatim owner");
+        assert!(owner.as_os_str().len() > 260, "exercise a real long path");
+        for path in [r"child\..\resource.cube", "child/../resource.cube"] {
+            let mut reference =
+                ParameterResourceReference::ExternalFile { path: PathBuf::from(path) };
+            reference.resolve_external_path(&owner).expect("long resource binding");
+            let ParameterResourceReference::ExternalFile { path } = reference else {
+                panic!("external path");
+            };
+            assert_eq!(
+                std::fs::read(path).expect("resolved native file"),
+                b"owned resource"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn relative_resource_binding_preserves_non_unicode_windows_path() {
+        use std::os::windows::ffi::OsStringExt;
+        let path = PathBuf::from(std::ffi::OsString::from_wide(&[
+            b'l' as u16,
+            0xd800,
+            b't' as u16,
+        ]));
+        let mut reference = ParameterResourceReference::ExternalFile { path: path.clone() };
+        reference.resolve_external_path(&owner()).expect("native path binding");
+        let ParameterResourceReference::ExternalFile { path: resolved } = reference else {
+            panic!("external path");
+        };
+        assert_eq!(
+            resolved.strip_prefix(owner()).expect("explicit owner").as_os_str(),
+            path.as_os_str()
+        );
+        assert!(resolved.to_str().is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn absolute_unc_resource_retains_its_identity() {
+        let mut reference = ParameterResourceReference::ExternalFile {
+            path: PathBuf::from(r"\\server\share\resource.cube"),
+        };
+        let original = reference.clone();
+        reference.resolve_external_path(&owner()).expect("UNC resource");
+        assert_eq!(reference, original);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn drive_relative_resource_never_uses_process_drive_directories() {
+        let mut reference =
+            ParameterResourceReference::ExternalFile { path: PathBuf::from(r"D:resource.cube") };
+        let original = reference.clone();
+        assert_eq!(
+            reference.resolve_external_path(&owner()),
+            Err(ParameterResourcePathError::AmbiguousPath)
+        );
+        assert_eq!(reference, original);
+        let mut rooted =
+            ParameterResourceReference::ExternalFile { path: PathBuf::from(r"\resource.cube") };
+        rooted.resolve_external_path(&owner()).expect("explicit owner drive");
+        assert_eq!(
+            rooted,
+            ParameterResourceReference::ExternalFile { path: PathBuf::from(r"C:\resource.cube") }
+        );
     }
 }

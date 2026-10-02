@@ -3071,3 +3071,14 @@ editing revokes the inspection and re-enables explicit confirmation.
 Opening a browser also withdraws the progress message before invoking the
 native picker. Cancelling that picker retains the draft without stale progress;
 locale changes cannot resurrect the withdrawn message.
+
+### Project-owned relative resource input
+
+The Resource draft captures the Project file alongside Session/Sequence identity.
+A changed Project path invalidates the draft and pending inspection. Confirmation
+binds new relative paths against that captured Project directory using the Core
+lexical resolver, then validates the resolved reference against the provider schema.
+The supervised inspection and eventual author action use the same bound path.
+Untouched references remain no-ops; equivalent resolved references also close
+without inspection or history. Missing targets are not created. This author input
+contract does not claim a resolution base for arbitrary native plugin defaults.
