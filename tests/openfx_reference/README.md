@@ -192,3 +192,27 @@ NaN/infinity admission and preservation of outputs on failure. The Rust matrix
 reuses one resident worker and compares pixels, then exercises the compiled
 graph. Animatable Double calculus must return MissingHostFeature until a
 complete Core-backed temporal binding is implemented.
+
+
+## String values
+
+Set `MONDRIAN_OPENFX_SESSION_PROBE_MODE=strings` and run the ignored
+`string_filter_description_preserves_all_native_modes` integration test. The owned
+wrapper declares eight String controls: all six SDK modes, with both existing/new
+policies for file and directory paths. Native Render reads exact UTF-8 bytes through
+`paramGetValueAtTime` and derives a gain from their lengths, so the oracle compares
+actual Float32 output against the authored snapshot rather than a transport echo.
+
+The same worker processes defaults, Unicode/multiline/empty edits, a 64 KiB value,
+and default restoration. The plugin probes finite past/future static reads, rejected
+nonfinite times, null/oversized setters and preservation of caller output/value.
+Rejected host snapshots must leave the worker reusable. Native metadata support
+is separate from product editing: path/Label/RTF controls currently reject effect
+registration until their faithful authoring contracts are implemented.
+
+
+`strings_text` with `string_text_modes_execute_through_authored_compiled_graph`
+qualifies SingleLine/MultiLine presentation metadata and authored empty/multiline
+values through the compiled effect graph. Successful plugin writes are exercised
+in CreateInstance, before SDK change notification becomes active; invalid writes
+are exercised inside InstanceChanged without introducing recursive edits.

@@ -608,3 +608,44 @@ caller output on failure. The owned discrete probe now asks past/future fraction
 times and NaN/infinity for static Double, Boolean, Integer and Choice/StrChoice
 controls. Three real native scenarios qualify those static queries; full
 animation/temporal support still requires authoritative author-curve evaluation.
+
+
+## Native String parameters
+
+The matched native/Rust description ABI preserves all six SDK String modes,
+including the independent FilePath/DirectoryPath existence policy. Unknown modes
+or non-boolean existence flags reject admission. String values remain exact UTF-8
+(including empty values, CR/LF, tabs and RTF markup); embedded NUL is rejected.
+A single value is bounded to 64 KiB, and the combined String/StrChoice snapshot to
+1 MiB. Defaults and complete authored snapshots are validated before the plugin
+CreateInstance action or grouped change callbacks. Omitted controls reset to declared defaults.
+
+The native String instance implements bounded reads/writes and constant static
+reads at any finite time. Invalid times and oversized/null writes preserve values
+and caller outputs. Animated historical access remains a separate temporal binding.
+Resident transport owns its CStrings through each synchronous native call and
+reuses the same supervised worker across accepted edits.
+
+SingleLine and MultiLine bind to the shared author Text modes. Other String modes
+are described and executable by the native session but reject product registration
+until faithful path/output, read-only Label and rich-text authoring contracts exist.
+They must not silently become generic editable text. The owned reference wrapper
+qualifies metadata and String-dependent Float32 pixels through the real SDK suite;
+this is not a complete third-party plugin or native editor qualification.
+
+
+Every concrete native parameter instance receives the owning FilterEffectInstance
+as its SDK parameter set. `paramSetValue`/`paramSetValueAtTime` notify that owner
+after successful writes; leaving the optional base constructor argument null
+breaks the suite even when the stored value itself is valid. The external probe
+checks successful scalar, Boolean, Integer, Choice, StrChoice and String writes
+in CreateInstance, where the SDK correctly suppresses change notifications until
+creation succeeds. Vector/color instances now retain the same owner, but their
+value execution remains unimplemented and is not qualified by these tests.
+
+
+String-mode deserialization uses exact tagged object shapes, including modes
+with no payload. An empty struct wire variant enforces surplus-field rejection;
+Serde internally tagged unit variants alone do not enforce that requirement.
+The public typed modes and their canonical serialized representation remain
+simple; the strict wire seam does not introduce alternate authoring values.

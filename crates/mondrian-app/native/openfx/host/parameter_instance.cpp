@@ -27,6 +27,7 @@
 #include "effect_instance.h"
 #include "image_clip.h"
 #include "parameter_instance.h"
+#include "render.h"
 
 namespace MondrianOpenFx {
 
@@ -37,7 +38,7 @@ namespace MondrianOpenFx {
   IntegerParameter::IntegerParameter(FilterEffectInstance* effect,
                                        const std::string& name,
                                        OFX::Host::Param::Descriptor& descriptor)
-    : _effect(effect), _descriptor(descriptor), _value(descriptor.getProperties().getIntProperty(kOfxParamPropDefault)), OFX::Host::Param::IntegerInstance(descriptor)
+    : _effect(effect), _descriptor(descriptor), _value(descriptor.getProperties().getIntProperty(kOfxParamPropDefault)), OFX::Host::Param::IntegerInstance(descriptor, effect)
   {
   }
 
@@ -73,7 +74,7 @@ namespace MondrianOpenFx {
   DoubleParameter::DoubleParameter(FilterEffectInstance* effect,
                                      const std::string& name,
                                      OFX::Host::Param::Descriptor& descriptor)
-    : _effect(effect), _descriptor(descriptor), _value(descriptor.getProperties().getDoubleProperty(kOfxParamPropDefault)), OFX::Host::Param::DoubleInstance(descriptor)
+    : _effect(effect), _descriptor(descriptor), _value(descriptor.getProperties().getDoubleProperty(kOfxParamPropDefault)), OFX::Host::Param::DoubleInstance(descriptor, effect)
   {
   }
 
@@ -142,7 +143,7 @@ namespace MondrianOpenFx {
   BooleanParameter::BooleanParameter(FilterEffectInstance* effect,
                                        const std::string& name,
                                        OFX::Host::Param::Descriptor& descriptor)
-    : _effect(effect), _descriptor(descriptor), _value(descriptor.getProperties().getIntProperty(kOfxParamPropDefault) != 0), OFX::Host::Param::BooleanInstance(descriptor)
+    : _effect(effect), _descriptor(descriptor), _value(descriptor.getProperties().getIntProperty(kOfxParamPropDefault) != 0), OFX::Host::Param::BooleanInstance(descriptor, effect)
   {
   }
 
@@ -177,7 +178,7 @@ namespace MondrianOpenFx {
   ChoiceParameter::ChoiceParameter(FilterEffectInstance* effect,
                                      const std::string& name,
                                      OFX::Host::Param::Descriptor& descriptor)
-    : OFX::Host::Param::ChoiceInstance(descriptor), _effect(effect),
+    : OFX::Host::Param::ChoiceInstance(descriptor, effect), _effect(effect),
       _value(descriptor.getProperties().getIntProperty(kOfxParamPropDefault))
   {
   }
@@ -213,7 +214,7 @@ namespace MondrianOpenFx {
 
   StrChoiceParameter::StrChoiceParameter(FilterEffectInstance* effect,
       OFX::Host::Param::Descriptor& descriptor)
-    : OFX::Host::Param::StringInstance(descriptor), _effect(effect),
+    : OFX::Host::Param::StringInstance(descriptor, effect), _effect(effect),
       _value(descriptor.getProperties().getStringProperty(kOfxParamPropDefault)) {
     if (_value.empty() && getProperties().getDimension(kOfxParamPropChoiceEnum) > 0) {
       _value = getProperties().getStringProperty(kOfxParamPropChoiceEnum, 0);
@@ -249,6 +250,34 @@ namespace MondrianOpenFx {
         ? set(value) : kOfxStatErrMissingHostFeature;
   }
 
+  StringParameter::StringParameter(FilterEffectInstance* effect,
+      OFX::Host::Param::Descriptor& descriptor)
+    : OFX::Host::Param::StringInstance(descriptor, effect), _effect(effect),
+      _value(descriptor.getProperties().getStringProperty(kOfxParamPropDefault)) {}
+
+  OfxStatus StringParameter::get(std::string& value) {
+    if (_value.size() > MONDRIAN_OPENFX_MAX_STRING_BYTES) { return kOfxStatErrValue; }
+    value = _value;
+    return kOfxStatOK;
+  }
+  OfxStatus StringParameter::get(OfxTime time, std::string& value) {
+    if (!std::isfinite(time)) { return kOfxStatErrValue; }
+    return !getCanAnimate() || time == _effect->frameState().info.frame
+        ? get(value) : kOfxStatErrMissingHostFeature;
+  }
+  OfxStatus StringParameter::set(const char* value) {
+    if (!value) { return kOfxStatErrValue; }
+    size_t length = 0;
+    while (length <= MONDRIAN_OPENFX_MAX_STRING_BYTES && value[length] != '\0') { ++length; }
+    if (length > MONDRIAN_OPENFX_MAX_STRING_BYTES) { return kOfxStatErrValue; }
+    _value.assign(value, length);
+    return kOfxStatOK;
+  }
+  OfxStatus StringParameter::set(OfxTime time, const char* value) {
+    if (!std::isfinite(time)) { return kOfxStatErrValue; }
+    return time == _effect->frameState().info.frame ? set(value) : kOfxStatErrMissingHostFeature;
+  }
+
   //
   // RgbaParameter
   //
@@ -256,7 +285,7 @@ namespace MondrianOpenFx {
   RgbaParameter::RgbaParameter(FilterEffectInstance* effect,
                                  const std::string& name,
                                  OFX::Host::Param::Descriptor& descriptor)
-    : _effect(effect), _descriptor(descriptor), OFX::Host::Param::RGBAInstance(descriptor)
+    : _effect(effect), _descriptor(descriptor), OFX::Host::Param::RGBAInstance(descriptor, effect)
   {
   }
 
@@ -287,7 +316,7 @@ namespace MondrianOpenFx {
   RgbParameter::RgbParameter(FilterEffectInstance* effect,
                                const std::string& name,
                                OFX::Host::Param::Descriptor& descriptor)
-    : _effect(effect), _descriptor(descriptor), OFX::Host::Param::RGBInstance(descriptor)
+    : _effect(effect), _descriptor(descriptor), OFX::Host::Param::RGBInstance(descriptor, effect)
   {
   }
 
@@ -318,7 +347,7 @@ namespace MondrianOpenFx {
   Double2DParameter::Double2DParameter(FilterEffectInstance* effect,
                                          const std::string& name,
                                          OFX::Host::Param::Descriptor& descriptor)
-    : _effect(effect), _descriptor(descriptor), OFX::Host::Param::Double2DInstance(descriptor)
+    : _effect(effect), _descriptor(descriptor), OFX::Host::Param::Double2DInstance(descriptor, effect)
   {
   }
 
@@ -349,7 +378,7 @@ namespace MondrianOpenFx {
   Integer2DParameter::Integer2DParameter(FilterEffectInstance* effect,
                                            const std::string& name,
                                            OFX::Host::Param::Descriptor& descriptor)
-    : _effect(effect), _descriptor(descriptor), OFX::Host::Param::Integer2DInstance(descriptor)
+    : _effect(effect), _descriptor(descriptor), OFX::Host::Param::Integer2DInstance(descriptor, effect)
   {
   }
 
@@ -380,7 +409,7 @@ namespace MondrianOpenFx {
   PushbuttonParameter::PushbuttonParameter(FilterEffectInstance* effect,
                                              const std::string& name,
                                              OFX::Host::Param::Descriptor& descriptor)
-    : _effect(effect), _descriptor(descriptor), OFX::Host::Param::PushbuttonInstance(descriptor)
+    : _effect(effect), _descriptor(descriptor), OFX::Host::Param::PushbuttonInstance(descriptor, effect)
   {
   }
 

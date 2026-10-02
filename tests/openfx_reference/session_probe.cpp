@@ -109,6 +109,61 @@ bool applyDiscreteGain(const void* handle, OfxPropertySetHandle in, const char* 
   }
   return gEffectHost->clipReleaseImage(image) == kOfxStatOK && valid;
 }
+// Preserve UTF-8 bytes and SDK-owned pointer lifetimes through the actual suite.
+bool stringValues(const void* handle, OfxPropertySetHandle in, bool render) {
+  OfxParamSetHandle params = nullptr;
+  double time = 0.0;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+      gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK) { return false; }
+  const char* names[] = {"single", "multi", "existingFile", "newFile",
+    "existingDirectory", "newDirectory", "status", "rich"};
+  size_t bytes = 0;
+  const int count = mode() == "strings_text" ? 2 : 8;
+  for (int index = 0; index < count; ++index) {
+    OfxParamHandle parameter = nullptr;
+    char* value = nullptr;
+    if (gParamHost->paramGetHandle(params, names[index], &parameter, nullptr) != kOfxStatOK ||
+        gParamHost->paramGetValueAtTime(parameter, time, &value) != kOfxStatOK || !value) { return false; }
+    const std::string saved(value);
+    bytes += saved.size();
+    for (double query : {time - 3.25, time + 9.5}) {
+      if (gParamHost->paramGetValueAtTime(parameter, query, &value) != kOfxStatOK || !value || saved != value) { return false; }
+    }
+    char sentinel[] = "unchanged";
+    for (double query : {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
+      value = sentinel;
+      if (gParamHost->paramGetValueAtTime(parameter, query, &value) != kOfxStatErrValue || value != sentinel) { return false; }
+      if (!render && gParamHost->paramSetValueAtTime(parameter, query, saved.c_str()) != kOfxStatErrValue) { return false; }
+    }
+    if (!render) {
+      const std::string oversized(64 * 1024 + 1, 'x');
+      if (gParamHost->paramSetValue(parameter, static_cast<const char*>(nullptr)) != kOfxStatErrValue ||
+          gParamHost->paramSetValue(parameter, oversized.c_str()) != kOfxStatErrValue ||
+          gParamHost->paramGetValue(parameter, &value) != kOfxStatOK || !value || saved != value) { return false; }
+    }
+  }
+  if (!render) { return true; }
+  OfxImageClipHandle clip = nullptr;
+  OfxPropertySetHandle image = nullptr;
+  if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Output", &clip, nullptr) != kOfxStatOK ||
+      gEffectHost->clipGetImage(clip, time, nullptr, &image) != kOfxStatOK) { return false; }
+  void* data = nullptr;
+  int bounds[4]{}, stride = 0;
+  bool valid = gPropHost->propGetPointer(image, kOfxImagePropData, 0, &data) == kOfxStatOK && data &&
+    gPropHost->propGetIntN(image, kOfxImagePropBounds, 4, bounds) == kOfxStatOK &&
+    gPropHost->propGetInt(image, kOfxImagePropRowBytes, 0, &stride) == kOfxStatOK;
+  const float gain = 1.0f + static_cast<float>(bytes % 11) / 10.0f;
+  if (valid) {
+    for (int y = 0; y < bounds[3] - bounds[1]; ++y) {
+      auto* row = reinterpret_cast<OfxRGBAColourF*>(static_cast<char*>(data) + y * stride);
+      for (int x = 0; x < bounds[2] - bounds[0]; ++x) {
+        row[x].r *= gain; row[x].g *= gain; row[x].b *= gain; row[x].a *= gain;
+      }
+    }
+  }
+  return gEffectHost->clipReleaseImage(image) == kOfxStatOK && valid;
+}
+
 // Exercise the actual varargs suite, including interval overflow whose product
 // is still representable. Outputs must survive every rejected request.
 bool staticCalculus(const void* handle) {
@@ -264,7 +319,84 @@ OfxStatus probe(const char* action, const void* handle,
       return kOfxStatFailed;
     }
   }
+  if (selected.find("strings") == 0 && operation == kOfxActionInstanceChanged &&
+      !stringValues(handle, in, false)) { return kOfxStatFailed; }
+  // Successful plugin writes belong here: the instance is not yet created,
+  // so the SDK must not notify InstanceChanged recursively for these writes.
+  if (selected.find("strings") == 0 && operation == kOfxActionCreateInstance) {
+    OfxParamSetHandle params = nullptr;
+    if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK) { return kOfxStatFailed; }
+    for (const char* name : {"single", "multi"}) {
+      OfxParamHandle parameter = nullptr;
+      char* value = nullptr;
+      if (gParamHost->paramGetHandle(params, name, &parameter, nullptr) != kOfxStatOK ||
+          gParamHost->paramGetValue(parameter, &value) != kOfxStatOK || !value) { return kOfxStatFailed; }
+      const std::string saved(value);
+      if (gParamHost->paramSetValue(parameter, saved.c_str()) != kOfxStatOK ||
+          gParamHost->paramGetValue(parameter, &value) != kOfxStatOK || !value || saved != value) { return kOfxStatFailed; }
+    }
+  }
+  // Successful writes notify the owning parameter set even during creation.
+  if (operation == kOfxActionCreateInstance) {
+    OfxParamSetHandle params = nullptr;
+    OfxParamHandle scalar = nullptr, toggle = nullptr;
+    double scale = 0.0;
+    int enabled = 0;
+    if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+        gParamHost->paramGetHandle(params, "scale", &scalar, nullptr) != kOfxStatOK ||
+        gParamHost->paramGetHandle(params, "scaleComponents", &toggle, nullptr) != kOfxStatOK ||
+        gParamHost->paramGetValue(scalar, &scale) != kOfxStatOK ||
+        gParamHost->paramGetValue(toggle, &enabled) != kOfxStatOK ||
+        gParamHost->paramSetValue(scalar, scale) != kOfxStatOK ||
+        gParamHost->paramSetValue(toggle, enabled) != kOfxStatOK) { return kOfxStatFailed; }
+    if (selected == "choice" || selected.find("strchoice") == 0) {
+      OfxParamHandle parameter = nullptr, integer = nullptr;
+      int count = 0;
+      if (gParamHost->paramGetHandle(params, "staticCount", &integer, nullptr) != kOfxStatOK ||
+          gParamHost->paramGetValue(integer, &count) != kOfxStatOK ||
+          gParamHost->paramSetValue(integer, count) != kOfxStatOK ||
+          gParamHost->paramGetHandle(params, "mode", &parameter, nullptr) != kOfxStatOK) { return kOfxStatFailed; }
+      if (selected == "choice") {
+        int value = 0;
+        if (gParamHost->paramGetValue(parameter, &value) != kOfxStatOK ||
+            gParamHost->paramSetValue(parameter, value) != kOfxStatOK) { return kOfxStatFailed; }
+      } else {
+        char* value = nullptr;
+        if (gParamHost->paramGetValue(parameter, &value) != kOfxStatOK || !value) { return kOfxStatFailed; }
+        const std::string saved(value);
+        if (gParamHost->paramSetValue(parameter, saved.c_str()) != kOfxStatOK) { return kOfxStatFailed; }
+      }
+    }
+  }
   const OfxStatus result = pluginMain(action, handle, in, out);
+  if (selected.find("strings") == 0 && operation == kOfxImageEffectActionRender &&
+      result == kOfxStatOK && !stringValues(handle, in, true)) { return kOfxStatFailed; }
+
+  if (selected.find("strings") == 0 && result == kOfxStatOK &&
+      operation == kOfxImageEffectActionDescribeInContext) {
+    const char* names[] = {"single", "multi", "existingFile", "newFile",
+                           "existingDirectory", "newDirectory", "status", "rich"};
+    const char* modes[] = {kOfxParamStringIsSingleLine, kOfxParamStringIsMultiLine,
+      kOfxParamStringIsFilePath, kOfxParamStringIsFilePath,
+      kOfxParamStringIsDirectoryPath, kOfxParamStringIsDirectoryPath,
+      kOfxParamStringIsLabel, kOfxParamStringIsRichTextFormat};
+    const char* defaults[] = {u8"汉字🙂", u8"first\n第二行\r\nlast\tvalue",
+      u8"C:/媒体/look.cube", u8"C:/输出/new.cube", u8"C:/媒体", u8"C:/输出/new",
+      u8"Ready ✓", "{\\rtf1\\ansi hello}"};
+    OfxParamSetHandle params = nullptr;
+    if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK) { return kOfxStatFailed; }
+    const int count = selected == "strings_text" ? 2 : 8;
+    for (int index = 0; index < count; ++index) {
+      OfxPropertySetHandle props = nullptr;
+      if (gParamHost->paramDefine(params, kOfxParamTypeString, names[index], &props) != kOfxStatOK ||
+          gPropHost->propSetString(props, kOfxPropLabel, 0, names[index]) != kOfxStatOK ||
+          gPropHost->propSetString(props, kOfxParamPropStringMode, 0, modes[index]) != kOfxStatOK ||
+          gPropHost->propSetString(props, kOfxParamPropDefault, 0, defaults[index]) != kOfxStatOK ||
+          gPropHost->propSetInt(props, kOfxParamPropAnimates, 0, 0) != kOfxStatOK) { return kOfxStatFailed; }
+      if (index >= 2 && index <= 5 &&
+          gPropHost->propSetInt(props, kOfxParamPropStringFilePathExists, 0, index % 2 == 0) != kOfxStatOK) { return kOfxStatFailed; }
+    }
+  }
   if (operation == kOfxActionCreateInstance && result == kOfxStatOK) {
     actions.emplace(handle, ActionState{});
     if (selected == "instance_required") {

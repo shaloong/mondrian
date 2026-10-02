@@ -34,6 +34,39 @@
 #include "effect_instance.h"
 #include "image_clip.h"
 
+static int stringMode(const OFX::Host::Property::Set& properties) {
+  const auto& mode = properties.getStringProperty(kOfxParamPropStringMode);
+  if (mode == kOfxParamStringIsSingleLine) { return 1; }
+  if (mode == kOfxParamStringIsMultiLine) { return 2; }
+  if (mode == kOfxParamStringIsFilePath) { return 3; }
+  if (mode == kOfxParamStringIsDirectoryPath) { return 4; }
+  if (mode == kOfxParamStringIsLabel) { return 5; }
+  if (mode == kOfxParamStringIsRichTextFormat) { return 6; }
+  return 0;
+}
+
+static bool admitsParameterDefaults(const OFX::Host::ImageEffect::Descriptor& descriptor) {
+  size_t bytes = 0;
+  if (descriptor.getParamList().size() > 4096) { return false; }
+  for (const auto* parameter : descriptor.getParamList()) {
+    if (parameter->getType() != kOfxParamTypeString && parameter->getType() != kOfxParamTypeStrChoice) { continue; }
+    const auto& props = parameter->getProperties();
+    if (parameter->getType() == kOfxParamTypeString) {
+      const int mode = stringMode(props);
+      if (mode == 0) { return false; }
+      if (mode == 3 || mode == 4) {
+        const int exists = props.getIntProperty(kOfxParamPropStringFilePathExists);
+        if (exists != 0 && exists != 1) { return false; }
+      }
+    }
+    const auto& value = props.getStringProperty(kOfxParamPropDefault);
+    if (value.size() > MONDRIAN_OPENFX_MAX_STRING_BYTES || value.find('\0') != std::string::npos ||
+        value.size() > MONDRIAN_OPENFX_MAX_PARAMETER_STRING_BYTES - bytes) { return false; }
+    bytes += value.size();
+  }
+  return true;
+}
+
 static OFX::Host::ImageEffect::ImageEffectPlugin* selectFilter(
     OFX::Host::ImageEffect::PluginCache& cache,
     OFX::Host::PluginBinary& binary,
@@ -126,6 +159,7 @@ struct MondrianOpenFxSession {
           !instance->getParam(value.name)) { return 4; }
     }
     std::vector<ParameterUpdate> updates;
+    size_t stringBytes = 0;
     bool changed = clipsChanged;
     for (const auto& entry : instance->getParams()) {
       auto* parameter = entry.second;
@@ -181,9 +215,24 @@ struct MondrianOpenFxSession {
           found = found || target == properties.getStringProperty(kOfxParamPropChoiceEnum, index);
         }
         std::string current;
-        if (!found || choice->get(current) != kOfxStatOK) { return 4; }
+        if (!found || target.size() > 256 || choice->get(current) != kOfxStatOK) { return 4; }
         updates.push_back({parameter, 5, 0.0, current != target, std::move(target)});
+      } else if (type == kOfxParamTypeString) {
+        auto* text = dynamic_cast<OFX::Host::Param::StringInstance*>(parameter);
+        if (!text || (value && (value->kind != 6 || !value->string_value ||
+            value->string_length > MONDRIAN_OPENFX_MAX_STRING_BYTES))) { return 4; }
+        std::string target = value ? std::string(value->string_value, value->string_length)
+                                  : properties.getStringProperty(kOfxParamPropDefault);
+        std::string current;
+        if (target.size() > MONDRIAN_OPENFX_MAX_STRING_BYTES || target.find('\0') != std::string::npos ||
+            text->get(current) != kOfxStatOK) { return 4; }
+        updates.push_back({parameter, 6, 0.0, current != target, std::move(target)});
       } else { return 7; }
+      if (updates.back().kind == 5 || updates.back().kind == 6) {
+        const size_t bytes = updates.back().stringValue.size();
+        if (bytes > MONDRIAN_OPENFX_MAX_PARAMETER_STRING_BYTES - stringBytes) { return 4; }
+        stringBytes += bytes;
+      }
       changed = changed || updates.back().changed;
     }
     const bool bracket = notify && changed;
@@ -197,7 +246,7 @@ struct MondrianOpenFxSession {
         status = static_cast<OFX::Host::Param::IntegerInstance*>(update.parameter)->set(static_cast<int>(update.value));
       } else if (update.kind == 4) {
         status = static_cast<OFX::Host::Param::ChoiceInstance*>(update.parameter)->set(static_cast<int>(update.value));
-      } else if (update.kind == 5) {
+      } else if (update.kind == 5 || update.kind == 6) {
         status = static_cast<OFX::Host::Param::StringInstance*>(update.parameter)->set(update.stringValue.c_str());
       } else {
         status = static_cast<OFX::Host::Param::BooleanInstance*>(update.parameter)->set(update.value == 1.0);
@@ -243,7 +292,7 @@ struct MondrianOpenFxSession {
     auto* plugin = selectFilter(imageCache, *binary, identifier);
     if (!plugin) { return 3; }
     auto* descriptor = plugin->getContext(kOfxImageEffectContextFilter);
-    if (!descriptor || !admitsIndependentFrames(*descriptor)) { return 7; }
+    if (!descriptor || !admitsIndependentFrames(*descriptor) || !admitsParameterDefaults(*descriptor)) { return 7; }
     instance.reset(plugin->createInstance(kOfxImageEffectContextFilter, &frame));
     if (!instance) { return 4; }
     const int applied = applyParameters(parameters, count, false, kOfxChangeUserEdited, false);
@@ -324,7 +373,7 @@ static int describe(const char* binary, const char* bundle,
   auto* plugin = selectFilter(imageEffectPluginCache, selectedBinary, identifier);
   if (!plugin) { return 3; }
   auto* descriptor = plugin->getContext(kOfxImageEffectContextFilter);
-  if (!descriptor || !admitsIndependentFrames(*descriptor)) { return 7; }
+  if (!descriptor || !admitsIndependentFrames(*descriptor) || !admitsParameterDefaults(*descriptor)) { return 7; }
   const std::string& displayName = descriptor->getLabel();
   if (displayName.size() > labelCapacity) { return 7; }
   std::memcpy(label, displayName.data(), displayName.size());
@@ -344,6 +393,7 @@ static int describe(const char* binary, const char* bundle,
         type == kOfxParamTypePushButton) { continue; }
     if (++count > 4096) { return 7; }
     MondrianOpenFxParameterInfo info{};
+    info.string_file_path_exists = -1;
     std::vector<MondrianOpenFxChoiceOption> choices;
     // All borrowed description storage must outlive the callback below.
     std::string stringDefault;
@@ -396,6 +446,20 @@ static int describe(const char* binary, const char* bundle,
       info.maximum = 1.0;
       info.display_minimum = 0.0;
       info.display_maximum = 1.0;
+    } else if (type == kOfxParamTypeString) {
+      info.kind = 6;
+      info.double_type = -1;
+      info.string_mode = stringMode(properties);
+      if (info.string_mode == 0) { return 7; }
+      if (info.string_mode == 3 || info.string_mode == 4) {
+        info.string_file_path_exists = properties.getIntProperty(kOfxParamPropStringFilePathExists);
+        if (info.string_file_path_exists != 0 && info.string_file_path_exists != 1) { return 7; }
+      }
+      stringDefault = properties.getStringProperty(kOfxParamPropDefault);
+      if (stringDefault.size() > MONDRIAN_OPENFX_MAX_STRING_BYTES ||
+          stringDefault.find('\0') != std::string::npos) { return 7; }
+      info.string_default = stringDefault.data();
+      info.string_default_length = stringDefault.size();
     } else if (type == kOfxParamTypeChoice || type == kOfxParamTypeStrChoice) {
       const bool stringChoice = type == kOfxParamTypeStrChoice;
       info.kind = stringChoice ? 5 : 4;

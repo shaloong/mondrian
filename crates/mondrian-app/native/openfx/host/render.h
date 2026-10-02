@@ -8,9 +8,14 @@
 extern "C" {
 #endif
 
+enum {
+  MONDRIAN_OPENFX_MAX_STRING_BYTES = 64 * 1024,
+  MONDRIAN_OPENFX_MAX_PARAMETER_STRING_BYTES = 1024 * 1024
+};
+
 struct MondrianOpenFxParameter {
   const char* name;
-  int kind; // 1: double, 2: boolean, 3: integer, 4: choice, 5: string choice
+  int kind; // 1: double, 2: boolean, 3: integer, 4: choice, 5: string choice, 6: string
   double value;
   const char* string_value;
   size_t string_length;
@@ -42,7 +47,7 @@ struct MondrianOpenFxParameterInfo {
   size_t label_length;
   const char* hint;
   size_t hint_length;
-  int kind; // 1: double, 2: boolean, 3: integer, 4: choice, 5: string choice
+  int kind; // 1: double, 2: boolean, 3: integer, 4: choice, 5: string choice, 6: string
   int preferred_interpolation; // 0: hold, 1: linear, 2: smooth
   int double_type; // 0: plain, 1: scale, -1: not a Double
   double default_value;
@@ -57,6 +62,8 @@ struct MondrianOpenFxParameterInfo {
   size_t choice_count;
   const char* string_default;
   size_t string_default_length;
+  int string_mode; // 0: other kind; 1: single, 2: multi, 3: file, 4: directory, 5: label, 6: RTF
+  int string_file_path_exists; // 0/1 for file/directory; -1 otherwise
 };
 
 typedef int (*MondrianOpenFxParameterCallback)(

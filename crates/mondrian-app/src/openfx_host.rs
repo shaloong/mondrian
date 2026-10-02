@@ -30,6 +30,9 @@ const MAX_PARAMETERS: usize = 4096;
 const DEADLINE: Duration = Duration::from_secs(30);
 const MAX_WORKER_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 const MAX_WORKER_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+/// Maximum UTF-8 bytes in one native String value, excluding its terminating NUL.
+pub const OPENFX_MAX_STRING_BYTES: usize = 64 * 1024;
+const MAX_PARAMETER_STRING_BYTES: usize = MAX_WORKER_REQUEST_BYTES / 2;
 
 /// An OFX parameter value supported by the current CPU filter host.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -45,6 +48,60 @@ pub enum OpenFxParameterValue {
     Choice(i32),
     /// Stable OFX StrChoice enum string, independent of labels and UI order.
     StrChoice(String),
+    /// Exact UTF-8 contents of an OFX String control, including empty values.
+    String(String),
+}
+
+/// Native presentation and path intent declared by the SDK String descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", from = "OpenFxStringModeWire")]
+pub enum OpenFxStringMode {
+    /// An editable single-line value.
+    SingleLine,
+    /// An editable multiline value.
+    MultiLine,
+    /// A file path, which may name an existing input or a new destination.
+    FilePath {
+        /// Whether the SDK requires the selected file to exist.
+        must_exist: bool,
+    },
+    /// A directory path, which may name an existing or new directory.
+    DirectoryPath {
+        /// Whether the SDK requires the selected directory to exist.
+        must_exist: bool,
+    },
+    /// A label that the plugin may update but the user must not edit.
+    Label,
+    /// An SDK rich-text value whose markup must be preserved.
+    RichTextFormat,
+}
+
+// Empty struct variants make internally tagged modes reject surplus fields;
+// Serde's unit variants otherwise accept them even with deny_unknown_fields.
+#[derive(Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+enum OpenFxStringModeWire {
+    SingleLine {},
+    MultiLine {},
+    FilePath { must_exist: bool },
+    DirectoryPath { must_exist: bool },
+    Label {},
+    RichTextFormat {},
+}
+
+impl From<OpenFxStringModeWire> for OpenFxStringMode {
+    fn from(mode: OpenFxStringModeWire) -> Self {
+        match mode {
+            OpenFxStringModeWire::SingleLine {} => Self::SingleLine,
+            OpenFxStringModeWire::MultiLine {} => Self::MultiLine,
+            OpenFxStringModeWire::FilePath { must_exist } => Self::FilePath { must_exist },
+            OpenFxStringModeWire::DirectoryPath { must_exist } => {
+                Self::DirectoryPath { must_exist }
+            }
+            OpenFxStringModeWire::Label {} => Self::Label,
+            OpenFxStringModeWire::RichTextFormat {} => Self::RichTextFormat,
+        }
+    }
 }
 
 /// Admitted interpretation of an OpenFX Double control.
@@ -85,6 +142,8 @@ pub struct OpenFxParameterDescription {
     pub preferred_interpolation: mondrian_core::automation::ParameterInterpolation,
     /// Semantic kind of a Double control.
     pub double_type: Option<OpenFxDoubleType>,
+    /// Required for String parameters and absent for every other kind.
+    pub string_mode: Option<OpenFxStringMode>,
     /// Lowest accepted numeric value, when this is a numeric parameter.
     pub minimum: Option<f64>,
     /// Highest accepted numeric value, when this is a numeric parameter.
@@ -243,6 +302,8 @@ struct NativeParameterInfo {
     choice_count: usize,
     string_default: *const c_char,
     string_default_length: usize,
+    string_mode: c_int,
+    string_file_path_exists: c_int,
 }
 
 #[derive(Default)]
@@ -655,12 +716,48 @@ unsafe fn decode_native_parameter(
             None,
             None,
         ),
+        6 if raw.double_type == -1 => (
+            // SAFETY: The matched host borrows this bounded default for the callback.
+            OpenFxParameterValue::String(unsafe {
+                copy_native_text(
+                    raw.string_default,
+                    raw.string_default_length,
+                    OPENFX_MAX_STRING_BYTES,
+                )?
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
         _ => return Err("unsupported OpenFX parameter kind or default".to_owned()),
     };
     let flag = |value| match value {
         0 => Ok(false),
         1 => Ok(true),
         _ => Err("invalid OpenFX parameter flag".to_owned()),
+    };
+    let string_mode = if raw.kind == 6 {
+        Some(match raw.string_mode {
+            1 if raw.string_file_path_exists == -1 => OpenFxStringMode::SingleLine,
+            2 if raw.string_file_path_exists == -1 => OpenFxStringMode::MultiLine,
+            3 => OpenFxStringMode::FilePath { must_exist: flag(raw.string_file_path_exists)? },
+            4 => OpenFxStringMode::DirectoryPath { must_exist: flag(raw.string_file_path_exists)? },
+            5 if raw.string_file_path_exists == -1 => OpenFxStringMode::Label,
+            6 if raw.string_file_path_exists == -1 => OpenFxStringMode::RichTextFormat,
+            _ => {
+                return Err(format!(
+                    "invalid OpenFX String metadata for `{name}`: mode {}, path flag {}",
+                    raw.string_mode, raw.string_file_path_exists
+                ))
+            }
+        })
+    } else {
+        if raw.string_mode != 0 || raw.string_file_path_exists != -1 {
+            return Err("non-String parameter has String metadata".to_owned());
+        }
+        None
     };
     Ok(OpenFxParameterDescription {
         name: name.clone(),
@@ -675,6 +772,7 @@ unsafe fn decode_native_parameter(
             _ => return Err("invalid OpenFX preferred interpolation".to_owned()),
         },
         double_type,
+        string_mode,
         minimum,
         maximum,
         display_minimum,
@@ -797,6 +895,7 @@ fn validate_parameters(
     if parameters.len() > MAX_PARAMETERS {
         return Err(invalid("too many OpenFX parameters"));
     }
+    let mut string_bytes = 0;
     for (name, value) in parameters {
         if name.is_empty()
             || name.len() > 256
@@ -818,6 +917,20 @@ fn validate_parameters(
             && *value < 0
         {
             return Err(invalid("OpenFX Choice index must be nonnegative"));
+        }
+        if let OpenFxParameterValue::String(value) = value
+            && (value.len() > OPENFX_MAX_STRING_BYTES || value.contains('\0'))
+        {
+            return Err(invalid("OpenFX String is oversized or contains NUL"));
+        }
+        if let OpenFxParameterValue::String(value) | OpenFxParameterValue::StrChoice(value) = value
+        {
+            string_bytes += value.len();
+            if string_bytes > MAX_PARAMETER_STRING_BYTES {
+                return Err(invalid(
+                    "OpenFX parameter strings exceed the snapshot budget",
+                ));
+            }
         }
     }
     Ok(())
@@ -868,6 +981,13 @@ fn validate_description(
         return Err(invalid("OpenFX filter display name is invalid"));
     }
     let mut names = std::collections::BTreeSet::new();
+    validate_parameters(
+        &description
+            .parameters
+            .iter()
+            .map(|parameter| (parameter.name.clone(), parameter.default_value.clone()))
+            .collect(),
+    )?;
     for parameter in &description.parameters {
         let name = &parameter.name;
         if name.is_empty()
@@ -893,6 +1013,13 @@ fn validate_description(
         ) && !parameter.choices.is_empty()
         {
             return Err(invalid("non-Choice parameter has choices"));
+        }
+        if matches!(parameter.default_value, OpenFxParameterValue::String(_))
+            != parameter.string_mode.is_some()
+        {
+            return Err(invalid(
+                "OpenFX String metadata does not match its parameter kind",
+            ));
         }
         match &parameter.default_value {
             OpenFxParameterValue::Choice(_) | OpenFxParameterValue::StrChoice(_) => {
@@ -933,7 +1060,7 @@ fn validate_description(
                     ));
                 }
             }
-            OpenFxParameterValue::Boolean(_) => {
+            OpenFxParameterValue::Boolean(_) | OpenFxParameterValue::String(_) => {
                 if parameter.preferred_interpolation
                     != mondrian_core::automation::ParameterInterpolation::Hold
                     || parameter.double_type.is_some()
@@ -942,7 +1069,9 @@ fn validate_description(
                     || parameter.display_minimum.is_some()
                     || parameter.display_maximum.is_some()
                 {
-                    return Err(invalid("OpenFX Boolean parameter has numeric bounds"));
+                    return Err(invalid(
+                        "OpenFX discrete parameter has invalid interpolation or numeric bounds",
+                    ));
                 }
             }
             OpenFxParameterValue::Integer(value) => {
@@ -1067,6 +1196,7 @@ mod shared_frame_tests {
                 choices: Vec::new(),
                 preferred_interpolation: mondrian_core::automation::ParameterInterpolation::Linear,
                 double_type: None,
+                string_mode: None,
                 minimum: Some(0.0),
                 maximum: Some(9.0),
                 display_minimum: Some(0.0),
@@ -1113,6 +1243,7 @@ mod shared_frame_tests {
                 ],
                 preferred_interpolation: mondrian_core::automation::ParameterInterpolation::Hold,
                 double_type: None,
+                string_mode: None,
                 minimum: None,
                 maximum: None,
                 display_minimum: None,
@@ -1122,6 +1253,74 @@ mod shared_frame_tests {
                 enabled: true,
             }],
         }
+    }
+
+    #[test]
+    fn string_descriptor_requires_exact_metadata_and_bounded_utf8_snapshots() {
+        let mut valid = choice_description_fixture();
+        let parameter = &mut valid.parameters[0];
+        parameter.choices.clear();
+        parameter.default_value = OpenFxParameterValue::String("汉字🙂\r\n\t".into());
+        for mode in [
+            OpenFxStringMode::SingleLine,
+            OpenFxStringMode::MultiLine,
+            OpenFxStringMode::FilePath { must_exist: true },
+            OpenFxStringMode::FilePath { must_exist: false },
+            OpenFxStringMode::DirectoryPath { must_exist: true },
+            OpenFxStringMode::DirectoryPath { must_exist: false },
+            OpenFxStringMode::Label,
+            OpenFxStringMode::RichTextFormat,
+        ] {
+            valid.parameters[0].string_mode = Some(mode);
+            assert!(validate_description(&valid, "test.choice").is_ok());
+            let json = serde_json::to_vec(&valid).expect("serialize String");
+            assert_eq!(
+                serde_json::from_slice::<OpenFxFilterDescription>(&json).expect("String metadata"),
+                valid
+            );
+        }
+        for scenario in 0..6 {
+            let mut invalid = valid.clone();
+            let parameter = &mut invalid.parameters[0];
+            match scenario {
+                0 => parameter.string_mode = None,
+                1 => parameter.minimum = Some(0.0),
+                2 => parameter.double_type = Some(OpenFxDoubleType::Plain),
+                3 => parameter.default_value = OpenFxParameterValue::String("a\0b".into()),
+                4 => {
+                    parameter.default_value =
+                        OpenFxParameterValue::String("x".repeat(OPENFX_MAX_STRING_BYTES + 1))
+                }
+                _ => {
+                    parameter.preferred_interpolation =
+                        mondrian_core::automation::ParameterInterpolation::Linear
+                }
+            }
+            assert!(
+                validate_description(&invalid, "test.choice").is_err(),
+                "scenario {scenario}"
+            );
+        }
+        for json in [
+            r#"{"mode":"file_path"}"#,
+            r#"{"mode":"single_line","must_exist":true}"#,
+            r#"{"mode":"unknown"}"#,
+            r#"{"mode":"directory_path","must_exist":1}"#,
+        ] {
+            assert!(serde_json::from_str::<OpenFxStringMode>(json).is_err());
+        }
+        let mut values = BTreeMap::new();
+        for index in 0..16 {
+            values.insert(
+                format!("string{index}"),
+                OpenFxParameterValue::String("x".repeat(OPENFX_MAX_STRING_BYTES)),
+            );
+        }
+        assert!(validate_parameters(&values).is_ok());
+        values.insert("extra".into(), OpenFxParameterValue::String("x".into()));
+        assert!(validate_parameters(&values).is_err());
+        valid.parameters[0].default_value = OpenFxParameterValue::Boolean(false);
+        assert!(validate_description(&valid, "test.choice").is_err());
     }
 
     #[test]

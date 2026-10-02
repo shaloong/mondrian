@@ -608,10 +608,12 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
                     .map(|(name, value)| {
                         let name = CString::new(name.as_str())
                             .map_err(|_| invalid("parameter name contains null"))?;
-                        let text = if let OpenFxParameterValue::StrChoice(key) = value {
+                        let text = if let OpenFxParameterValue::StrChoice(key)
+                        | OpenFxParameterValue::String(key) = value
+                        {
                             Some(
                                 CString::new(key.as_str())
-                                    .map_err(|_| invalid("StrChoice key contains null"))?,
+                                    .map_err(|_| invalid("parameter string contains null"))?,
                             )
                         } else {
                             None
@@ -629,6 +631,7 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
                             OpenFxParameterValue::Integer(value) => (3, f64::from(*value)),
                             OpenFxParameterValue::Choice(value) => (4, f64::from(*value)),
                             OpenFxParameterValue::StrChoice(_) => (5, 0.0),
+                            OpenFxParameterValue::String(_) => (6, 0.0),
                         };
                         NativeParameter {
                             name: name.as_ptr(),

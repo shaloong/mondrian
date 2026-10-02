@@ -7,7 +7,8 @@ use mondrian_app::openfx_adapter::inspect_openfx_binary;
 use mondrian_app::openfx_effect::register_selected_openfx_filter;
 use mondrian_app::openfx_host::{
     describe_openfx_filter, render_openfx_filter_frame, OpenFxDoubleType, OpenFxFilterSession,
-    OpenFxFloatFrame, OpenFxHostError, OpenFxParameterValue, OpenFxRenderTiming,
+    OpenFxFloatFrame, OpenFxHostError, OpenFxParameterValue, OpenFxRenderTiming, OpenFxStringMode,
+    OPENFX_MAX_STRING_BYTES,
 };
 use mondrian_core::automation::PropertyValue;
 use mondrian_core::{
@@ -20,6 +21,197 @@ use mondrian_effects::{
 
 fn product_executable() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_mondrian"))
+}
+
+#[test]
+#[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and probe mode strings"]
+fn string_filter_description_preserves_all_native_modes() {
+    let binary =
+        PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));
+    let inspection =
+        inspect_openfx_binary(product_executable(), &binary).expect("inspect String probe");
+    let description = describe_openfx_filter(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+    )
+    .expect("describe all SDK String modes");
+    let modes = [
+        ("single", OpenFxStringMode::SingleLine),
+        ("multi", OpenFxStringMode::MultiLine),
+        (
+            "existingFile",
+            OpenFxStringMode::FilePath { must_exist: true },
+        ),
+        ("newFile", OpenFxStringMode::FilePath { must_exist: false }),
+        (
+            "existingDirectory",
+            OpenFxStringMode::DirectoryPath { must_exist: true },
+        ),
+        (
+            "newDirectory",
+            OpenFxStringMode::DirectoryPath { must_exist: false },
+        ),
+        ("status", OpenFxStringMode::Label),
+        ("rich", OpenFxStringMode::RichTextFormat),
+    ];
+    let mut defaults = BTreeMap::new();
+    for (name, mode) in modes {
+        let parameter = description.parameters.iter().find(|p| p.name == name).expect("String");
+        assert_eq!(parameter.string_mode, Some(mode));
+        assert!(!parameter.can_animate);
+        let OpenFxParameterValue::String(value) = &parameter.default_value else {
+            panic!("String type");
+        };
+        defaults.insert(name.to_owned(), value.clone());
+    }
+    assert_eq!(defaults["single"], "汉字🙂");
+    assert_eq!(defaults["multi"], "first\n第二行\r\nlast\tvalue");
+    let input = OpenFxFloatFrame {
+        width: 2,
+        height: 2,
+        pixels: vec![[0.1, 0.2, 0.3, 0.05]; 4],
+    };
+    let timing = OpenFxRenderTiming {
+        frame: 1.0,
+        frame_rate: 24.0,
+        first_frame: 0.0,
+        last_frame: 10.0,
+        pixel_aspect_ratio: 1.0,
+    };
+    let mut session = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+        2,
+        2,
+        &mut || Ok(()),
+    )
+    .expect("String worker");
+    let worker = session.worker_process_id();
+    let authored: BTreeMap<String, OpenFxParameterValue> = BTreeMap::from([
+        ("single".into(), OpenFxParameterValue::String("".into())),
+        (
+            "multi".into(),
+            OpenFxParameterValue::String("行一\r\n🙂\t行二".into()),
+        ),
+        (
+            "newFile".into(),
+            OpenFxParameterValue::String("Z:/不存在/新文件.cube".into()),
+        ),
+        (
+            "newDirectory".into(),
+            OpenFxParameterValue::String("Z:/不存在/新目录".into()),
+        ),
+        (
+            "status".into(),
+            OpenFxParameterValue::String("完成 ✓".into()),
+        ),
+        (
+            "rich".into(),
+            OpenFxParameterValue::String("{\\rtf1\\ansi changed}".into()),
+        ),
+    ]);
+    let boundary = BTreeMap::from([(
+        "single".into(),
+        OpenFxParameterValue::String("x".repeat(OPENFX_MAX_STRING_BYTES)),
+    )]);
+    for values in [&BTreeMap::new(), &authored, &boundary, &BTreeMap::new()] {
+        let output =
+            session.render(&timing, values, &input, &mut || Ok(())).expect("String render");
+        assert_eq!(session.worker_process_id(), worker);
+        let bytes: usize = defaults
+            .iter()
+            .map(|(name, default)| match values.get(name) {
+                Some(OpenFxParameterValue::String(value)) => value.len(),
+                _ => default.len(),
+            })
+            .sum();
+        let gain = 1.0 + (bytes % 11) as f32 / 10.0;
+        for (actual, original) in output.pixels.iter().zip(&input.pixels) {
+            for channel in 0..4 {
+                assert!((actual[channel] - original[channel] * gain).abs() < 1e-6);
+            }
+        }
+    }
+    for invalid in ["a\0b".to_owned(), "x".repeat(OPENFX_MAX_STRING_BYTES + 1)] {
+        let values = BTreeMap::from([("single".into(), OpenFxParameterValue::String(invalid))]);
+        assert!(session.render(&timing, &values, &input, &mut || Ok(())).is_err());
+        assert_eq!(session.worker_process_id(), worker);
+    }
+    session
+        .render(&timing, &authored, &input, &mut || Ok(()))
+        .expect("invalid snapshot leaves worker reusable");
+    // Native metadata admission cannot fabricate a faithful path/Label/RTF editor.
+    assert!(register_selected_openfx_filter(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin"
+    )
+    .is_err());
+}
+
+#[test]
+#[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and probe mode strings_text"]
+fn string_text_modes_execute_through_authored_compiled_graph() {
+    use mondrian_core::ParameterTextMode;
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
+        "strings_text"
+    );
+    let binary =
+        PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));
+    let inspection = inspect_openfx_binary(product_executable(), &binary).expect("inspect");
+    let kind = register_selected_openfx_filter(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+    )
+    .expect("register textual modes");
+    let mut effect = instantiate_effect_node(kind).expect("author instance");
+    let values = [
+        ("single", ParameterTextMode::SingleLine, ""),
+        ("multi", ParameterTextMode::MultiLine, "行一\r\n🙂\t行二"),
+    ];
+    for (name, mode, value) in values {
+        let descriptor = &effect
+            .properties
+            .iter()
+            .find(|(_, p)| p.descriptor.display_name == name)
+            .expect("String property")
+            .1
+            .descriptor;
+        assert_eq!(descriptor.schema.text_mode, Some(mode));
+        let id = descriptor.parameter_id().clone();
+        effect
+            .set_static_value_by_parameter(&id, PropertyValue::Text(value.into()))
+            .expect("author String");
+    }
+    let range = TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::new(10, 24).expect("end"))
+        .expect("range");
+    let context = EffectFrameContext::new(Rational::FPS_24, SampleAspectRatio::SQUARE, range)
+        .expect("context");
+    let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+        &[effect],
+        &[],
+        &[],
+        &[],
+        WorkingColorSpace::LinearRec709,
+        context,
+        &LutPreparationCache::uncached(),
+    )
+    .expect("compile");
+    let graph = program.evaluate(TimelineTime::new(1, 24).expect("frame")).expect("evaluate");
+    let input = vec![[0.1, 0.2, 0.3, 0.05]; 4];
+    let pixels =
+        apply_compiled_effect_graph_rgba_f32(&input, 2, 2, &graph, 1192).expect("native graph");
+    let gain =
+        1.0 + (values.iter().map(|(_, _, value)| value.len()).sum::<usize>() % 11) as f32 / 10.0;
+    for (actual, original) in pixels.iter().zip(&input) {
+        for channel in 0..4 {
+            assert!((actual[channel] - original[channel] * gain).abs() < 1e-6);
+        }
+    }
 }
 
 #[test]

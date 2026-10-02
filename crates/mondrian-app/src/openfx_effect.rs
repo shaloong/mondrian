@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 use crate::openfx_adapter::OpenFxBinaryInspection;
 use crate::openfx_host::{
     describe_openfx_filter, OpenFxDoubleType, OpenFxFilterDescription, OpenFxFilterSession,
-    OpenFxFloatFrame, OpenFxHostError, OpenFxParameterValue, OpenFxRenderTiming,
+    OpenFxFloatFrame, OpenFxHostError, OpenFxParameterValue, OpenFxRenderTiming, OpenFxStringMode,
 };
 
 /// A selected Filter cannot be represented by the admitted visual effect contract.
@@ -204,6 +204,17 @@ fn build_definition(
     let mut properties = PropertyBag::default();
     let mut bound = Vec::with_capacity(description.parameters.len());
     for (index, parameter) in description.parameters.iter().enumerate() {
+        if matches!(parameter.default_value, OpenFxParameterValue::String(_))
+            && !matches!(
+                parameter.string_mode,
+                Some(OpenFxStringMode::SingleLine | OpenFxStringMode::MultiLine)
+            )
+        {
+            return Err(OpenFxEffectRegistrationError::Schema(format!(
+                "parameter `{}` requires a path, read-only label or rich-text authoring contract",
+                parameter.name,
+            )));
+        }
         let editable = !parameter.secret && parameter.enabled;
         let parameter_id = if editable {
             let mut identity = description.identifier.as_bytes().to_vec();
@@ -218,11 +229,23 @@ fn build_definition(
                 OpenFxParameterValue::Integer(value) => PropertyValue::Int(i64::from(value)),
                 OpenFxParameterValue::Choice(value) => PropertyValue::Enum(value.to_string()),
                 OpenFxParameterValue::StrChoice(key) => PropertyValue::Enum(key),
+                OpenFxParameterValue::String(text) => PropertyValue::Text(text),
             };
             let mut descriptor = PropertyDescriptor::try_new(path, &parameter.label, default_value)
                 .map_err(|error| OpenFxEffectRegistrationError::Schema(error.to_string()))?
                 .with_parameter_id(parameter_id.clone())
                 .with_animatable(parameter.can_animate);
+            if let Some(mode) = parameter.string_mode {
+                descriptor = descriptor.with_text_mode(match mode {
+                    OpenFxStringMode::SingleLine => mondrian_core::ParameterTextMode::SingleLine,
+                    OpenFxStringMode::MultiLine => mondrian_core::ParameterTextMode::MultiLine,
+                    _ => {
+                        return Err(OpenFxEffectRegistrationError::Schema(
+                            "unsupported String authoring contract".to_owned(),
+                        ))
+                    }
+                });
+            }
             if matches!(
                 parameter.default_value,
                 OpenFxParameterValue::Choice(_) | OpenFxParameterValue::StrChoice(_)
@@ -378,6 +401,14 @@ fn build_definition(
                                 ) =>
                             {
                                 OpenFxParameterValue::StrChoice(key)
+                            }
+                            Some(PropertyValue::Text(text))
+                                if matches!(
+                                    parameter.default_value,
+                                    OpenFxParameterValue::String(_)
+                                ) =>
+                            {
+                                OpenFxParameterValue::String(text)
                             }
                             Some(PropertyValue::Bool(value)) => {
                                 OpenFxParameterValue::Boolean(value)
@@ -540,6 +571,7 @@ mod tests {
                     preferred_interpolation:
                         mondrian_core::automation::ParameterInterpolation::Linear,
                     double_type: Some(OpenFxDoubleType::Scale),
+                    string_mode: None,
                     minimum: Some(0.0),
                     maximum: Some(2.0),
                     display_minimum: Some(0.0),
@@ -557,6 +589,7 @@ mod tests {
                     preferred_interpolation:
                         mondrian_core::automation::ParameterInterpolation::Hold,
                     double_type: None,
+                    string_mode: None,
                     minimum: None,
                     maximum: None,
                     display_minimum: None,

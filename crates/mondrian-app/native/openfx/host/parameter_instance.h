@@ -78,6 +78,17 @@ namespace MondrianOpenFx {
     OfxStatus set(OfxTime time, const char*) override;
   };
 
+  class StringParameter : public OFX::Host::Param::StringInstance {
+    FilterEffectInstance* _effect;
+    std::string _value;
+  public:
+    StringParameter(FilterEffectInstance* effect, OFX::Host::Param::Descriptor& descriptor);
+    OfxStatus get(std::string&) override;
+    OfxStatus get(OfxTime time, std::string&) override;
+    OfxStatus set(const char*) override;
+    OfxStatus set(OfxTime time, const char*) override;
+  };
+
   class RgbaParameter : public OFX::Host::Param::RGBAInstance {
   protected:
     FilterEffectInstance*   _effect;

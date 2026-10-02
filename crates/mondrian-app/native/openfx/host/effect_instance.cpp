@@ -143,6 +143,8 @@ namespace MondrianOpenFx {
       return new ChoiceParameter(this,name,descriptor);
     else if(descriptor.getType()==kOfxParamTypeStrChoice)
       return new StrChoiceParameter(this,descriptor);
+    else if(descriptor.getType()==kOfxParamTypeString)
+      return new StringParameter(this,descriptor);
     else if(descriptor.getType()==kOfxParamTypeRGBA)
       return new RgbaParameter(this,name,descriptor);
     else if(descriptor.getType()==kOfxParamTypeRGB)
