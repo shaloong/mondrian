@@ -361,7 +361,7 @@ impl GpuProgramScopesRuntime {
             });
             pass.set_pipeline(&pipelines.reduce_histogram_pipeline);
             pass.set_bind_group(0, &aggregate_bind_group, &[]);
-            pass.dispatch_workgroups(request.bins.div_ceil(WORKGROUP_SIZE), 1, 1);
+            pass.dispatch_workgroups(request.bins, request.waveform_channels(), 1);
         }
 
         {
@@ -1066,31 +1066,36 @@ fn aggregate(gid: vec3<u32>, rgb_waveform: bool) {
     if luma_high != 0u { atomicAdd(&counts[7u], luma_high); }
 }
 
-@compute @workgroup_size(16, 16, 1)
-fn reduce_histogram(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let bin = gid.x;
-    let channel = gid.y;
+// Disjoint column partials retain exact integer sums, with no extra buffer.
+var<workgroup> histogram_partials: array<u32, 64>;
+
+@compute @workgroup_size(64, 1, 1)
+fn reduce_histogram(
+    @builtin(workgroup_id) group_id: vec3<u32>,
+    @builtin(local_invocation_index) local_index: u32,
+) {
+    let bin = group_id.x;
+    let channel = select(3u, group_id.y, uniforms.waveform_channels == 3u);
     if bin >= uniforms.bins || channel >= 4u {
         return;
     }
-    var sum = 0u;
     let plane = uniforms.waveform_width * uniforms.bins;
-    if uniforms.waveform_channels == 3u {
-        if channel >= 3u {
-            return;
-        }
-        for (var x = 0u; x < uniforms.waveform_width; x += 1u) {
-            sum += atomicLoad(&counts[uniforms.waveform_offset + channel * plane + x * uniforms.bins + bin]);
-        }
-    } else {
-        if channel != 3u {
-            return;
-        }
-        for (var x = 0u; x < uniforms.waveform_width; x += 1u) {
-            sum += atomicLoad(&counts[uniforms.waveform_offset + x * uniforms.bins + bin]);
-        }
+    let waveform_channel = select(0u, channel, uniforms.waveform_channels == 3u);
+    var sum = 0u;
+    for (var x = local_index; x < uniforms.waveform_width; x += 64u) {
+        sum += atomicLoad(&counts[uniforms.waveform_offset + waveform_channel * plane + x * uniforms.bins + bin]);
     }
-    atomicStore(&counts[uniforms.histogram_offset + channel * uniforms.bins + bin], sum);
+    histogram_partials[local_index] = sum;
+    workgroupBarrier();
+    for (var stride = 32u; stride != 0u; stride /= 2u) {
+        if local_index < stride {
+            histogram_partials[local_index] += histogram_partials[local_index + stride];
+        }
+        workgroupBarrier();
+    }
+    if local_index == 0u {
+        atomicStore(&counts[uniforms.histogram_offset + channel * uniforms.bins + bin], histogram_partials[0u]);
+    }
 }
 
 @compute @workgroup_size(16, 16, 1)
