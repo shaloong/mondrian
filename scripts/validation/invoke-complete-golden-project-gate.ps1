@@ -239,6 +239,29 @@ try {
         throw "Golden reference validation failed with exit code $LASTEXITCODE."
     }
 
+    $failurePhase = "required-fixture-preflight"
+    $assetEvidence = Get-Content -LiteralPath $assetReportPath -Raw | ConvertFrom-Json
+    $missingFixtures = @()
+    foreach ($role in @($contract.required_fixture_roles | Where-Object { $_.required })) {
+        if ([string]::IsNullOrWhiteSpace($role.fixture_id)) {
+            throw "Required Golden fixture role is unresolved: $($role.role)"
+        }
+        $entries = @($assetEvidence.assets | Where-Object { $_.fixture_id -eq $role.fixture_id })
+        if ($entries.Count -ne 1) {
+            throw "Required Golden fixture role must resolve to one validated asset: $($role.role)"
+        }
+        # Reuse the All-scope validator's path, presence and attestation evidence.
+        # Golden requires these assets even when the generic Pr tier does not.
+        if (-not $entries[0].present) {
+            $missingFixtures += "$($role.fixture_id): $($entries[0].path)"
+        } elseif ($entries[0].availability -eq "generated" -and -not $entries[0].attested) {
+            throw "Required Golden fixture has no validated generation attestation: $($role.fixture_id)"
+        }
+    }
+    if ($missingFixtures.Count -gt 0) {
+        throw "Required Golden fixtures are absent; generate their corpus recipes: $($missingFixtures -join '; ')"
+    }
+
     $failurePhase = "validation-binary-build"
     [Environment]::SetEnvironmentVariable(
         "CARGO_INCREMENTAL",

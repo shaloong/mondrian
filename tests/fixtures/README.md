@@ -46,3 +46,33 @@ pwsh -File scripts/validation/validate-reference-assets.ps1 -Tier Pr
 `Nightly` and `Release` tiers require every restricted asset to be present. A
 missing required asset is reported as `blocked`, while a schema, size, or hash
 mismatch is `failed`; neither state is a pass.
+
+## Complete Golden Project
+
+The complete gate requires every fixture role declared in
+`tests/validation/golden-project.json`, including generated media that is optional
+in the generic Pr tier. It checks the reference validator's presence and generation
+attestation evidence before building or opening an App session. Missing fixtures
+are reported together; an incomplete fixture set cannot qualify a Golden run.
+
+Generate the current six media fixtures with the manifest-owned recipes:
+
+```powershell
+pwsh -File scripts/validation/generate-golden-project-media.ps1
+pwsh -File scripts/validation/generate-golden-editorial-video.ps1
+pwsh -File scripts/validation/generate-golden-vfr-retime-video.ps1
+pwsh -File scripts/validation/generate-golden-color-reference-media.ps1
+pwsh -File scripts/validation/generate-reference-playback-media.ps1 -Profile Audio
+pwsh -File scripts/validation/invoke-complete-golden-project-gate.ps1
+```
+
+Use each generator's `-OutputRoot` and the gate's `-FixtureRoot` when placing
+fixtures outside the checkout. Existing generated files must have matching
+attestations; unrelated or older recipe outputs cannot substitute for them.
+The gate resolves `CARGO_TARGET_DIR` through the shared process helper and passes
+that directory explicitly to Cargo, then executes and hashes those same products.
+Without that environment setting it uses the checkout's `target` directory.
+
+The Windows product uses native per-user LocalAppData for Project authority.
+Running the gate requires normal access to that namespace. Changing TEMP or
+deleting persistent lock files is not a way to obtain or bypass Project authority.
