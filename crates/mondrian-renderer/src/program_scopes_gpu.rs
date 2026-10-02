@@ -837,8 +837,15 @@ fn add_grouped_subgroup(keys: vec4<u32>, subgroup_invocation_id: u32) {
 }"#;
 
 fn aggregate_shader_source(use_subgroups: bool) -> Cow<'static, str> {
+    // Static vector indices avoid dynamic insertion in the four-pixel keys.
+    // Expand once when preparing the backend, for both aggregation variants.
+    let mut pixels = String::new();
+    for index in 0..PIXELS_PER_INVOCATION {
+        pixels.push_str(&AGGREGATE_PIXEL_SHADER.replace("PIXEL_INDEX", &index.to_string()));
+    }
+    let aggregate = AGGREGATE_SHADER.replace("PIXEL_BLOCKS", &pixels);
     if !use_subgroups {
-        return Cow::Borrowed(AGGREGATE_SHADER);
+        return Cow::Owned(aggregate);
     }
     // Naga requires a one-dimensional workgroup for subgroup lane builtins.
     // Its local index still covers this complete two-dimensional image tile.
@@ -848,7 +855,7 @@ fn aggregate_shader_source(use_subgroups: bool) -> Cow<'static, str> {
         width = SUBGROUP_TILE_WIDTH,
         height = SUBGROUP_TILE_HEIGHT,
     );
-    let mut shader = AGGREGATE_SHADER.replacen(GROUPED_GLOBAL_SHADER, GROUPED_SUBGROUP_SHADER, 1);
+    let mut shader = aggregate.replacen(GROUPED_GLOBAL_SHADER, GROUPED_SUBGROUP_SHADER, 1);
     shader = shader.replacen(
         "fn aggregate(gid: vec3<u32>, rgb_waveform: bool) {",
         "fn aggregate(gid: vec3<u32>, rgb_waveform: bool, subgroup_invocation_id: u32) {",
@@ -887,6 +894,65 @@ fn aggregate_shader_source(use_subgroups: bool) -> Cow<'static, str> {
     debug_assert!(shader.contains("@builtin(subgroup_invocation_id)"));
     Cow::Owned(shader)
 }
+
+// Keep one pixel body in source; backend preparation gives every vec4 access
+// a constant index without adding per-frame work or changing aggregation.
+const AGGREGATE_PIXEL_SHADER: &str = r#"    {
+        let x = first_x + PIXEL_INDEXu;
+        if active_row && x < uniforms.input_width {
+            let rgb = textureLoad(source, vec2<i32>(i32(x), i32(gid.y)), 0).rgb;
+            // WGSL permits finite-math assumptions; float self-comparison can be
+            // optimized away. IEEE exponent bits reject both NaN and infinity.
+            let non_finite = (bitcast<vec3<u32>>(rgb) & vec3<u32>(0x7f800000u)) == vec3<u32>(0x7f800000u);
+            if any(non_finite) {
+                let channel = select(select(2u, 1u, non_finite.g), 0u, non_finite.r);
+                let sample_key = (gid.y * uniforms.input_width + x) * 3u + channel;
+                atomicAdd(&counts[uniforms.validation_offset], 1u);
+                atomicMax(&counts[uniforms.validation_offset + 1u], 0xffffffffu - sample_key);
+            } else {
+                let y = signal_luma(rgb);
+                let scaled = scaled_components(rgb, y);
+                let rb = signal_bin(scaled.r);
+                let gb = signal_bin(scaled.g);
+                let bb = signal_bin(scaled.b);
+                let yb = signal_bin(scaled.a);
+                if rgb_waveform {
+                    // RGB histograms are the exact column reduction of the three
+                    // waveform planes. Avoid three redundant global atomics per pixel;
+                    // the reduction pass below reconstructs the same integer counts.
+                    luma_histogram[PIXEL_INDEXu] = uniforms.histogram_offset + 3u * uniforms.bins + yb;
+                } else {
+                    red_histogram[PIXEL_INDEXu] = uniforms.histogram_offset + rb;
+                    green_histogram[PIXEL_INDEXu] = uniforms.histogram_offset + uniforms.bins + gb;
+                    blue_histogram[PIXEL_INDEXu] = uniforms.histogram_offset + 2u * uniforms.bins + bb;
+                }
+
+                let wx = min(x * uniforms.waveform_width / uniforms.input_width, uniforms.waveform_width - 1u);
+                waveform_red_or_luma[PIXEL_INDEXu] = uniforms.waveform_offset + wx * uniforms.bins + select(yb, rb, rgb_waveform);
+                if rgb_waveform {
+                    waveform_green[PIXEL_INDEXu] = uniforms.waveform_offset + plane + wx * uniforms.bins + gb;
+                    waveform_blue[PIXEL_INDEXu] = uniforms.waveform_offset + 2u * plane + wx * uniforms.bins + bb;
+                }
+
+                let clamped_y = clamp(y, 0.0, 1.0);
+                let u = (rgb.b - clamped_y) / (2.0 * (1.0 - uniforms.kb));
+                let v = (rgb.r - clamped_y) / (2.0 * (1.0 - uniforms.kr));
+                let ux = min(u32(clamp(u + 0.5, 0.0, 0.999) * 64.0), 63u);
+                let vy = min(u32(clamp(v + 0.5, 0.0, 0.999) * 64.0), 63u);
+                vectorscope[PIXEL_INDEXu] = uniforms.vectorscope_offset + vy * 64u + ux;
+
+                red_low += select(0u, 1u, rgb.r < 0.0);
+                red_high += select(0u, 1u, rgb.r > 1.0);
+                green_low += select(0u, 1u, rgb.g < 0.0);
+                green_high += select(0u, 1u, rgb.g > 1.0);
+                blue_low += select(0u, 1u, rgb.b < 0.0);
+                blue_high += select(0u, 1u, rgb.b > 1.0);
+                luma_low += select(0u, 1u, y < 0.0);
+                luma_high += select(0u, 1u, y > 1.0);
+            }
+        }
+    }
+"#;
 
 const AGGREGATE_SHADER: &str = r#"
 struct Uniforms {
@@ -1029,63 +1095,7 @@ fn aggregate(gid: vec3<u32>, rgb_waveform: bool) {
     var luma_low = 0u;
     var luma_high = 0u;
     let plane = uniforms.waveform_width * uniforms.bins;
-    for (var i = 0u; i < 4u; i += 1u) {
-        let x = first_x + i;
-        if !active_row || x >= uniforms.input_width {
-            continue;
-        }
-        let rgb = textureLoad(source, vec2<i32>(i32(x), i32(gid.y)), 0).rgb;
-        // WGSL permits finite-math assumptions; float self-comparison can be
-        // optimized away. IEEE exponent bits reject both NaN and infinity.
-        let non_finite = (bitcast<vec3<u32>>(rgb) & vec3<u32>(0x7f800000u)) == vec3<u32>(0x7f800000u);
-        if any(non_finite) {
-            let channel = select(select(2u, 1u, non_finite.g), 0u, non_finite.r);
-            let sample_key = (gid.y * uniforms.input_width + x) * 3u + channel;
-            atomicAdd(&counts[uniforms.validation_offset], 1u);
-            atomicMax(&counts[uniforms.validation_offset + 1u], 0xffffffffu - sample_key);
-            continue;
-        }
-        let y = signal_luma(rgb);
-        let scaled = scaled_components(rgb, y);
-        let rb = signal_bin(scaled.r);
-        let gb = signal_bin(scaled.g);
-        let bb = signal_bin(scaled.b);
-        let yb = signal_bin(scaled.a);
-        if rgb_waveform {
-            // RGB histograms are the exact column reduction of the three
-            // waveform planes. Avoid three redundant global atomics per pixel;
-            // the reduction pass below reconstructs the same integer counts.
-            luma_histogram[i] = uniforms.histogram_offset + 3u * uniforms.bins + yb;
-        } else {
-            red_histogram[i] = uniforms.histogram_offset + rb;
-            green_histogram[i] = uniforms.histogram_offset + uniforms.bins + gb;
-            blue_histogram[i] = uniforms.histogram_offset + 2u * uniforms.bins + bb;
-        }
-
-        let wx = min(x * uniforms.waveform_width / uniforms.input_width, uniforms.waveform_width - 1u);
-        waveform_red_or_luma[i] = uniforms.waveform_offset + wx * uniforms.bins + select(yb, rb, rgb_waveform);
-        if rgb_waveform {
-            waveform_green[i] = uniforms.waveform_offset + plane + wx * uniforms.bins + gb;
-            waveform_blue[i] = uniforms.waveform_offset + 2u * plane + wx * uniforms.bins + bb;
-        }
-
-        let clamped_y = clamp(y, 0.0, 1.0);
-        let u = (rgb.b - clamped_y) / (2.0 * (1.0 - uniforms.kb));
-        let v = (rgb.r - clamped_y) / (2.0 * (1.0 - uniforms.kr));
-        let ux = min(u32(clamp(u + 0.5, 0.0, 0.999) * 64.0), 63u);
-        let vy = min(u32(clamp(v + 0.5, 0.0, 0.999) * 64.0), 63u);
-        vectorscope[i] = uniforms.vectorscope_offset + vy * 64u + ux;
-
-        red_low += select(0u, 1u, rgb.r < 0.0);
-        red_high += select(0u, 1u, rgb.r > 1.0);
-        green_low += select(0u, 1u, rgb.g < 0.0);
-        green_high += select(0u, 1u, rgb.g > 1.0);
-        blue_low += select(0u, 1u, rgb.b < 0.0);
-        blue_high += select(0u, 1u, rgb.b > 1.0);
-        luma_low += select(0u, 1u, y < 0.0);
-        luma_high += select(0u, 1u, y > 1.0);
-    }
-    add_grouped_global(red_histogram);
+PIXEL_BLOCKS    add_grouped_global(red_histogram);
     add_grouped_global(green_histogram);
     add_grouped_global(blue_histogram);
     add_grouped_global(luma_histogram);
