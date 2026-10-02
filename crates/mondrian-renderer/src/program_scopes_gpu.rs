@@ -1,8 +1,8 @@
 //! Demand-driven Program Output video scopes recorded entirely on the GPU.
 //!
 //! The runtime consumes display-encoded Program Output before monitor
-//! adaptation. Atomic buffers preserve exact per-frame counts; a second compute
-//! pass turns those counts into sampleable display textures without a normal
+//! adaptation. Atomic buffers preserve exact per-frame counts; histogram
+//! reduction and visualization produce sampleable textures without a normal
 //! CPU readback path.
 
 use std::borrow::Cow;
@@ -19,6 +19,10 @@ const HISTOGRAM_HEIGHT: u32 = 128;
 const VECTOR_TEXTURE_SIZE: u32 = 256;
 const WORKGROUP_SIZE: u32 = 16;
 const PIXELS_PER_INVOCATION: u32 = 4;
+// Map each one-dimensional subgroup workgroup to a narrow image tile so nearby
+// lanes can share waveform-column keys without giving up texture locality.
+const SUBGROUP_TILE_WIDTH: u32 = 4;
+const SUBGROUP_TILE_HEIGHT: u32 = 64;
 const DISPLAY_WORKGROUP_SIZE: u32 = 8;
 
 /// Bounded configuration for one GPU Program Output scope request.
@@ -336,9 +340,11 @@ impl GpuProgramScopesRuntime {
             pass.set_pipeline(&aggregate_pipeline);
             pass.set_bind_group(0, &aggregate_bind_group, &[]);
             if pipelines.use_subgroups {
-                let row_invocations = input_width.div_ceil(PIXELS_PER_INVOCATION);
-                let total_invocations = row_invocations.saturating_mul(input_height);
-                pass.dispatch_workgroups(total_invocations.div_ceil(256), 1, 1);
+                pass.dispatch_workgroups(
+                    input_width.div_ceil(SUBGROUP_TILE_WIDTH * PIXELS_PER_INVOCATION),
+                    input_height.div_ceil(SUBGROUP_TILE_HEIGHT),
+                    1,
+                );
             } else {
                 pass.dispatch_workgroups(
                     input_width.div_ceil(WORKGROUP_SIZE * PIXELS_PER_INVOCATION),
@@ -802,6 +808,14 @@ fn aggregate_shader_source(use_subgroups: bool) -> Cow<'static, str> {
     if !use_subgroups {
         return Cow::Borrowed(AGGREGATE_SHADER);
     }
+    // Naga requires a one-dimensional workgroup for subgroup lane builtins.
+    // Its local index still covers this complete two-dimensional image tile.
+    let workgroup_size = SUBGROUP_TILE_WIDTH * SUBGROUP_TILE_HEIGHT;
+    let coordinates = format!(
+        "vec3<u32>(group_id.x * {width}u + local_index % {width}u, group_id.y * {height}u + local_index / {width}u, 0u)",
+        width = SUBGROUP_TILE_WIDTH,
+        height = SUBGROUP_TILE_HEIGHT,
+    );
     let mut shader = AGGREGATE_SHADER.replacen(GROUPED_GLOBAL_SHADER, GROUPED_SUBGROUP_SHADER, 1);
     shader = shader.replacen(
         "fn aggregate(gid: vec3<u32>, rgb_waveform: bool) {",
@@ -825,12 +839,16 @@ fn aggregate_shader_source(use_subgroups: bool) -> Cow<'static, str> {
     }
     shader = shader.replacen(
         "@compute @workgroup_size(16, 16, 1)\nfn main_luma(@builtin(global_invocation_id) gid: vec3<u32>) {\n    aggregate(gid, false);",
-        "@compute @workgroup_size(256, 1, 1)\nfn main_luma(\n    @builtin(global_invocation_id) linear_gid: vec3<u32>,\n    @builtin(subgroup_invocation_id) subgroup_invocation_id: u32,\n) {\n    let row_invocations = (uniforms.input_width + 3u) / 4u;\n    let gid = vec3<u32>(linear_gid.x % row_invocations, linear_gid.x / row_invocations, 0u);\n    aggregate(gid, false, subgroup_invocation_id);",
+        &format!(
+            "@compute @workgroup_size({workgroup_size}, 1, 1)\nfn main_luma(\n    @builtin(workgroup_id) group_id: vec3<u32>,\n    @builtin(local_invocation_index) local_index: u32,\n    @builtin(subgroup_invocation_id) subgroup_invocation_id: u32,\n) {{\n    let gid = {coordinates};\n    aggregate(gid, false, subgroup_invocation_id);"
+        ),
         1,
     );
     shader = shader.replacen(
         "@compute @workgroup_size(16, 16, 1)\nfn main_rgb(@builtin(global_invocation_id) gid: vec3<u32>) {\n    aggregate(gid, true);",
-        "@compute @workgroup_size(256, 1, 1)\nfn main_rgb(\n    @builtin(global_invocation_id) linear_gid: vec3<u32>,\n    @builtin(subgroup_invocation_id) subgroup_invocation_id: u32,\n) {\n    let row_invocations = (uniforms.input_width + 3u) / 4u;\n    let gid = vec3<u32>(linear_gid.x % row_invocations, linear_gid.x / row_invocations, 0u);\n    aggregate(gid, true, subgroup_invocation_id);",
+        &format!(
+            "@compute @workgroup_size({workgroup_size}, 1, 1)\nfn main_rgb(\n    @builtin(workgroup_id) group_id: vec3<u32>,\n    @builtin(local_invocation_index) local_index: u32,\n    @builtin(subgroup_invocation_id) subgroup_invocation_id: u32,\n) {{\n    let gid = {coordinates};\n    aggregate(gid, true, subgroup_invocation_id);"
+        ),
         1,
     );
     debug_assert!(!shader.contains("add_grouped_global("));
