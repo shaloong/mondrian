@@ -1,15 +1,11 @@
-# Security Policy / 安全政策
+# Security Policy
 
-## Report privately / 私密报告
+## Report privately
 
 Send suspected vulnerabilities to **contact@shaloong.com**, with the subject
 `[Mondrian Security]` and a short description. Do not open a public issue or PR
 containing an undisclosed vulnerability, exploit, private media, credentials,
 or personal information. English and Chinese reports are welcome.
-
-请通过 **contact@shaloong.com** 私密报告疑似漏洞，主题使用
-`[Mondrian Security]`。不要在公开 Issue 或 PR 中披露未公开漏洞、利用代码、
-私人素材、凭证或个人信息。支持中文和英文报告。
 
 If the repository's [security page](https://github.com/shaloong/mondrian/security)
 offers **Report a vulnerability**, GitHub private reporting is also available.
@@ -21,7 +17,7 @@ reproduction steps, expected and observed behavior, and the potential impact.
 Use a small synthetic reproducer where possible. Ask for a suitable private
 transfer channel before sending large or sensitive files.
 
-## Versions and scope / 版本与范围
+## Versions and scope
 
 Reports are welcome for all versions. Fix development targets the current
 `develop` branch and the latest public release; maintainers determine whether
@@ -40,7 +36,7 @@ unsure, report privately.
 See the [security design and evidence](../docs/security/design.md) for current
 boundaries and limitations. That document is not an exclusion list.
 
-## Response and coordinated disclosure / 响应与协调披露
+## Response and coordinated disclosure
 
 Maintainers aim to acknowledge reports within **3 business days**, and must
 provide an initial response within **14 calendar days**. These are response

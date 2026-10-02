@@ -1,29 +1,25 @@
 # 贡献指南
 
-## 贡献授权 / Contribution authorization
+## 贡献授权
 
 项目使用[贡献者许可协议（CLA）](legal/CLA.md)取得贡献的许可，包含协议明示的商业再许可权限；贡献者保留其著作权。仅使用项目、维护自己的分支或独立发布插件，不要求签署 CLA。CLA 不改变现有代码所适用的许可证。
 
-The [Contributor License Agreement](legal/CLA.md) grants the stated rights in Contributions, including commercial relicensing; contributors retain their copyright. Merely using the project, maintaining a fork or independently publishing a plugin does not require a CLA. The CLA does not change the licenses applicable to existing code.
-
 签署前请阅读[隐私告知](legal/CLA-PRIVACY.md)。在线入口、当前验收状态及记录方式见[接入说明](legal/CLA-SERVICE.md)。截至 2026-10-02，GitHub main/develop 规则已启用并要求 `license/cla`；真实签署、导出及隐私流程的验收证据仍需核实。维护者不得仅凭规则启用或页面可访问就认定授权核验完成。私人授权材料通过 contact@shaloong.com 联系，不放公开 PR。
 
-Read the [privacy notice](legal/CLA-PRIVACY.md) before signing. See the [service procedure](legal/CLA-SERVICE.md) for the entry point, validation status and records. As of 2026-10-02, active GitHub rules require `license/cla` on main/develop; signing, export and privacy acceptance evidence still requires verification. Neither an active rule nor an accessible signing page establishes verified authorization. Contact contact@shaloong.com for private authority materials; do not post them in public PRs.
-
-## 社区与提交入口 / Community and submission
+## 社区与提交入口
 
 中文和英文 Issue/PR 均可。请遵守[行为准则](../CODE_OF_CONDUCT.md)。
 Bug 和功能建议通过 [GitHub Issues](https://github.com/shaloong/mondrian/issues/new/choose)
 提交；疑似漏洞走[私密安全报告](../.github/SECURITY.md)。
 
-External PRs target **develop**; maintainers promote this repository's develop
-branch to main. Explain the problem and validation using the PR template.
-See [review requirements](dev/code-review.md), [governance](../GOVERNANCE.md),
-and [support](../SUPPORT.md). Local agent tickets do not replace public issues.
+外部 PR 提交至 **develop**；维护者再将本仓库的 develop 合入 main。
+请按 PR 模板说明问题、变更和验证，参阅[审查要求](dev/code-review.md)、
+[项目治理](../GOVERNANCE.md)和[支持入口](../SUPPORT.md)。
+工程代理使用的本地任务记录不能替代公开 Issue。
 
-Maintainers should label small, bounded tasks `good first issue` or `help wanted`
-when they can provide a reproducer, expected result and validation instructions.
-A label alone is insufficient; keep the task actionable and acknowledge reports.
+维护者可为范围明确的小任务添加 `good first issue` 或 `help wanted` 标签，
+同时提供复现步骤、预期结果和验证方法。标签本身不能替代可执行的说明；
+收到报告后应予以回应。
 
 ## 开发环境搭建
 

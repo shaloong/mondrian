@@ -5,13 +5,22 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $failures = [System.Collections.Generic.List[string]]::new()
 $required = @(
-    'README.md', 'CODE_OF_CONDUCT.md', 'GOVERNANCE.md', 'SUPPORT.md',
+    'README.md', 'README.zh-CN.md', 'CODE_OF_CONDUCT.md', 'GOVERNANCE.md', 'SUPPORT.md',
     '.github/SECURITY.md', '.github/PULL_REQUEST_TEMPLATE.md',
     '.github/ISSUE_TEMPLATE/bug_report.yml', '.github/ISSUE_TEMPLATE/feature_request.yml',
     '.github/ISSUE_TEMPLATE/config.yml', '.github/dependabot.yml',
     '.github/workflows/dependency-audit.yml', 'docs/CONTRIBUTING.md',
     'docs/README.md', 'docs/legal/CLA-SERVICE.md', 'docs/dev/code-review.md',
     'docs/security/design.md', 'docs/security/dependencies.md'
+)
+
+# Public entry points have English prose. Localized and legal files are separate
+# from this check; developer-only documents may keep their existing language.
+$englishEntryPoints = @(
+    'README.md', 'CODE_OF_CONDUCT.md', 'GOVERNANCE.md', 'SUPPORT.md',
+    '.github/SECURITY.md', '.github/PULL_REQUEST_TEMPLATE.md',
+    '.github/ISSUE_TEMPLATE/bug_report.yml', '.github/ISSUE_TEMPLATE/feature_request.yml',
+    '.github/ISSUE_TEMPLATE/config.yml', 'docs/README.md'
 )
 
 function Test-RepositoryReference([string]$sourcePath, [string]$reference) {
@@ -34,6 +43,16 @@ foreach ($relativePath in $required) {
     if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
         $failures.Add("Missing required community file: $relativePath")
         continue
+    }
+    if ($relativePath -in $englishEntryPoints) {
+        $entryContent = Get-Content -Raw -LiteralPath $fullPath
+        # Language names use their own language in the shared README navigation.
+        if ($relativePath -eq 'README.md') {
+            $entryContent = [regex]::Replace($entryContent, '(?m)^English · \[\u7b80\u4f53\u4e2d\u6587\]\(README\.zh-CN\.md\)\r?$', '')
+        }
+        if ($entryContent -match '[\u3400-\u9fff]') {
+            $failures.Add("Keep English entry-point prose separate from translations: $relativePath")
+        }
     }
     if ($relativePath.EndsWith('.md')) {
         $content = Get-Content -Raw -LiteralPath $fullPath

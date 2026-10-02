@@ -1,4 +1,4 @@
-# Support / 支持
+# Support
 
 - **Bugs and feature requests:** use
   [GitHub Issues](https://github.com/shaloong/mondrian/issues/new/choose).

@@ -162,8 +162,9 @@ Use when the effect branches from the current output, processes the branch, then
 })
 ```
 
-`radius_id` / `opacity_id` 必须由 `plugin_type.parameter_id(...)` 创建，并分别绑定到
-`PropertyDescriptor::with_parameter_id(...)` 后再由 `move` 闭包捕获。
+Create `radius_id` / `opacity_id` with `plugin_type.parameter_id(...)`, bind each
+using `PropertyDescriptor::with_parameter_id(...)`, then capture them in the
+`move` closure.
 
 Available `BlendMode` variants include `Normal`, `Screen`, `Multiply`, `Overlay`,
 `LinearDodge`, and `Subtract`; consult `mondrian_core::BlendMode` for the complete set.

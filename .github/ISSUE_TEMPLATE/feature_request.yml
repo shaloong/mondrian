@@ -1,5 +1,5 @@
-name: Feature request / 功能建议
-description: Describe a user problem and a proposed improvement / 描述需求与改进
+name: Feature request
+description: Describe a user problem and a proposed improvement
 title: "[Feature]: "
 body:
   - type: markdown
@@ -8,19 +8,19 @@ body:
   - type: textarea
     id: problem
     attributes:
-      label: User problem / 用户问题
+      label: User problem
       description: Explain the editing or delivery workflow and who needs this.
     validations:
       required: true
   - type: textarea
     id: outcome
     attributes:
-      label: Desired outcome / 期望结果
+      label: Desired outcome
       description: Describe observable behavior and how success could be verified.
     validations:
       required: true
   - type: textarea
     id: alternatives
     attributes:
-      label: Alternatives and constraints / 替代方案与约束
+      label: Alternatives and constraints
       description: Current workaround, platform/format requirements, compatibility, or useful references.
