@@ -471,14 +471,9 @@ fn run_phase(
             }
             let owner = owners.as_mut().context("execution owners")?;
             report["gpu_adapter"] = serde_json::to_value(owner.gpu_adapter_info()?)?;
-            playback = Some(PersistentTimelinePlaybackPhase::start_local_smoke(
-                state,
-                owner,
-                timeline_extent.minimum_presented_frames,
-                playback_rate,
-                deadline,
-                Duration::from_secs(5),
-            )?);
+            // Capture/admit the independent frozen Export while transport is
+            // stopped. Synchronous startup work cannot consume an unobserved
+            // interval after the Audio Device has become Clock Master.
             if index > 0 {
                 let mut preset = ExportPreset::h264_aac_sdr_1080p();
                 preset.resolution = Some(mondrian_export::preset::Resolution {
@@ -512,12 +507,17 @@ fn run_phase(
                     exports.as_mut().context("export owner")?.begin_cancel_retry_recovery(1)?;
                 }
             }
-            // Export preparation may perform synchronous snapshot/admission work after
-            // AudioDevice has entered clock ownership. Close that startup interval
-            // through the same phase boundary used by the production campaign: prove
-            // the current A/V picture, then freeze transport until the first measured
-            // coordinator interval resumes it. Otherwise harness setup time is charged
-            // as an unobserved multi-frame advance on the first sample.
+            playback = Some(PersistentTimelinePlaybackPhase::start_local_smoke(
+                state,
+                owner,
+                timeline_extent.minimum_presented_frames,
+                playback_rate,
+                deadline,
+                Duration::from_secs(5),
+            )?);
+            // Prove the paired startup picture, then freeze transport while the
+            // measurement clock and sampler are established. Export stays active
+            // and retains the original deadline throughout this boundary.
             playback
                 .as_mut()
                 .context("playback owner")?
