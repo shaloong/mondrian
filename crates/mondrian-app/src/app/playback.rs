@@ -3094,6 +3094,17 @@ mod tests {
     fn invalid_final_device_evidence_cannot_block_confirmed_loss_handoff() {
         let mut state = state_with_sequence(20);
         play_ready(&mut state);
+        // Startup need not complete before an absolute ten-millisecond timestamp.
+        // Exercise a nonzero Engine clock independently of physical scheduling.
+        let initialized_at = state
+            .playback_engine
+            .monotonic_high_water()
+            .checked_add(Duration::from_millis(20))
+            .expect("initialization timestamp");
+        state
+            .playback_engine
+            .tick(initialized_at)
+            .expect("nonzero initialized Engine clock");
         let observation = audio_device_clock_observation(
             audio_snapshot(),
             state.playback_engine.snapshot().epoch,
@@ -3108,17 +3119,32 @@ mod tests {
             .playback_engine
             .observe_audio_device_clock(observation)
             .expect("qualify audio master");
+        let advanced_at = state
+            .playback_engine
+            .monotonic_high_water()
+            .checked_add(Duration::from_millis(10))
+            .expect("advanced timestamp");
         state
             .playback_engine
-            .tick(MonotonicTimestamp::from_duration(Duration::from_millis(10)))
+            .tick(advanced_at)
             .expect("advance Engine timestamp beyond App adapter timestamp");
+        let handled_at = state.playback_observation_instant_anchor;
+        let final_output =
+            RealtimeAudioOutputSnapshot { captured_at: handled_at, ..audio_snapshot() };
+        assert!(
+            state
+                .playback_timestamp_for_observation(final_output.captured_at)
+                .expect("projection")
+                < state.playback_engine.monotonic_high_water(),
+            "the frozen final evidence must be older than the authoritative Engine clock"
+        );
         let result = state.handle_audio_playback_event(
             AudioPlaybackEvent::DeviceLost {
                 reason: mondrian_media::RealtimeAudioOutputLossReason::BackendFailure,
-                final_output: audio_snapshot(),
+                final_output,
                 final_media_anchor: Some(audio_anchor(0)),
             },
-            Instant::now(),
+            handled_at,
         );
 
         assert!(result.is_ok());

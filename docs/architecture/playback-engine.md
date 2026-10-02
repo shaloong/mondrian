@@ -2686,3 +2686,9 @@ grace end is Late. Each case consumes the demand once and records only its
 actual Ready/Degraded/Late delivery class. Functional tests do not use test-runner
 wall-clock duration as evidence of realtime performance; deadline admission and
 physical publication remain governed by their production observation seams.
+
+Device-loss acceptance likewise establishes a nonzero Engine high-water mark,
+then advances from that authoritative timestamp using checked arithmetic.
+Frozen final output is explicitly older than the Engine clock, and the App loss
+adapter must still complete the Synthetic handoff. No fixed absolute startup
+timestamp or test-runner wall time is used to construct the stale-evidence case.
