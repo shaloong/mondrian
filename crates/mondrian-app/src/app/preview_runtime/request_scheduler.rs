@@ -952,6 +952,72 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         plan
     }
 
+    /// A ready GPU candidate must cross its current presentation boundary
+    /// before optional future planning consumes its remaining frame budget.
+    /// Priming and demand-free observations retain their existing refill path.
+    pub(super) fn schedule_gpu_candidate_prefetches(
+        &self,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+        proxy_demands: &dyn PreviewProxyDemandSink,
+        sequence: &Sequence,
+        frame: i64,
+        target_width: u32,
+        target_height: u32,
+    ) {
+        let transport = snapshot.transport();
+        if transport.is_playing() && !transport.is_priming() && transport.demand().is_some() {
+            return;
+        }
+        self.schedule_media_prefetches(
+            snapshot,
+            proxy_demands,
+            sequence,
+            frame,
+            target_width,
+            target_height,
+        );
+    }
+
+    /// Refill through the same Preview owner after the Adapter has committed
+    /// an exact GPU picture and Playback has consumed its current ticket.
+    /// No deferred queue or new admission authority is needed: a fresh owner
+    /// snapshot supplies the same bounded future planner and resource grants.
+    pub(crate) fn prefetch_after_gpu_presentation(
+        &self,
+        request: PreviewFrameExecutionRequest<'_>,
+    ) {
+        let snapshot = request.snapshot();
+        let transport = snapshot.transport();
+        if !transport.is_playing()
+            || transport.is_priming()
+            || transport.is_speculative_preparation()
+            || transport.demand().is_some()
+            || self.viewer_cpu_fallback_active.get()
+        {
+            return;
+        }
+        let Some(output) = self.registered_exact_current_gpu_output_key() else {
+            return;
+        };
+        let Some(sequence) =
+            snapshot.authoring().and_then(PreviewAuthoringSnapshot::active_sequence)
+        else {
+            return;
+        };
+        if output.sequence_id != sequence.id {
+            return;
+        }
+        self.schedule_media_prefetches(
+            snapshot,
+            request.proxy_demands(),
+            sequence,
+            transport.current_frame().max(0),
+            output.width,
+            output.height,
+        );
+        self.scheduler.prune_obsolete();
+    }
+
     pub(super) fn schedule_media_prefetches(
         &self,
         snapshot: &PreviewExecutionSnapshot<'_>,
@@ -1268,22 +1334,23 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 let can_open = if let Some(coverage_frames) =
                     self.cold_activation_covering_frames(transport, prefetch_window_frames)
                 {
-                    // The nearest missing complete picture keeps first claim.
-                    // Beyond it only the source inputs on the blocked owner
-                    // need to cover a cold open. Another worker's farther
-                    // missing picture cannot indefinitely prevent preparation.
+                    // The immediate complete picture keeps first claim.
+                    // Establish the blocked owner's coverage before chasing
+                    // the other worker's farther missing inputs. Otherwise
+                    // those refills consume the slot needed by the cold source
+                    // and repeatedly evict each other at one coordinate.
                     let mut nearest = self.plan_future_media_prefix_scoped(
                         snapshot,
                         proxy_demands,
                         sequence,
                         frame,
                         playback_direction,
-                        prefetch_window_frames,
+                        1,
                         None,
                         Resolution { width: target_width, height: target_height },
                         color_context.clone(),
                         remaining_prefetch_jobs,
-                        FutureMediaPrefixScope::FirstMissingFrame,
+                        FutureMediaPrefixScope::CompleteFrames,
                     );
                     let nearest_owned = !nearest.admission_limit_reached;
                     let nearest_requests = nearest.requests.len();
@@ -1478,6 +1545,30 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         .filter(|key| active_work_keys.contains(key))
                         .collect(),
                 );
+                if shares_near_worker && remaining_prefetch_jobs > 0 {
+                    // The cold work now owns its actual reservation and source
+                    // coverage. The independent worker may fill the nearest
+                    // missing picture with the remaining physical headroom.
+                    let nearest = self.plan_future_media_prefix_scoped(
+                        snapshot,
+                        proxy_demands,
+                        sequence,
+                        frame,
+                        playback_direction,
+                        prefetch_window_frames,
+                        None,
+                        Resolution { width: target_width, height: target_height },
+                        color_context.clone(),
+                        remaining_prefetch_jobs,
+                        FutureMediaPrefixScope::FirstMissingFrame,
+                    );
+                    let scheduled = self.admit_future_media_prefix(
+                        nearest,
+                        preroll_deadline_at,
+                        playback_direction,
+                    );
+                    remaining_prefetch_jobs = remaining_prefetch_jobs.saturating_sub(scheduled);
+                }
             }
             // Keep complete-picture guards through both actual admissions;
             // only the blocked owner's coverage survives this turn.

@@ -691,7 +691,19 @@ impl AppUiHost {
                 self.window_preview_state.replace(next);
                 visible_changed.set(changed);
             });
-            if candidate.was_already_visible()
+            if carrier == PreviewPresentationCarrier::ExternalGpu
+                && candidate.was_already_visible()
+                && artifact_was_visible
+                && !changed
+                && candidate.presentation_ticket().is_none()
+                && self.app_state.borrow().pending_playback_frame_demand_identity().is_none()
+            {
+                // Preview proved the exact current artifact and the Window
+                // still holds its Ready physical slot. Observe it without a
+                // visibility commit or a second Frame Delivery. A new demand,
+                // distinct texture, or stale slot still needs ticket authority.
+                FramePresentationDisposition::NoDemand
+            } else if candidate.was_already_visible()
                 && artifact_was_visible
                 && let Some(already_visible_at) = self.last_playback_frame_advance_at.get()
             {
@@ -804,6 +816,12 @@ impl AppUiHost {
         }
         match disposition {
             FramePresentationDisposition::Presented(_) => {
+                {
+                    let state = self.app_state.borrow();
+                    self.preview_service.prefetch_after_gpu_presentation(
+                        state.preview_frame_execution_request(std::time::Instant::now()),
+                    );
+                }
                 self.preview_service.try_release_settled_transport_media_residency();
                 let _ = self.observe_playback_video_preroll();
                 self.preview_dirty.set(true);
@@ -3253,6 +3271,90 @@ mod tests {
             Some("promoted-frame-one"),
             "rejection cannot replace the admitted artifact",
         );
+    }
+
+    #[test]
+    fn completed_current_gpu_observation_keeps_the_visible_picture_without_a_new_delivery() {
+        let host = workspace_host_without_preview_workers("completed-current-gpu-observation");
+        let ticket = {
+            let mut state = host.app_state.borrow_mut();
+            state.seek(0).expect("bind still demand");
+            state
+                .playback_frame_presentation_ticket(
+                    mondrian_playback::FramePresentationQuality::Ready,
+                )
+                .expect("current untimed demand")
+        };
+        host.preview_service
+            .synchronize_transport_intent(host.app_state.borrow().preview_transport_intent());
+        seed_window_gpu_output(&host);
+        let (_, output) = host
+            .preview_service
+            .registered_exact_current_gpu_output_artifact()
+            .expect("exact prepared output");
+        host.window_preview_state.replace(ViewerPreviewState::Ready(
+            ViewerFrameContent::ExternalTexture(output),
+        ));
+        // The physical slot already contains the exact artifact. Complete the
+        // original demand once before observing that same current output again.
+        host.last_playback_frame_advance_at.set(Some(Instant::now()));
+        assert!(matches!(
+            host.present_current_viewer_output(
+                PreviewPresentationCandidate::already_visible((), Some(ticket)),
+                PreviewPresentationCarrier::ExternalGpu,
+            ),
+            FramePresentationDisposition::Presented(_)
+        ));
+        assert!(host.app_state.borrow().pending_playback_frame_demand_identity().is_none());
+        let evidence = host.app_state.borrow().playback_evidence_report();
+        let ViewerPreviewState::Ready(ViewerFrameContent::ExternalTexture(visible)) =
+            host.window_preview_state.borrow().clone()
+        else {
+            panic!("original publication must remain Ready");
+        };
+        host.preview_dirty.set(false);
+        for _ in 0..2 {
+            assert_eq!(
+                host.present_current_viewer_output(
+                    PreviewPresentationCandidate::already_visible((), None),
+                    PreviewPresentationCarrier::ExternalGpu,
+                ),
+                FramePresentationDisposition::NoDemand,
+                "observing the same admitted picture cannot invent a second publication",
+            );
+            assert!(matches!(
+                &*host.window_preview_state.borrow(),
+                ViewerPreviewState::Ready(ViewerFrameContent::ExternalTexture(frame))
+                    if frame == &visible
+            ));
+            assert!(
+                !host.preview_dirty.get(),
+                "unchanged pixels cannot schedule another repaint"
+            );
+            assert_eq!(host.app_state.borrow().playback_evidence_report(), evidence);
+        }
+        host.app_state.borrow_mut().set_playback_frame_running(7);
+        let replacement = host
+            .app_state
+            .borrow()
+            .pending_playback_frame_demand_identity()
+            .expect("replacement demand");
+        assert_eq!(
+            host.present_current_viewer_output(
+                PreviewPresentationCandidate::already_visible((), None),
+                PreviewPresentationCarrier::ExternalGpu,
+            ),
+            FramePresentationDisposition::LostAuthority,
+            "a ticketless observation cannot consume the replacement demand",
+        );
+        assert_eq!(
+            host.app_state.borrow().pending_playback_frame_demand_identity(),
+            Some(replacement),
+        );
+        assert!(matches!(
+            &*host.window_preview_state.borrow(),
+            ViewerPreviewState::Stale(_)
+        ));
     }
 
     #[test]

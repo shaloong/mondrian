@@ -321,7 +321,9 @@ pub(crate) fn should_attempt_headless_gpu_candidate(
     let binding_covers_current =
         candidate_binding.is_some_and(|binding| binding.covers_current(current_intent));
     match status {
-        HeadlessGpuCandidateStatus::Ready => !binding_covers_current,
+        HeadlessGpuCandidateStatus::Ready => {
+            !binding_covers_current || pump_outcome.candidate_retry_required
+        }
         HeadlessGpuCandidateStatus::QueuedReady | HeadlessGpuCandidateStatus::InFlight => true,
         HeadlessGpuCandidateStatus::Loading => !binding_covers_current || preview_progress,
         HeadlessGpuCandidateStatus::Backpressured | HeadlessGpuCandidateStatus::Unavailable => true,

@@ -16,7 +16,8 @@ pub(crate) struct PreviewWorkPoll {
     pub(crate) visible_change: bool,
     /// Pending execution state changed without requiring Viewer reconstruction.
     pub(crate) transport_change: bool,
-    /// A pending Viewer candidate should retry after capacity was released.
+    /// The Viewer request has actionable work after capacity or media residency
+    /// changed, including future-window refill behind an already Ready picture.
     pub(crate) candidate_retry_required: bool,
     /// More completions should be drained on a follow-up runtime turn.
     pub(crate) needs_follow_up_poll: bool,

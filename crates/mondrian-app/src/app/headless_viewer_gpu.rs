@@ -1811,6 +1811,19 @@ impl HeadlessViewerGpuAdapter {
             .is_some_and(|current| current == output)
     }
 
+    /// Whether an off-screen prepared artifact has its exact live physical owner.
+    pub(crate) fn has_prepared_physical_output_artifact(
+        &self,
+        output_key: &crate::app::preview_execution::PreviewOutputKey,
+        output: &HeadlessViewerGpuOutput,
+    ) -> bool {
+        self.device_progress.generation_terminal().is_none()
+            && self
+                .physical_outputs
+                .prepared_artifact_for_key(output_key)
+                .is_some_and(|prepared| prepared == output)
+    }
+
     /// Whether the visible physical slot has this exact semantic key.
     #[cfg(any(test, feature = "validation"))]
     pub(crate) fn has_current_physical_output_for_key(

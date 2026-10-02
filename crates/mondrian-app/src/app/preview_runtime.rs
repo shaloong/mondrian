@@ -775,9 +775,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             request.snapshot().transport().current_frame(),
             "candidate-preamble",
         );
-        // Candidate evaluation is the acknowledgement boundary for retained
-        // retry authority. Polling alone must never consume this request.
-        if self.media_retry_pending.replace(false) {
+        // Only the ordinary current evaluation acknowledges the shared media
+        // retry. Polling and ticketless preparation cannot consume its bounded
+        // future-window refill opportunity.
+        if !request.snapshot().transport().is_speculative_preparation()
+            && self.media_retry_pending.replace(false)
+        {
             bump(&self.media_retry_acknowledgements);
         }
         self.last_gpu_loading_reason.set(None);
@@ -929,13 +932,30 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             })
         });
         if let Some(prepared) = prepared_promotion {
-            // Promotion is the common steady-state current path in Headless
-            // playback. It must retain the visible turn's recurring future
-            // media responsibility after speculative candidates were narrowed
-            // to their exact frame; otherwise a cold source transition is not
-            // discovered until its immediate-successor turn at the cut.
+            // A prepared GPU picture still needs actual Adapter publication.
+            // Its future refill follows that commit through this same owner;
+            // Priming and transparent candidates keep their existing path.
             observation.next("current-prefetch");
-            self.schedule_media_prefetches(snapshot, proxy_demands, sequence, frame, width, height);
+            match prepared {
+                PreviewPreparedPromotion::Gpu { .. } => self.schedule_gpu_candidate_prefetches(
+                    snapshot,
+                    proxy_demands,
+                    sequence,
+                    frame,
+                    width,
+                    height,
+                ),
+                PreviewPreparedPromotion::Transparent => {
+                    self.schedule_media_prefetches(
+                        snapshot,
+                        proxy_demands,
+                        sequence,
+                        frame,
+                        width,
+                        height,
+                    );
+                }
+            }
             observation.next("current-prune");
             self.scheduler.prune_obsolete();
             return match prepared {
@@ -1126,7 +1146,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 if let Some(PreviewPreparedPromotion::Gpu { already_visible, .. }) =
                     prepared_content
                 {
-                    self.schedule_media_prefetches(
+                    self.schedule_gpu_candidate_prefetches(
                         snapshot,
                         proxy_demands,
                         sequence,
@@ -1144,7 +1164,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     });
                 }
                 if cache_reusable && self.execution.borrow_mut().output_for(&cache_key).is_some() {
-                    self.schedule_media_prefetches(
+                    self.schedule_gpu_candidate_prefetches(
                         snapshot,
                         proxy_demands,
                         sequence,
@@ -1621,7 +1641,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             .plan_candidate_with_reuse(Some(&cache_key), resolved.cache_reusable)
         {
             PreviewCandidateDecision::Current => {
-                self.schedule_media_prefetches(
+                self.schedule_gpu_candidate_prefetches(
                     snapshot,
                     proxy_demands,
                     sequence,
@@ -1648,7 +1668,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             cache_key = cache_key.with_execution_nonce(candidate_id);
         }
         let prefetch_started = Instant::now();
-        self.schedule_media_prefetches(snapshot, proxy_demands, sequence, frame, width, height);
+        self.schedule_gpu_candidate_prefetches(
+            snapshot,
+            proxy_demands,
+            sequence,
+            frame,
+            width,
+            height,
+        );
         let prefetch_us = app_duration_us(prefetch_started.elapsed());
         self.scheduler.prune_obsolete();
         if transport.is_speculative_preparation() {

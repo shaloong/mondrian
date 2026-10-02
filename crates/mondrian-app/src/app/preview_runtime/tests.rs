@@ -226,6 +226,89 @@ fn completed_gpu_output_survives_same_picture_pause_without_reevaluation() {
 }
 
 #[test]
+fn prepared_current_picture_reaches_publication_before_future_media_admission() {
+    let (mut state, root) = state_with_solid_then_invalid_video_activation();
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    state.play().expect("start transport");
+    let frame = match execute_gpu_preview_for_test_app(&runtime, &state) {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        _ => panic!("expected priming picture"),
+    };
+    let output_key = frame.output_key.clone();
+    runtime.register_gpu_output(output_key.clone(), ());
+    assert!(matches!(
+        state.finalize_frame_presentation(
+            frame.presentation_ticket(),
+            crate::app::playback::FramePresentationPublication::prepared(|| {}),
+        ),
+        crate::app::playback::FramePresentationDisposition::Presented(_)
+    ));
+    drop(frame);
+    state.observe_video_preroll(0, 0);
+    assert_eq!(
+        state.playback_engine.snapshot().state,
+        mondrian_playback::TransportState::Playing
+    );
+    let request = state.preview_successor_execution_request(Instant::now()).expect("successor");
+    let intent = request.snapshot().transport().playback_intent();
+    runtime.register_prepared_gpu_successor(intent, output_key, ());
+    let boundary_limit = Instant::now() + Duration::from_secs(1);
+    while state.current_frame() < intent.frame {
+        assert!(
+            Instant::now() < boundary_limit,
+            "clock did not reach successor"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+        state.advance_playback_clock_at(Instant::now());
+    }
+    assert_eq!(state.current_frame(), intent.frame);
+    assert!(state.pending_playback_frame_demand_identity().is_some());
+
+    // Remove only the test's unexecuted Priming producers. The next current
+    // candidate must preserve its future responsibility, but must not admit
+    // it before the Adapter commits this prepared picture's exact ticket.
+    runtime.scheduler.cancel_all();
+    runtime.future_media_window.borrow_mut().clear();
+    let planning_before = runtime.diagnostics().future_media_window.semantic_frame_evaluations;
+    let candidate = match execute_gpu_preview_for_test_app(&runtime, &state) {
+        PreviewGpuFrameState::Current(candidate) => candidate,
+        _ => panic!("expected exact prepared current picture"),
+    };
+    let planning_before_publication =
+        runtime.diagnostics().future_media_window.semantic_frame_evaluations;
+    runtime.prefetch_after_gpu_presentation(state.preview_frame_execution_request(Instant::now()));
+    let planning_with_pending_ticket =
+        runtime.diagnostics().future_media_window.semantic_frame_evaluations;
+    let disposition = state.finalize_frame_presentation(
+        candidate.presentation_ticket(),
+        crate::app::playback::FramePresentationPublication::prepared(|| {}),
+    );
+    runtime.prefetch_after_gpu_presentation(state.preview_frame_execution_request(Instant::now()));
+    let planning_after_publication =
+        runtime.diagnostics().future_media_window.semantic_frame_evaluations;
+    let closed = runtime.shutdown_until(Instant::now() + Duration::from_secs(5));
+    assert!(closed.all_workers_terminated(), "{closed:?}");
+    drop(state);
+    std::fs::remove_dir_all(root).expect("remove fixture");
+    assert_eq!(
+        planning_before_publication, planning_before,
+        "optional future media was planned before the current ticket committed"
+    );
+    assert_eq!(planning_with_pending_ticket, planning_before);
+    assert!(
+        matches!(
+            disposition,
+            crate::app::playback::FramePresentationDisposition::Presented(_)
+        ),
+        "{disposition:?}"
+    );
+    assert!(
+        planning_after_publication > planning_before,
+        "publishing the picture must preserve its future media planning responsibility"
+    );
+}
+
+#[test]
 fn repeated_acquires_for_the_same_evaluation_do_not_re_resolve() {
     let state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
     let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
@@ -3342,10 +3425,11 @@ fn promoted_current_successor_retains_recurring_cold_source_prefetch_ownership()
         ViewerExternalTexturePresentation::full_frame(current.width, current.height)
             .expect("full-frame presentation"),
     ));
+    let visible_at = Instant::now();
     state
         .complete_frame_presentation(
             current.presentation_ticket().expect("priming current ticket"),
-            Instant::now(),
+            visible_at,
         )
         .expect("present priming current");
     assert!(
@@ -3366,17 +3450,35 @@ fn promoted_current_successor_retains_recurring_cold_source_prefetch_ownership()
         "ticketless preparation must not recursively plan the future media window"
     );
 
-    let advanced = state.advance_playback_clock(Duration::from_millis(45));
-    assert_eq!(
-        advanced.status,
-        crate::app::playback::PlaybackAdvanceStatus::Advanced
-    );
-    assert_eq!(state.current_frame(), 1);
     let activation_key = media_preview_key_for_simple_sequence_frame(&service, &state, 48);
+    let boundary_limit = Instant::now() + Duration::from_secs(1);
+    while state.current_frame() == 0 {
+        assert!(Instant::now() < boundary_limit, "clock did not advance");
+        std::thread::sleep(Duration::from_millis(1));
+        state.advance_playback_clock_at(Instant::now());
+    }
+    assert_eq!(state.current_frame(), 1);
+    let candidate = match execute_gpu_preview_for_test_app(&service, &state) {
+        PreviewGpuFrameState::Current(candidate) => candidate,
+        _ => panic!("expected prepared current picture"),
+    };
+    assert!(
+        candidate.was_already_visible(),
+        "same solid picture retains its physical artifact"
+    );
+    assert!(!service.scheduler.has_pending_key(&activation_key));
+    // This successor aliases the continuously retained solid output. Observe
+    // its continuous visibility through the existing same-artifact seam;
+    // a distinct buffer must use the ordinary commit instant instead.
     assert!(matches!(
-        execute_gpu_preview_for_test_app(&service, &state),
-        PreviewGpuFrameState::Current(_)
+        state.finalize_already_visible_frame_presentation(
+            candidate.presentation_ticket(),
+            Instant::now(),
+            crate::app::playback::FramePresentationPublication::prepared(|| {}),
+        ),
+        crate::app::playback::FramePresentationDisposition::Presented(_)
     ));
+    service.prefetch_after_gpu_presentation(state.preview_frame_execution_request(Instant::now()));
     assert!(
         service.scheduler.has_pending_key(&activation_key),
         "the promoted visible current must discover and reserve the cold source transition"
@@ -6298,6 +6400,163 @@ fn resident_persistent_layer_keeps_cold_source_on_the_opposite_session_owner() {
     service.shutdown();
     drop(state);
     std::fs::remove_dir_all(root).expect("remove preview root");
+}
+
+#[test]
+fn cold_source_coverage_reaches_a_fixed_point_without_advancing_transport() {
+    let (mut state, root) = state_with_sequential_invalid_video_assets();
+    let overlay_path = root.join("overlay.mp4");
+    std::fs::write(&overlay_path, b"invalid fixture").expect("fixture");
+    let overlay = commit_preview_test_media(
+        state.asset_library().expect("library"),
+        overlay_path.clone(),
+        rec709_video_media_info(std::fs::metadata(overlay_path).expect("metadata").len()),
+    );
+    let mut sequence = state.active_sequence().expect("sequence").clone();
+    sequence.settings.frame_rate = Rational::new(60, 1);
+    let tb = sequence.time_base();
+    // Changing the evaluation grid does not reinterpret authored times. Build
+    // both base edits on this grid instead of retaining the helper's 25fps cuts.
+    sequence.video_tracks[0].clips[0].duration = tt(120, tb);
+    sequence.video_tracks[0].clips[1].position = tt(120, tb);
+    sequence.video_tracks[0].clips[1].duration = tt(120, tb);
+    for position in [0, 120] {
+        sequence.video_tracks[1]
+            .add_clip(Clip::new(overlay, tt(position, tb), tt(120, tb)).expect("overlay"))
+            .expect("insert overlay");
+    }
+    state.test_set_sequence(Some(sequence));
+    state.play().expect("play");
+    let delivered =
+        deliver_test_current_frame(&mut state, mondrian_playback::FrameDeliveryKind::Ready);
+    state.observe_video_preroll_at_wall(delivered, 1, 1, true, true, Instant::now());
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    synchronize_visual_program_for_state(&service, &state);
+    let sequence = state.active_sequence().expect("sequence");
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let resolution = Resolution { width, height };
+    let near = future_media_prefix_keys_for_state(&service, &state, 0, 6, resolution);
+    let activation = future_media_prefix_keys_for_state(&service, &state, 119, 1, resolution);
+    let cold = activation.iter().find(|key| key.asset_id != overlay).expect("cold source");
+    assert_eq!(near.len(), 12, "six pictures each require both sources");
+    service.frame_store.replace(test_cpu_frame_store(8, 640 * 1024 * 1024, 6));
+    let mut opened = test_preview_decode_diagnostics(
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewHardwareDecodeDecision::GpuResidentNative,
+        PreviewHardwareDecodeBlocker::None,
+    );
+    opened.elapsed_us = 80_000;
+    service.record_startup_preroll_decode(opened, 0);
+    assert_eq!(
+        service.cold_activation_covering_frames(
+            snapshot.transport(),
+            media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
+                .expect("bounded temporal window"),
+        ),
+        Some(6),
+        "exercise finite shared-worker coverage, rather than the complete-window fallback"
+    );
+    for key in &near {
+        service.future_media_window.borrow_mut().remember_playback_worker_affinity(
+            key.decode.source().clone(),
+            if key.asset_id == overlay {
+                MediaPreviewWorkerLane::Playback
+            } else {
+                MediaPreviewWorkerLane::NonPlayback
+            },
+        );
+    }
+    // Three full pictures and two more inputs on the worker that would open
+    // the cold source saturate the eight-entry Store. These CPU test payloads
+    // exercise physical admission; they do not qualify hardware decoding.
+    for key in near
+        .iter()
+        .take(6)
+        .chain(near.iter().skip(6).take(4).filter(|key| key.asset_id != overlay))
+    {
+        assert!(admit_test_media_frame(
+            &mut service.frame_store.borrow_mut(),
+            key.clone(),
+            test_media_frame(4),
+            MediaPreviewRequestPriority::Prefetch,
+        ));
+    }
+    let receiver = service.scheduler.job_receiver();
+    let mut held_cold = None;
+    let mut observed_jobs = Vec::new();
+    let mut lost_immediate_picture = false;
+    let mut admitted_per_poll = Vec::new();
+    for _ in 0..4 {
+        schedule_media_prefetches_for_state(&service, &state, sequence, 0);
+        lost_immediate_picture |= near
+            .iter()
+            .take(2)
+            .any(|key| service.frame_store.borrow_mut().media_frame(key).is_none());
+        admitted_per_poll.push(service.jobs.diagnostics().queued_prefetch_jobs);
+        for lane in [
+            MediaPreviewWorkerLane::Playback,
+            MediaPreviewWorkerLane::NonPlayback,
+        ] {
+            while let MediaPreviewJobQueueWait::Work(MediaPreviewJobQueueReceive::Job {
+                mut job,
+                ..
+            }) = receiver.recv_for_worker_outcome_timeout(lane, Duration::from_millis(1))
+            {
+                observed_jobs.push(job.key.clone());
+                if job.key == *cold {
+                    assert!(held_cold.is_none(), "only one cold execution may exist");
+                    held_cold = Some(job);
+                    break;
+                }
+                // Complete only genuinely admitted work with its Broker lease.
+                // The cold execution stays in flight across later polls.
+                let execution = job.execution_id.expect("execution lease");
+                assert!(service.scheduler.mark_execution_completed(execution));
+                assert!(service
+                    .frame_store
+                    .borrow_mut()
+                    .insert_media_frame(
+                        job.key.clone(),
+                        test_media_frame(4),
+                        job.residency_work.take().expect("physical reservation"),
+                    )
+                    .is_admitted());
+                let _ = service.scheduler.resolve_execution(execution, false);
+            }
+        }
+    }
+    let cold_started = held_cold.is_some();
+    let coverage_still_resident = near
+        .iter()
+        .filter(|key| key.asset_id != overlay)
+        .all(|key| service.frame_store.borrow_mut().media_frame(key).is_some());
+    if let Some(job) = held_cold {
+        service
+            .scheduler
+            .abandon_execution(job.execution_id.expect("cold execution lease"));
+        drop(job);
+    }
+    service.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).expect("cleanup coverage fixture");
+    assert!(
+        !lost_immediate_picture,
+        "cold preparation must preserve the nearest full picture"
+    );
+    assert!(
+        cold_started,
+        "resident coverage never admitted the cold source at a fixed coordinate: {admitted_per_poll:?}; expected={cold:?}; observed={observed_jobs:?}"
+    );
+    assert!(
+        coverage_still_resident,
+        "the actual cold execution must retain its worker coverage"
+    );
+    assert_eq!(
+        &admitted_per_poll[2..],
+        &[0, 0],
+        "covered cold work and the nearest picture must settle instead of repeatedly refilling evicted distant inputs"
+    );
 }
 
 #[test]
@@ -15295,8 +15554,8 @@ fn test_media_work_demand(target_frame: i64) -> mondrian_playback::MediaWorkDema
     )
 }
 
-fn install_preview_result_channel_for_test(
-    service: &WindowPreviewAdapter,
+fn install_preview_result_channel_for_test<O: Clone>(
+    service: &PreviewProductionRuntime<O>,
 ) -> mpsc::SyncSender<MediaPreviewResult> {
     let (result_tx, result_rx) = mpsc::sync_channel(MEDIA_PREVIEW_COMPLETED_RESULT_QUEUE_CAPACITY);
     service.results.replace(result_rx);
@@ -15332,8 +15591,8 @@ fn shutdown_disconnects_completed_result_owners_before_worker_join() {
     assert_eq!(service.frame_store.borrow().diagnostics().media_entries, 0);
 }
 
-fn test_successful_media_preview_result(
-    service: &WindowPreviewAdapter,
+fn test_successful_media_preview_result<O: Clone>(
+    service: &PreviewProductionRuntime<O>,
     key: MediaPreviewKey,
     generation: u64,
     seed: u8,
@@ -17533,6 +17792,351 @@ fn preview_representation_quality_selects_a_reduced_decode_identity() {
 }
 
 #[test]
+fn completed_prefetch_media_wakes_a_satisfied_current_candidate_once() {
+    use crate::app::headless_realtime_playback::{
+        should_attempt_headless_gpu_candidate, HeadlessGpuCandidateBinding,
+        HeadlessGpuCandidateBindingState, HeadlessGpuCandidateIntent, HeadlessGpuCandidateStatus,
+    };
+
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    state.play().expect("play");
+    let current = match execute_gpu_preview_for_test_app(&service, &state) {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        _ => panic!("expected current GPU candidate"),
+    };
+    assert!(register_test_window_preview_output(
+        &service,
+        &current,
+        current.external_texture_key(),
+        ViewerExternalTexturePresentation::full_frame(current.width, current.height)
+            .expect("full-frame presentation"),
+    ));
+    state
+        .complete_frame_presentation(
+            current.presentation_ticket().expect("current ticket"),
+            Instant::now(),
+        )
+        .expect("present current");
+    let key = test_media_key(1989);
+    let result_tx = install_preview_result_channel_for_test(&service);
+    let generation = service.execution.borrow().generation();
+    assert!(matches!(
+        service.scheduler.request_with_binding(
+            key.clone(),
+            generation,
+            MediaPreviewRequestPriority::Prefetch,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            None,
+            None,
+        ),
+        MediaPreviewRequestStatus::Scheduled { .. }
+    ));
+    let mut result = test_successful_media_preview_result(&service, key.clone(), generation, 9);
+    result.priority = MediaPreviewRequestPriority::Prefetch;
+    result.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
+    result_tx.send(result).expect("publish future media");
+
+    // No evaluation waits on this producer: the current picture is already
+    // satisfied, but completion releases the bounded future-work opportunity.
+    let outcome = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5), None);
+    assert!(service.frame_store.borrow_mut().media_frame(&key).is_some());
+    assert!(!outcome.visible_change);
+    assert!(outcome.frame_delivery_candidates.is_empty());
+    assert!(outcome.candidate_retry_required);
+
+    let intent = HeadlessGpuCandidateIntent::from_state(&state);
+    let binding = Some(HeadlessGpuCandidateBinding {
+        intent,
+        state: HeadlessGpuCandidateBindingState::Satisfied,
+    });
+    assert!(should_attempt_headless_gpu_candidate(
+        HeadlessGpuCandidateStatus::Ready,
+        binding,
+        intent,
+        crate::app::playback_preview::PlaybackPreviewPumpOutcome {
+            candidate_retry_required: outcome.candidate_retry_required,
+            ..Default::default()
+        },
+    ));
+    let second = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5), None);
+    assert!(
+        second.candidate_retry_required,
+        "polling must retain the unacknowledged refill"
+    );
+    let successor = state
+        .preview_successor_execution_request(Instant::now())
+        .expect("successor request");
+    assert!(matches!(
+        service.gpu_preview_frame(successor),
+        PreviewGpuFrameState::Prepared
+    ));
+    assert!(
+        service
+            .poll_finished_outcome_with_budget(8, Duration::from_millis(5), None)
+            .candidate_retry_required,
+        "ticketless preparation cannot acknowledge the visible current's refill",
+    );
+    assert!(matches!(
+        execute_gpu_preview_for_test_app(&service, &state),
+        PreviewGpuFrameState::Current(candidate) if candidate.was_already_visible()
+    ));
+    assert!(
+        !service
+            .poll_finished_outcome_with_budget(8, Duration::from_millis(5), None)
+            .candidate_retry_required
+    );
+    assert!(!should_attempt_headless_gpu_candidate(
+        HeadlessGpuCandidateStatus::Ready,
+        binding,
+        intent,
+        Default::default(),
+    ));
+    service.shutdown();
+}
+
+#[test]
+#[ignore = "requires a real local GPU"]
+fn distinct_prepared_gpu_picture_cannot_inherit_an_earlier_visibility_time() {
+    use crate::app::headless_preview_presentation::{
+        prepare_headless_preview_successor, present_headless_preview_candidate,
+        present_headless_preview_candidate_at, HeadlessPreviewCandidate, HeadlessPreviewRuntime,
+    };
+    use crate::app::headless_viewer_gpu::{
+        HeadlessGpuCompletionDeadline, HeadlessViewerGpuAdapter,
+    };
+
+    ensure_test_ocio_loaded();
+    let mut state = AppState::new();
+    let mut sequence = Sequence::new("distinct prepared visibility");
+    let tb = sequence.time_base();
+    for (start, duration, color) in [
+        (0, 1, Color::from_rgba8(160, 24, 24, 255)),
+        (1, 23, Color::from_rgba8(24, 24, 160, 255)),
+    ] {
+        sequence.video_tracks[0]
+            .add_clip(
+                Clip::new_solid_color(AssetId::new(), color, tt(start, tb), tt(duration, tb))
+                    .expect("solid fixture"),
+            )
+            .expect("insert solid fixture");
+    }
+    state.test_set_sequence(Some(sequence));
+    state.seek(0).expect("first picture");
+    let service = HeadlessPreviewRuntime::new_without_workers_for_test();
+    let mut gpu = HeadlessViewerGpuAdapter::new().expect("real GPU adapter");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let completion_deadline = HeadlessGpuCompletionDeadline::at(deadline);
+    for playing in [false, true] {
+        if playing {
+            state.play().expect("play");
+        }
+        loop {
+            assert!(Instant::now() < deadline, "current picture did not settle");
+            let result = present_headless_preview_candidate(
+                &service,
+                &mut state,
+                &mut gpu,
+                completion_deadline,
+            )
+            .expect("present first picture");
+            if matches!(result, HeadlessPreviewCandidate::Presented { .. })
+                && !gpu.has_submission_in_flight()
+                && state.pending_playback_frame_demand_identity().is_none()
+            {
+                break;
+            }
+            std::thread::yield_now();
+        }
+    }
+    let old = service.registered_gpu_output_artifact().expect("visible first picture");
+    assert!(prepare_headless_preview_successor(
+        &service,
+        &mut state,
+        &mut gpu,
+        completion_deadline,
+        true,
+    )
+    .expect("prepare distinct successor")
+    .is_some());
+    while gpu.has_submission_in_flight() {
+        assert!(
+            Instant::now() < deadline,
+            "prepared GPU execution did not complete"
+        );
+        present_headless_preview_candidate(&service, &mut state, &mut gpu, completion_deadline)
+            .expect("retire completed successor");
+        std::thread::yield_now();
+    }
+    assert!(
+        !state.is_playback_priming(),
+        "preroll must establish the running clock"
+    );
+    assert!(gpu.has_current_physical_output_for_key(&old.0));
+    let period = Duration::from_nanos(
+        1_000_000_000 * u64::try_from(tb.num).unwrap() / u64::try_from(tb.den).unwrap(),
+    );
+    let boundary_at = Instant::now() + period;
+    state.advance_playback_clock_at(boundary_at);
+    assert_eq!(
+        state.current_frame(),
+        1,
+        "fixture must bind the distinct successor"
+    );
+    let current_intent =
+        state.preview_execution_snapshot(boundary_at).transport().playback_intent();
+    let prepared = service
+        .registered_relevant_prepared_gpu_output_key(current_intent, None)
+        .expect("exact distinct prepared picture");
+    assert_ne!(prepared, old.0);
+    assert!(gpu.has_prepared_physical_output_for_key(&prepared));
+    assert!(!gpu.has_current_physical_output_for_key(&prepared));
+    let ticket = state
+        .playback_frame_presentation_ticket(mondrian_playback::FramePresentationQuality::Ready)
+        .expect("new current demand");
+    let evidence = state.playback_evidence_report();
+    // Leave the Engine's exact pending demand intact while real monotonic
+    // time passes its deadline and grace. The old red texture stays visible;
+    // the different blue texture is only off-screen preparation.
+    std::thread::sleep(
+        (boundary_at + Duration::from_millis(150))
+            .checked_duration_since(Instant::now())
+            .unwrap_or_default(),
+    );
+    let result = present_headless_preview_candidate_at(
+        &service,
+        &mut state,
+        &mut gpu,
+        completion_deadline,
+        Some(boundary_at),
+    )
+    .expect("arbitrate expired distinct picture");
+    let still_old = gpu.has_current_physical_output_for_key(&old.0)
+        && !gpu.has_current_physical_output_for_key(&prepared);
+    let after = state.playback_evidence_report();
+    let pending = state.pending_playback_frame_demand_identity();
+    let barrier = gpu.release_preview_decoder_dependencies_until(deadline);
+    let preview_closed = service.shutdown_until(deadline);
+    let gpu_closed = gpu.shutdown_until(deadline);
+    let app_closed = state.shutdown_for_endurance(deadline);
+    assert!(barrier.is_complete(), "{barrier:?}");
+    assert!(
+        preview_closed.all_workers_terminated(),
+        "{preview_closed:?}"
+    );
+    assert!(gpu_closed.qualifies_normal_runtime(), "{gpu_closed:?}");
+    assert!(app_closed.all_resources_released(), "{app_closed:?}");
+    assert!(
+        matches!(result, HeadlessPreviewCandidate::DroppedLate),
+        "{result:?}"
+    );
+    assert!(
+        still_old,
+        "an expired distinct prepared texture cannot replace visible pixels"
+    );
+    assert_eq!(after.deliveries.ready, evidence.deliveries.ready);
+    assert_eq!(after.deliveries.degraded, evidence.deliveries.degraded);
+    assert_eq!(after.deliveries.late, evidence.deliveries.late + 1);
+    assert_ne!(pending, Some(ticket.identity()));
+}
+
+#[test]
+#[ignore = "requires a real local GPU"]
+fn real_headless_visible_picture_acknowledges_completed_prefetch() {
+    use crate::app::headless_preview_presentation::{
+        present_headless_preview_candidate, HeadlessPresentedOutput, HeadlessPreviewCandidate,
+        HeadlessPreviewRuntime,
+    };
+    use crate::app::headless_viewer_gpu::{
+        HeadlessGpuCompletionDeadline, HeadlessViewerGpuAdapter,
+    };
+
+    let service = HeadlessPreviewRuntime::new_without_workers_for_test();
+    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    let mut gpu = HeadlessViewerGpuAdapter::new().expect("real GPU adapter");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let completion_deadline = HeadlessGpuCompletionDeadline::at(deadline);
+    // Warm the ordinary stopped picture before Play's own Priming deadline.
+    for playing in [false, true] {
+        if playing {
+            state.play().expect("play");
+        }
+        loop {
+            assert!(Instant::now() < deadline, "exact picture did not settle");
+            let result = present_headless_preview_candidate(
+                &service,
+                &mut state,
+                &mut gpu,
+                completion_deadline,
+            )
+            .expect("ordinary Headless candidate");
+            if matches!(result, HeadlessPreviewCandidate::Presented { .. })
+                && !gpu.has_submission_in_flight()
+                && state.pending_playback_frame_demand_identity().is_none()
+            {
+                break;
+            }
+            std::thread::yield_now();
+        }
+    }
+    let original_output = service.registered_gpu_output_artifact().expect("visible artifact");
+    let key = test_media_key(1990);
+    let results = install_preview_result_channel_for_test(&service);
+    let generation = service.execution.borrow().generation();
+    assert!(matches!(
+        service.scheduler.request_with_binding(
+            key.clone(),
+            generation,
+            MediaPreviewRequestPriority::Prefetch,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            None,
+            None,
+        ),
+        MediaPreviewRequestStatus::Scheduled { .. }
+    ));
+    let mut result = test_successful_media_preview_result(&service, key, generation, 9);
+    result.priority = MediaPreviewRequestPriority::Prefetch;
+    result.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
+    results.send(result).expect("publish completed future input");
+    assert!(
+        service
+            .poll_finished_outcome_with_budget(8, Duration::from_millis(5), None)
+            .candidate_retry_required
+    );
+    let acknowledgements = service.media_retry_acknowledgements.get();
+    let retry =
+        present_headless_preview_candidate(&service, &mut state, &mut gpu, completion_deadline)
+            .expect("retry through real Headless presentation");
+    let acknowledged = !service.media_retry_pending.get()
+        && service.media_retry_acknowledgements.get() == acknowledgements + 1;
+    let unchanged = service.registered_gpu_output_artifact() == Some(original_output)
+        && !gpu.has_submission_in_flight();
+    let barrier = gpu.release_preview_decoder_dependencies_until(deadline);
+    let preview_closed = service.shutdown_until(deadline);
+    let gpu_closed = gpu.shutdown_until(deadline);
+    let app_closed = state.shutdown_for_endurance(deadline);
+    assert!(barrier.is_complete(), "{barrier:?}");
+    assert!(
+        preview_closed.all_workers_terminated(),
+        "{preview_closed:?}"
+    );
+    assert!(gpu_closed.qualifies_normal_runtime(), "{gpu_closed:?}");
+    assert!(app_closed.all_resources_released(), "{app_closed:?}");
+    assert!(matches!(
+        retry,
+        HeadlessPreviewCandidate::Presented {
+            output: HeadlessPresentedOutput::CurrentGpu,
+            completed_presentation: None,
+        }
+    ));
+    assert!(unchanged, "refill must preserve the exact physical picture");
+    assert!(
+        acknowledged,
+        "visible-picture fast return bypassed the current planner"
+    );
+}
+
+#[test]
 fn completed_ticketless_successor_media_wakes_its_exact_evaluation() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let key = test_media_key(1987);
@@ -17864,4 +18468,143 @@ fn native_temporal_reuse_retains_one_allocation_and_exact_request_identity() {
     drop(reused);
     drop(protected);
     assert_eq!(store.diagnostics().media_aggregate_resource_units, 0);
+}
+
+#[test]
+#[ignore = "requires a real local GPU"]
+fn obsolete_queue_publication_releases_its_completed_input_evaluation() {
+    use crate::app::headless_preview_presentation::{
+        drive_headless_gpu_submission, present_headless_preview_candidate,
+        HeadlessCompletedGpuDisposition, HeadlessPresentedOutput, HeadlessPreviewCandidate,
+        HeadlessPreviewRuntime,
+    };
+    use crate::app::headless_viewer_gpu::{
+        HeadlessGpuCompletionDeadline, HeadlessViewerGpuAdapter,
+    };
+
+    // The source payload is an explicit CPU fixture; actual GPU queue/callback,
+    // Preview evaluation, and Store leases are production owners. This is not
+    // VideoToolbox or physical Viewer qualification.
+    let (mut state, _, root) = state_with_invalid_video_asset_for_cpu_rgb(true);
+    let service = HeadlessPreviewRuntime::new_without_workers_for_test();
+    let mut gpu = HeadlessViewerGpuAdapter::new().expect("real GPU adapter");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let completion_deadline = HeadlessGpuCompletionDeadline::at(deadline);
+    let key = media_preview_key_for_simple_sequence_frame(&service, &state, 0);
+    let sequence = state.active_sequence().expect("fixture Sequence");
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let working = sequence
+        .settings
+        .root_program_color_context(state.project_color_environment())
+        .expect("fixture color contract")
+        .working_color_space();
+    assert!(admit_test_media_frame(
+        &mut service.frame_store.borrow_mut(),
+        key.clone(),
+        test_media_frame_with_size_in_working(80, width, height, 1973, working),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+    // Warm the same real rendering contract under the untimed stopped demand.
+    loop {
+        assert!(Instant::now() < deadline);
+        let candidate =
+            present_headless_preview_candidate(&service, &mut state, &mut gpu, completion_deadline)
+                .expect("warm actual GPU picture");
+        if matches!(candidate, HeadlessPreviewCandidate::Presented { .. })
+            && !gpu.has_submission_in_flight()
+        {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    let warm = service.registered_exact_current_gpu_output_key().expect("warm picture");
+    let warm_intent =
+        state.preview_execution_snapshot(Instant::now()).transport().playback_intent();
+    service.release_completed_gpu_evaluation(&warm, warm_intent);
+    assert_eq!(
+        service.frame_store.borrow().diagnostics().protected_media_entries,
+        0
+    );
+    // Retire the stopped semantic registration so Play must submit a fresh
+    // ordinary picture instead of correctly reusing its visible alias.
+    service.clear_registered_output_for_key(&warm);
+    assert!(service.registered_exact_current_gpu_output_key().is_none());
+    state.play().expect("fresh current intent");
+    let epoch = state.playback_epoch();
+    let published =
+        present_headless_preview_candidate(&service, &mut state, &mut gpu, completion_deadline)
+            .expect("queue current picture");
+    assert!(
+        matches!(
+            published,
+            HeadlessPreviewCandidate::Presented { output: HeadlessPresentedOutput::QueuedGpu, .. }
+        ),
+        "{published:?}"
+    );
+    assert!(gpu.has_submission_in_flight());
+    assert!(state.pending_playback_frame_demand_identity().is_none());
+    let protected_before = service.frame_store.borrow().diagnostics().protected_media_entries;
+    assert_eq!(
+        protected_before, 1,
+        "actual source input must hold its Current protection"
+    );
+    if state.is_playback_priming() {
+        assert!(state.observe_video_preroll(0, 0));
+    }
+    assert!(
+        !state.is_playback_priming(),
+        "fixture must establish its running clock"
+    );
+    let tb = state.active_sequence().expect("Sequence").time_base();
+    let period = Duration::from_nanos(
+        (1_000_000_000u64 * u64::try_from(tb.num).expect("positive time base"))
+            .div_ceil(u64::try_from(tb.den).expect("positive time base")),
+    );
+    state.advance_playback_clock_at(Instant::now() + period);
+    assert_eq!(state.playback_epoch(), epoch);
+    assert_eq!(state.current_frame(), 1);
+    // Drain only the original submitted owner. Do not evaluate frame1 or use
+    // LRU eviction to hide frame0's optional lease.
+    let completed = loop {
+        assert!(Instant::now() < deadline);
+        if let Some(candidate) = drive_headless_gpu_submission(&service, &mut state, &mut gpu)
+            .expect("observe actual callback")
+            && !gpu.has_submission_in_flight()
+        {
+            break candidate;
+        }
+        std::thread::yield_now();
+    };
+    let protected_after = service.frame_store.borrow().diagnostics().protected_media_entries;
+    let resident = service.frame_store.borrow_mut().media_frame(&key).is_some();
+    let pending = state.pending_playback_frame_demand_identity();
+    let barrier = gpu.release_preview_decoder_dependencies_until(deadline);
+    let preview_closed = service.shutdown_until(deadline);
+    let gpu_closed = gpu.shutdown_until(deadline);
+    let app_closed = state.shutdown_for_endurance(deadline);
+    assert!(barrier.is_complete(), "{barrier:?}");
+    assert!(
+        preview_closed.all_workers_terminated(),
+        "{preview_closed:?}"
+    );
+    assert!(gpu_closed.qualifies_normal_runtime(), "{gpu_closed:?}");
+    assert!(app_closed.all_resources_released(), "{app_closed:?}");
+    std::fs::remove_dir_all(root).expect("clean fixture");
+    assert!(
+        matches!(
+            completed,
+            HeadlessPreviewCandidate::CompletedGpu {
+                disposition: HeadlessCompletedGpuDisposition::PublishedCurrent { .. },
+                ..
+            }
+        ),
+        "{completed:?}"
+    );
+    assert_eq!(
+        protected_after, 0,
+        "completed obsolete input cannot pin optional reuse cache"
+    );
+    assert!(resident, "retirement must not clear Frame Store");
+    assert_eq!(pending.expect("frame1 demand preserved").target_frame, 1);
 }

@@ -390,6 +390,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         }
                         self.frame_store.borrow_mut().forget_failure(&result.key);
                         self.media_execution_failures.borrow_mut().remove(&result.key);
+                        // The visible current may already be satisfied while
+                        // these ticketless inputs release future-work capacity.
+                        // Retain the refill until an ordinary current request
+                        // acknowledges it; a boundary poll or ticketless
+                        // successor cannot consume that planner's opportunity.
+                        if result.priority == MediaPreviewRequestPriority::Prefetch
+                            && result.access_mode == PreviewDecodeAccessMode::PlaybackCursor
+                            && self.transport_playing.get()
+                        {
+                            self.media_retry_pending.set(true);
+                        }
                     }
                     outcome.visible_change |= presentation_current;
                     // A decoded frame became available; only evaluations that

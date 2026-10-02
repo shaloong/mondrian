@@ -80,6 +80,12 @@ rebuilds monitor adaptation from the new contract.
 
 Priming also proves the next distinct physical source inside the bounded cold-open horizon before it releases the clock anchor. The shared preroll seam may overlap that future decode with GPU presentation only after the complete current-frame media closure is physically resident; a partial multi-input closure retains absolute admission priority. Distinct-source discovery uses the renderer's canonical inclusive range closure and a monotonic prefix binary search for the first Asset outside the current media set. The App then lowers and validates the exact returned frame before admission. The visible current owner admits the activation against the original preroll deadline and reports its residency as a separate Playback observation; the deadline is never renewed. Once Playing begins, current turns only replenish the same bounded window, while speculative successor and farther-lookahead turns cannot recursively scan it.
 
+A successfully retained Playback Prefetch completion in an active Playback transport requests one current-candidate retry even when no evaluation is waiting on that producer. The existing media retry owner retains that request across polls until an ordinary current evaluation acknowledges it; ticketless successor and lookahead evaluations cannot consume it. A Ready current binding still consumes this completion notification: the exact retained picture remains Current while its ordinary media planner replenishes the future window under the same physical reservation and Frame Store grants. Headless resolves this request through the same Preview current-candidate entry and its existing Current presentation branch; a physical already-visible shortcut cannot bypass that planner or consume the notification on its behalf. Waiting for another picture boundary would leave a multi-layer window permanently one frame ahead and postpone a shared-worker cold source until its decode can no longer fit before the cut. After acknowledgement an empty completion poll creates no retry; neither the notification nor the refill creates a Frame Delivery, changes Clock Master, or renews a deadline. Background completion without an active Playback transport cannot retain a future-window retry.
+
+The Window Adapter also treats a ticketless exact-current GPU candidate as an observation only when the same physical texture is already Ready and no pending Frame Demand exists. It performs no visibility commit, creates no Frame Delivery, and does not schedule another repaint. A stale slot, distinct texture, or replacement demand still requires the ordinary presentation authority.
+
+When a distinct cold source shares a near Playback worker and has finite observed preparation coverage, the scheduler first protects the immediate complete picture, then replenishes that worker's bounded source inputs. Other-worker distant holes cannot spend the cold source's physical reservation before its coverage settles. After the cold attempt owns its real Broker reservation and coverage guards, the independent worker may fill the first missing complete picture with the remaining grant. This ordering lets repeated completion polls converge at an unchanged Timeline coordinate without increasing capacity, changing quality, or claiming distant cache residency as presentation.
+
 Cold-activation GPU-object preparation has its own ticketless execution purpose. Its resolved evaluation lives only for that prewarm call and does not enter the ordinary four-entry evaluation LRU; dropping the frame releases its transient media protection after renderer backend objects are ready. This keeps the far activation coordinate outside the ordinary realtime evaluation set while the bounded staging owners protect the near horizon. The cold frame still uses the same Timeline resolver, exact media keys, GPU input preparation, deadlines, and cancellation policy.
 
 A far activation may also reuse a physical source that still contributes to
@@ -1191,7 +1197,11 @@ or revive a newer prepared result.
 For Headless realtime playback, an exact semantic and physical prepared match
 is promoted immediately after the Clock advances across its frame boundary.
 That deadline-bound promotion precedes the general Preview result pump and GPU
-callback retirement. Native-memory observation and the next immutable resource
+callback retirement. A distinct prepared texture still commits its physical
+slot only inside the App's accepted publication closure at the real commit
+instant. Queue-order readiness proves preparation, not earlier visibility;
+only an exact continuously visible alias can inherit the boundary timestamp.
+Native-memory observation and the next immutable resource
 decision run after candidate arbitration on every successful turn, so resource
 maintenance cannot consume the presentation budget of an already-rendered
 successor.
@@ -2313,6 +2323,13 @@ instead owns one exact decode reservation under the same aggregate limits;
 it cannot publish complete-picture readiness or reserve unadmitted inputs.
 Resident cold dependencies remain guarded while later activation work owns its
 real Broker leases, including an already-active source restart after cold open.
+Current admission retains completed inputs belonging to that same exact Demand
+while reserving or inserting its other inputs. Recycling one input to make room
+for another would prevent the complete picture from ever becoming Ready. Both
+reclamation boundaries use the existing allocation ledger's Demand identity;
+the existing hard aggregate and per-Demand grants remain unchanged. Independent
+old consumers remain charged. A different Demand or ordinary policy trimming
+can reclaim Store-only old inputs normally, so this is no permanent pin.
 The Store never contains a Widget payload. `app::preview_raster_frame` owns RGBA8 validation, encoded color
 identity, stable presentation-resource naming, and the CPU raster output
 contract. The Window presentation Adapter alone maps that value to
@@ -2703,6 +2720,14 @@ through completion without acquiring Current protection. Retiring an evaluation
 or evicting a Frame Store entry therefore cannot make in-flight source bytes
 disappear from the physical ledger; completion drops the same shared leases.
 
+An ordinary queue-published Headless picture releases its exact evaluation reuse
+owner when its real GPU completion is observed. That retirement uses the
+submitted frame's captured Playback Intent, even if the Clock Master already
+demands the next frame. Physical artifact identity and successful publication
+remain required; current transport eligibility does not extend the completed
+input lifetime. Frame Store entries and independent in-flight clones retain
+their own leases, and retirement cannot consume the successor's Frame Demand.
+
 The standalone `preview_visual_protocol` test target compiles the same
 `preview_media_residency` lease carrier as App and its visual worker. The carrier
 is independent of decoded-frame/color adaptation, so protocol tests retain real
@@ -2717,6 +2742,15 @@ CPU projection and GPU publication share the existing presentation-carrier
 discriminator and Playback commit seam. Already-visible timing is reusable
 only when the exact physical artifact was actually retained visibly; a new
 buffer observes the ordinary presentation deadline.
+
+A ready GPU picture with a running current Frame Demand does not synchronously
+plan optional future media before publication. Window and Headless first commit
+the actual output through the unchanged Playback ticket seam, then recapture an
+owner-derived snapshot and refill through the same production Preview planner,
+Broker, cold-activation horizon, and resource grants. A pending ticket cannot
+invoke that refill seam. Priming, demand-free observations, unresolved current
+work, and CPU fallback retain their existing planning paths; this ordering does
+not renew a deadline or backdate the picture's visibility.
 
 Linux NVIDIA native input uses the existing coherent Renderer admission snapshot
 and Media worker-family CUDA selector. The Window and Headless device creation
