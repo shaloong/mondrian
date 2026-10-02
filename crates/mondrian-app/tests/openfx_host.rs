@@ -1181,6 +1181,33 @@ fn qualify_native_discrete_filter(string_choice: bool) {
             }
         }
     }
+    // The probe performs derivative/integral suite queries against these
+    // constants without changing image gain. Include zero, subnormals, signed
+    // values and representable products of overflowing time differences.
+    for value in [
+        0.0,
+        f64::from_bits(1),
+        -f64::from_bits(1),
+        0.25,
+        -0.25,
+        f64::MAX,
+    ] {
+        let output = resident
+            .render(
+                &timing,
+                &BTreeMap::from([("calculus".into(), OpenFxParameterValue::Double(value))]),
+                &input,
+                &mut || Ok(()),
+            )
+            .expect("static native derivative and integral contract");
+        assert_eq!(resident.worker_process_id(), worker);
+        let gain = (default_index + 1) as f32;
+        for (actual, original) in output.pixels.iter().zip(&input.pixels) {
+            for channel in 0..4 {
+                assert!((actual[channel] - original[channel] * gain).abs() < 1e-6);
+            }
+        }
+    }
     for value in [0, 1, 2] {
         let output = render_openfx_filter_frame(
             product_executable(),

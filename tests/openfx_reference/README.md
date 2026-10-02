@@ -184,3 +184,11 @@ controls. They compare current values against past/future fractional-time querie
 for all five scalar kinds and require NaN/infinity to return ErrValue without
 publishing output values. This qualifies constant non-animatable snapshots;
 potentially animated parameters still require separate complete temporal binding.
+
+Static Double calculus is also checked through the actual parameter varargs
+suite: zero derivatives; forward, reversed and equal endpoints; finite
+endpoints with overflowing differences; zero/subnormal/signed/extreme values;
+NaN/infinity admission and preservation of outputs on failure. The Rust matrix
+reuses one resident worker and compares pixels, then exercises the compiled
+graph. Animatable Double calculus must return MissingHostFeature until a
+complete Core-backed temporal binding is implemented.

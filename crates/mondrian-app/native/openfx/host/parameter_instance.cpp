@@ -108,14 +108,31 @@ namespace MondrianOpenFx {
         ? set(value) : kOfxStatErrMissingHostFeature;
   }
 
-  OfxStatus DoubleParameter::derive(OfxTime time, double&)
+  OfxStatus DoubleParameter::derive(OfxTime time, double& value)
   {
-    return kOfxStatErrMissingHostFeature;
+    if (!std::isfinite(time)) { return kOfxStatErrValue; }
+    if (getCanAnimate()) { return kOfxStatErrMissingHostFeature; }
+    value = 0.0;
+    return kOfxStatOK;
   }
 
-  OfxStatus DoubleParameter::integrate(OfxTime time1, OfxTime time2, double&)
+  OfxStatus DoubleParameter::integrate(OfxTime time1, OfxTime time2, double& value)
   {
-    return kOfxStatErrMissingHostFeature;
+    if (!std::isfinite(time1) || !std::isfinite(time2)) { return kOfxStatErrValue; }
+    if (getCanAnimate()) { return kOfxStatErrMissingHostFeature; }
+    double result = 0.0;
+    if (_value != 0.0 && time1 != time2) {
+      const double interval = time2 - time1;
+      // Finite endpoints can have an unrepresentable difference while the
+      // scaled integral is finite. Halve only that large interval; halving
+      // tiny intervals would lose subnormal precision. Windows long double
+      // has no extra range, so do not rely on an extended intermediate type.
+      result = std::isfinite(interval) ? _value * interval
+          : (_value * (time2 * 0.5 - time1 * 0.5)) * 2.0;
+      if (!std::isfinite(result)) { return kOfxStatErrValue; }
+    }
+    value = result;
+    return kOfxStatOK;
   }
 
   //

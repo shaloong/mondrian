@@ -12,6 +12,7 @@
 #include <map>
 #include <string>
 #include <limits>
+#include <cmath>
 
 namespace {
 struct ActionState { bool changing = false; int changes = 0; int renders = 0; };
@@ -107,6 +108,43 @@ bool applyDiscreteGain(const void* handle, OfxPropertySetHandle in, const char* 
     }
   }
   return gEffectHost->clipReleaseImage(image) == kOfxStatOK && valid;
+}
+// Exercise the actual varargs suite, including interval overflow whose product
+// is still representable. Outputs must survive every rejected request.
+bool staticCalculus(const void* handle) {
+  OfxParamSetHandle params = nullptr;
+  OfxParamHandle parameter = nullptr;
+  double current = 0.0;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+      gParamHost->paramGetHandle(params, "calculus", &parameter, nullptr) != kOfxStatOK ||
+      gParamHost->paramGetValueAtTime(parameter, 0.0, &current) != kOfxStatOK) { return false; }
+  const double limit = std::numeric_limits<double>::max();
+  for (double time : {-limit, -3.25, 0.0, 9.5, limit}) {
+    double result = -999.0;
+    if (gParamHost->paramGetDerivative(parameter, time, &result) != kOfxStatOK || result != 0.0) { return false; }
+  }
+  for (const auto& interval : {std::pair<double, double>{-1.0, 1.0}, {1.0, -1.0}, {9.5, 9.5}, {-limit, limit}, {limit, -limit}}) {
+    double expected = 0.0;
+    if (interval.first != interval.second) {
+      expected = current * (interval.second == limit || interval.first == limit ? limit : 1.0);
+      expected *= interval.second > interval.first ? 2.0 : -2.0;
+    }
+    double result = -999.0;
+    const auto status = gParamHost->paramGetIntegral(parameter, interval.first, interval.second, &result);
+    if (std::isfinite(expected)) {
+      if (status != kOfxStatOK || result != expected) { return false; }
+    } else if (status != kOfxStatErrValue || result != -999.0) { return false; }
+  }
+  for (double invalid : {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()}) {
+    double result = -999.0;
+    if (gParamHost->paramGetDerivative(parameter, invalid, &result) != kOfxStatErrValue || result != -999.0 ||
+        gParamHost->paramGetIntegral(parameter, invalid, 0.0, &result) != kOfxStatErrValue || result != -999.0 ||
+        gParamHost->paramGetIntegral(parameter, 0.0, invalid, &result) != kOfxStatErrValue || result != -999.0) { return false; }
+  }
+  if (gParamHost->paramGetHandle(params, "scaleR", &parameter, nullptr) != kOfxStatOK) { return false; }
+  double result = -999.0;
+  return gParamHost->paramGetDerivative(parameter, 0.0, &result) == kOfxStatErrMissingHostFeature && result == -999.0 &&
+         gParamHost->paramGetIntegral(parameter, 0.0, 1.0, &result) == kOfxStatErrMissingHostFeature && result == -999.0;
 }
 // These controls are declared non-animatable in the owned Choice fixtures.
 // Other finite times must see the same immutable authored snapshot.
@@ -339,8 +377,13 @@ OfxStatus probe(const char* action, const void* handle,
       gPropHost->propSetInt(props, kOfxParamPropDisplayMin, 0, 0);
       gPropHost->propSetInt(props, kOfxParamPropDisplayMax, 0, 9);
       gPropHost->propSetInt(props, kOfxParamPropAnimates, 0, 0);
+      if (gParamHost->paramDefine(params, kOfxParamTypeDouble, "calculus", &props) != kOfxStatOK) { return kOfxStatFailed; }
+      gPropHost->propSetDouble(props, kOfxParamPropDefault, 0, -0.5);
+      gPropHost->propSetDouble(props, kOfxParamPropMin, 0, -std::numeric_limits<double>::max());
+      gPropHost->propSetDouble(props, kOfxParamPropMax, 0, std::numeric_limits<double>::max());
+      gPropHost->propSetInt(props, kOfxParamPropAnimates, 0, 0);
     } else if (operation == kOfxImageEffectActionRender &&
-               !staticQueries(handle, in, selected != "choice")) { return kOfxStatFailed; }
+               (!staticCalculus(handle) || !staticQueries(handle, in, selected != "choice"))) { return kOfxStatFailed; }
   }
   return result;
 }

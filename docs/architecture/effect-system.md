@@ -1248,3 +1248,15 @@ The built-in LUT path parameter declares external File bindings with the cube
 suffix. ProjectAsset and Uri are rejected before author mutation, matching the
 actual prepared cube-LUT provider. Inspector and native browsing read this same
 schema contract; extension checks preserve spelling and admit uppercase suffixes.
+
+### Native static OpenFX calculus
+
+Non-animatable native Double snapshots answer finite-time derivatives with zero
+and signed frame-coordinate integrals with their constant value times the
+interval. Overflowing endpoint subtraction is scaled before multiplication so
+a representable integral remains valid, including zero and subnormal values.
+Non-finite queries and unrepresentable results return ErrValue without changing
+caller outputs. Animatable definitions still reject calculus until Core owns
+the complete temporal query path; static support does not advertise animation.
+The owned native Choice/StrChoice fixture exercises these suite queries through
+resident and compiled graph execution while checking unchanged Float32 pixels.
