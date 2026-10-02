@@ -72,6 +72,15 @@ pub enum LocalMediaSmokePhases {
     ConcurrentRecoveryOnly,
 }
 
+/// Source contributions selected without changing their decode cadence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum LocalMediaSmokeSources {
+    /// Rotate the three independently probed source cadences.
+    MixedCadence,
+    /// Use only the source proven to be 3840x2160 Main10 at 60/1.
+    Single60,
+}
+
 /// Explicit workload; resolution and layer count never change during execution.
 #[derive(Debug, Clone, Copy)]
 pub struct LocalMediaSmokeSettings {
@@ -85,6 +94,8 @@ pub struct LocalMediaSmokeSettings {
     pub phases: LocalMediaSmokePhases,
     /// One video source, or that source plus a full-duration alpha overlay.
     pub video_layers: u8,
+    /// Base video source selection; single-60 requires one layer at 60 fps.
+    pub video_sources: LocalMediaSmokeSources,
     /// Authored Program Output; source metadata and color interpretation remain unchanged.
     pub program_color_space: ColorSpace,
 }
@@ -118,6 +129,11 @@ impl LocalMediaSmokeSettings {
         ensure!(
             (1..=2).contains(&self.video_layers),
             "video layers must be 1 or 2"
+        );
+        ensure!(
+            self.video_sources != LocalMediaSmokeSources::Single60
+                || (self.video_layers == 1 && self.frame_rate == Rational::FPS_60),
+            "single60 requires one video layer and 60 fps output"
         );
         ensure!(
             matches!(
@@ -168,6 +184,7 @@ pub(super) fn run_proxy_control(
             frame_rate: Rational::FPS_24,
             phases: LocalMediaSmokePhases::All,
             video_layers: 2,
+            video_sources: LocalMediaSmokeSources::MixedCadence,
             program_color_space: ColorSpace::Rec709,
         },
         true,
@@ -216,6 +233,7 @@ fn run_profile(
         "local-media-production-profile-v3"
     };
     let mut report = json!({"schema_version":3,"profile":profile,"status":"NotRun","commercial_qualification":false,"duration_72h_qualified":false,"physical_surface_qualified":false,"physical_reference_output_qualified":false,"hdr_surface_qualified":false,"original_native_media_qualified":false,"proxy_control":proxy_control,"phase_seconds":phase_seconds,"hard_deadline_seconds":hard_deadline_seconds,"memory_stop_bytes":MEMORY_LIMIT,"maximum_artifacts_per_phase":MAXIMUM_ARTIFACTS,"maximum_retained_artifact_bytes_per_phase":MAXIMUM_RETAINED_ARTIFACT_BYTES,"program_resolution":settings.resolution,"video_layers":settings.video_layers,"selected_phases":settings.phases,"fixtures":[],"phases":[]});
+    report["video_sources"] = json!(settings.video_sources);
     report["program_frame_rate"] =
         json!({"numerator": settings.frame_rate.num, "denominator": settings.frame_rate.den});
     report["requested_program_color_space"] = json!(settings.program_color_space);
@@ -446,6 +464,7 @@ fn run_phase(
                     proxy_control,
                     segment_count: timeline_extent.segment_count,
                     video_layers: settings.video_layers,
+                    video_sources: settings.video_sources,
                 },
             )?;
             if proxy_control {
@@ -908,6 +927,7 @@ struct LocalSmokeComposition {
     proxy_control: bool,
     segment_count: u64,
     video_layers: u8,
+    video_sources: LocalMediaSmokeSources,
 }
 
 fn author(
@@ -918,7 +938,12 @@ fn author(
     report: &mut Value,
     composition: LocalSmokeComposition,
 ) -> anyhow::Result<()> {
-    let LocalSmokeComposition { proxy_control, segment_count, video_layers } = composition;
+    let LocalSmokeComposition {
+        proxy_control,
+        segment_count,
+        video_layers,
+        video_sources,
+    } = composition;
     let frame_rate = state.active_sequence().context("Sequence")?.settings.frame_rate;
     ensure!(
         frame_rate.den == 1 && frame_rate.num > 0,
@@ -1035,7 +1060,8 @@ fn author(
     let overlay = add_track(state, TrackAddKind::Video)?;
     let audio = add_track(state, TrackAddKind::Audio)?;
     let mut rates = BTreeSet::new();
-    for path in &paths[..3] {
+    let mut single_source_index = None;
+    for (source_index, path) in paths[..3].iter().enumerate() {
         let info = assets
             .iter()
             .find(|asset| asset.file_path() == Some(path.as_path()))
@@ -1049,11 +1075,27 @@ fn author(
             "fixture probe does not prove real HEVC 10-bit with exact frame rate"
         );
         rates.insert((video.frame_rate.num, video.frame_rate.den));
+        if video_sources == LocalMediaSmokeSources::Single60 && video.frame_rate == Rational::FPS_60
+        {
+            ensure!(
+                video.width == 3840
+                    && video.height == 2160
+                    && video.codec_profile == mondrian_core::VideoCodecProfile::HevcMain10
+                    && video.proven_sampling().is_some(),
+                "single60 requires a proven 3840x2160 Main10 source"
+            );
+            single_source_index = Some(source_index);
+        }
     }
     ensure!(
         rates.len() == 3,
         "real fixture rates must be three distinct cadences"
     );
+    ensure!(
+        video_sources != LocalMediaSmokeSources::Single60 || single_source_index.is_some(),
+        "single60 has no proven 60/1 Main10 source"
+    );
+    report["selected_base_video_source"] = json!(single_source_index.map(|index| &paths[index]));
     // Repeat genuine two-second source contributions far enough to cover the
     // full observation plus independent-Export completion grace and recovery
     // seek displacement. The final segment is the terminal guard authority.
@@ -1063,7 +1105,7 @@ fn author(
             "Timeline authoring reached the run deadline"
         );
         let ordinal_usize = usize::try_from(ordinal).context("Timeline segment index overflow")?;
-        let video_index = (ordinal_usize + index) % 3;
+        let video_index = single_source_index.unwrap_or((ordinal_usize + index) % 3);
         let segment_start = i64::try_from(ordinal)?
             .checked_mul(frames_per_segment)
             .context("Timeline segment position overflow")?;
@@ -1305,6 +1347,7 @@ mod tests {
             frame_rate: Rational::FPS_60,
             phases: LocalMediaSmokePhases::All,
             video_layers: 2,
+            video_sources: LocalMediaSmokeSources::MixedCadence,
             program_color_space: ColorSpace::Rec709,
         }
     }

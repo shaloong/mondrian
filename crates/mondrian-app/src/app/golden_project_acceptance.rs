@@ -46,7 +46,9 @@ use std::path::{Path, PathBuf};
 
 /// Workload controls for the same production-linked local validation runtime.
 #[cfg(feature = "validation")]
-pub use local_media_smoke::{LocalMediaSmokePhases, LocalMediaSmokeSettings};
+pub use local_media_smoke::{
+    LocalMediaSmokePhases, LocalMediaSmokeSettings, LocalMediaSmokeSources,
+};
 
 /// Run bounded local real-media production stages without commercial qualification.
 #[cfg(feature = "validation")]

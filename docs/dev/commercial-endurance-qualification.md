@@ -579,20 +579,21 @@ Build with `cargo build --locked --profile validation -p mondrian-app
 --all-features --bin mondrian --example local_media_smoke -j 2`. Read the resulting executable's
 `--help` before running. Supply explicit fixture root, create-only output,
 seconds, output resolution, output frame rate, selected phases, video-layer count
-and Program Output (`rec709`, `pq` or `hlg`). Source-build
+Program Output (`rec709`, `pq` or `hlg`) and source selection (`mixed` or
+`single60`). Source-build
 examples may use the existing `MONDRIAN_PREVIEW_DEMUX_WORKER_PATH` and
 `MONDRIAN_MEDIA_PROBE_WORKER_PATH` overrides to select that same-profile
 `mondrian` worker executable. This does not qualify a packaged sealed runtime.
 
 ```text
-local_media_smoke <fixtures> <new-output> 300 1920x1080 60 all 2 rec709
-local_media_smoke <fixtures> <new-output> 1800 1920x1080 60 playback 1 rec709
-local_media_smoke <fixtures> <new-output> 300 1920x1080 60 export 2 rec709
-local_media_smoke <fixtures> <new-output> 300 1920x1080 60 recovery 2 rec709
-local_media_smoke <fixtures> <new-output> 30 3840x2160 30 playback 1 rec709
-local_media_smoke <fixtures> <new-output> 30 3840x2160 30 playback 1 pq
-local_media_smoke <fixtures> <new-output> 30 3840x2160 30 playback 1 hlg
-local_media_smoke <fixtures> <new-output> 15 3840x2160 60 playback 1 rec709
+local_media_smoke <fixtures> <new-output> 300 1920x1080 60 all 2 rec709 mixed
+local_media_smoke <fixtures> <new-output> 1800 1920x1080 60 playback 1 rec709 mixed
+local_media_smoke <fixtures> <new-output> 300 1920x1080 60 export 2 rec709 mixed
+local_media_smoke <fixtures> <new-output> 300 1920x1080 60 recovery 2 rec709 mixed
+local_media_smoke <fixtures> <new-output> 30 3840x2160 30 playback 1 rec709 mixed
+local_media_smoke <fixtures> <new-output> 30 3840x2160 30 playback 1 pq mixed
+local_media_smoke <fixtures> <new-output> 30 3840x2160 30 playback 1 hlg mixed
+local_media_smoke <fixtures> <new-output> 15 3840x2160 60 playback 1 rec709 single60
 ```
 
 Output resolution accepts 640x360, 1920x1080 or 3840x2160; output cadence
@@ -601,6 +602,15 @@ Timeline segments and frozen Export sampling. Each Export keeps the existing
 120-frame workload (five, four or two seconds respectively). Source cadence
 remains independent. A short single-layer 4K60 run does not qualify the full sealed
 HDR/effects/scopes matrix.
+
+`mixed` rotates the three source cadences. `single60` selects the source whose
+ordinary probe proves HEVC Main10, 3840x2160 and exact 60/1; it requires one video
+layer and 60 fps output. Both modes retain the same two-second clip repetitions,
+seek/cache operations, Full quality, deadlines and consuming production owners.
+Reports identify the selected source and its existing probe/hash. Source
+provenance remains an independent requirement: a timestamp-scaled 24 fps file
+can probe as 60/1 and does not qualify original 60 fps source content. Never
+replace provenance verification with the `single60` label.
 
 The color argument authors the ordinary Sequence Program Output contract;
 it does not reinterpret source metadata or install a validation color transform.

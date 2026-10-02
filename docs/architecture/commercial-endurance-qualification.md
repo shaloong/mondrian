@@ -1456,13 +1456,18 @@ QC now passes one exact Instant through picture rescan and regulatory analysis.
 
 `cargo run --locked --profile validation -p mondrian-app --all-features
 --example local_media_smoke -j 2 -- "<fixture-root>" "<new-output-directory>"
-30 640x360 60 all 2 rec709` runs three bounded local production stages. Resolution,
+30 640x360 60 all 2 rec709 mixed` runs three bounded local production stages. Resolution,
 output cadence, phase selection, layer count and Program Output (`rec709`, `pq`,
 `hlg`) are explicit. The color selection authors the existing Sequence contract,
 with no source reinterpretation or independent color authority. The same cadence
 binds the authored Sequence, Playback, two-second clips and frozen Export
 sampling; Export retains its existing 120-frame workload at every cadence.
 It never changes original source decode dimensions or cadence.
+Source selection is explicit: `mixed` rotates three cadences; `single60` uses only
+the source whose ordinary probe proves 3840x2160 Main10 at 60/1, with one video
+layer and 60 fps output. Both use the same two-second clip authoring and execution
+owners. Independent provenance must rule out timestamp-scaled source derivatives;
+the selector establishes neither original acquisition cadence nor hardware decode.
 Output supports 640x360, 1920x1080 and 3840x2160 at 24, 30 or 60 fps. This includes
 short 4K output diagnostics, not the complete sealed 4K60 matrix.
 `all` and focused `export`/`recovery` accept
@@ -1480,8 +1485,8 @@ HEVC layer, PNG and WAV through ordinary import and Timeline drop/trim.
 Recorded probes and hashes, rather than file names, establish executable
 source cadence, alpha and color contracts. A file labelled HEVC alpha that
 probes as opaque does not qualify alpha; timestamp-derived 25/60 fps fixtures
-do not qualify original native-source cadence. The Sequence uses 60/1 with
-explicit 640×360 or 1920×1080 Program output. Its authored Preview scale is
+do not qualify original native-source cadence. The Sequence uses the explicitly
+requested cadence and 640×360, 1920×1080 or 3840×2160 Program output. Its authored Preview scale is
 1.0; actual completed GPU dimensions and runtime Full quality are checked.
 Each stage creates fresh App, Preview/GPU and Waveform owners after the prior
 group consumes shutdown. The existing persistent Playback owner supplies real

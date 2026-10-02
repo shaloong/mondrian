@@ -59,6 +59,7 @@ pub(super) fn run(root: PathBuf, output: PathBuf) -> anyhow::Result<PathBuf> {
                     proxy_control: false,
                     segment_count: 60,
                     video_layers: 2,
+                    video_sources: LocalMediaSmokeSources::MixedCadence,
                 },
             )?;
             state.stop()?;
