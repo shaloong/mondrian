@@ -13,7 +13,7 @@
 | 菜单项（Menu） | 向菜单栏插入自定义功能入口 | 规划中 |
 | 资产源（Asset Source） | 提供自定义资产获取方式 | 规划中 |
 
-插件通过统一的 `PluginManifest` 声明自己提供哪些能力，一个插件可以同时具备多种能力。
+本手册介绍源码 crate 形式的特效 SDK，通过 `EffectDefinition` 与其 `EffectPluginContract` 注册能力。统一 SDK 插件包 Manifest、UI 扩展和资产源接口仍属规划。独立的 OpenFX、CLAP/VST3 原生格式 Adapter 已有受限实现，其范围与资格见[插件架构](../architecture/plugin-system.md)。
 
 ## 阅读导航
 
@@ -26,7 +26,7 @@
 
 3. **[特效开发](./03-effect-development.md)** —— 掌握 Effect Graph DSL，学会组合内置算子、编写分支效果、接入自定义渲染后端。
 4. **[性能与缓存](./04-performance-and-caching.md)** —— 理解缓存策略，让你的特效在预览和导出时都高效运行。
-5. **[版本契约与兼容策略](./05-versioning-and-compatibility.md)** —— 声明插件版本、处理 API 兼容性、配置失败降级行为。
+5. **[版本契约与兼容策略](./05-versioning-and-compatibility.md)** —— 声明插件版本、处理 API 兼容性、配置失败报告与定义隔离行为。
 
 ### 深入阶段
 

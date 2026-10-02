@@ -811,7 +811,7 @@ for stale PID slots, concurrent same-label claims, and missing-parent rejection.
 
 ## Document Schema Contract
 
-Document schema v26 is the current Alpha author contract. It persists the
+Document schema v27 is the current Alpha author contract. It persists the
 Project-owned color environment and future-Sequence template, exact rational
 author time, canonical audio layout/routing/processor schemas, canonical proxy
 membership, closed Clip content, multi-member link groups, strong visual
@@ -821,10 +821,14 @@ time, closed Sequence color/delivery structures, and one exact
 covering/strict-predecessor sampling boundary while its terminal boundary is
 derived from duration. Media Clip interpretation may also retain a bounded reel
 name, exact SMPTE source reference, and foreign item identity for interchange;
-these facts never replace Asset or placement identity.
+these facts never replace Asset or placement identity. Project-owned Gallery
+stills retain bounded PNG rasters, working-linear statistics and capture/Grade
+Version identities as portable author state. Current-schema decoding defaults
+an omitted Gallery to empty; supplied stills are validated before admission.
 
 Every old or future document schema and every unknown author field fails closed
-during Alpha. Reopen must never synthesize missing defaults, infer a legacy
+during Alpha. Apart from the explicit current-schema empty-Gallery default,
+reopen must not synthesize missing author defaults, infer a legacy
 source range, or repair an invalid strong reference. The evolution registry is
 the only future migration seam; version history is maintained by source
 control, not repeated here as an implementation ledger.

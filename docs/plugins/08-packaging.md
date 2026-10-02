@@ -20,7 +20,7 @@ crates/
 
 ```rust
 // 在 mondrian-app 初始化代码中
-mondrian_plugin_hello::register();
+mondrian_plugin_hello::register()?;
 ```
 
 这种方式的优点是可以直接利用 Rust 的类型系统和编译期检查，缺点是需要重新编译整个应用来添加或更新插件。

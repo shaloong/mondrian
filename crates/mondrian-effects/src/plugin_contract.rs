@@ -27,7 +27,8 @@ pub const CURRENT_EFFECT_PLUGIN_API_VERSION: EffectPluginApiVersion =
 pub enum EffectPluginRuntimeFailurePolicy {
     /// Report the failed instance while keeping the definition available for repair/retry.
     KeepDefinitionAvailable,
-    /// Disable the definition for the rest of the process after any runtime failure.
+    /// Disable this registered definition generation after any runtime failure.
+    /// A replacement generation has independent quarantine state.
     DisableDefinition,
 }
 
