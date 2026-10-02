@@ -3,8 +3,8 @@
 Initial controls reviewed against source `a1925ca3bcc6faf2868ab35bf40cc584da4f2537`
 on 2026-10-02; native-plugin scope aligned with develop source
 `2a418ecb86d9b8aecd7cf42aa6f9477e03bd0228` on 2026-10-03.
-This is an initial design/evidence inventory, not an exhaustive security audit,
-an OpenSSF certification, or a list of findings that may be ignored.
+This inventory describes the reviewed controls and their limitations; it is
+not an exhaustive security audit.
 
 ## System and trust boundaries
 

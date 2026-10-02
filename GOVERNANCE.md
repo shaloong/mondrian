@@ -31,7 +31,7 @@ conduct, credential, and personal-data matters use private channels instead.
 ## Contribution and release authority
 
 External changes target **develop**. **main** accepts promotion PRs from this
-repository's **develop** branch. Both branches use PRs and CLA checks. See
+repository's **develop** branch. External contributions use PRs and CLA checks. See
 [contributing](docs/CONTRIBUTING.md) and
 [review requirements](docs/dev/code-review.md). Repository administrators must
 verify live branch rules independently of written policy: require applicable CI
@@ -40,11 +40,17 @@ approval when the reviewer roster supports it. Enable private vulnerability and
 content reporting, assign handlers, and verify alert routing. Review access and
 backup readiness quarterly.
 
+Promote develop to main with a merge commit, then merge main back into develop
+to synchronize the promotion history; this synchronization should have no file
+changes. Release fixes land in develop first; do not squash/rebase promotions
+or force-push shared branches.
+
 Release maintainers review CI, qualification evidence, dependency findings,
 license notices, human-readable release notes, and security advisories before
 publishing. A successful build, a tag, or an automatically created draft does
 not authorize a public release. Present distribution qualification is described
-in [the contribution guide](docs/CONTRIBUTING.md).
+in the [release workflow](.github/workflows/release.yml) and
+[qualification guide](docs/dev/commercial-endurance-qualification.md).
 
 ## Access and continuity
 
