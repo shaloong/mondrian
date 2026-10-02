@@ -835,3 +835,14 @@ round-trip tests additionally cover visual parameters, mask animation, audio
 processor schema/curves, Basic Title animation, exact Transition/link
 relationships, and SQLite content. A schema number is not advanced unless
 these required semantics are represented and validated.
+
+
+### Saving during a continuous parameter interaction
+
+A save snapshot contains the currently committed canonical value, including a
+live parameter interaction; ephemeral pending history is not serialized.
+Cancellation restores the original value through a fresh author generation.
+Completion of an earlier live-value save cannot mark the restored project clean:
+manual and autosave baselines remain scoped to the captured author generation
+and Asset Library revision. Saving the restored generation establishes a new
+clean baseline through the ordinary persistence completion path.

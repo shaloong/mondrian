@@ -45,6 +45,9 @@ pub(crate) enum ParameterGestureAction {
     Finish {
         gesture_id: AuthoringGestureId,
     },
+    Cancel {
+        gesture_id: AuthoringGestureId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,12 +215,35 @@ impl AppState {
         Ok(())
     }
 
+    /// Restore a current interaction through canonical Session cancellation.
+    fn cancel_parameter_gesture(&mut self, id: AuthoringGestureId) -> Result<()> {
+        if self.active_parameter_gesture.as_ref().is_none_or(|active| active.id != id) {
+            return Ok(());
+        }
+        if !self.parameter_gesture_is_current() {
+            return self.finish_parameter_gesture();
+        }
+        let commit = self
+            .authoring
+            .as_mut()
+            .ok_or_else(|| gesture_error("no authoring Session"))?
+            .cancel_sequence_gesture(id)?;
+        self.active_parameter_gesture = None;
+        if let Some(commit) = commit {
+            self.consume_authoring_commit(commit);
+        }
+        Ok(())
+    }
+
     /// Apply live parameter intent through the existing author modules in one explicit group.
     pub(super) fn dispatch_parameter_gesture(
         &mut self,
         action: ParameterGestureAction,
     ) -> Result<()> {
         let (id, edit, begin) = match action {
+            ParameterGestureAction::Cancel { gesture_id } => {
+                return self.cancel_parameter_gesture(gesture_id)
+            }
             ParameterGestureAction::Begin { gesture_id, edit } => (gesture_id, edit, true),
             ParameterGestureAction::Update { gesture_id, edit } => (gesture_id, edit, false),
             ParameterGestureAction::Finish { gesture_id } => {
@@ -260,7 +286,7 @@ impl AppState {
         let result = self.dispatch_product_action(edit.into_product());
         self.parameter_gesture_command = None;
         if result.is_err() {
-            self.finish_parameter_gesture()?;
+            self.cancel_parameter_gesture(id)?;
         }
         result
     }
@@ -372,6 +398,117 @@ mod tests {
         };
         *current = PropertyValue::Float(value);
         edit
+    }
+
+    #[test]
+    fn parameter_gesture_cancel_restores_all_three_owners_and_original_redo() {
+        for owner in [TestOwner::Clip, TestOwner::Effect, TestOwner::Mask] {
+            let (mut state, edit) = fixture(owner);
+            state
+                .dispatch_action(
+                    ParameterGestureAction::Begin {
+                        gesture_id: AuthoringGestureId::new(),
+                        edit: with_value(edit.clone(), 0.8),
+                    }
+                    .action(),
+                )
+                .expect("original branch begin");
+            state.finish_parameter_gesture().expect("original branch finish");
+            assert!(state.undo_timeline().expect("original branch Undo"));
+            let original = state.active_sequence().expect("origin").clone();
+            let history = state.authoring_history().expect("history").diagnostics();
+            let id = AuthoringGestureId::new();
+            state
+                .dispatch_action(
+                    ParameterGestureAction::Begin { gesture_id: id, edit: edit.clone() }.action(),
+                )
+                .expect("begin");
+            state
+                .dispatch_action(
+                    ParameterGestureAction::Update {
+                        gesture_id: id,
+                        edit: with_value(edit.clone(), 0.6),
+                    }
+                    .action(),
+                )
+                .expect("live");
+            assert!(!state
+                .active_sequence()
+                .expect("live")
+                .author_state_eq_ignoring_revision(&original));
+            assert_eq!(
+                state.authoring_history().expect("history").diagnostics().redo_entries,
+                history.redo_entries
+            );
+            state
+                .dispatch_action(
+                    ParameterGestureAction::Cancel { gesture_id: AuthoringGestureId::new() }
+                        .action(),
+                )
+                .expect("foreign ignored");
+            assert!(state.parameter_gesture_is_current());
+            state
+                .dispatch_action(ParameterGestureAction::Cancel { gesture_id: id }.action())
+                .expect("cancel");
+            assert!(state.active_parameter_gesture.is_none());
+            assert!(state
+                .active_sequence()
+                .expect("origin")
+                .author_state_eq_ignoring_revision(&original));
+            assert_eq!(
+                state.authoring_history().expect("history").diagnostics(),
+                history
+            );
+            state
+                .dispatch_action(ParameterGestureAction::Finish { gesture_id: id }.action())
+                .expect("late finish ignored");
+            state
+                .dispatch_action(
+                    ParameterGestureAction::Update { gesture_id: id, edit: with_value(edit, 0.4) }
+                        .action(),
+                )
+                .expect("late update ignored");
+            assert_eq!(
+                state.authoring_history().expect("history").diagnostics(),
+                history
+            );
+            assert!(state.redo_timeline().expect("original Redo"));
+            assert!(!state
+                .active_sequence()
+                .expect("redone branch")
+                .author_state_eq_ignoring_revision(&original));
+        }
+    }
+
+    #[test]
+    fn parameter_gesture_failed_update_cancels_the_entire_interaction() {
+        let (mut state, edit) = fixture(TestOwner::Clip);
+        let original = state.active_sequence().expect("origin").clone();
+        let history = state.authoring_history().expect("history").diagnostics();
+        let id = AuthoringGestureId::new();
+        state
+            .dispatch_action(
+                ParameterGestureAction::Begin { gesture_id: id, edit: edit.clone() }.action(),
+            )
+            .expect("begin");
+        assert!(
+            state
+                .dispatch_action(
+                    ParameterGestureAction::Update { gesture_id: id, edit: with_value(edit, 2.0) }
+                        .action()
+                )
+                .is_err(),
+            "invalid opacity rejects the write"
+        );
+        assert!(state.active_parameter_gesture.is_none());
+        assert!(state
+            .active_sequence()
+            .expect("restored")
+            .author_state_eq_ignoring_revision(&original));
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
     }
 
     #[test]

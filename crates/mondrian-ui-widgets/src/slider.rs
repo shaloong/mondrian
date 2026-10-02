@@ -29,6 +29,8 @@ pub enum SliderEdit {
     Update(mondrian_core::AuthoringGestureId),
     /// Pointer release, focus loss or disabled interaction accepts the latest value.
     Finish(mondrian_core::AuthoringGestureId),
+    /// Escape cancels the interaction; author adapters restore through their transaction owner.
+    Cancel(mondrian_core::AuthoringGestureId),
 }
 
 /// Adapter for value changes and explicit pointer interaction boundaries.
@@ -47,6 +49,7 @@ pub struct Slider {
     on_change: Option<Box<SliderChangeAction>>,
     on_edit: Option<Box<SliderEditAction>>,
     gesture: Option<mondrian_core::AuthoringGestureId>,
+    drag_start: Option<f32>,
     visual: Cell<SliderVisualTokens>,
 }
 
@@ -107,6 +110,7 @@ impl Slider {
             on_change: None,
             on_edit: None,
             gesture: None,
+            drag_start: None,
             visual: Cell::new(SliderVisualTokens::default()),
         }
     }
@@ -227,6 +231,19 @@ impl Slider {
         if let Some(gesture) = self.gesture.take() {
             self.dispatch_edit(SliderEdit::Finish(gesture), ctx);
         }
+        self.drag_start = None;
+    }
+
+    fn cancel_edit(&mut self, ctx: &mut EventContext) {
+        let changed = self.drag_start.take().is_some_and(|origin| self.model.restore_value(origin));
+        if let Some(gesture) = self.gesture.take() {
+            self.dispatch_edit(SliderEdit::Cancel(gesture), ctx);
+        } else if changed {
+            self.dispatch_change(ctx);
+        }
+        self.dragging = false;
+        ctx.release_pointer_capture(self.id);
+        ctx.request_repaint();
     }
 
     fn keyboard_step(&self, modifiers: Modifiers) -> f32 {
@@ -283,6 +300,7 @@ impl Widget for Slider {
                 ctx.request_pointer_capture(self.id);
                 if self.on_edit.is_some() {
                     self.finish_edit(ctx);
+                    self.drag_start = Some(self.value());
                     let gesture = mondrian_core::AuthoringGestureId::new();
                     self.gesture = Some(gesture);
                     let ratio = self.geometry.get().ratio_at_position(self.bounds, *position);
@@ -290,6 +308,7 @@ impl Widget for Slider {
                     self.dispatch_edit(SliderEdit::Begin(gesture), ctx);
                     ctx.request_repaint();
                 } else {
+                    self.drag_start = Some(self.value());
                     self.update_value(position, ctx);
                 }
                 EventResult::Handled
@@ -323,6 +342,10 @@ impl Widget for Slider {
             UiEvent::KeyDown { key, modifiers } if self.focused => {
                 if modifiers.ctrl || modifiers.alt || modifiers.meta {
                     return EventResult::Ignored;
+                }
+                if self.dragging && *key == KeyCode::Escape {
+                    self.cancel_edit(ctx);
+                    return EventResult::Handled;
                 }
                 if self.dragging
                     && matches!(
@@ -593,6 +616,105 @@ mod tests {
         );
 
         assert_close(s.value(), 50.0);
+    }
+
+    #[test]
+    fn slider_escape_cancels_gesture_once_and_restores_unquantized_start() {
+        use std::rc::Rc;
+        let phases = Rc::new(RefCell::new(Vec::new()));
+        let recorded = Rc::clone(&phases);
+        let mut slider =
+            Slider::new(0.23, 0.0, 1.0).with_step(0.25).on_edit(move |phase, value| {
+                recorded.borrow_mut().push((phase, value));
+                None::<Action>
+            });
+        slider.layout(Rect::new(0.0, 0.0, 200.0, 20.0));
+        let mut ctx = event_ctx();
+        slider.event(
+            &UiEvent::MouseDown {
+                position: Point::new(0.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        slider.event(
+            &UiEvent::MouseMove {
+                position: Point::new(100.0, 10.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(slider.value(), 0.5);
+        let mut modified = Modifiers::none();
+        modified.ctrl = true;
+        assert_eq!(
+            slider.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: modified },
+                &mut ctx
+            ),
+            EventResult::Ignored
+        );
+        assert!(slider.dragging);
+        assert_eq!(
+            slider.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(slider.value(), 0.23);
+        assert!(!slider.dragging);
+        for event in [
+            UiEvent::MouseMove {
+                position: Point::new(180.0, 10.0),
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseUp {
+                position: Point::new(180.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::FocusLost,
+        ] {
+            slider.event(&event, &mut ctx);
+        }
+        let phases = phases.borrow();
+        assert_eq!(phases.len(), 3);
+        let SliderEdit::Begin(id) = phases[0].0 else {
+            panic!("begin");
+        };
+        assert_eq!(phases[1].0, SliderEdit::Update(id));
+        assert_eq!(phases[2], (SliderEdit::Cancel(id), 0.23));
+    }
+
+    #[test]
+    fn slider_escape_restores_value_only_form_draft_without_quantizing_it() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        let mut slider = Slider::new(0.23, 0.0, 1.0).with_step(0.25).on_change(value_action);
+        slider.layout(Rect::new(0.0, 0.0, 200.0, 20.0));
+        slider.event(
+            &UiEvent::MouseDown {
+                position: Point::new(100.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        slider.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(slider.value(), 0.23);
+        assert_eq!(
+            *actions.borrow(),
+            vec![value_action(0.5), value_action(0.23)]
+        );
     }
 
     #[test]

@@ -749,19 +749,17 @@ open, migration where supported, save, reopen, and semantic fingerprint
 retention.
 
 Continuous parameter interaction history belongs to AuthoringSession. Its
-Sequence/generation lease is ephemeral and is not serialized into .mdp files.
-Each live update commits canonical state independently, allowing saved snapshots
-to represent the exact current value. Only adjacent commands sharing an explicit
-interaction group replace their history endpoint; a single Undo/Redo restores
-the complete drag. Group endpoint replacement and net-zero sealing update the
-same bounded descriptor footprint index as ordinary author commands.
+Sequence/generation lease and independently bounded pending history command are
+ephemeral and are not serialized into .mdp files. Each live update commits
+canonical state independently, allowing saved snapshots to represent the exact
+current value. Pending history retains original and latest endpoints without
+altering completed Undo/Redo stacks. Finish admits one changed command using the
+ordinary retention policy; net-zero finish preserves the original Redo branch.
 
-A continuous interaction whose authored endpoints match is a net-zero history
-entry. This identity is cached when the typed command is compiled. Undo queries
-and restore preparation select the nearest meaningful command without moving
-history; validated Undo atomically removes trailing zero interactions and moves
-only that command to Redo. An intervening validated Sequence or Project command
-removes a previous zero interaction in its own prepared history/footprint plan.
-Abandoned preparation and author validation errors do not seal or alter the
-active interaction. Zero elimination releases exact roots and metadata and is
-not counted as budget eviction or a discarded author command.
+Cancellation validates the current author source and restores the exact original
+Sequence with a fresh revision and author generation. It releases pending roots
+without changing completed history or eviction counters. An intervening command
+accepts the pending interaction atomically and invalidates its lease. Failed
+preparation, budget admission or validation leaves author state and both history
+ledgers unchanged. Disabled or insufficient Undo retention does not disable
+cancellation: pending origin admission has its own explicit byte budget.

@@ -398,22 +398,21 @@ scope; UI Events owns scope focus, traversal, restoration and shortcut isolation
 
 Core supplies a strongly typed AuthoringGestureId. Editor State opens a
 Sequence/generation lease and validates every live edit through the normal
-replacement certificate. History retains only the interaction's original and
-latest Sequence endpoints; each update still advances author generations and
-publishes ordinary post-commit invalidation. Adjacent entries merge only with
-the same explicit gesture and begin generation, matching authored endpoints
-and Sequence ownership. Intervening commands or Undo/Redo invalidate the lease.
-Replacing history endpoints uses the existing footprint overlay and retention
-budget; unretained origins cannot later produce a misleading partial Undo.
-A finished net-zero interaction drops its redundant entry and retained charge
-without an author mutation or a history-budget warning.
+replacement certificate. Each update commits canonical author state and advances
+author generations. History stages one interaction's original and latest
+Sequence endpoints independently of the completed Undo/Redo stacks. Original
+Redo branches and retention counters remain intact until acceptance.
 
-A continuous interaction whose authored endpoints match is a net-zero history
-entry. This identity is cached when the typed command is compiled. Undo queries
-and restore preparation select the nearest meaningful command without moving
-history; validated Undo atomically removes trailing zero interactions and moves
-only that command to Redo. An intervening validated Sequence or Project command
-removes a previous zero interaction in its own prepared history/footprint plan.
-Abandoned preparation and author validation errors do not seal or alter the
-active interaction. Zero elimination releases exact roots and metadata and is
-not counted as budget eviction or a discarded author command.
+Completed commands and the pending interaction have explicit, independent byte
+budgets. Their footprint indexes share descriptor caching; shared roots may be
+conservatively charged in both ledgers. Pending budget admission precedes author
+installation. An update that cannot retain its cancellation origin fails
+atomically, including when ordinary Undo retention is disabled.
+
+Finish accepts a changed interaction through ordinary bounded history admission;
+a net-zero finish releases pending state without discarding Redo. Cancel validates
+and restores the exact original Sequence through the authoring session, advancing
+generations when author state changes and preserving completed history. Ordinary
+commands accept pending work in their own prepared history plan. Undo accepts and
+reverses a changed interaction, or skips a net-zero interaction atomically. Stale
+or foreign interaction identities cannot overwrite intervening author changes.

@@ -1898,10 +1898,30 @@ where
         }
     }
     let slider_action = Rc::clone(&action);
+    let author_interaction = std::cell::Cell::new(false);
     slider = slider.on_edit(move |phase, ratio| {
         use crate::app::parameter_gesture::{ParameterGestureAction, ParameterGestureEdit};
         use mondrian_ui_widgets::SliderEdit;
-        let action = slider_action(T::from_ratio(ratio, soft_min, soft_max, step));
+        if author_interaction.get() {
+            let boundary = match phase {
+                SliderEdit::Finish(gesture_id) => {
+                    Some(ParameterGestureAction::Finish { gesture_id })
+                }
+                SliderEdit::Cancel(gesture_id) => {
+                    Some(ParameterGestureAction::Cancel { gesture_id })
+                }
+                _ => None,
+            };
+            if let Some(boundary) = boundary {
+                author_interaction.set(false);
+                return Some(boundary.action());
+            }
+        }
+        let action = slider_action(if matches!(phase, SliderEdit::Cancel(_)) {
+            value
+        } else {
+            T::from_ratio(ratio, soft_min, soft_max, step)
+        });
         let Some(edit) = action.as_ref().and_then(ParameterGestureEdit::from_action) else {
             return if matches!(phase, SliderEdit::Finish(_)) {
                 None
@@ -1912,6 +1932,7 @@ where
         match phase {
             SliderEdit::Single => action,
             SliderEdit::Begin(gesture_id) => {
+                author_interaction.set(true);
                 Some(ParameterGestureAction::Begin { gesture_id, edit }.action())
             }
             SliderEdit::Update(gesture_id) => {
@@ -1919,6 +1940,9 @@ where
             }
             SliderEdit::Finish(gesture_id) => {
                 Some(ParameterGestureAction::Finish { gesture_id }.action())
+            }
+            SliderEdit::Cancel(gesture_id) => {
+                Some(ParameterGestureAction::Cancel { gesture_id }.action())
             }
         }
     });

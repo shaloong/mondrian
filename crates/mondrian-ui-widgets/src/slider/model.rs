@@ -69,6 +69,14 @@ impl SliderModel {
         self.min + self.range() * ratio.clamp(0.0, 1.0)
     }
 
+    /// Restore a previously held model value without applying input quantization.
+    pub(super) fn restore_value(&mut self, value: f32) -> bool {
+        let next = clamp_finite(value, self.min, self.max);
+        let changed = self.value != next;
+        self.value = next;
+        changed
+    }
+
     pub(super) fn set_value(&mut self, value: f32) -> bool {
         let next = self.quantize_value(value);
         if (next - self.value).abs() <= f32::EPSILON {

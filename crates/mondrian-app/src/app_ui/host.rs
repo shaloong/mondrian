@@ -181,6 +181,7 @@ pub struct AppUiHost {
     mode: AppUiMode,
     system_theme_preset: ThemePreset,
     ui_dirty: Cell<bool>,
+    force_model_refresh: Cell<bool>,
     preview_dirty: Cell<bool>,
     pending_close_action: Option<PendingCloseAction>,
     /// Guarded close/quit intent whose Project persistence barrier is still
@@ -1109,6 +1110,7 @@ impl AppUiHost {
     /// Refresh the root widget models when editor state changed.
     pub fn refresh_if_dirty(&mut self, bounds: Rect) {
         let full_refresh = self.ui_dirty.replace(false);
+        let force_model_refresh = self.force_model_refresh.replace(false);
         let preview_refresh = self.preview_dirty.replace(false);
         if !full_refresh {
             if preview_refresh && self.mode == AppUiMode::Workspace {
@@ -1133,6 +1135,7 @@ impl AppUiHost {
         let next_mode = mode_for_app_state(&self.app_state.borrow());
         if next_mode == self.mode
             && !stale_parameter_gesture
+            && !force_model_refresh
             && widget_tree_has_transient_interaction(self.active_root())
         {
             self.ui_dirty.set(true);
@@ -1585,6 +1588,10 @@ impl AppUiHost {
                 action_prefers_transport_refresh_without_preview(&action);
             if let Err(err) = self.dispatch_editor_action(action) {
                 tracing::warn!("custom UI action failed: {err}");
+                if parameter_gesture {
+                    self.force_model_refresh.set(true);
+                    self.mark_dirty();
+                }
             }
             let transport_intent = self.app_state.borrow().preview_transport_intent();
             self.preview_service.synchronize_transport_intent(transport_intent);
@@ -5359,6 +5366,136 @@ mod tests {
                 .expect("redone")
                 .author_state_eq_ignoring_revision(&completed_drag));
         }
+    }
+
+    #[test]
+    fn inspector_slider_escape_restores_author_history_and_original_redo_through_real_router() {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+        let mut state = workspace_app_state_with_timed_solid();
+        let clip_id = state.active_sequence().expect("Sequence").video_tracks[0].clips[0].id;
+        state.select_clip_by_id(clip_id).expect("select");
+        let original = state.active_sequence().expect("origin").clone();
+        state
+            .authoring
+            .as_mut()
+            .expect("Session")
+            .edit_sequence(original.id, "original branch", |sequence| {
+                sequence.name = "original branch".into();
+                Ok(())
+            })
+            .expect("fixture branch");
+        assert!(state.undo_timeline().expect("original Undo"));
+        let before = state.authoring_history().expect("history").diagnostics();
+        assert!(before.redo_entries > 0);
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("slider-escape"),
+        );
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let slider_id = inspector_slider(host.active_root(), false).expect("slider");
+        let point = {
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let slider = tree.get(slider_id).expect("slider");
+            (0..720)
+                .step_by(4)
+                .find_map(|y| {
+                    (0..1280).step_by(4).find_map(|x| {
+                        let point = Point::new(x as f32, y as f32);
+                        slider.hit_test(point).then_some(point)
+                    })
+                })
+                .expect("visible slider point")
+        };
+        let pending = PendingUiActions::default();
+        let dispatch = |action| pending.push(action);
+        let mut router = EventRouter::new(host.active_root().id());
+        for event in [
+            UiEvent::MouseDown {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseMove {
+                position: Point::new(point.x + 24.0, point.y),
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            assert_eq!(
+                router.route(
+                    event,
+                    &mut WidgetTreeView::new(host.active_root_mut()),
+                    &dispatch
+                ),
+                EventResult::Handled
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        }
+        assert_eq!(router.captured(), Some(slider_id));
+        assert_eq!(router.focused(), Some(slider_id));
+        assert!(!host
+            .app_state()
+            .active_sequence()
+            .expect("live")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(host.app_state().parameter_gesture_is_current());
+        assert_eq!(
+            router.route(
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::types::KeyCode::Escape,
+                    modifiers: Modifiers::none()
+                },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &dispatch
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(router.captured(), None);
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert!(host.app_state().active_parameter_gesture.is_none());
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("restored")
+            .author_state_eq_ignoring_revision(&original));
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            before
+        );
+        for event in [
+            UiEvent::MouseMove { position: point, modifiers: Modifiers::none() },
+            UiEvent::MouseUp {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::FocusLost,
+        ] {
+            router.route(
+                event,
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &dispatch,
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        }
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("no late write")
+            .author_state_eq_ignoring_revision(&original));
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            before
+        );
+        pending.push(Action::Redo);
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert_eq!(
+            host.app_state().active_sequence().expect("original Redo").name,
+            "original branch"
+        );
     }
 
     #[test]

@@ -570,6 +570,7 @@ impl AppUiHostStartupOwner {
             mode,
             system_theme_preset,
             ui_dirty: Cell::new(false),
+            force_model_refresh: Cell::new(false),
             preview_dirty: Cell::new(false),
             pending_close_action: None,
             quiescing_close_action: None,

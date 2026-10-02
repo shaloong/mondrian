@@ -2923,7 +2923,7 @@ the modal immediately; valid focused drafts retain their widgets and IME.
 Each resource update and browse request uses the same current-author check, so
 a delayed event cannot open a picker or retain input against an invalid owner.
 
-Slider exposes explicit begin/update/finish edit callbacks with a fresh typed
+Slider exposes explicit begin/update/finish/cancel edit callbacks with a fresh typed
 identity for each pointer drag. Begin is emitted even if the value is unchanged;
 release/focus loss finish once. Keyboard edits are independent. The common
 numeric property builder wraps only canonical Clip/Effect/Mask parameter intents
@@ -2940,10 +2940,17 @@ asset-folder navigation and startup/workspace transitions. A failed history
 seal retains the existing controls and schedules a retry; a delayed event cannot
 continue writing through the removed interaction identity.
 
+Escape during a focused captured slider interaction restores the exact original
+value, releases pointer capture and emits Cancel once. Late pointer release or
+focus loss cannot accept the cancelled interaction. Value-only form controls
+restore their original draft; canonical Clip/Effect/Mask controls ask the authoring
+session to cancel the staged command. Failed author updates cancel the entire
+interaction and force a model refresh even if the initial update never changed
+an author generation.
+
 Undo during a captured parameter slider interaction uses the Session's next
-meaningful history command. If the drag returned to its authored origin, Undo
-removes that zero entry atomically with restoring the preceding command. The
-resulting author generation invalidates the captured gesture; Host discards its
-controls before transient deferral, and late pointer events cannot recreate a
-write or a redundant Redo entry. This is author-history policy, not a UI snapshot
-restore or a hidden extra Undo action.
+meaningful history command. A changed drag is accepted and reversed atomically;
+a net-zero drag releases its pending command while restoring the preceding
+command. Host discards invalidated controls before transient deferral, and late
+pointer events cannot recreate a write. This policy preserves original Redo on
+cancellation and net-zero finish without UI snapshot restoration.

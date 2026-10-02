@@ -35,19 +35,31 @@ pub const DEFAULT_AUTHORING_HISTORY_RETAINED_BYTES: usize = 256 * 1024 * 1024;
 // allowance used by AUTHORING_FOOTPRINT_VERSION V1 in mondrian-core.
 const AUTHORING_HISTORY_ARC_ALLOWANCE_WORDS: usize = 4;
 
-/// Hard retention limits for one authoring history.
+/// Default logical-payload ceiling for one cancellable live interaction.
+///
+/// This temporary restore point is charged separately from completed Undo/Redo
+/// so a full history can remain intact until the interaction is accepted.
+pub const DEFAULT_AUTHORING_HISTORY_PENDING_BYTES: usize = 256 * 1024 * 1024;
+
+/// Hard retention limits for completed history and one active interaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct AuthoringHistoryBudget {
     /// Maximum entries across the Undo and Redo stacks.
     pub max_entries: usize,
     /// Maximum command-owned bytes across both stacks.
     pub max_retained_bytes: usize,
+    /// Maximum temporary command-owned bytes for one cancellable interaction.
+    pub max_pending_bytes: usize,
 }
 
 impl AuthoringHistoryBudget {
     /// Construct explicit retention limits.
-    pub const fn new(max_entries: usize, max_retained_bytes: usize) -> Self {
-        Self { max_entries, max_retained_bytes }
+    pub const fn new(
+        max_entries: usize,
+        max_retained_bytes: usize,
+        max_pending_bytes: usize,
+    ) -> Self {
+        Self { max_entries, max_retained_bytes, max_pending_bytes }
     }
 }
 
@@ -56,6 +68,7 @@ impl Default for AuthoringHistoryBudget {
         Self::new(
             DEFAULT_AUTHORING_HISTORY_MAX_ENTRIES,
             DEFAULT_AUTHORING_HISTORY_RETAINED_BYTES,
+            DEFAULT_AUTHORING_HISTORY_PENDING_BYTES,
         )
     }
 }
@@ -63,12 +76,16 @@ impl Default for AuthoringHistoryBudget {
 /// Current and cumulative bounded-history evidence.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AuthoringHistoryDiagnostics {
-    /// Number of retained Undo entries.
+    /// Available Undo steps, including an undoable staged interaction.
     pub undo_entries: usize,
     /// Number of retained Redo entries.
     pub redo_entries: usize,
     /// Versioned conservative logical allocation charge retained by commands.
     pub retained_bytes: usize,
+    /// Number of staged interactions, bounded to zero or one.
+    pub pending_entries: usize,
+    /// Independently charged payload of the staged interaction.
+    pub pending_retained_bytes: usize,
     /// Accounting formula used to produce `retained_bytes`.
     pub retained_charge_version: AuthoringFootprintVersion,
     /// Active retention limits.
@@ -1160,15 +1177,36 @@ pub(crate) struct PreparedAuthoringHistoryRecord {
     footprint_plan: PreparedFootprintPlan,
     outcome: AuthoringHistoryRecordOutcome,
     unretained_command: Option<UnretainedHistoryCommand>,
+    pending_install: PendingHistoryInstall,
 }
 
-/// One project-wide bounded Undo/Redo history.
+#[derive(Debug)]
+struct PendingHistoryCommand {
+    entry: Arc<AuthoringHistoryEntry>,
+    retained_bytes: usize,
+}
+
+#[derive(Debug)]
+struct PreparedPendingHistoryCommand {
+    command: PendingHistoryCommand,
+    footprint_plan: PreparedFootprintPlan,
+}
+
+#[derive(Debug)]
+enum PendingHistoryInstall {
+    Stage(Box<PreparedPendingHistoryCommand>),
+    Clear,
+}
+
+/// One project-wide bounded Undo/Redo history with one staged interaction.
 #[derive(Debug)]
 pub struct AuthoringHistory {
     budget: AuthoringHistoryBudget,
     state: AuthoringHistoryState,
     footprint_index: RetainedFootprintIndex,
     descriptor_cache: AuthoringFootprintDescriptorCache,
+    pending: Option<PendingHistoryCommand>,
+    pending_footprint_index: RetainedFootprintIndex,
 }
 
 impl Default for AuthoringHistory {
@@ -1185,6 +1223,8 @@ impl AuthoringHistory {
             state: AuthoringHistoryState::empty(),
             footprint_index: RetainedFootprintIndex::empty(),
             descriptor_cache: AuthoringFootprintDescriptorCache::new(),
+            pending: None,
+            pending_footprint_index: RetainedFootprintIndex::empty(),
         }
     }
 
@@ -1257,59 +1297,30 @@ impl AuthoringHistory {
         command: AuthoringCommand,
         group: Option<crate::session::AuthoringHistoryGroup>,
     ) -> Result<PreparedAuthoringHistoryRecord> {
-        let expected_revision = self.state.revision;
-        let next_revision = expected_revision.checked_add(1).ok_or_else(|| {
-            authoring_error(
-                "prepare_authoring_history_record",
-                "History revision exhausted",
-            )
-        })?;
-        // Only adjacent validated Sequence commits in the same explicitly
-        // opened interaction may share a restore point. An intervening author
-        // command, owner change or Undo/Redo must never be absorbed.
-        let previous = self.state.undo_stack.back().filter(|entry| {
-            group.is_some() && entry.group == group && self.state.redo_stack.is_empty()
-        });
-        let (command, coalesced) = match (previous, command) {
-            (
-                Some(previous),
-                AuthoringCommand::Sequence { description, sequence_id, before, after },
-            ) => match &previous.command {
-                AuthoringCommand::Sequence {
-                    sequence_id: previous_id,
-                    before: original,
-                    after: previous_after,
-                    ..
-                } if *previous_id == sequence_id
-                    && previous_after.author_state_eq_ignoring_revision(&before) =>
-                {
-                    (
-                        AuthoringCommand::Sequence {
-                            description,
-                            sequence_id,
-                            before: original.clone(),
-                            after,
-                        },
-                        true,
-                    )
-                }
-                _ => (
-                    AuthoringCommand::Sequence { description, sequence_id, before, after },
-                    false,
-                ),
-            },
-            (_, command) => (command, false),
-        };
+        if let Some(group) = group {
+            return self.prepare_pending_command(command, group);
+        }
         let entry = Arc::new(AuthoringHistoryEntry::compile(
             command,
             self.descriptor_cache.clone(),
-            group,
+            None,
         )?);
-        // An interrupted interaction that returned to its authored origin is
-        // removed only with installation of this new validated command. Its
-        // endpoint roots and metadata are released by the same footprint plan.
-        let elide_previous_zero =
-            !coalesced && self.state.undo_stack.back().is_some_and(|entry| entry.net_zero);
+        let prefix = self
+            .pending
+            .as_ref()
+            .filter(|pending| !pending.entry.net_zero)
+            .map(|pending| Arc::clone(&pending.entry));
+        self.prepare_committed_entries(entry, prefix)
+    }
+
+    fn prepare_committed_entries(
+        &mut self,
+        entry: Arc<AuthoringHistoryEntry>,
+        prefix: Option<Arc<AuthoringHistoryEntry>>,
+    ) -> Result<PreparedAuthoringHistoryRecord> {
+        let expected_revision = self.state.revision;
+        let next_revision = self.next_revision()?;
+        let prefix_count = usize::from(prefix.is_some());
         let branch_discarded_entries = self.state.redo_stack.len();
         let mut undo_stack = clone_history_stack(&self.state.undo_stack)?;
         let redo_stack = VecDeque::new();
@@ -1330,8 +1341,7 @@ impl AuthoringHistory {
             let footprint_plan = overlay.finish()?;
             self.reserve_footprint_plan(&footprint_plan)?;
             let retained_bytes = footprint_plan.retained_bytes()?;
-            let barrier_discarded_entries =
-                self.state.undo_stack.len() - usize::from(elide_previous_zero);
+            let barrier_discarded_entries = self.state.undo_stack.len() + prefix_count;
             let candidate = AuthoringHistoryState {
                 revision: next_revision,
                 undo_stack: VecDeque::new(),
@@ -1348,7 +1358,7 @@ impl AuthoringHistory {
                 retention_disabled_entries: self
                     .state
                     .retention_disabled_entries
-                    .checked_add(1)
+                    .checked_add(1 + prefix_count as u64)
                     .ok_or_else(|| {
                         authoring_error(
                             "account_authoring_history_retention_disabled",
@@ -1358,6 +1368,7 @@ impl AuthoringHistory {
                 oversize_dropped_entries: self.state.oversize_dropped_entries,
             };
             return Ok(PreparedAuthoringHistoryRecord {
+                pending_install: PendingHistoryInstall::Clear,
                 expected_revision,
                 candidate,
                 footprint_plan,
@@ -1375,25 +1386,22 @@ impl AuthoringHistory {
             });
         }
 
-        undo_stack.try_reserve(1).map_err(|error| {
+        undo_stack.try_reserve(1 + prefix_count).map_err(|error| {
             authoring_error(
                 "prepare_authoring_history_record",
                 format!("could not reserve Undo history storage: {error}"),
             )
         })?;
-        let replaced = if coalesced || elide_previous_zero {
-            undo_stack.pop_back()
-        } else {
-            None
-        };
+        if let Some(prefix) = &prefix {
+            undo_stack.push_back(Arc::clone(prefix));
+        }
         undo_stack.push_back(Arc::clone(&entry));
         let mut overlay = FootprintOverlay::new(&self.footprint_index);
-        // Add the new roots before removing Redo roots. Shared descendants then
-        // stay active across a branch instead of being torn down and rebuilt.
-        overlay.add_entry(&entry)?;
-        if let Some(replaced) = replaced {
-            overlay.remove_entry(&replaced)?;
+        // Keep shared descendants active while the original Redo branch is retired.
+        if let Some(prefix) = &prefix {
+            overlay.add_entry(prefix)?;
         }
+        overlay.add_entry(&entry)?;
         for discarded in &self.state.redo_stack {
             overlay.remove_entry(discarded)?;
         }
@@ -1413,8 +1421,7 @@ impl AuthoringHistory {
                 // roots, so this is the exact standalone command charge. Do
                 // not rebuild a second manifest over the same descriptor DAG.
                 let command_only_charge = retained_bytes;
-                let barrier_discarded_entries =
-                    self.state.undo_stack.len() - usize::from(elide_previous_zero);
+                let barrier_discarded_entries = self.state.undo_stack.len() + prefix_count;
                 let mut barrier_overlay = FootprintOverlay::new(&self.footprint_index);
                 for discarded in &self.state.undo_stack {
                     barrier_overlay.remove_entry(discarded)?;
@@ -1451,6 +1458,7 @@ impl AuthoringHistory {
                         })?,
                 };
                 return Ok(PreparedAuthoringHistoryRecord {
+                    pending_install: PendingHistoryInstall::Clear,
                     expected_revision,
                     candidate,
                     footprint_plan,
@@ -1515,6 +1523,7 @@ impl AuthoringHistory {
             oversize_dropped_entries: self.state.oversize_dropped_entries,
         };
         Ok(PreparedAuthoringHistoryRecord {
+            pending_install: PendingHistoryInstall::Clear,
             expected_revision,
             candidate,
             footprint_plan,
@@ -1527,6 +1536,178 @@ impl AuthoringHistory {
             },
             unretained_command: None,
         })
+    }
+
+    fn next_revision(&self) -> Result<u64> {
+        self.state.revision.checked_add(1).ok_or_else(|| {
+            authoring_error("prepare_authoring_history", "History revision exhausted")
+        })
+    }
+
+    fn unchanged_state(&self, revision: u64) -> Result<AuthoringHistoryState> {
+        Ok(AuthoringHistoryState {
+            revision,
+            undo_stack: clone_history_stack(&self.state.undo_stack)?,
+            redo_stack: clone_history_stack(&self.state.redo_stack)?,
+            retained_bytes: self.state.retained_bytes,
+            budget_evicted_entries: self.state.budget_evicted_entries,
+            budget_evicted_bytes: self.state.budget_evicted_bytes,
+            branch_discarded_entries: self.state.branch_discarded_entries,
+            barrier_discarded_entries: self.state.barrier_discarded_entries,
+            retention_disabled_entries: self.state.retention_disabled_entries,
+            oversize_dropped_entries: self.state.oversize_dropped_entries,
+        })
+    }
+
+    fn prepare_pending_command(
+        &mut self,
+        command: AuthoringCommand,
+        group: crate::session::AuthoringHistoryGroup,
+    ) -> Result<PreparedAuthoringHistoryRecord> {
+        let next_revision = self.next_revision()?;
+        let command = match (&self.pending, command) {
+            (
+                Some(pending),
+                AuthoringCommand::Sequence { description, sequence_id, before, after },
+            ) => match &pending.entry.command {
+                AuthoringCommand::Sequence {
+                    sequence_id: original_id,
+                    before: origin,
+                    after: previous,
+                    ..
+                } if pending.entry.group == Some(group)
+                    && *original_id == sequence_id
+                    && previous.author_state_eq_ignoring_revision(&before) =>
+                {
+                    AuthoringCommand::Sequence {
+                        description,
+                        sequence_id,
+                        before: origin.clone(),
+                        after,
+                    }
+                }
+                _ => {
+                    return Err(authoring_error(
+                        "stage_authoring_gesture",
+                        "pending interaction has a different owner or source endpoint",
+                    ))
+                }
+            },
+            (None, command @ AuthoringCommand::Sequence { .. }) => command,
+            (_, _) => {
+                return Err(authoring_error(
+                    "stage_authoring_gesture",
+                    "only a Sequence command can be staged",
+                ))
+            }
+        };
+        let entry = Arc::new(AuthoringHistoryEntry::compile(
+            command,
+            self.descriptor_cache.clone(),
+            Some(group),
+        )?);
+        let mut overlay = FootprintOverlay::new(&self.pending_footprint_index);
+        overlay.add_entry(&entry)?;
+        if let Some(previous) = &self.pending {
+            overlay.remove_entry(&previous.entry)?;
+        }
+        let pending_plan = overlay.finish()?;
+        let retained_bytes = pending_plan.retained_bytes()?;
+        if retained_bytes > self.budget.max_pending_bytes {
+            return Err(authoring_error(
+                "stage_authoring_gesture",
+                format!(
+                    "interaction requires {retained_bytes} bytes; temporary budget is {}",
+                    self.budget.max_pending_bytes
+                ),
+            ));
+        }
+        self.pending_footprint_index.try_reserve_for_plan(&pending_plan)?;
+        self.descriptor_cache
+            .validate_and_reserve(&pending_plan.cache_insertions)
+            .map_err(|error| footprint_error("reserve_pending_history", error))?;
+        let retained =
+            self.budget.max_entries > 0 && retained_bytes <= self.budget.max_retained_bytes;
+        Ok(PreparedAuthoringHistoryRecord {
+            expected_revision: self.state.revision,
+            candidate: self.unchanged_state(next_revision)?,
+            footprint_plan: FootprintOverlay::new(&self.footprint_index).finish()?,
+            outcome: AuthoringHistoryRecordOutcome {
+                retained,
+                budget_evicted_entries: 0,
+                budget_evicted_bytes: 0,
+                branch_discarded_entries: 0,
+                barrier_discarded_entries: 0,
+            },
+            unretained_command: None,
+            pending_install: PendingHistoryInstall::Stage(Box::new(
+                PreparedPendingHistoryCommand {
+                    command: PendingHistoryCommand { entry, retained_bytes },
+                    footprint_plan: pending_plan,
+                },
+            )),
+        })
+    }
+
+    fn prepare_pending_discard(&mut self) -> Result<PreparedAuthoringHistoryRecord> {
+        Ok(PreparedAuthoringHistoryRecord {
+            expected_revision: self.state.revision,
+            candidate: self.unchanged_state(self.next_revision()?)?,
+            footprint_plan: FootprintOverlay::new(&self.footprint_index).finish()?,
+            outcome: AuthoringHistoryRecordOutcome {
+                retained: false,
+                budget_evicted_entries: 0,
+                budget_evicted_bytes: 0,
+                branch_discarded_entries: 0,
+                barrier_discarded_entries: 0,
+            },
+            unretained_command: None,
+            pending_install: PendingHistoryInstall::Clear,
+        })
+    }
+
+    /// Whether an independently charged restore point still belongs to this interaction.
+    pub(crate) fn pending_group_is(&self, group: crate::session::AuthoringHistoryGroup) -> bool {
+        self.pending.as_ref().is_some_and(|pending| pending.entry.group == Some(group))
+    }
+
+    /// Accept the staged command or release a net-zero interaction without branching.
+    pub(crate) fn finish_pending_group(
+        &mut self,
+        group: crate::session::AuthoringHistoryGroup,
+    ) -> Result<bool> {
+        let Some(pending) =
+            self.pending.as_ref().filter(|pending| pending.entry.group == Some(group))
+        else {
+            return Ok(false);
+        };
+        let prepared = if pending.entry.net_zero {
+            self.prepare_pending_discard()?
+        } else {
+            self.prepare_committed_entries(Arc::clone(&pending.entry), None)?
+        };
+        self.commit_prepared_record(prepared)?;
+        Ok(true)
+    }
+
+    /// Prepare cancellation against the exact live source without touching history.
+    pub(crate) fn prepare_pending_cancel(
+        &mut self,
+        group: crate::session::AuthoringHistoryGroup,
+        document: &ProjectDocument,
+    ) -> Result<
+        Option<(
+            PreparedAuthoringHistoryRestore,
+            PreparedAuthoringHistoryRecord,
+        )>,
+    > {
+        let Some(pending) =
+            self.pending.as_ref().filter(|pending| pending.entry.group == Some(group))
+        else {
+            return Ok(None);
+        };
+        let restore = pending.entry.prepare_restore_before(document)?;
+        Ok(Some((restore, self.prepare_pending_discard()?)))
     }
 
     fn reserve_footprint_plan(&mut self, plan: &PreparedFootprintPlan) -> Result<()> {
@@ -1585,6 +1766,22 @@ impl AuthoringHistory {
         let outcome = prepared.outcome;
         prepared.footprint_plan.apply(&mut self.footprint_index, &self.descriptor_cache);
         self.state = prepared.candidate;
+        match prepared.pending_install {
+            PendingHistoryInstall::Stage(pending) => {
+                pending
+                    .footprint_plan
+                    .apply(&mut self.pending_footprint_index, &self.descriptor_cache);
+                self.pending = Some(pending.command);
+            }
+            PendingHistoryInstall::Clear => {
+                self.pending = None;
+                self.pending_footprint_index = RetainedFootprintIndex::empty();
+            }
+        }
+        debug_assert_eq!(
+            self.pending_footprint_index.total_bytes().ok(),
+            Some(self.pending.as_ref().map_or(0, |pending| pending.retained_bytes))
+        );
         debug_assert_eq!(
             self.footprint_index.total_bytes().ok(),
             Some(self.state.retained_bytes)
@@ -1608,160 +1805,93 @@ impl AuthoringHistory {
         &self,
         document: &ProjectDocument,
     ) -> Result<Option<PreparedAuthoringHistoryRestore>> {
+        if !self.can_redo() {
+            return Ok(None);
+        }
         let Some(entry) = self.state.redo_stack.back() else {
             return Ok(None);
         };
         entry.prepare_restore_after(document).map(Some)
     }
 
-    /// Move the validated Undo entry and discard trailing net-zero interactions
-    /// with one fallible preparation followed by one atomic history install.
+    /// Move the detached validated restore point with one atomic history install.
     pub(crate) fn commit_prepared_undo(&mut self) -> Result<()> {
-        let next_revision = self.state.revision.checked_add(1).ok_or_else(|| {
+        let mut prepared = if let Some(pending) =
+            self.pending.as_ref().filter(|pending| !pending.entry.net_zero)
+        {
+            if !self.pending_is_undoable(pending) {
+                return Err(authoring_error(
+                    "commit_prepared_authoring_undo",
+                    "staged command is not undoable",
+                ));
+            }
+            self.prepare_committed_entries(Arc::clone(&pending.entry), None)?
+        } else {
+            self.prepare_pending_discard()?
+        };
+        prepared.candidate.redo_stack.try_reserve(1).map_err(|error| {
             authoring_error(
                 "commit_prepared_authoring_undo",
-                "History revision exhausted",
+                format!("could not reserve Redo storage: {error}"),
             )
         })?;
-        let mut undo_stack = clone_history_stack(&self.state.undo_stack)?;
-        let mut redo_stack = clone_history_stack(&self.state.redo_stack)?;
-        redo_stack.try_reserve(1).map_err(|error| {
-            authoring_error(
-                "commit_prepared_authoring_undo",
-                format!("could not reserve Redo history storage: {error}"),
-            )
-        })?;
-        let mut overlay = FootprintOverlay::new(&self.footprint_index);
-        while undo_stack.back().is_some_and(|entry| entry.net_zero) {
-            let entry = undo_stack.pop_back().ok_or_else(|| {
-                authoring_error("commit_prepared_authoring_undo", "zero entry disappeared")
-            })?;
-            overlay.remove_entry(&entry)?;
-        }
-        let entry = undo_stack.pop_back().ok_or_else(|| {
+        let entry = prepared.candidate.undo_stack.pop_back().ok_or_else(|| {
             authoring_error(
                 "commit_prepared_authoring_undo",
                 "prepared Undo entry is no longer available",
             )
         })?;
-        redo_stack.push_back(entry);
-        let footprint_plan = overlay.finish()?;
-        self.reserve_footprint_plan(&footprint_plan)?;
-        let candidate = AuthoringHistoryState {
-            revision: next_revision,
-            undo_stack,
-            redo_stack,
-            retained_bytes: footprint_plan.retained_bytes()?,
-            budget_evicted_entries: self.state.budget_evicted_entries,
-            budget_evicted_bytes: self.state.budget_evicted_bytes,
-            branch_discarded_entries: self.state.branch_discarded_entries,
-            barrier_discarded_entries: self.state.barrier_discarded_entries,
-            retention_disabled_entries: self.state.retention_disabled_entries,
-            oversize_dropped_entries: self.state.oversize_dropped_entries,
-        };
-        self.commit_prepared_record(PreparedAuthoringHistoryRecord {
-            expected_revision: self.state.revision,
-            candidate,
-            footprint_plan,
-            outcome: AuthoringHistoryRecordOutcome {
-                retained: false,
-                budget_evicted_entries: 0,
-                budget_evicted_bytes: 0,
-                branch_discarded_entries: 0,
-                barrier_discarded_entries: 0,
-            },
-            unretained_command: None,
-        })?;
+        prepared.candidate.redo_stack.push_back(entry);
+        self.commit_prepared_record(prepared)?;
         Ok(())
     }
 
-    /// Move the entry whose detached Redo payload has already validated.
+    /// Move the validated Redo entry and release a zero interaction atomically.
     pub(crate) fn commit_prepared_redo(&mut self) -> Result<()> {
-        let next_revision = self.state.revision.checked_add(1).ok_or_else(|| {
+        if !self.can_redo() {
+            return Err(authoring_error(
+                "commit_prepared_authoring_redo",
+                "no available Redo entry",
+            ));
+        }
+        let mut prepared = self.prepare_pending_discard()?;
+        prepared.candidate.undo_stack.try_reserve(1).map_err(|error| {
             authoring_error(
                 "commit_prepared_authoring_redo",
-                "History revision exhausted",
+                format!("could not reserve Undo storage: {error}"),
             )
         })?;
-        self.state.undo_stack.try_reserve(1).map_err(|error| {
-            authoring_error(
-                "commit_prepared_authoring_redo",
-                format!("could not reserve Undo history storage: {error}"),
-            )
-        })?;
-        let entry = self.state.redo_stack.pop_back().ok_or_else(|| {
+        let entry = prepared.candidate.redo_stack.pop_back().ok_or_else(|| {
             authoring_error(
                 "commit_prepared_authoring_redo",
                 "prepared Redo entry is no longer available",
             )
         })?;
-        self.state.undo_stack.push_back(entry);
-        self.state.revision = next_revision;
+        prepared.candidate.undo_stack.push_back(entry);
+        self.commit_prepared_record(prepared)?;
         Ok(())
     }
 
-    /// Remove a finished interaction that returned exactly to its authored start.
-    pub(crate) fn elide_zero_group(
-        &mut self,
-        group: crate::session::AuthoringHistoryGroup,
-    ) -> Result<bool> {
-        let Some(entry) = self.state.undo_stack.back().filter(|entry| entry.group == Some(group))
-        else {
-            return Ok(false);
-        };
-        if !entry.net_zero {
-            return Ok(false);
-        }
-        let next_revision = self.state.revision.checked_add(1).ok_or_else(|| {
-            authoring_error("seal_authoring_gesture", "History revision exhausted")
-        })?;
-        let mut undo_stack = clone_history_stack(&self.state.undo_stack)?;
-        undo_stack.pop_back();
-        let redo_stack = clone_history_stack(&self.state.redo_stack)?;
-        let mut overlay = FootprintOverlay::new(&self.footprint_index);
-        overlay.remove_entry(entry)?;
-        let footprint_plan = overlay.finish()?;
-        self.reserve_footprint_plan(&footprint_plan)?;
-        let candidate = AuthoringHistoryState {
-            revision: next_revision,
-            undo_stack,
-            redo_stack,
-            retained_bytes: footprint_plan.retained_bytes()?,
-            budget_evicted_entries: self.state.budget_evicted_entries,
-            budget_evicted_bytes: self.state.budget_evicted_bytes,
-            branch_discarded_entries: self.state.branch_discarded_entries,
-            barrier_discarded_entries: self.state.barrier_discarded_entries,
-            retention_disabled_entries: self.state.retention_disabled_entries,
-            oversize_dropped_entries: self.state.oversize_dropped_entries,
-        };
-        self.commit_prepared_record(PreparedAuthoringHistoryRecord {
-            expected_revision: self.state.revision,
-            candidate,
-            footprint_plan,
-            outcome: AuthoringHistoryRecordOutcome {
-                retained: false,
-                budget_evicted_entries: 0,
-                budget_evicted_bytes: 0,
-                branch_discarded_entries: 0,
-                barrier_discarded_entries: 0,
-            },
-            unretained_command: None,
-        })?;
-        Ok(true)
+    fn pending_is_undoable(&self, pending: &PendingHistoryCommand) -> bool {
+        self.budget.max_entries > 0 && pending.retained_bytes <= self.budget.max_retained_bytes
     }
 
     fn next_undo_entry(&self) -> Option<&Arc<AuthoringHistoryEntry>> {
-        self.state.undo_stack.iter().rev().find(|entry| !entry.net_zero)
+        if let Some(pending) = self.pending.as_ref().filter(|pending| !pending.entry.net_zero) {
+            return self.pending_is_undoable(pending).then_some(&pending.entry);
+        }
+        self.state.undo_stack.back()
     }
 
-    /// Whether a meaningful Undo entry exists; an active net-zero gesture is skipped.
+    /// Whether a meaningful command can be undone, including a staged interaction.
     pub fn can_undo(&self) -> bool {
         self.next_undo_entry().is_some()
     }
 
-    /// Whether a Redo entry exists.
+    /// Whether the original Redo branch is executable against current author state.
     pub fn can_redo(&self) -> bool {
-        !self.state.redo_stack.is_empty()
+        !self.pending.as_ref().is_some_and(|pending| !pending.entry.net_zero)
+            && !self.state.redo_stack.is_empty()
     }
 
     /// User-facing label for the next Undo operation.
@@ -1769,17 +1899,28 @@ impl AuthoringHistory {
         self.next_undo_entry().map(|entry| entry.description())
     }
 
-    /// User-facing label for the next Redo operation.
+    /// User-facing label for the next executable Redo operation.
     pub fn redo_description(&self) -> Option<&str> {
+        if !self.can_redo() {
+            return None;
+        }
         self.state.redo_stack.back().map(|entry| entry.description())
     }
 
     /// Return bounded-history evidence.
     pub fn diagnostics(&self) -> AuthoringHistoryDiagnostics {
         AuthoringHistoryDiagnostics {
-            undo_entries: self.state.undo_stack.len(),
+            undo_entries: self.state.undo_stack.len()
+                + usize::from(self.pending.as_ref().is_some_and(|pending| {
+                    !pending.entry.net_zero && self.pending_is_undoable(pending)
+                })),
             redo_entries: self.state.redo_stack.len(),
             retained_bytes: self.state.retained_bytes,
+            pending_entries: usize::from(self.pending.is_some()),
+            pending_retained_bytes: self
+                .pending
+                .as_ref()
+                .map_or(0, |pending| pending.retained_bytes),
             retained_charge_version: AUTHORING_FOOTPRINT_VERSION,
             budget: self.budget,
             undo_description: self.undo_description().map(ToOwned::to_owned),
@@ -1969,8 +2110,11 @@ mod tests {
             let mut document = project_with_sequence();
             let original = document.sequences.active().expect("Sequence").clone();
             let baseline = renamed(&original, "baseline");
-            let mut history =
-                AuthoringHistory::with_budget(AuthoringHistoryBudget::new(2, 1024 * 1024));
+            let mut history = AuthoringHistory::with_budget(AuthoringHistoryBudget::new(
+                2,
+                1024 * 1024,
+                crate::history::DEFAULT_AUTHORING_HISTORY_PENDING_BYTES,
+            ));
             history.record_sequence("baseline", &original, &baseline).expect("baseline");
             let group = crate::session::AuthoringHistoryGroup {
                 gesture: mondrian_core::AuthoringGestureId::new(),
@@ -2072,8 +2216,11 @@ mod tests {
     fn grouped_endpoint_replacement_and_zero_sealing_match_cold_footprint_accounting() {
         let project = project_with_sequence();
         let original = project.sequences.active().expect("Sequence");
-        let mut history =
-            AuthoringHistory::with_budget(AuthoringHistoryBudget::new(2, 1024 * 1024));
+        let mut history = AuthoringHistory::with_budget(AuthoringHistoryBudget::new(
+            2,
+            1024 * 1024,
+            crate::history::DEFAULT_AUTHORING_HISTORY_PENDING_BYTES,
+        ));
         let baseline = renamed(original, "baseline");
         history.record_sequence("ordinary", original, &baseline).expect("ordinary");
         let charge = history.diagnostics().retained_bytes;
@@ -2098,7 +2245,7 @@ mod tests {
             .expect("prepare zero");
         history.commit_prepared_record(prepared).expect("install zero");
         assert_incremental_matches_cold(&history);
-        assert!(history.elide_zero_group(group).expect("seal zero"));
+        assert!(history.finish_pending_group(group).expect("seal zero"));
         assert_eq!(history.diagnostics().undo_entries, 1);
         assert_eq!(history.diagnostics().retained_bytes, charge);
         assert_incremental_matches_cold(&history);
@@ -2137,6 +2284,17 @@ mod tests {
             history.footprint_index.total_bytes().expect("indexed History footprint"),
             cold
         );
+        let mut pending_stack = VecDeque::new();
+        if let Some(pending) = &history.pending {
+            pending_stack.push_back(Arc::clone(&pending.entry));
+        }
+        let pending_cold = retained_bytes_for_stacks(&pending_stack, &VecDeque::new())
+            .expect("cold pending footprint");
+        assert_eq!(
+            history.pending_footprint_index.total_bytes().expect("pending index"),
+            pending_cold
+        );
+        assert_eq!(history.diagnostics().pending_retained_bytes, pending_cold);
     }
 
     fn apply_restore(
@@ -2194,7 +2352,11 @@ mod tests {
         let second = renamed(&first, "Second");
         let third = renamed(&first, "Third");
         let fourth = renamed(&first, "Fourth");
-        let mut history = AuthoringHistory::with_budget(AuthoringHistoryBudget::new(2, usize::MAX));
+        let mut history = AuthoringHistory::with_budget(AuthoringHistoryBudget::new(
+            2,
+            usize::MAX,
+            crate::history::DEFAULT_AUTHORING_HISTORY_PENDING_BYTES,
+        ));
 
         history.record_sequence("second", &first, &second).expect("record second");
         history.record_sequence("third", &second, &third).expect("record third");
@@ -2219,7 +2381,11 @@ mod tests {
         unlimited.record_sequence("third", &second, &third).expect("record third");
         unlimited.record_sequence("fourth", &third, &fourth).expect("record fourth");
         let full_candidate_charge = unlimited.diagnostics().retained_bytes;
-        let mut bounded = AuthoringHistory::with_budget(AuthoringHistoryBudget::new(2, usize::MAX));
+        let mut bounded = AuthoringHistory::with_budget(AuthoringHistoryBudget::new(
+            2,
+            usize::MAX,
+            crate::history::DEFAULT_AUTHORING_HISTORY_PENDING_BYTES,
+        ));
         bounded.record_sequence("second", &first, &second).expect("record second");
         bounded.record_sequence("third", &second, &third).expect("record third");
 
@@ -2248,6 +2414,7 @@ mod tests {
         let mut history = AuthoringHistory::with_budget(AuthoringHistoryBudget::new(
             10,
             retained_bytes.saturating_sub(1),
+            crate::history::DEFAULT_AUTHORING_HISTORY_PENDING_BYTES,
         ));
 
         let prepared = history.prepare_sequence_record("rename", &before, &after).expect("prepare");
@@ -2265,7 +2432,11 @@ mod tests {
         let document = project_with_sequence();
         let before = document.sequences.active().expect("active Sequence").clone();
         let after = renamed(&before, "After");
-        let mut history = AuthoringHistory::with_budget(AuthoringHistoryBudget::new(0, usize::MAX));
+        let mut history = AuthoringHistory::with_budget(AuthoringHistoryBudget::new(
+            0,
+            usize::MAX,
+            crate::history::DEFAULT_AUTHORING_HISTORY_PENDING_BYTES,
+        ));
 
         let prepared = history.prepare_sequence_record("rename", &before, &after).expect("prepare");
         assert!(prepared.footprint_plan.cache_insertions.is_empty());
@@ -2288,8 +2459,11 @@ mod tests {
         let first_command =
             AuthoringCommand::sequence("second", &first, &second).expect("first command");
         let retained_bytes = command_retained_bytes(first_command);
-        let mut history =
-            AuthoringHistory::with_budget(AuthoringHistoryBudget::new(10, retained_bytes));
+        let mut history = AuthoringHistory::with_budget(AuthoringHistoryBudget::new(
+            10,
+            retained_bytes,
+            crate::history::DEFAULT_AUTHORING_HISTORY_PENDING_BYTES,
+        ));
         history.record_sequence("second", &first, &second).expect("record first");
         let third = renamed(&second, &"oversize".repeat(retained_bytes));
 
@@ -2323,6 +2497,7 @@ mod tests {
         let mut history = AuthoringHistory::with_budget(AuthoringHistoryBudget::new(
             10,
             retained_two_command_charge,
+            crate::history::DEFAULT_AUTHORING_HISTORY_PENDING_BYTES,
         ));
         history.record_sequence("second", &first, &second).expect("record second");
         history.record_sequence("third", &second, &third).expect("record third");
@@ -2356,7 +2531,11 @@ mod tests {
         assert!(history.descriptor_cache.is_empty());
         assert_incremental_matches_cold(&history);
 
-        history.budget = AuthoringHistoryBudget::new(10, usize::MAX);
+        history.budget = AuthoringHistoryBudget::new(
+            10,
+            usize::MAX,
+            crate::history::DEFAULT_AUTHORING_HISTORY_PENDING_BYTES,
+        );
         let after_barrier = renamed(&barrier_after, "After barrier");
         let outcome = history
             .record_sequence("after barrier", &barrier_after, &after_barrier)
@@ -2388,6 +2567,7 @@ mod tests {
         let mut history = AuthoringHistory::with_budget(AuthoringHistoryBudget::new(
             10,
             retained_bytes.saturating_sub(1),
+            crate::history::DEFAULT_AUTHORING_HISTORY_PENDING_BYTES,
         ));
         let diagnostics_before = history.diagnostics();
 
@@ -2871,7 +3051,11 @@ mod tests {
         let second = renamed(&first, "Second");
         let third = renamed(&second, "Third");
         let shared_video_tracks = first.video_tracks.allocation_id();
-        let mut history = AuthoringHistory::with_budget(AuthoringHistoryBudget::new(1, usize::MAX));
+        let mut history = AuthoringHistory::with_budget(AuthoringHistoryBudget::new(
+            1,
+            usize::MAX,
+            crate::history::DEFAULT_AUTHORING_HISTORY_PENDING_BYTES,
+        ));
         history.record_sequence("second", &first, &second).expect("record first");
         let evicted_root_ids = history.state.undo_stack[0]
             .footprint_roots
