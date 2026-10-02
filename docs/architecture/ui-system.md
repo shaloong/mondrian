@@ -2838,3 +2838,13 @@ Playback FramePosition rather than synthesizing one from the current author rate
 Authoring restore and runtime admission remain separate: a committed author receipt
 is published even if subsequent playback admission reports an error. Physical device
 failure behavior is a separate qualification requirement.
+
+## Inspector text editor selection
+
+Generic Inspector Text controls use the definition's `ParameterTextMode`, not
+line breaks in the current value. Empty multiline parameters retain a text area;
+single-line fields retain their compact control when their authored value has
+line breaks. Generic plugin fields keep confirm/cancel draft semantics and one
+transaction on commit. Basic Title remains explicitly multiline with its existing
+live editing action policy. Event regression tests cover Unicode, empty multiline,
+line-break-containing single-line values, cancel, no-op, Undo and row geometry.

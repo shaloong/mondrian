@@ -433,6 +433,16 @@ pub struct AnimatablePropertyUiMetadata {
     pub display_order: Option<u32>,
 }
 
+/// Definition-owned text editor shape, independent from the current value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParameterTextMode {
+    /// A compact input for a single textual field.
+    SingleLine,
+    /// A text area that admits line breaks, including when the value is empty.
+    MultiLine,
+}
+
 /// Versioned, stable identity and invalidation contract for one parameter.
 ///
 /// The schema identity remains stable across UI layout, display-name, and
@@ -456,6 +466,8 @@ pub struct ParameterSchema {
     pub unit: ParameterUnit,
     /// Enforced numeric bounds and editor stepping, when numeric.
     pub numeric: Option<ParameterNumericContract>,
+    /// Required for text parameters; absent for every other value type.
+    pub text_mode: Option<ParameterTextMode>,
     /// Ordered interpolation intents; the first is the default for new keys.
     pub allowed_interpolations: Vec<ParameterInterpolation>,
     /// Stable choices for `PropertyValue::Enum`; empty for other value types.
@@ -497,6 +509,8 @@ impl ParameterSchema {
             is_animatable,
             unit: ParameterUnit::Unitless,
             numeric: None,
+            text_mode: (value_type == PropertyValueType::Text)
+                .then_some(ParameterTextMode::SingleLine),
             allowed_interpolations,
             enum_options: Vec::new(),
             cache_impact: ParameterCacheImpact::Value,
@@ -506,6 +520,12 @@ impl ParameterSchema {
     /// Attach a physical interpretation when no bounded numeric contract is needed.
     pub fn with_unit(mut self, unit: ParameterUnit) -> Self {
         self.unit = unit;
+        self
+    }
+
+    /// Declare the editor shape for a text parameter.
+    pub fn with_text_mode(mut self, mode: ParameterTextMode) -> Self {
+        self.text_mode = Some(mode);
         self
     }
 
@@ -557,6 +577,9 @@ impl ParameterSchema {
         }
         if self.value_type != self.default_value.value_type() {
             return Err(ParameterSchemaError::ValueTypeMismatch);
+        }
+        if (self.value_type == PropertyValueType::Text) != self.text_mode.is_some() {
+            return Err(ParameterSchemaError::TextModeTypeMismatch);
         }
         if self.is_animatable && !self.value_type.supports_animation() {
             return Err(ParameterSchemaError::UnsupportedAnimationType);
@@ -783,6 +806,9 @@ pub enum ParameterSchemaError {
     EnumOptionsMismatch,
     #[error("enum default is not present in its option set")]
     UnknownEnumDefault,
+    /// Text definitions require a text mode and other definitions must not carry one.
+    #[error("text editor mode must be present exactly for text parameters")]
+    TextModeTypeMismatch,
     #[error("numeric constraints require a numeric property type")]
     NumericContractTypeMismatch,
     #[error("descriptor value type does not match its default value")]
@@ -1291,6 +1317,12 @@ impl PropertyDescriptor {
     /// Attach a physical interpretation when no bounded numeric contract is needed.
     pub fn with_unit(mut self, unit: ParameterUnit) -> Self {
         self.schema = self.schema.with_unit(unit);
+        self
+    }
+
+    /// Declare the definition-owned editor shape for a text parameter.
+    pub fn with_text_mode(mut self, mode: ParameterTextMode) -> Self {
+        self.schema = self.schema.with_text_mode(mode);
         self
     }
 
@@ -3633,6 +3665,7 @@ impl crate::AuthoringFootprint for ParameterSchema {
             is_animatable: _,
             unit: _,
             numeric: _,
+            text_mode: _,
             allowed_interpolations,
             enum_options,
             cache_impact: _,
@@ -4534,6 +4567,35 @@ mod tests {
                 None,
             )
             .is_err());
+    }
+
+    #[test]
+    fn text_editor_mode_is_explicit_and_survives_empty_values_and_serialization() {
+        let id = ParameterId::new_static("mondrian.test.text_mode");
+        for text in ["", "plain", "first\nsecond", "Unicode 文本"] {
+            for mode in [ParameterTextMode::SingleLine, ParameterTextMode::MultiLine] {
+                let schema = ParameterSchema::v1(id.clone(), PropertyValue::Text(text.to_owned()))
+                    .with_text_mode(mode);
+                schema.validate().expect("valid text metadata");
+                let encoded = serde_json::to_string(&schema).expect("encode");
+                let decoded: ParameterSchema = serde_json::from_str(&encoded).expect("decode");
+                assert_eq!(decoded, schema);
+                assert_eq!(decoded.text_mode, Some(mode));
+            }
+        }
+        let mut text = ParameterSchema::v1(id.clone(), PropertyValue::Text(String::new()));
+        assert_eq!(text.text_mode, Some(ParameterTextMode::SingleLine));
+        text.text_mode = None;
+        assert_eq!(
+            text.validate(),
+            Err(ParameterSchemaError::TextModeTypeMismatch)
+        );
+        let numeric = ParameterSchema::v1(id, PropertyValue::Double(1.0))
+            .with_text_mode(ParameterTextMode::MultiLine);
+        assert_eq!(
+            numeric.validate(),
+            Err(ParameterSchemaError::TextModeTypeMismatch)
+        );
     }
 
     #[test]

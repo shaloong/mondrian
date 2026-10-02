@@ -262,6 +262,7 @@ fn canonical_descriptors() -> Vec<PropertyDescriptor> {
             PropertyValue::Text("Title".to_owned()),
         )
         .with_parameter_id(ParameterId::new_static("mondrian.title.text"))
+        .with_text_mode(crate::ParameterTextMode::MultiLine)
         .with_animatable(false),
         PropertyDescriptor::new(
             BasicTitle::FONT_FAMILY_PATH,

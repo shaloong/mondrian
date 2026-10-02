@@ -368,3 +368,12 @@ Validation uses ordered sets for keys and ranks, avoiding quadratic scans for
 large vendor choice sets. The canonical option vector and animation ordinals
 are never reordered. Rank is inline author metadata; strings retain their
 existing explicit footprint accounting.
+
+## Definition-owned text controls
+
+Core `ParameterSchema::text_mode` is present exactly for Text values and is
+validated with the value type. Definitions declare SingleLine or MultiLine;
+constructors choose SingleLine and Basic Title declares MultiLine explicitly.
+Serialized Text schemas without a mode are rejected rather than repaired with a
+compatibility fallback.
+Authoring footprint accounting treats this fixed-size enum as inline metadata.

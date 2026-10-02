@@ -6841,6 +6841,12 @@ fn effect_long_text_controls_confirm_or_cancel_without_partial_author_writes() {
             format!("First line\n{}", "第二行参数".repeat(20)),
             "Changed\n第二行".to_owned(),
         ),
+        ("empty_multiline", String::new(), "New\n第二行".to_owned()),
+        (
+            "single_multiline_value",
+            "First\nsecond".to_owned(),
+            "Changed".to_owned(),
+        ),
     ];
     let mut builder = EffectPluginDefinitionBuilder::new(
         kind.key(),
@@ -6863,7 +6869,12 @@ fn effect_long_text_controls_confirm_or_cancel_without_partial_author_writes() {
         builder = builder.property(
             PropertyDescriptor::new(*name, "Vendor text", PropertyValue::Text(initial.clone()))
                 .with_parameter_id(kind.parameter_id(name).expect("parameter"))
-                .with_animatable(false),
+                .with_animatable(false)
+                .with_text_mode(if matches!(*name, "multiline" | "empty_multiline") {
+                    mondrian_core::ParameterTextMode::MultiLine
+                } else {
+                    mondrian_core::ParameterTextMode::SingleLine
+                }),
         );
     }
     register_effect_definition(builder.build()).expect("definition");
@@ -6894,7 +6905,27 @@ fn effect_long_text_controls_confirm_or_cancel_without_partial_author_writes() {
             })
             .expect("property");
         assert_eq!(property.label, "Vendor text");
-        if initial.contains(['\n', '\r']) {
+        let multiline = matches!(*name, "multiline" | "empty_multiline");
+        let size = effect_property_value_widget(
+            &chinese_localizer(),
+            property,
+            true,
+            Some(selection),
+            effect_id,
+        )
+        .measure(LayoutConstraint { min: Size::ZERO, max: Size::new(280.0, f32::MAX) });
+        if multiline {
+            assert!(
+                size.height > 60.0,
+                "declared multiline must keep its text area even when empty"
+            );
+        } else {
+            assert!(
+                size.height < 60.0,
+                "single-line mode must not change with authored line breaks"
+            );
+        }
+        if multiline {
             let constraint = LayoutConstraint { min: Size::ZERO, max: Size::new(280.0, f32::MAX) };
             let required_height = effect_property_value_widget(
                 &chinese_localizer(),

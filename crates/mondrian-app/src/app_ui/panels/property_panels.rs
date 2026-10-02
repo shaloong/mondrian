@@ -2619,7 +2619,7 @@ pub(super) fn inspector_property_row(
     };
     if let Some(height) = height {
         row.with_height(height)
-    } else if matches!(&property.value, PropertyValue::Text(text) if text.contains(['\n', '\r'])) {
+    } else if property.schema.text_mode == Some(mondrian_core::ParameterTextMode::MultiLine) {
         row.with_content_height()
     } else {
         row
@@ -2789,7 +2789,7 @@ pub(super) fn inspector_property_value_widget(
                         }),
                 );
             }
-            if text.contains(['\n', '\r']) {
+            if property.schema.text_mode == Some(mondrian_core::ParameterTextMode::MultiLine) {
                 let selected_clip = selection;
                 Box::new(
                     MultilineTextInput::new(&property.label)
