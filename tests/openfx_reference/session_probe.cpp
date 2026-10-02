@@ -68,15 +68,18 @@ bool imageUnavailable(const void* handle, OfxPropertySetHandle in) {
   }
   return status == kOfxStatFailed;
 }
-bool applyInteger(const void* handle, OfxPropertySetHandle in) {
+bool applyInteger(const void* handle, OfxPropertySetHandle in, const char* name = "count", bool choice = false) {
   OfxParamSetHandle params = nullptr;
   OfxParamHandle count = nullptr;
   double time = 0.0;
   int value = 0;
   if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
-      gParamHost->paramGetHandle(params, "count", &count, nullptr) != kOfxStatOK ||
+      gParamHost->paramGetHandle(params, name, &count, nullptr) != kOfxStatOK ||
       gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
       gParamHost->paramGetValueAtTime(count, time, &value) != kOfxStatOK) { return false; }
+  // Render reads use the requested time; getValue/setValue belong to change
+  // or interact actions, not Render (OfxParameterSuiteV1 contract).
+  if (choice) { ++value; }
   OfxImageClipHandle clip = nullptr;
   OfxPropertySetHandle image = nullptr;
   if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Output", &clip, nullptr) != kOfxStatOK ||
@@ -153,6 +156,19 @@ OfxStatus probe(const char* action, const void* handle,
       return kOfxStatOK; // Deliberately do not produce this frame.
     }
   }
+  if (selected == "choice" && operation == kOfxActionInstanceChanged) {
+    OfxParamSetHandle params = nullptr;
+    OfxParamHandle parameter = nullptr;
+    int before = -1, after = -1;
+    if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+        gParamHost->paramGetHandle(params, "mode", &parameter, nullptr) != kOfxStatOK ||
+        gParamHost->paramGetValue(parameter, &before) != kOfxStatOK ||
+        gParamHost->paramSetValue(parameter, -1) != kOfxStatErrValue ||
+        gParamHost->paramSetValue(parameter, 3) != kOfxStatErrValue ||
+        gParamHost->paramGetValue(parameter, &after) != kOfxStatOK || before != after) {
+      return kOfxStatFailed;
+    }
+  }
   const OfxStatus result = pluginMain(action, handle, in, out);
   if (operation == kOfxActionCreateInstance && result == kOfxStatOK) {
     actions.emplace(handle, ActionState{});
@@ -205,6 +221,22 @@ OfxStatus probe(const char* action, const void* handle,
           gPropHost->propGetString(props, kOfxParamInterpType, 0, &value) != kOfxStatOK ||
           !value || std::string(value) != kOfxParamInterpTypeConstantStep) { return kOfxStatFailed; }
     } else if (operation == kOfxImageEffectActionRender && !applyInteger(handle, in)) { return kOfxStatFailed; }
+  }
+  if (selected == "choice" && result == kOfxStatOK) {
+    if (operation == kOfxImageEffectActionDescribeInContext) {
+      OfxParamSetHandle params = nullptr;
+      OfxPropertySetHandle props = nullptr;
+      const char* labels[] = { "Same", "Same", "Third" };
+      const int ranks[] = { 2147483647, -2147483647 - 1, 0 };
+      if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+          gParamHost->paramDefine(params, kOfxParamTypeChoice, "mode", &props) != kOfxStatOK ||
+          gPropHost->propSetString(props, kOfxPropLabel, 0, "Mode") != kOfxStatOK ||
+          gPropHost->propSetInt(props, kOfxParamPropDefault, 0, 1) != kOfxStatOK ||
+          gPropHost->propSetStringN(props, kOfxParamPropChoiceOption, 3, labels) != kOfxStatOK ||
+          gPropHost->propSetIntN(props, kOfxParamPropChoiceOrder, 3, ranks) != kOfxStatOK) { return kOfxStatFailed; }
+    } else if (operation == kOfxImageEffectActionRender && !applyInteger(handle, in, "mode", true)) {
+      return kOfxStatFailed;
+    }
   }
   return result;
 }

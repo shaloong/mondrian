@@ -702,90 +702,98 @@ fn inspector_blend_choices_resolve_declared_catalog_addresses() {
 #[test]
 fn inspector_vendor_choice_caption_keeps_canonical_dispatch_across_locales() {
     use mondrian_core::automation::{AnimatedProperty, ParameterEnumOption, PropertyDescriptor};
-    let descriptor = PropertyDescriptor::new(
-        "vendor.mode",
-        "Mode",
-        PropertyValue::Enum("vendor:43".to_owned()),
-    )
-    .with_enum_options(vec![
-        ParameterEnumOption::new("vendor:42", "Écho / 回声", "vendor.mode.echo"),
-        ParameterEnumOption::new("vendor:43", "Écho / 回声", "vendor.mode.echo.second"),
-    ]);
-    descriptor.validate().expect("declared vendor captions");
-    let property = AnimatedProperty::from_descriptor(descriptor);
-    let selection = SelectedClipRef {
-        track_id: TrackId::new(),
-        is_video_track: true,
-        clip_id: ClipId::new(),
-    };
-    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
-        let localizer = Localizer::new(locale).expect("catalog");
-        let model =
-            inspector_property_model("vendor.mode", &property, TimelineTime::ZERO, &localizer);
-        assert_eq!(model.schema, property.descriptor.schema);
-        assert_eq!(model.value, PropertyValue::Enum("vendor:43".to_owned()));
-        assert_eq!(model.enum_labels["vendor:42"], "Écho / 回声");
-        assert_eq!(model.enum_labels["vendor:43"], "Écho / 回声");
-        let mut widget = inspector_property_value_widget(
-            &localizer,
-            &model,
-            true,
-            Some(selection),
-            InspectorPropertyTarget::Clip { parameter: model.address.clone() },
-        );
-        assert_eq!(
-            widget.accessibility().expect("choice").name.as_deref(),
-            Some("Écho / 回声")
-        );
-        widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
-        let actions = RefCell::new(Vec::new());
-        let dispatch = |action| actions.borrow_mut().push(action);
-        let mut focus = DummyFocus;
-        let mut shortcut = DummyShortcut;
-        let mut tooltip = DummyTooltip;
-        let mut requests = EventRequests::default();
-        let mut ctx = event_ctx(
-            &mut focus,
-            &mut shortcut,
-            &mut tooltip,
-            &mut requests,
-            &dispatch,
-        );
-        widget.event(
-            &UiEvent::MouseDown {
-                position: Point::new(20.0, 14.0),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-        widget.event(
-            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
-            &mut ctx,
-        );
-        let actions = actions.borrow();
-        assert_eq!(actions.len(), 1);
-        let Action::Custom { payload, .. } = &actions[0] else {
-            panic!("parameter action");
+    for ranked in [false, true] {
+        let mut descriptor = PropertyDescriptor::new(
+            "vendor.mode",
+            "Mode",
+            PropertyValue::Enum("vendor:43".to_owned()),
+        )
+        .with_enum_options(vec![
+            ParameterEnumOption::new("vendor:42", "Écho / 回声", "vendor.mode.echo"),
+            ParameterEnumOption::new("vendor:43", "Écho / 回声", "vendor.mode.echo.second"),
+        ]);
+        if ranked {
+            descriptor.schema.enum_options[0].display_rank = Some(i32::MAX);
+            descriptor.schema.enum_options[1].display_rank = Some(i32::MIN);
+        }
+        descriptor.validate().expect("declared vendor captions");
+        let property = AnimatedProperty::from_descriptor(descriptor);
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
         };
-        let payload: ClipWriteParameterValuesPayload =
-            serde_json::from_value(payload.clone()).expect("typed parameter write");
-        assert_eq!(
-            payload.writes,
-            vec![ParameterValueWrite::Value {
-                parameter: model.address.clone(),
-                value: PropertyValue::Enum("vendor:42".to_owned())
-            }]
-        );
-        let mut declared = property.clone();
-        declared.descriptor.schema.enum_options[0].message_id = "inspector-opacity".to_owned();
-        let translated =
-            inspector_property_model("vendor.mode", &declared, TimelineTime::ZERO, &localizer);
-        assert_eq!(
-            translated.enum_labels["vendor:42"],
-            localizer.text("inspector-opacity")
-        );
-        assert_eq!(translated.enum_labels["vendor:43"], "Écho / 回声");
+        for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+            let localizer = Localizer::new(locale).expect("catalog");
+            let model =
+                inspector_property_model("vendor.mode", &property, TimelineTime::ZERO, &localizer);
+            assert_eq!(model.schema, property.descriptor.schema);
+            assert_eq!(model.value, PropertyValue::Enum("vendor:43".to_owned()));
+            assert_eq!(model.enum_labels["vendor:42"], "Écho / 回声");
+            assert_eq!(model.enum_labels["vendor:43"], "Écho / 回声");
+            let mut widget = inspector_property_value_widget(
+                &localizer,
+                &model,
+                true,
+                Some(selection),
+                InspectorPropertyTarget::Clip { parameter: model.address.clone() },
+            );
+            assert_eq!(
+                widget.accessibility().expect("choice").name.as_deref(),
+                Some("Écho / 回声")
+            );
+            widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+            let actions = RefCell::new(Vec::new());
+            let dispatch = |action| actions.borrow_mut().push(action);
+            let mut focus = DummyFocus;
+            let mut shortcut = DummyShortcut;
+            let mut tooltip = DummyTooltip;
+            let mut requests = EventRequests::default();
+            let mut ctx = event_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            widget.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(20.0, 14.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            widget.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+            let actions = actions.borrow();
+            assert_eq!(actions.len(), 1);
+            let Action::Custom { payload, .. } = &actions[0] else {
+                panic!("parameter action");
+            };
+            let payload: ClipWriteParameterValuesPayload =
+                serde_json::from_value(payload.clone()).expect("typed parameter write");
+            assert_eq!(
+                payload.writes,
+                vec![ParameterValueWrite::Value {
+                    parameter: model.address.clone(),
+                    value: PropertyValue::Enum(
+                        if ranked { "vendor:43" } else { "vendor:42" }.to_owned()
+                    )
+                }]
+            );
+            let mut declared = property.clone();
+            declared.descriptor.schema.enum_options[0].message_id = "inspector-opacity".to_owned();
+            let translated =
+                inspector_property_model("vendor.mode", &declared, TimelineTime::ZERO, &localizer);
+            assert_eq!(
+                translated.enum_labels["vendor:42"],
+                localizer.text("inspector-opacity")
+            );
+            assert_eq!(translated.enum_labels["vendor:43"], "Écho / 回声");
+        }
     }
 }
 

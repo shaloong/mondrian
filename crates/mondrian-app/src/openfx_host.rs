@@ -41,6 +41,8 @@ pub enum OpenFxScalarValue {
     Boolean(bool),
     /// An exact signed 32-bit OFX Integer parameter value.
     Integer(i32),
+    /// Original zero-based OFX Choice index, independent of UI ordering.
+    Choice(i32),
 }
 
 /// Admitted interpretation of an OpenFX Double control.
@@ -51,6 +53,15 @@ pub enum OpenFxDoubleType {
     Plain,
     /// A multiplicative scale.
     Scale,
+}
+
+/// One caption and optional visual rank in original native Choice index order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenFxChoiceOption {
+    /// Plugin-provided caption, independent of the stored integer index.
+    pub label: String,
+    /// Optional signed visual rank; absent ranks preserve original index order.
+    pub display_rank: Option<i32>,
 }
 
 /// A parameter admitted by the selected Float32 Filter host.
@@ -64,6 +75,8 @@ pub struct OpenFxParameterDescription {
     pub hint: String,
     /// Value assigned when an effect instance is first created.
     pub default_value: OpenFxScalarValue,
+    /// Choice options in original native index order; empty for other kinds.
+    pub choices: Vec<OpenFxChoiceOption>,
     /// Definition-preferred interpolation for newly authored keys.
     pub preferred_interpolation: mondrian_core::automation::ParameterInterpolation,
     /// Semantic kind of a Double control.
@@ -192,6 +205,14 @@ struct NativeFrameInfo {
 }
 
 #[repr(C)]
+struct NativeChoiceOption {
+    label: *const c_char,
+    label_length: usize,
+    rank_present: c_int,
+    display_rank: c_int,
+}
+
+#[repr(C)]
 struct NativeParameterInfo {
     name: *const c_char,
     name_length: usize,
@@ -210,6 +231,8 @@ struct NativeParameterInfo {
     can_animate: c_int,
     secret: c_int,
     enabled: c_int,
+    choices: *const NativeChoiceOption,
+    choice_count: usize,
 }
 
 #[derive(Default)]
@@ -536,6 +559,30 @@ unsafe fn decode_native_parameter(
     let label = unsafe { copy_native_text(raw.label, raw.label_length, 256)? };
     // SAFETY: The native host passes std::string storage valid for this callback.
     let hint = unsafe { copy_native_text(raw.hint, raw.hint_length, 1024)? };
+    let choices = if raw.kind == 4 {
+        if raw.choice_count == 0 || raw.choice_count > 4096 || raw.choices.is_null() {
+            return Err("invalid OpenFX Choice option array".to_owned());
+        }
+        // SAFETY: The matched C++ host owns this bounded array for the callback.
+        unsafe { std::slice::from_raw_parts(raw.choices, raw.choice_count) }
+            .iter()
+            .map(|option| {
+                // SAFETY: Each caption's std::string storage outlives this callback.
+                let label = unsafe { copy_native_text(option.label, option.label_length, 256)? };
+                let display_rank = match option.rank_present {
+                    0 => None,
+                    1 => Some(option.display_rank),
+                    _ => return Err("invalid OpenFX Choice rank flag".to_owned()),
+                };
+                Ok(OpenFxChoiceOption { label, display_rank })
+            })
+            .collect::<Result<Vec<_>, String>>()?
+    } else {
+        if raw.choice_count != 0 {
+            return Err("non-Choice parameter has choices".to_owned());
+        }
+        Vec::new()
+    };
     let (default_value, double_type, minimum, maximum, display_minimum, display_maximum) = match raw
         .kind
     {
@@ -570,6 +617,16 @@ unsafe fn decode_native_parameter(
             Some(raw.display_minimum),
             Some(raw.display_maximum),
         ),
+        4 if raw.double_type == -1 => (
+            OpenFxScalarValue::Choice(
+                checked_openfx_integer(raw.default_value).ok_or("invalid OpenFX Choice default")?,
+            ),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
         _ => return Err("unsupported OpenFX parameter kind or default".to_owned()),
     };
     let flag = |value| match value {
@@ -582,6 +639,7 @@ unsafe fn decode_native_parameter(
         label: if label.is_empty() { name } else { label },
         hint,
         default_value,
+        choices,
         preferred_interpolation: match raw.preferred_interpolation {
             0 => mondrian_core::automation::ParameterInterpolation::Hold,
             1 => mondrian_core::automation::ParameterInterpolation::Linear,
@@ -723,6 +781,11 @@ fn validate_parameters(
         {
             return Err(invalid("OpenFX parameter value must be finite"));
         }
+        if let OpenFxScalarValue::Choice(value) = value
+            && *value < 0
+        {
+            return Err(invalid("OpenFX Choice index must be nonnegative"));
+        }
     }
     Ok(())
 }
@@ -791,7 +854,39 @@ fn validate_description(
         {
             return Err(invalid("OpenFX filter parameter text is invalid"));
         }
+        if !matches!(parameter.default_value, OpenFxScalarValue::Choice(_))
+            && !parameter.choices.is_empty()
+        {
+            return Err(invalid("non-Choice parameter has choices"));
+        }
         match &parameter.default_value {
+            OpenFxScalarValue::Choice(value) => {
+                let mut ranks = std::collections::BTreeSet::new();
+                if parameter.choices.is_empty()
+                    || parameter.choices.len() > 4096
+                    || *value < 0
+                    || *value as usize >= parameter.choices.len()
+                    || parameter.preferred_interpolation
+                        != mondrian_core::automation::ParameterInterpolation::Hold
+                    || parameter.double_type.is_some()
+                    || parameter.minimum.is_some()
+                    || parameter.maximum.is_some()
+                    || parameter.display_minimum.is_some()
+                    || parameter.display_maximum.is_some()
+                    || parameter.choices.iter().any(|option| {
+                        option.label.trim().is_empty()
+                            || option.label.len() > 256
+                            || option.label.chars().any(char::is_control)
+                            || option.display_rank.is_some()
+                                != parameter.choices[0].display_rank.is_some()
+                            || option.display_rank.is_some_and(|rank| !ranks.insert(rank))
+                    })
+                {
+                    return Err(invalid(
+                        "OpenFX Choice default, options or visual order is invalid",
+                    ));
+                }
+            }
             OpenFxScalarValue::Boolean(_) => {
                 if parameter.preferred_interpolation
                     != mondrian_core::automation::ParameterInterpolation::Hold
@@ -923,6 +1018,7 @@ mod shared_frame_tests {
                 label: "Count".into(),
                 hint: String::new(),
                 default_value: OpenFxScalarValue::Integer(2),
+                choices: Vec::new(),
                 preferred_interpolation: mondrian_core::automation::ParameterInterpolation::Linear,
                 double_type: None,
                 minimum: Some(0.0),
@@ -946,6 +1042,89 @@ mod shared_frame_tests {
             description.parameters[0].minimum = bound;
             assert!(validate_description(&description, "test.integer").is_err());
         }
+    }
+
+    #[test]
+    fn choice_descriptor_preserves_indices_and_rejects_invalid_metadata() {
+        let valid = OpenFxFilterDescription {
+            identifier: "test.choice".into(),
+            label: "Choice".into(),
+            parameters: vec![OpenFxParameterDescription {
+                name: "mode".into(),
+                label: "Mode".into(),
+                hint: String::new(),
+                default_value: OpenFxScalarValue::Choice(1),
+                choices: vec![
+                    OpenFxChoiceOption {
+                        label: "同じ表示".into(),
+                        display_rank: Some(i32::MAX),
+                    },
+                    OpenFxChoiceOption {
+                        label: "同じ表示".into(),
+                        display_rank: Some(i32::MIN),
+                    },
+                ],
+                preferred_interpolation: mondrian_core::automation::ParameterInterpolation::Hold,
+                double_type: None,
+                minimum: None,
+                maximum: None,
+                display_minimum: None,
+                display_maximum: None,
+                can_animate: false,
+                secret: false,
+                enabled: true,
+            }],
+        };
+        assert!(validate_description(&valid, "test.choice").is_ok());
+        let restored: OpenFxFilterDescription =
+            serde_json::from_slice(&serde_json::to_vec(&valid).expect("serialize descriptor"))
+                .expect("restore descriptor");
+        assert_eq!(restored.parameters[0].choices, valid.parameters[0].choices);
+        assert_eq!(
+            restored.parameters[0].default_value,
+            OpenFxScalarValue::Choice(1)
+        );
+        for index in [-1, 2, i32::MAX] {
+            let mut invalid = valid.clone();
+            invalid.parameters[0].default_value = OpenFxScalarValue::Choice(index);
+            assert!(validate_description(&invalid, "test.choice").is_err());
+        }
+        for scenario in 0..8 {
+            let mut invalid = valid.clone();
+            let parameter = &mut invalid.parameters[0];
+            match scenario {
+                0 => parameter.choices.clear(),
+                1 => parameter.choices[1].display_rank = Some(i32::MAX),
+                2 => parameter.choices[1].display_rank = None,
+                3 => parameter.choices[1].label = " \t".into(),
+                4 => parameter.choices[1].label = "bad\0label".into(),
+                5 => parameter.minimum = Some(0.0),
+                6 => {
+                    parameter.preferred_interpolation =
+                        mondrian_core::automation::ParameterInterpolation::Linear
+                }
+                _ => parameter.default_value = OpenFxScalarValue::Boolean(false),
+            }
+            assert!(
+                validate_description(&invalid, "test.choice").is_err(),
+                "scenario {scenario}"
+            );
+        }
+        let mut natural = valid.clone();
+        for option in &mut natural.parameters[0].choices {
+            option.display_rank = None;
+        }
+        assert!(validate_description(&natural, "test.choice").is_ok());
+        assert!(validate_parameters(&BTreeMap::from([(
+            "mode".into(),
+            OpenFxScalarValue::Choice(-1)
+        )]))
+        .is_err());
+        assert!(validate_parameters(&BTreeMap::from([(
+            "mode".into(),
+            OpenFxScalarValue::Choice(0)
+        )]))
+        .is_ok());
     }
 
     // Each native qualification runs in its own bounded child; test threads never

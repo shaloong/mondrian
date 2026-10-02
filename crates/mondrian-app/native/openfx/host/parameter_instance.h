@@ -57,7 +57,7 @@ namespace MondrianOpenFx {
   class ChoiceParameter : public OFX::Host::Param::ChoiceInstance {
   protected:
     FilterEffectInstance*   _effect;
-    OFX::Host::Param::Descriptor& _descriptor;
+    int _value;
   public:
     ChoiceParameter(FilterEffectInstance* effect,  const std::string& name, OFX::Host::Param::Descriptor& descriptor);
     OfxStatus get(int&);

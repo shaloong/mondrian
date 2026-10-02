@@ -150,34 +150,43 @@ namespace MondrianOpenFx {
   }
 
   //
-  // MyChoiceInteger
+  // ChoiceParameter
   //
 
   ChoiceParameter::ChoiceParameter(FilterEffectInstance* effect,
                                      const std::string& name,
                                      OFX::Host::Param::Descriptor& descriptor)
-    : _effect(effect), _descriptor(descriptor), OFX::Host::Param::ChoiceInstance(descriptor)
+    : OFX::Host::Param::ChoiceInstance(descriptor), _effect(effect),
+      _value(descriptor.getProperties().getIntProperty(kOfxParamPropDefault))
   {
   }
 
-  OfxStatus ChoiceParameter::get(int&)
+  OfxStatus ChoiceParameter::get(int& value)
   {
-    return kOfxStatErrMissingHostFeature;
+    const int count = getProperties().getDimension(kOfxParamPropChoiceOption);
+    if (_value < 0 || _value >= count) { return kOfxStatErrValue; }
+    value = _value;
+    return kOfxStatOK;
   }
 
-  OfxStatus ChoiceParameter::get(OfxTime time, int&)
+  OfxStatus ChoiceParameter::get(OfxTime time, int& value)
   {
-    return kOfxStatErrMissingHostFeature;
+    return std::isfinite(time) && time == _effect->frameState().info.frame
+        ? get(value) : kOfxStatErrMissingHostFeature;
   }
 
-  OfxStatus ChoiceParameter::set(int)
+  OfxStatus ChoiceParameter::set(int value)
   {
-    return kOfxStatErrMissingHostFeature;
+    const int count = getProperties().getDimension(kOfxParamPropChoiceOption);
+    if (value < 0 || value >= count) { return kOfxStatErrValue; }
+    _value = value;
+    return kOfxStatOK;
   }
 
-  OfxStatus ChoiceParameter::set(OfxTime time, int)
+  OfxStatus ChoiceParameter::set(OfxTime time, int value)
   {
-    return kOfxStatErrMissingHostFeature;
+    return std::isfinite(time) && time == _effect->frameState().info.frame
+        ? set(value) : kOfxStatErrMissingHostFeature;
   }
 
   //

@@ -361,3 +361,10 @@ keys; duplicate captions remain valid because captions do not identify choices.
 All three strings are persisted and included in authoring footprint accounting.
 The constructor requires all three declarations, with no migration alias or
 caption synthesized from an unknown vendor key. Hold automation stores keys only.
+
+Enum choices can declare optional signed `display_rank` values. Ranks are either
+absent for every option (natural schema order) or present and unique for all.
+Validation uses ordered sets for keys and ranks, avoiding quadratic scans for
+large vendor choice sets. The canonical option vector and animation ordinals
+are never reordered. Rank is inline author metadata; strings retain their
+existing explicit footprint accounting.

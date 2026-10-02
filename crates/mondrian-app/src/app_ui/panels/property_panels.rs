@@ -2821,7 +2821,9 @@ pub(super) fn inspector_property_value_widget(
         }
         PropertyValue::Enum(value) => {
             let mut items = Vec::with_capacity(property.schema.enum_options.len());
-            for option in &property.schema.enum_options {
+            let mut choices: Vec<_> = property.schema.enum_options.iter().enumerate().collect();
+            choices.sort_by_key(|(index, option)| (option.display_rank.unwrap_or(0), *index));
+            for (_, option) in choices {
                 items.push(
                     MenuItem::new(
                         property

@@ -553,3 +553,24 @@ real probe sets Hold for an Integer and Smooth for a Double, attempts all three
 forbidden instance mutations, verifies unchanged metadata and executes the Hold
 curve through the product compiled graph. A separate invalid-metadata probe
 requires description rejection before registration.
+
+## Native Choice parameters
+
+The matched native description ABI copies bounded Choice labels and optional
+signed visual ranks into owned Rust metadata. Values retain their original
+zero-based integer indices; effect properties use those indices as enum keys.
+Display sorting never changes canonical option ordinals or authored values.
+Duplicate captions are allowed; invalid defaults, mixed/duplicate ranks, gaps,
+and numeric bounds on Choice are rejected before catalog registration.
+
+The native instance stores its integer value and validates reads/writes against
+the instance's current option count. Timed access uses the explicit current-frame
+contract. Snapshot application validates all controls before assigning values
+and sending grouped change notifications. Render callbacks use timed reads;
+current-value reads and writes are exercised in change callbacks.
+
+The external pinned official Basic wrapper qualifies indices 0/1/2, default
+restoration, same-instance edits, invalid values/types, signed extreme display
+ranks, and equal direct/compiled-graph Float32 pixels. An invalid plugin write
+in InstanceChanged preserves the current index. This does not qualify StrChoice,
+historical-time access, dynamic option rebinding, or the wider vendor matrix.

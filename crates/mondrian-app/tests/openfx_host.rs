@@ -1067,6 +1067,139 @@ fn integer_filter_preserves_typed_authoring_and_native_pixels() {
 }
 
 #[test]
+#[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and MONDRIAN_OPENFX_SESSION_PROBE_MODE=choice"]
+fn choice_filter_preserves_canonical_indices_and_native_pixels() {
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
+        "choice"
+    );
+    let binary =
+        PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));
+    let inspection = inspect_openfx_binary(product_executable(), &binary).expect("inspect");
+    let identifier = "uk.co.thefoundry.BasicGainPlugin";
+    let description =
+        describe_openfx_filter(product_executable(), &inspection, identifier).expect("describe");
+    let count = description.parameters.iter().find(|p| p.name == "mode").expect("choice");
+    assert_eq!(count.default_value, OpenFxScalarValue::Choice(1));
+    assert_eq!(count.choices.len(), 3);
+    assert_eq!(count.choices[0].label, count.choices[1].label);
+    assert_eq!(
+        count.choices.iter().map(|option| option.display_rank).collect::<Vec<_>>(),
+        vec![Some(i32::MAX), Some(i32::MIN), Some(0)]
+    );
+    assert!(!count.can_animate);
+    let input = OpenFxFloatFrame {
+        width: 2,
+        height: 2,
+        pixels: vec![[0.1, 0.2, 0.3, 0.05]; 4],
+    };
+    let timing = OpenFxRenderTiming {
+        frame: 1.0,
+        frame_rate: 24.0,
+        first_frame: 0.0,
+        last_frame: 10.0,
+        pixel_aspect_ratio: 1.0,
+    };
+    let mut resident = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        identifier,
+        2,
+        2,
+        &mut || Ok(()),
+    )
+    .expect("resident choice worker");
+    let worker = resident.worker_process_id();
+    for index in [None, Some(0), Some(2), Some(1), None] {
+        let values = index
+            .map(|value| BTreeMap::from([("mode".into(), OpenFxScalarValue::Choice(value))]))
+            .unwrap_or_default();
+        let output = resident
+            .render(&timing, &values, &input, &mut || Ok(()))
+            .expect("resident choice edit");
+        assert_eq!(resident.worker_process_id(), worker);
+        let gain = (index.unwrap_or(1) + 1) as f32;
+        for (actual, original) in output.pixels.iter().zip(&input.pixels) {
+            for channel in 0..4 {
+                assert!((actual[channel] - original[channel] * gain).abs() < 1e-6);
+            }
+        }
+    }
+    for value in [0, 1, 2] {
+        let output = render_openfx_filter_frame(
+            product_executable(),
+            &inspection,
+            identifier,
+            &timing,
+            &BTreeMap::from([("mode".to_owned(), OpenFxScalarValue::Choice(value))]),
+            &input,
+        )
+        .expect("native choice");
+        for (actual, original) in output.pixels.iter().zip(&input.pixels) {
+            for channel in 0..4 {
+                assert!((actual[channel] - original[channel] * (value + 1) as f32).abs() < 1e-6);
+            }
+        }
+    }
+    for value in [
+        OpenFxScalarValue::Choice(-1),
+        OpenFxScalarValue::Choice(3),
+        OpenFxScalarValue::Double(1.5),
+        OpenFxScalarValue::Boolean(true),
+    ] {
+        assert!(render_openfx_filter_frame(
+            product_executable(),
+            &inspection,
+            identifier,
+            &timing,
+            &BTreeMap::from([("mode".to_owned(), value)]),
+            &input
+        )
+        .is_err());
+    }
+    let kind = register_selected_openfx_filter(product_executable(), &inspection, identifier)
+        .expect("register");
+    let mut effect = instantiate_effect_node(kind).expect("author instance");
+    let id = effect
+        .properties
+        .iter()
+        .find(|(_, p)| p.descriptor.display_name == "Mode")
+        .expect("choice property")
+        .1
+        .descriptor
+        .parameter_id()
+        .clone();
+    effect
+        .set_static_value_by_parameter(&id, PropertyValue::Enum("2".into()))
+        .expect("author canonical choice");
+    assert!(effect
+        .set_static_value_by_parameter(&id, PropertyValue::Enum("3".into()))
+        .is_err());
+    let range = TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::new(10, 24).expect("end"))
+        .expect("range");
+    let context = EffectFrameContext::new(Rational::FPS_24, SampleAspectRatio::SQUARE, range)
+        .expect("context");
+    let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+        &[effect],
+        &[],
+        &[],
+        &[],
+        WorkingColorSpace::LinearRec709,
+        context,
+        &LutPreparationCache::uncached(),
+    )
+    .expect("compile");
+    let graph = program.evaluate(TimelineTime::new(1, 24).expect("frame")).expect("evaluate");
+    let pixels = apply_compiled_effect_graph_rgba_f32(&input.pixels, 2, 2, &graph, 1191)
+        .expect("native graph");
+    for (actual, original) in pixels.iter().zip(&input.pixels) {
+        for channel in 0..4 {
+            assert!((actual[channel] - original[channel] * 3.0).abs() < 1e-6);
+        }
+    }
+}
+
+#[test]
 #[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and MONDRIAN_OPENFX_SESSION_PROBE_MODE=interpolation"]
 fn plugin_interpolation_metadata_controls_new_author_keys_and_readonly_instances() {
     use mondrian_core::automation::{InterpolationType, ParameterInterpolation};

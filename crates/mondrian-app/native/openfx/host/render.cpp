@@ -160,6 +160,13 @@ struct MondrianOpenFxSession {
             target < properties.getIntProperty(kOfxParamPropMin) || target > properties.getIntProperty(kOfxParamPropMax) ||
             scalar->get(current) != kOfxStatOK) { return 4; }
         updates.push_back({parameter, 3, target, current != target});
+      } else if (auto* choice = dynamic_cast<OFX::Host::Param::ChoiceInstance*>(parameter)) {
+        const double target = value ? value->value : properties.getIntProperty(kOfxParamPropDefault);
+        const int options = properties.getDimension(kOfxParamPropChoiceOption);
+        int current = 0;
+        if ((value && value->kind != 4) || !std::isfinite(target) || std::trunc(target) != target ||
+            target < 0 || target >= options || choice->get(current) != kOfxStatOK) { return 4; }
+        updates.push_back({parameter, 4, target, current != target});
       } else { return 7; }
       changed = changed || updates.back().changed;
     }
@@ -172,6 +179,8 @@ struct MondrianOpenFxSession {
         status = static_cast<OFX::Host::Param::DoubleInstance*>(update.parameter)->set(update.value);
       } else if (update.kind == 3) {
         status = static_cast<OFX::Host::Param::IntegerInstance*>(update.parameter)->set(static_cast<int>(update.value));
+      } else if (update.kind == 4) {
+        status = static_cast<OFX::Host::Param::ChoiceInstance*>(update.parameter)->set(static_cast<int>(update.value));
       } else {
         status = static_cast<OFX::Host::Param::BooleanInstance*>(update.parameter)->set(update.value == 1.0);
       }
@@ -317,6 +326,7 @@ static int describe(const char* binary, const char* bundle,
         type == kOfxParamTypePushButton) { continue; }
     if (++count > 4096) { return 7; }
     MondrianOpenFxParameterInfo info{};
+    std::vector<MondrianOpenFxChoiceOption> choices;
     const std::string& name = parameter->getName();
     const std::string& label = parameter->getLabel();
     const std::string& hint = parameter->getHint();
@@ -366,6 +376,25 @@ static int describe(const char* binary, const char* bundle,
       info.maximum = 1.0;
       info.display_minimum = 0.0;
       info.display_maximum = 1.0;
+    } else if (type == kOfxParamTypeChoice) {
+      info.kind = 4;
+      info.double_type = -1;
+      info.default_value = properties.getIntProperty(kOfxParamPropDefault);
+      const int options = properties.getDimension(kOfxParamPropChoiceOption);
+      const int ranks = properties.getDimension(kOfxParamPropChoiceOrder);
+      if (options < 1 || options > 4096 || (ranks != 0 && ranks != options) ||
+          info.default_value < 0 || info.default_value >= options) { return 7; }
+      std::set<int> seenRanks;
+      choices.reserve(options);
+      for (int index = 0; index < options; ++index) {
+        const auto& caption = properties.getStringProperty(kOfxParamPropChoiceOption, index);
+        if (caption.empty() || caption.size() > 256) { return 7; }
+        const int rank = ranks ? properties.getIntProperty(kOfxParamPropChoiceOrder, index) : 0;
+        if (ranks && !seenRanks.insert(rank).second) { return 7; }
+        choices.push_back({caption.data(), caption.size(), ranks ? 1 : 0, rank});
+      }
+      info.choices = choices.data();
+      info.choice_count = choices.size();
     } else {
       std::cerr << "unsupported parameter type: " << type << std::endl;
       return 7;

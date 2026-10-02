@@ -153,3 +153,11 @@ optional native grant, seeks with reversed Source data across generations,
 checks both complete unclamped outputs and resident frame charge, then trims
 to zero. The one-pixel unfetched probe also changes frame generation before
 its required second-call failure, detecting accidental worker restarts.
+
+Choice qualification uses MONDRIAN_OPENFX_SESSION_PROBE_MODE=choice and the ignored integration test choice_filter_preserves_canonical_indices_and_native_pixels. The owned wrapper declares duplicate captions with extreme signed ChoiceOrder ranks; its native Render reads the authored original index through paramGetValueAtTime, as required in Render actions. The test compares per-index Float32 output against expected gains and exercises the same choice through the compiled effect graph. This qualification does not establish StrChoice or historical-time access.
+
+The Choice scenario also checks invalid plugin writes in InstanceChanged,
+where current-value access is legal, and verifies preservation of the current
+index. A resident worker processes default/0/2/1/default edits without changing
+process identity. Full parameter-suite semantics beyond this scenario require
+separate qualification.

@@ -332,3 +332,10 @@ in English, Chinese and pseudo locales. Equal captions may identify different
 keys: menu checked state and dispatch still use canonical keys. Direct schema
 consumers also use declared captions when no localized projection is supplied.
 Locale projection does not modify schema, current values or automation addresses.
+
+The generic Inspector dropdown sorts a temporary projection by declared choice
+rank, retaining schema order for naturally ordered definitions. Ranks are signed
+32-bit values and need not be contiguous or positive. Canonical keys, option
+vector order, checked state, current value and Hold keyframes remain unchanged;
+locale changes only replace captions. Duplicate translated/vendor captions never
+merge choices or become action payload values.

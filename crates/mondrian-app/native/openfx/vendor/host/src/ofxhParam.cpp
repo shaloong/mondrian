@@ -264,6 +264,7 @@ namespace OFX {
 
         static const Property::PropSpec allChoice[] = {
           { kOfxParamPropChoiceOption,    Property::eString,    0,    false,    "" },
+          { kOfxParamPropChoiceOrder,     Property::eInt,       0,    false,    "0" },
           Property::propSpecEnd
         };
 

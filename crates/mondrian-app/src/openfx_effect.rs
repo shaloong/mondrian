@@ -216,11 +216,32 @@ fn build_definition(
                 OpenFxScalarValue::Double(value) => PropertyValue::Double(value),
                 OpenFxScalarValue::Boolean(value) => PropertyValue::Bool(value),
                 OpenFxScalarValue::Integer(value) => PropertyValue::Int(i64::from(value)),
+                OpenFxScalarValue::Choice(value) => PropertyValue::Enum(value.to_string()),
             };
             let mut descriptor = PropertyDescriptor::try_new(path, &parameter.label, default_value)
                 .map_err(|error| OpenFxEffectRegistrationError::Schema(error.to_string()))?
                 .with_parameter_id(parameter_id.clone())
                 .with_animatable(parameter.can_animate);
+            if matches!(parameter.default_value, OpenFxScalarValue::Choice(_)) {
+                descriptor = descriptor.with_enum_options(
+                    parameter
+                        .choices
+                        .iter()
+                        .enumerate()
+                        .map(|(index, option)| {
+                            let mut choice = mondrian_core::automation::ParameterEnumOption::new(
+                                index.to_string(),
+                                &option.label,
+                                format!("{parameter_id}.choice.{index}"),
+                            );
+                            if let Some(rank) = option.display_rank {
+                                choice = choice.with_display_rank(rank);
+                            }
+                            choice
+                        })
+                        .collect(),
+                );
+            }
             if matches!(parameter.default_value, OpenFxScalarValue::Integer(_)) {
                 descriptor.schema.allowed_interpolations = vec![
                     mondrian_core::automation::ParameterInterpolation::Hold,
@@ -331,6 +352,19 @@ fn build_definition(
                         match effect.evaluate_parameter(parameter_id, context.time) {
                             Some(PropertyValue::Double(value)) if value.is_finite() => {
                                 OpenFxScalarValue::Double(value)
+                            }
+                            Some(PropertyValue::Enum(key))
+                                if matches!(
+                                    parameter.default_value,
+                                    OpenFxScalarValue::Choice(_)
+                                ) =>
+                            {
+                                OpenFxScalarValue::Choice(key.parse::<i32>().map_err(|_| {
+                                    invalid(format!(
+                                        "parameter `{}` has invalid Choice key",
+                                        parameter.name
+                                    ))
+                                })?)
                             }
                             Some(PropertyValue::Bool(value)) => OpenFxScalarValue::Boolean(value),
                             Some(PropertyValue::Int(value)) => {
@@ -487,6 +521,7 @@ mod tests {
                     label: "Gain".to_owned(),
                     hint: "Multiply every channel".to_owned(),
                     default_value: OpenFxScalarValue::Double(1.0),
+                    choices: Vec::new(),
                     preferred_interpolation:
                         mondrian_core::automation::ParameterInterpolation::Linear,
                     double_type: Some(OpenFxDoubleType::Scale),
@@ -503,6 +538,7 @@ mod tests {
                     label: "Internal Switch".to_owned(),
                     hint: String::new(),
                     default_value: OpenFxScalarValue::Boolean(false),
+                    choices: Vec::new(),
                     preferred_interpolation:
                         mondrian_core::automation::ParameterInterpolation::Hold,
                     double_type: None,

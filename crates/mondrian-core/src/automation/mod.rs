@@ -383,6 +383,9 @@ pub struct ParameterEnumOption {
     pub display_name: String,
     /// Localization address for this option's caption.
     pub message_id: String,
+    /// Optional signed presentation rank; absent ranks preserve schema order.
+    /// Ranks never change canonical keys or the ordinal encoding of automation.
+    pub display_rank: Option<i32>,
 }
 
 impl ParameterEnumOption {
@@ -396,7 +399,14 @@ impl ParameterEnumOption {
             key: key.into(),
             display_name: display_name.into(),
             message_id: message_id.into(),
+            display_rank: None,
         }
+    }
+
+    /// Declare this choice's visual rank without changing its author ordinal.
+    pub fn with_display_rank(mut self, rank: i32) -> Self {
+        self.display_rank = Some(rank);
+        self
     }
 }
 
@@ -583,15 +593,22 @@ impl ParameterSchema {
                 return Err(ParameterSchemaError::InterpolationTypeMismatch);
             }
         }
-        for (index, option) in self.enum_options.iter().enumerate() {
+        let mut choice_keys = std::collections::BTreeSet::new();
+        let mut display_ranks = std::collections::BTreeSet::new();
+        for option in &self.enum_options {
             if option.key.trim().is_empty()
                 || option.display_name.trim().is_empty()
                 || option.message_id.trim().is_empty()
             {
                 return Err(ParameterSchemaError::InvalidEnumOption);
             }
-            if self.enum_options[..index].iter().any(|previous| previous.key == option.key) {
+            if !choice_keys.insert(option.key.as_str()) {
                 return Err(ParameterSchemaError::DuplicateEnumOption);
+            }
+            if option.display_rank.is_some() != self.enum_options[0].display_rank.is_some()
+                || option.display_rank.is_some_and(|rank| !display_ranks.insert(rank))
+            {
+                return Err(ParameterSchemaError::InvalidEnumDisplayOrder);
             }
         }
         match (&self.default_value, self.enum_options.is_empty()) {
@@ -759,6 +776,9 @@ pub enum ParameterSchemaError {
     InvalidEnumOption,
     #[error("enum option keys must be unique")]
     DuplicateEnumOption,
+    /// Visual ranks must be absent for every choice or present and unique for all.
+    #[error("enum display ranks must be either all absent or all present and unique")]
+    InvalidEnumDisplayOrder,
     #[error("enum parameters require options and non-enum parameters cannot declare them")]
     EnumOptionsMismatch,
     #[error("enum default is not present in its option set")]
@@ -3569,7 +3589,7 @@ impl crate::AuthoringFootprint for ParameterEnumOption {
         &self,
         collector: &mut crate::AuthoringFootprintCollector,
     ) -> std::result::Result<(), crate::AuthoringFootprintError> {
-        let Self { key, display_name, message_id } = self;
+        let Self { key, display_name, message_id, display_rank: _ } = self;
         collector.collect(key)?;
         collector.collect(display_name)?;
         collector.collect(message_id)
@@ -4424,6 +4444,55 @@ mod tests {
                 None
             )
             .is_err());
+    }
+
+    #[test]
+    fn enum_visual_ranks_preserve_author_ordinals_and_hold_animation() {
+        let descriptor = PropertyDescriptor::new(
+            "vendor.mode",
+            "Mode",
+            PropertyValue::Enum("first".to_owned()),
+        )
+        .with_enum_options(vec![
+            ParameterEnumOption::new("first", "First", "vendor.first").with_display_rank(i32::MAX),
+            ParameterEnumOption::new("second", "Second", "vendor.second")
+                .with_display_rank(i32::MIN),
+        ]);
+        descriptor.validate().expect("arbitrary unique signed ranks");
+        let encoded = serde_json::to_vec(&descriptor).expect("serialize ranked choices");
+        let decoded: PropertyDescriptor = serde_json::from_slice(&encoded).expect("rank roundtrip");
+        assert_eq!(decoded, descriptor);
+        let mut property = AnimatedProperty::from_descriptor(descriptor.clone());
+        property.enable_animation(tt(0)).expect("enable");
+        property
+            .write_value(
+                tt(10),
+                PropertyValue::Enum("second".to_owned()),
+                InterpolationType::Hold,
+                None,
+            )
+            .expect("hold write");
+        assert_eq!(
+            property.evaluate(tt(9)),
+            PropertyValue::Enum("first".to_owned())
+        );
+        assert_eq!(
+            property.evaluate(tt(10)),
+            PropertyValue::Enum("second".to_owned())
+        );
+        assert_eq!(property.descriptor.schema.enum_options[0].key, "first");
+        let mut mixed = descriptor.clone();
+        mixed.schema.enum_options[0].display_rank = None;
+        assert_eq!(
+            mixed.validate(),
+            Err(ParameterSchemaError::InvalidEnumDisplayOrder)
+        );
+        let mut repeated = descriptor;
+        repeated.schema.enum_options[1].display_rank = Some(i32::MAX);
+        assert_eq!(
+            repeated.validate(),
+            Err(ParameterSchemaError::InvalidEnumDisplayOrder)
+        );
     }
 
     #[test]
