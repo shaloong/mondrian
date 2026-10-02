@@ -182,6 +182,7 @@ fluent-syntax = { workspace = true }
 unic-langid = { workspace = true }
 sys-locale = { workspace = true }
 uuid = { workspace = true }
+url = { workspace = true }
 sha2 = { workspace = true }
 chrono = { workspace = true }
 # 并发

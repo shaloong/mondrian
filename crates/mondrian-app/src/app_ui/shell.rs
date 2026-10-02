@@ -1046,6 +1046,169 @@ pub struct AppUiAppRoot {
 }
 
 impl AppUiAppRoot {
+    /// Route typed resource drafts before ordinary author actions.
+    pub(crate) fn try_handle_resource_action(
+        &mut self,
+        action: &Action,
+        state: &AppState,
+        platform: &dyn PlatformService,
+    ) -> Result<crate::app_ui::resource_dialog::ResourceActionOutcome> {
+        use crate::app_ui::resource_dialog::{
+            ResourceActionOutcome, ResourceAssetChoice, ResourceDialog, ResourceDraft,
+            ResourceEditorAction, RESOURCE_EDITOR,
+        };
+        let Action::Custom { namespace, name, payload } = action else {
+            return Ok(ResourceActionOutcome::Unhandled);
+        };
+        if namespace != APP_SHELL_NAMESPACE || name != RESOURCE_EDITOR {
+            return Ok(ResourceActionOutcome::Unhandled);
+        }
+        let event: ResourceEditorAction = serde_json::from_value(payload.clone())
+            .map_err(|error| app_shell_action_error(name, error))?;
+        let refreshed = matches!(
+            &event,
+            ResourceEditorAction::Open { .. } | ResourceEditorAction::Confirm { .. }
+        )
+        .then(|| {
+            crate::app_ui::panels::InspectorPanelModel::from_app_state(state, &self.localizer)
+        });
+        let model = refreshed.as_ref().unwrap_or(&self.models.inspector);
+        if let ResourceEditorAction::Open { clip_id, target } = event {
+            let Some(property) = target.property(clip_id, model) else {
+                return Ok(ResourceActionOutcome::Handled(None));
+            };
+            let mondrian_core::PropertyValue::Resource(reference) = &property.value else {
+                return Ok(ResourceActionOutcome::Handled(None));
+            };
+            let mut assets = state
+                .asset_library()
+                .map(|library| library.list_assets())
+                .transpose()?
+                .unwrap_or_default()
+                .into_iter()
+                .map(|asset| ResourceAssetChoice {
+                    id: asset.id,
+                    label: asset.file_path().map_or_else(
+                        || asset.name.clone(),
+                        |path| format!("{} · {}", asset.name, path.display()),
+                    ),
+                })
+                .collect::<Vec<_>>();
+            assets.sort_by(|a, b| a.label.cmp(&b.label).then_with(|| a.id.cmp(&b.id)));
+            let draft = ResourceDraft::new(
+                clip_id,
+                target,
+                reference.clone(),
+                property.schema.clone(),
+                state.authoring_session_id(),
+                state.active_sequence_id(),
+            );
+            self.modal = Some(ShellModal::Resource(Box::new(ResourceDialog::new(
+                draft,
+                property.label.clone(),
+                assets,
+                self.localizer.locale(),
+            ))));
+            self.layout(self.bounds);
+            return Ok(ResourceActionOutcome::Handled(None));
+        }
+        let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_resource_mut) else {
+            return Ok(ResourceActionOutcome::Handled(None));
+        };
+        if event.id() != Some(dialog.draft.id) {
+            return Ok(ResourceActionOutcome::Handled(None));
+        }
+        if dialog.draft.session != state.authoring_session_id()
+            || dialog.draft.sequence != state.active_sequence_id()
+            || !dialog.draft.matches_model(model)
+        {
+            self.modal = None;
+            return Ok(ResourceActionOutcome::Handled(None));
+        }
+        match event {
+            ResourceEditorAction::Update { update, .. } => dialog.apply_update(update),
+            ResourceEditorAction::Browse { folder, .. } => {
+                if !dialog.draft.allows_browse(folder) || dialog.is_composing() {
+                    return Ok(ResourceActionOutcome::Handled(None));
+                }
+                let filters = dialog
+                    .draft
+                    .schema
+                    .resource
+                    .as_ref()
+                    .filter(|contract| !contract.file_extensions.is_empty())
+                    .map_or_else(Vec::new, |contract| {
+                        vec![FileFilter::new(
+                            self.localizer.text("resource-file-only"),
+                            contract.file_extensions.clone(),
+                        )]
+                    });
+                let selection = if folder {
+                    platform
+                        .open_folder_dialog(&self.localizer.text("resource-browse-folder"))
+                        .map(|outcome| outcome.into_selection())
+                } else {
+                    platform
+                        .open_file_dialog(&self.localizer.text("resource-browse-file"), &filters)
+                        .map(|outcome| {
+                            outcome.into_selection().and_then(|mut paths| {
+                                if paths.len() == 1 {
+                                    paths.pop()
+                                } else {
+                                    if !paths.is_empty() {
+                                        dialog.set_error("resource-select-one-file");
+                                    }
+                                    None
+                                }
+                            })
+                        })
+                };
+                match selection {
+                    Ok(Some(path)) => dialog.selected_path(path),
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "resource picker failed");
+                        dialog.set_error("resource-browse-failed");
+                    }
+                }
+            }
+            ResourceEditorAction::Confirm { .. } => {
+                if dialog.is_composing() {
+                    return Ok(ResourceActionOutcome::Handled(None));
+                }
+                let value = match dialog.draft.confirmed_value() {
+                    Ok(Some(value)) => value,
+                    Ok(None) => {
+                        self.modal = None;
+                        return Ok(ResourceActionOutcome::Handled(None));
+                    }
+                    Err(key) => {
+                        dialog.set_error(key);
+                        return Ok(ResourceActionOutcome::Handled(None));
+                    }
+                };
+                if let mondrian_core::ParameterResourceReference::ProjectAsset { asset_id } = value
+                {
+                    let current = state
+                        .asset_library()
+                        .map(|library| library.get_asset(asset_id))
+                        .transpose()?
+                        .flatten();
+                    if current.as_ref().is_none_or(|asset| asset.membership.is_retired()) {
+                        dialog.set_error("resource-asset-missing");
+                        return Ok(ResourceActionOutcome::Handled(None));
+                    }
+                }
+                let author = dialog.draft.author_action(value);
+                self.modal = None;
+                return Ok(ResourceActionOutcome::Handled(author));
+            }
+            ResourceEditorAction::Cancel { .. } => self.modal = None,
+            ResourceEditorAction::Open { .. } => {}
+        }
+        Ok(ResourceActionOutcome::Handled(None))
+    }
+
     /// Build a root widget from the current application state snapshot.
     pub fn from_app_state(state: &AppState) -> Self {
         Self::from_app_state_with_preferences(state, &AppUiPreferences::default())
@@ -1353,6 +1516,15 @@ impl AppUiAppRoot {
     /// Replace panel contents from a fresh model snapshot while preserving the
     /// root widget id and menu state.
     pub fn set_models(&mut self, models: AppUiPanelModels) {
+        if self
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .is_some_and(|dialog| !dialog.draft.matches_model(&models.inspector))
+        {
+            self.modal = None;
+        }
+
         let layout = self.dock.layout_snapshot();
         let dock_panel_state = collect_dock_panel_state(&self.dock);
         let asset_grid_state = collect_asset_grid_state(&self.dock);
@@ -1498,6 +1670,13 @@ impl AppUiAppRoot {
             .refresh_for_app_state_with_shortcut_overrides(state, &preferences.shortcut_overrides);
         self.status_bar.sync_history(state.status_log());
         self.active_sequence = state.active_sequence().cloned();
+        if self.modal.as_ref().and_then(ShellModal::as_resource).is_some_and(|dialog| {
+            dialog.draft.session != state.authoring_session_id()
+                || dialog.draft.sequence != state.active_sequence_id()
+        }) {
+            self.modal = None;
+        }
+
         self.project_color_environment = state.project_color_environment().clone();
         self.new_sequence_defaults = state.new_sequence_defaults().clone();
         self.project_sequence_color_contracts = project_sequence_color_contracts(state);
@@ -1527,6 +1706,12 @@ impl AppUiAppRoot {
         apply_viewer_zoom_mode(&mut models, self.viewer_zoom_mode);
         self.localizer = localizer;
         self.set_models(models);
+        if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_resource_mut)
+            && let Some(property) =
+                dialog.draft.target.property(dialog.draft.clip_id, &self.models.inspector)
+        {
+            dialog.set_locale(locale, property.label.clone());
+        }
         let preferences_model =
             AppUiPreferencesModel::from_app_state_with_shortcut_overrides_and_audio_output(
                 state,
@@ -1571,6 +1756,10 @@ impl AppUiAppRoot {
         locale: crate::app_ui::localization::AppUiLocale,
     ) {
         if self.notification_session_id != state.authoring_session_id() {
+            if self.modal.as_ref().and_then(ShellModal::as_resource).is_some() {
+                self.modal = None;
+            }
+
             self.notification_session_id = state.authoring_session_id();
             self.status_bar.notifications =
                 NotificationOverlay::from_existing(&state.notifications, locale);
@@ -2555,6 +2744,10 @@ fn restore_panel_scroll_state_into(
 }
 
 impl Widget for AppUiAppRoot {
+    fn keyboard_focus_scope(&self) -> Option<WidgetId> {
+        self.modal.as_ref().map(Widget::id)
+    }
+
     fn id(&self) -> WidgetId {
         self.id
     }
@@ -2760,6 +2953,8 @@ mod tests {
         revealed_paths: Mutex<Vec<PathBuf>>,
         dialog_titles: Mutex<Vec<String>>,
         dialog_default_names: Mutex<Vec<String>>,
+        dialog_filters: Mutex<Vec<Vec<FileFilter>>>,
+        dialog_error: bool,
     }
 
     impl PlatformService for FakePlatform {
@@ -2774,9 +2969,13 @@ mod tests {
         fn open_file_dialog(
             &self,
             title: &str,
-            _filters: &[FileFilter],
+            filters: &[FileFilter],
         ) -> Result<FileDialogOutcome<Vec<PathBuf>>, FileDialogError> {
             self.dialog_titles.lock().expect("dialog titles lock").push(title.to_owned());
+            self.dialog_filters.lock().expect("filter lock").push(filters.to_vec());
+            if self.dialog_error {
+                return Err(FileDialogError::Unavailable);
+            }
             Ok(match self.open_paths.clone() {
                 Some(paths) => FileDialogOutcome::Selected(paths),
                 None => FileDialogOutcome::Cancelled,
@@ -2788,6 +2987,9 @@ mod tests {
             title: &str,
         ) -> Result<FileDialogOutcome<PathBuf>, FileDialogError> {
             self.dialog_titles.lock().expect("dialog titles lock").push(title.to_owned());
+            if self.dialog_error {
+                return Err(FileDialogError::Unavailable);
+            }
             Ok(match self.open_folder.clone() {
                 Some(path) => FileDialogOutcome::Selected(path),
                 None => FileDialogOutcome::Cancelled,
@@ -5161,6 +5363,363 @@ mod tests {
 
         assert_eq!(result, EventResult::Handled);
         assert!(root.modal.as_ref().and_then(ShellModal::as_about).is_some());
+    }
+
+    #[test]
+    fn app_root_modal_router_contains_tabs_and_restores_background_focus() {
+        use mondrian_ui_core::{FocusManager, TreeWalker, WidgetTree};
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let platform = FakePlatform::default();
+        let mut root = AppUiAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let background = {
+            let tree = WidgetTreeView::new(&mut root);
+            TreeWalker::focus_next(&tree, WidgetId::default()).expect("background control")
+        };
+        let mut router = EventRouter::new(root.id());
+        router.focus_manager_mut().set_focused_widget(Some(background), None);
+        root.handle_shell_action(app_shell_about_action(), &platform, None);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let modal = root.keyboard_focus_scope().expect("modal scope");
+        let actions = std::cell::RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        {
+            let mut tree = WidgetTreeView::new(&mut root);
+            router.route(
+                UiEvent::TextInput("背景不能收到".to_owned()),
+                &mut tree,
+                &dispatch,
+            );
+            let first = router.focus_manager().focused_widget().expect("modal initial focus");
+            assert_ne!(first, background);
+            for modifiers in [Modifiers::none(), Modifiers::shift()] {
+                for _ in 0..24 {
+                    router.route(
+                        UiEvent::KeyDown { key: KeyCode::Tab, modifiers },
+                        &mut tree,
+                        &dispatch,
+                    );
+                    let mut current = router.focus_manager().focused_widget();
+                    while current.is_some() && current != Some(modal) {
+                        current = current.and_then(|id| tree.parent_id(id));
+                    }
+                    assert_eq!(current, Some(modal));
+                }
+            }
+        }
+        assert!(
+            actions.borrow().is_empty(),
+            "typing and traversing must not author background actions"
+        );
+        root.modal = None;
+        {
+            let mut tree = WidgetTreeView::new(&mut root);
+            router.route(
+                UiEvent::KeyUp { key: KeyCode::Tab, modifiers: Modifiers::none() },
+                &mut tree,
+                &dispatch,
+            );
+        }
+        assert_eq!(router.focus_manager().focused_widget(), Some(background));
+    }
+
+    #[test]
+    fn resource_lut_draft_commit_undo_save_reopen_executes_real_cube() {
+        use crate::app_ui::resource_dialog::{
+            InspectorPropertyTarget, ResourceActionOutcome, ResourceEditorAction, ResourceUpdate,
+        };
+        use mondrian_core::{
+            ParameterResourceReference, PropertyValue, TimelineTime, WorkingColorSpace,
+        };
+        use mondrian_effects::EffectType;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let directory = std::env::temp_dir().join(format!(
+            "mondrian-resource-workflow-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).expect("test directory");
+        let cube = directory.join("蓝色 映射.cube");
+        std::fs::write(
+            &cube,
+            "LUT_3D_SIZE 2\n0 0 0\n0 0 1\n0 1 0\n0 1 1\n1 0 0\n1 0 1\n1 1 0\n1 1 1\n",
+        )
+        .expect("real cube file");
+        let mut sequence = mondrian_timeline::Sequence::new("Resource acceptance");
+        let mut clip = mondrian_timeline::Clip::new_basic_title(
+            "Title",
+            "Arial",
+            TimelineTime::ZERO,
+            TimelineTime::new(1, 1).expect("duration"),
+        )
+        .expect("generated clip");
+        let clip_id = clip.id;
+        let mut effect = mondrian_effects::instantiate_effect_node(EffectType::Lut3D).expect("LUT");
+        let effect_id = effect.id;
+        effect
+            .set_static_value_by_parameter(
+                &EffectType::Lut3D.parameter_id("processing_space").expect("space"),
+                PropertyValue::Enum("scene_linear".to_owned()),
+            )
+            .expect("explicit color space");
+        let path = EffectType::Lut3D.property_path("path");
+        let parameter = effect.properties.property(&path).expect("path property").address();
+        clip.add_effect_node(effect);
+        sequence.video_tracks[0].add_clip(clip).expect("add generated clip");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("select clip");
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let target = InspectorPropertyTarget::Effect { effect_id, parameter: parameter.clone() };
+        let platform = FakePlatform {
+            open_paths: Some(vec![cube.clone()]),
+            ..FakePlatform::default()
+        };
+        let open = ResourceEditorAction::Open { clip_id, target: target.clone() };
+        let route =
+            |root: &mut AppUiAppRoot, state: &AppState, event: ResourceEditorAction| match root
+                .try_handle_resource_action(&event.action(), state, &platform)
+                .expect("shell resource event")
+            {
+                ResourceActionOutcome::Handled(action) => action,
+                ResourceActionOutcome::Unhandled => panic!("typed resource event must be handled"),
+            };
+        let revision = state.active_sequence().expect("sequence").revision;
+        assert!(route(&mut root, &state, open.clone()).is_none());
+        let cancelled =
+            root.modal.as_ref().and_then(ShellModal::as_resource).expect("draft").draft.id;
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Update {
+                id: cancelled,
+                update: ResourceUpdate::Kind(
+                    crate::app_ui::resource_dialog::ResourceKind::ExternalFile
+                )
+            }
+        )
+        .is_none());
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Browse { id: cancelled, folder: false }
+        )
+        .is_none());
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Cancel { id: cancelled }
+        )
+        .is_none());
+        assert_eq!(
+            state.active_sequence().expect("sequence").revision,
+            revision
+        );
+        assert!(!state.can_undo_action());
+        assert!(route(&mut root, &state, open.clone()).is_none());
+        let unchanged =
+            root.modal.as_ref().and_then(ShellModal::as_resource).expect("draft").draft.id;
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Confirm { id: unchanged }
+        )
+        .is_none());
+        assert!(!state.can_undo_action());
+        assert!(route(&mut root, &state, open.clone()).is_none());
+        let id = root.modal.as_ref().and_then(ShellModal::as_resource).expect("draft").draft.id;
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Cancel { id: cancelled }
+        )
+        .is_none());
+        assert!(
+            root.modal.is_some(),
+            "stale cancellation cannot close a newer draft"
+        );
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Update {
+                id,
+                update: ResourceUpdate::Kind(
+                    crate::app_ui::resource_dialog::ResourceKind::ExternalFile
+                )
+            }
+        )
+        .is_none());
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Browse { id, folder: false }
+        )
+        .is_none());
+        let selected = root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .expect("draft")
+            .draft
+            .value()
+            .expect("selected cube");
+        for picker in [
+            FakePlatform::default(),
+            FakePlatform { dialog_error: true, ..FakePlatform::default() },
+            FakePlatform {
+                open_paths: Some(vec![cube.clone(), cube.clone()]),
+                ..FakePlatform::default()
+            },
+        ] {
+            assert!(matches!(
+                root.try_handle_resource_action(
+                    &ResourceEditorAction::Browse { id, folder: false }.action(),
+                    &state,
+                    &picker
+                )
+                .expect("picker result"),
+                ResourceActionOutcome::Handled(None)
+            ));
+            assert_eq!(
+                root.modal
+                    .as_ref()
+                    .and_then(ShellModal::as_resource)
+                    .expect("preserved draft")
+                    .draft
+                    .value()
+                    .expect("preserved value"),
+                selected
+            );
+            let filters = picker.dialog_filters.lock().expect("filters");
+            assert_eq!(filters[0][0].extensions, vec!["cube".to_owned()]);
+        }
+        let folder_picker = FakePlatform {
+            open_folder: Some(directory.clone()),
+            ..FakePlatform::default()
+        };
+        assert!(matches!(
+            root.try_handle_resource_action(
+                &ResourceEditorAction::Browse { id, folder: true }.action(),
+                &state,
+                &folder_picker
+            )
+            .expect("disallowed folder"),
+            ResourceActionOutcome::Handled(None)
+        ));
+        assert!(
+            folder_picker.dialog_titles.lock().expect("titles").is_empty(),
+            "File-only schema must not open a folder picker"
+        );
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Update {
+                id,
+                update: ResourceUpdate::Text("wrong.txt".to_owned())
+            }
+        )
+        .is_none());
+        assert!(route(&mut root, &state, ResourceEditorAction::Confirm { id }).is_none());
+        assert!(
+            root.modal.is_some(),
+            "invalid confirmation retains the recoverable draft"
+        );
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Update {
+                id,
+                update: ResourceUpdate::Text(cube.to_string_lossy().into_owned())
+            }
+        )
+        .is_none());
+        assert_eq!(
+            state.active_sequence().expect("sequence").revision,
+            revision
+        );
+        let action = route(&mut root, &state, ResourceEditorAction::Confirm { id })
+            .expect("one author action");
+        assert!(root.modal.is_none());
+        state.dispatch_action(action).expect("atomic author commit");
+        let resource = |state: &AppState| {
+            state
+                .active_sequence()
+                .expect("sequence")
+                .find_clip(clip_id)
+                .expect("clip")
+                .effects
+                .iter()
+                .find(|effect| effect.id == effect_id)
+                .expect("effect")
+                .properties
+                .property_by_address(&parameter)
+                .expect("path")
+                .1
+                .static_value()
+                .clone()
+        };
+        let bound = PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+            path: cube.clone(),
+        });
+        assert_eq!(resource(&state), bound);
+        assert!(state.undo_timeline().expect("undo binding"));
+        assert_eq!(
+            resource(&state),
+            PropertyValue::Resource(ParameterResourceReference::Unbound)
+        );
+        assert!(
+            !state.can_undo_action(),
+            "the confirmed binding is exactly one history entry"
+        );
+        assert!(state.redo_timeline().expect("redo binding"));
+        assert_eq!(resource(&state), bound);
+        assert_eq!(
+            state.asset_library().expect("library").list_assets().expect("assets").len(),
+            0,
+            "binding a LUT must not import library media"
+        );
+        root.refresh_from_app_state(&state);
+        assert!(route(&mut root, &state, open).is_none());
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
+        root.refresh_from_app_state(&state);
+        assert!(root.modal.is_none(), "locking the owner cancels the draft");
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked =
+            false;
+        let project = directory.join("验收.mdp");
+        state.save_project_file_as(project.clone()).expect("durable save");
+        drop(root);
+        drop(state);
+        let mut reopened = AppState::new();
+        reopened.open_project_file(project).expect("reopen actual container");
+        assert_eq!(resource(&reopened), bound);
+        let clip = reopened
+            .active_sequence()
+            .expect("reopened sequence")
+            .find_clip(clip_id)
+            .expect("persisted clip");
+        let graph = mondrian_effects::compile_clip_effect_graph(
+            &clip.effects,
+            &[],
+            TimelineTime::ZERO,
+            WorkingColorSpace::LinearRec709,
+        )
+        .expect("compile persisted LUT");
+        let output = mondrian_effects::apply_compiled_effect_graph_rgba_f32(
+            &[[1.0, 0.0, 0.0, 0.375]],
+            1,
+            1,
+            &graph,
+            0,
+        )
+        .expect("execute compiled LUT");
+        assert_eq!(
+            output,
+            vec![[0.0, 0.0, 1.0, 0.375]],
+            "real cube must swap red and blue without changing alpha"
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(&directory).expect("remove test-owned directory");
     }
 
     #[test]

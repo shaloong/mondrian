@@ -410,6 +410,112 @@ impl ParameterEnumOption {
     }
 }
 
+/// Binding families an executable resource provider accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParameterResourceKind {
+    /// A recoverable path on the current machine.
+    ExternalFile,
+    /// A strong reference to the project asset library.
+    ProjectAsset,
+    /// A provider-resolved absolute resource URI.
+    Uri,
+}
+
+/// Native browsing shape for an external resource path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourcePathKind {
+    /// Select one file.
+    File,
+    /// Select one directory.
+    Directory,
+    /// The provider accepts either shape.
+    FileOrDirectory,
+}
+
+/// Definition-owned resource admission shared by authoring and UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParameterResourceContract {
+    /// Unique admitted nonempty binding families. Unbound is always allowed.
+    pub allowed_kinds: Vec<ParameterResourceKind>,
+    /// Required exactly when external paths are admitted.
+    pub path_kind: Option<ResourcePathKind>,
+    /// Lowercase file suffixes without dots; empty admits any extension.
+    /// Restrictions require File path_kind and never test filesystem availability.
+    pub file_extensions: Vec<String>,
+}
+impl ParameterResourceContract {
+    /// Admit all reference families for a general-purpose provider.
+    pub fn all_bindings() -> Self {
+        Self {
+            allowed_kinds: vec![
+                ParameterResourceKind::ExternalFile,
+                ParameterResourceKind::ProjectAsset,
+                ParameterResourceKind::Uri,
+            ],
+            path_kind: Some(ResourcePathKind::FileOrDirectory),
+            file_extensions: Vec::new(),
+        }
+    }
+    /// Admit only external files with the declared suffixes.
+    pub fn external_file(file_extensions: Vec<String>) -> Self {
+        Self {
+            allowed_kinds: vec![ParameterResourceKind::ExternalFile],
+            path_kind: Some(ResourcePathKind::File),
+            file_extensions,
+        }
+    }
+    /// Validate a complete provider declaration independently from host availability.
+    pub fn validate(&self) -> std::result::Result<(), ParameterSchemaError> {
+        if self.allowed_kinds.is_empty()
+            || self
+                .allowed_kinds
+                .iter()
+                .enumerate()
+                .any(|(index, kind)| self.allowed_kinds[..index].contains(kind))
+            || self.path_kind.is_some()
+                != self.allowed_kinds.contains(&ParameterResourceKind::ExternalFile)
+            || (!self.file_extensions.is_empty() && self.path_kind != Some(ResourcePathKind::File))
+            || self.file_extensions.iter().enumerate().any(|(index, extension)| {
+                extension.is_empty()
+                    || !extension
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+                    || self.file_extensions[..index].contains(extension)
+            })
+        {
+            return Err(ParameterSchemaError::InvalidResourceContract);
+        }
+        Ok(())
+    }
+    /// Check author intent without resolving the file, asset or URI.
+    pub fn admits(&self, reference: &ParameterResourceReference) -> bool {
+        match reference {
+            ParameterResourceReference::Unbound => true,
+            ParameterResourceReference::ExternalFile { path } => {
+                self.allowed_kinds.contains(&ParameterResourceKind::ExternalFile)
+                    && !path.as_os_str().is_empty()
+                    && !path.as_os_str().as_encoded_bytes().contains(&0)
+                    && (self.file_extensions.is_empty()
+                        || path.extension().and_then(|extension| extension.to_str()).is_some_and(
+                            |extension| {
+                                self.file_extensions
+                                    .iter()
+                                    .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+                            },
+                        ))
+            }
+            ParameterResourceReference::ProjectAsset { .. } => {
+                self.allowed_kinds.contains(&ParameterResourceKind::ProjectAsset)
+            }
+            ParameterResourceReference::Uri { uri } => {
+                self.allowed_kinds.contains(&ParameterResourceKind::Uri) && !uri.is_empty()
+            }
+        }
+    }
+}
+
 /// Recoverable author intent for parameters that select external resources.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -468,6 +574,8 @@ pub struct ParameterSchema {
     pub numeric: Option<ParameterNumericContract>,
     /// Required for text parameters; absent for every other value type.
     pub text_mode: Option<ParameterTextMode>,
+    /// Required exactly for Resource parameters; governs author and picker admission.
+    pub resource: Option<ParameterResourceContract>,
     /// Ordered interpolation intents; the first is the default for new keys.
     pub allowed_interpolations: Vec<ParameterInterpolation>,
     /// Stable choices for `PropertyValue::Enum`; empty for other value types.
@@ -512,6 +620,8 @@ impl ParameterSchema {
             text_mode: (value_type == PropertyValueType::Text)
                 .then_some(ParameterTextMode::SingleLine),
             allowed_interpolations,
+            resource: (value_type == PropertyValueType::Resource)
+                .then(ParameterResourceContract::all_bindings),
             enum_options: Vec::new(),
             cache_impact: ParameterCacheImpact::Value,
         }
@@ -526,6 +636,12 @@ impl ParameterSchema {
     /// Declare the editor shape for a text parameter.
     pub fn with_text_mode(mut self, mode: ParameterTextMode) -> Self {
         self.text_mode = Some(mode);
+        self
+    }
+
+    /// Declare the reference and native browsing shapes accepted by this provider.
+    pub fn with_resource_contract(mut self, resource: ParameterResourceContract) -> Self {
+        self.resource = Some(resource);
         self
     }
 
@@ -580,6 +696,16 @@ impl ParameterSchema {
         }
         if (self.value_type == PropertyValueType::Text) != self.text_mode.is_some() {
             return Err(ParameterSchemaError::TextModeTypeMismatch);
+        }
+        if (self.value_type == PropertyValueType::Resource) != self.resource.is_some() {
+            return Err(ParameterSchemaError::ResourceContractTypeMismatch);
+        }
+        if let Some(resource) = &self.resource {
+            resource.validate()?;
+            if !matches!(&self.default_value, PropertyValue::Resource(reference) if resource.admits(reference))
+            {
+                return Err(ParameterSchemaError::InvalidResourceDefault);
+            }
         }
         if self.is_animatable && !self.value_type.supports_animation() {
             return Err(ParameterSchemaError::UnsupportedAnimationType);
@@ -809,6 +935,15 @@ pub enum ParameterSchemaError {
     /// Text definitions require a text mode and other definitions must not carry one.
     #[error("text editor mode must be present exactly for text parameters")]
     TextModeTypeMismatch,
+    /// Resource contracts belong exactly to Resource definitions.
+    #[error("resource contract must be present exactly for resource parameters")]
+    ResourceContractTypeMismatch,
+    /// Binding families and native path shape must form a valid provider declaration.
+    #[error("invalid resource binding or path contract")]
+    InvalidResourceContract,
+    /// The provider must accept its default reference.
+    #[error("resource default is not admitted by the provider")]
+    InvalidResourceDefault,
     #[error("numeric constraints require a numeric property type")]
     NumericContractTypeMismatch,
     #[error("descriptor value type does not match its default value")]
@@ -1323,6 +1458,12 @@ impl PropertyDescriptor {
     /// Declare the definition-owned editor shape for a text parameter.
     pub fn with_text_mode(mut self, mode: ParameterTextMode) -> Self {
         self.schema = self.schema.with_text_mode(mode);
+        self
+    }
+
+    /// Declare resource admission from the owning executable definition.
+    pub fn with_resource_contract(mut self, resource: ParameterResourceContract) -> Self {
+        self.schema = self.schema.with_resource_contract(resource);
         self
     }
 
@@ -2326,6 +2467,19 @@ impl AnimatedProperty {
             &self.descriptor.schema.default_value,
             &value,
         )?;
+        if let PropertyValue::Resource(reference) = &value
+            && self
+                .descriptor
+                .schema
+                .resource
+                .as_ref()
+                .is_none_or(|contract| !contract.admits(reference))
+        {
+            return Err(parameter_value_error(
+                &self.descriptor.path,
+                "resource reference is not admitted by the provider",
+            ));
+        }
         if let PropertyValue::Curve(curve) = &value {
             curve.validate().map_err(|error| {
                 parameter_value_error(&self.descriptor.path, &error.to_string())
@@ -3651,6 +3805,25 @@ impl crate::AuthoringFootprint for AnimatablePropertyUiMetadata {
     }
 }
 
+impl crate::AuthoringFootprint for ParameterResourceContract {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { allowed_kinds, path_kind: _, file_extensions } = self;
+        collector.collect(allowed_kinds)?;
+        collector.collect(file_extensions)
+    }
+}
+impl crate::AuthoringFootprint for ParameterResourceKind {
+    fn collect_authoring_footprint(
+        &self,
+        _: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        Ok(())
+    }
+}
+
 impl crate::AuthoringFootprint for ParameterSchema {
     fn collect_authoring_footprint(
         &self,
@@ -3666,6 +3839,7 @@ impl crate::AuthoringFootprint for ParameterSchema {
             unit: _,
             numeric: _,
             text_mode: _,
+            resource,
             allowed_interpolations,
             enum_options,
             cache_impact: _,
@@ -3674,7 +3848,8 @@ impl crate::AuthoringFootprint for ParameterSchema {
         collector.collect(message_id)?;
         collector.collect(default_value)?;
         collector.collect(allowed_interpolations)?;
-        collector.collect(enum_options)
+        collector.collect(enum_options)?;
+        collector.collect(resource)
     }
 }
 
@@ -4595,6 +4770,94 @@ mod tests {
         assert_eq!(
             numeric.validate(),
             Err(ParameterSchemaError::TextModeTypeMismatch)
+        );
+    }
+
+    #[test]
+    fn resource_contract_rejects_unsupported_bindings_before_author_mutation() {
+        let contract = ParameterResourceContract::external_file(vec!["cube".to_owned()]);
+        contract.validate().expect("file contract");
+        let descriptor = PropertyDescriptor::new(
+            "lut",
+            "LUT",
+            PropertyValue::Resource(ParameterResourceReference::Unbound),
+        )
+        .with_resource_contract(contract.clone());
+        descriptor.validate().expect("resource schema");
+        let mut property = AnimatedProperty::from_descriptor(descriptor);
+        let accepted = PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+            path: PathBuf::from("missing Unicode 文件.CUBE"),
+        });
+        property.set_static_value(accepted.clone()).expect("offline author intent");
+        let before = property.clone();
+        for reference in [
+            ParameterResourceReference::ProjectAsset { asset_id: AssetId::new() },
+            ParameterResourceReference::Uri { uri: "https://example.test/lut.cube".to_owned() },
+            ParameterResourceReference::ExternalFile { path: PathBuf::from("wrong.txt") },
+            ParameterResourceReference::ExternalFile { path: PathBuf::new() },
+            ParameterResourceReference::ExternalFile { path: PathBuf::from("invalid\0.cube") },
+        ] {
+            assert!(property.set_static_value(PropertyValue::Resource(reference)).is_err());
+            assert_eq!(
+                property, before,
+                "rejection must retain author value and identities"
+            );
+        }
+        let encoded = serde_json::to_string(&property).expect("encode");
+        let decoded: AnimatedProperty = serde_json::from_str(&encoded).expect("decode");
+        decoded.validate().expect("persisted contract");
+        assert_eq!(decoded, property);
+        let mut corrupted = decoded.clone();
+        corrupted.static_value = PropertyValue::Resource(ParameterResourceReference::Uri {
+            uri: "file:///invalid.cube".to_owned(),
+        });
+        let persisted = serde_json::to_string(&corrupted).expect("corrupt author fixture");
+        let decoded: AnimatedProperty =
+            serde_json::from_str(&persisted).expect("decode corrupt fixture");
+        assert!(
+            decoded.validate().is_err(),
+            "persisted unsupported bindings must fail validation"
+        );
+        let mut missing = property.descriptor.schema.clone();
+        missing.resource = None;
+        assert_eq!(
+            missing.validate(),
+            Err(ParameterSchemaError::ResourceContractTypeMismatch)
+        );
+        let invalid_default = ParameterSchema::v1(
+            ParameterId::new_static("test.resource_default"),
+            PropertyValue::Resource(ParameterResourceReference::Uri {
+                uri: "https://example.test/file.cube".to_owned(),
+            }),
+        )
+        .with_resource_contract(contract.clone());
+        assert_eq!(
+            invalid_default.validate(),
+            Err(ParameterSchemaError::InvalidResourceDefault)
+        );
+        property
+            .set_static_value(PropertyValue::Resource(ParameterResourceReference::Unbound))
+            .expect("clear");
+        let mut invalid = contract;
+        invalid.allowed_kinds.push(ParameterResourceKind::ExternalFile);
+        assert_eq!(
+            invalid.validate(),
+            Err(ParameterSchemaError::InvalidResourceContract)
+        );
+        invalid.allowed_kinds.pop();
+        invalid.path_kind = Some(ResourcePathKind::Directory);
+        assert_eq!(
+            invalid.validate(),
+            Err(ParameterSchemaError::InvalidResourceContract)
+        );
+        let invalid_type = ParameterSchema::v1(
+            ParameterId::new_static("test.resource_contract"),
+            PropertyValue::Text(String::new()),
+        )
+        .with_resource_contract(ParameterResourceContract::all_bindings());
+        assert_eq!(
+            invalid_type.validate(),
+            Err(ParameterSchemaError::ResourceContractTypeMismatch)
         );
     }
 

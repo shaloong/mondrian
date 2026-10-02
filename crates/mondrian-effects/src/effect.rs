@@ -2511,7 +2511,11 @@ fn define_builtin_property(
             .with_numeric_contract(builtin_parameter_unit(effect_type, parameter), numeric);
     }
     if matches!(effect_type, EffectType::Lut3D) && parameter == "path" {
-        descriptor = descriptor.with_cache_impact(ParameterCacheImpact::Resource);
+        descriptor = descriptor
+            .with_cache_impact(ParameterCacheImpact::Resource)
+            .with_resource_contract(mondrian_core::ParameterResourceContract::external_file(
+                vec!["cube".to_owned()],
+            ));
     }
     if matches!(effect_type, EffectType::Qualifier) && parameter == "matte_preview" {
         descriptor = descriptor.with_cache_impact(ParameterCacheImpact::Topology);

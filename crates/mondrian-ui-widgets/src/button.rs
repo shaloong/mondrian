@@ -131,6 +131,11 @@ impl Button {
         self.enabled
     }
 
+    /// Replace the caption while retaining identity, focus and interaction state.
+    pub fn set_label(&mut self, label: impl Into<String>) {
+        self.label = label.into();
+    }
+
     /// Use minimal style (transparent bg, hover highlight, active state).
     pub fn minimal(mut self) -> Self {
         self.style = ButtonStyle::Minimal;

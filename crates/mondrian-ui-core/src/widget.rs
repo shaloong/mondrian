@@ -625,6 +625,15 @@ pub trait Widget {
         false
     }
 
+    /// Active modal subtree that owns keyboard input and focus traversal.
+    ///
+    /// The root declares this directly. The scope must name a current descendant;
+    /// `None` permits ordinary root traversal. Background shortcuts are suspended
+    /// while a scope is active, including when it has no focusable controls.
+    fn keyboard_focus_scope(&self) -> Option<WidgetId> {
+        None
+    }
+
     /// Whether the currently focused state of this widget accepts committed
     /// text input.
     ///

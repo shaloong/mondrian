@@ -4333,6 +4333,15 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     }
 
                     WindowEvent::MouseInput { state, button, .. } => {
+                        if state == ElementState::Pressed
+                            && button == winit::event::MouseButton::Left
+                            && let Some(direction) = window_resize_direction(&session)
+                        {
+                            match session.window.drag_resize_window(direction) {
+                                Ok(()) => return,
+                                Err(error) => tracing::debug!(%error, "native window resize unavailable"),
+                            }
+                        }
                         let sync_workspace_layout = state == ElementState::Released
                             && button == winit::event::MouseButton::Left;
                         let evt = match state {
@@ -8732,6 +8741,9 @@ fn update_window_cursor_icon(host: &AppUiHost, session: &mut AppUiWindowSession)
 }
 
 fn window_cursor_icon(host: &AppUiHost, session: &AppUiWindowSession) -> winit::window::CursorIcon {
+    if let Some(direction) = window_resize_direction(session) {
+        return direction.into();
+    }
     winit_cursor_icon_for_ui_state(
         session.ui_runtime.is_eyedropper_active(),
         session.ui_runtime.widget_cursor_request(),
@@ -8741,6 +8753,72 @@ fn window_cursor_icon(host: &AppUiHost, session: &AppUiWindowSession) -> winit::
             session.router.focus_manager().focused_widget(),
         ),
     )
+}
+
+fn window_resize_direction(session: &AppUiWindowSession) -> Option<winit::window::ResizeDirection> {
+    // AppKit provides its own resize handling; winit's explicit drag API is
+    // unsupported there. Windows and Linux need client-side edge hit testing.
+    if cfg!(target_os = "macos")
+        || session.router.captured().is_some()
+        || session.ui_runtime.is_eyedropper_active()
+    {
+        return None;
+    }
+    let size = session.window.inner_size();
+    let scale = session.window.scale_factor() as f32;
+    resize_direction_at_point(
+        session.role,
+        session.window.is_maximized() || session.window.fullscreen().is_some(),
+        Point::new(session.last_cursor.x / scale, session.last_cursor.y / scale),
+        size.width as f32 / scale,
+        size.height as f32 / scale,
+    )
+}
+
+fn resize_direction_at_point(
+    role: AppUiWindowRole,
+    expanded: bool,
+    point: Point,
+    width: f32,
+    height: f32,
+) -> Option<winit::window::ResizeDirection> {
+    use winit::window::ResizeDirection::*;
+    const EDGE: f32 = 6.0;
+    const CORNER: f32 = 16.0;
+    if role != AppUiWindowRole::Workspace
+        || expanded
+        || !width.is_finite()
+        || !height.is_finite()
+        || width <= 2.0 * CORNER
+        || height <= 2.0 * CORNER
+        || !point.x.is_finite()
+        || !point.y.is_finite()
+        || point.x < 0.0
+        || point.y < 0.0
+        || point.x >= width
+        || point.y >= height
+    {
+        return None;
+    }
+    let left = point.x < EDGE;
+    let right = point.x >= width - EDGE;
+    let top = point.y < EDGE;
+    let bottom = point.y >= height - EDGE;
+    match (left || right, top || bottom) {
+        (false, false) => None,
+        _ if (left && point.y < CORNER) || (top && point.x < CORNER) => Some(NorthWest),
+        _ if (right && point.y < CORNER) || (top && point.x >= width - CORNER) => Some(NorthEast),
+        _ if (left && point.y >= height - CORNER) || (bottom && point.x < CORNER) => {
+            Some(SouthWest)
+        }
+        _ if (right && point.y >= height - CORNER) || (bottom && point.x >= width - CORNER) => {
+            Some(SouthEast)
+        }
+        _ if left => Some(West),
+        _ if right => Some(East),
+        _ if top => Some(North),
+        _ => Some(South),
+    }
 }
 
 fn splitter_direction_at_cursor(host: &AppUiHost, cursor: Point) -> Option<SplitDirection> {
@@ -8878,6 +8956,49 @@ mod platform_window_chrome {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn workspace_resize_edges_and_corners_respect_window_state() {
+        use winit::window::ResizeDirection::*;
+        let samples = [
+            (Point::new(1.0, 1.0), NorthWest),
+            (Point::new(799.0, 1.0), NorthEast),
+            (Point::new(1.0, 599.0), SouthWest),
+            (Point::new(799.0, 599.0), SouthEast),
+            (Point::new(1.0, 300.0), West),
+            (Point::new(799.0, 300.0), East),
+            (Point::new(400.0, 1.0), North),
+            (Point::new(400.0, 599.0), South),
+            (Point::new(12.0, 1.0), NorthWest),
+        ];
+        for (point, expected) in samples {
+            assert_eq!(
+                resize_direction_at_point(AppUiWindowRole::Workspace, false, point, 800.0, 600.0),
+                Some(expected)
+            );
+            assert_eq!(
+                resize_direction_at_point(AppUiWindowRole::Startup, false, point, 800.0, 600.0),
+                None
+            );
+            assert_eq!(
+                resize_direction_at_point(AppUiWindowRole::Workspace, true, point, 800.0, 600.0),
+                None
+            );
+        }
+        for point in [
+            Point::new(6.0, 300.0),
+            Point::new(12.0, 12.0),
+            Point::new(400.0, 300.0),
+            Point::new(-1.0, 0.0),
+            Point::new(800.0, 0.0),
+            Point::new(f32::NAN, 0.0),
+        ] {
+            assert_eq!(
+                resize_direction_at_point(AppUiWindowRole::Workspace, false, point, 800.0, 600.0),
+                None
+            );
+        }
+    }
+
     #[test]
     fn pre_active_construction_error_releases_scope_before_building_evidence() {
         struct DropProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);

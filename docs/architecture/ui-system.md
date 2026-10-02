@@ -2848,3 +2848,68 @@ line breaks. Generic plugin fields keep confirm/cancel draft semantics and one
 transaction on commit. Basic Title remains explicitly multiline with its existing
 live editing action policy. Event regression tests cover Unicode, empty multiline,
 line-break-containing single-line values, cancel, no-op, Undo and row geometry.
+
+## Typed resource editing
+
+Inspector Resource values open a shell-local draft modal. URI, project asset,
+external file/folder and Unbound retain their distinct author representations.
+Resource schema admission shapes available modes and native file filters. The
+full asset-library chooser loads names on open, independent from browser folder
+navigation, and supports searching. File/URI drafts survive kind changes; typing
+updates local form state without author transactions or focused-input replacement.
+Only confirmation lowers a stable target through the same Inspector parameter
+write action. Cancel and unchanged confirmation emit no author action. Native
+picker cancellation preserves the draft and does not import media. Draft IDs,
+author session/Sequence and current owner/schema/value checks reject stale
+updates and invalid owners. Qualification is tracked in the local issue tracker.
+
+## Overlay ownership and input targets
+
+UI Events keeps the winning overlay scope separate from its ordinary content
+hit target. Normal pointer routing descends into that scope to establish focus
+and capture on editable leaves; it cannot fall through to background siblings.
+Outside-close and clipped content retain the scope target. Nested popup overlays
+still take precedence. Captured-pointer preemption compares overlay scope ancestry,
+so moving a text-selection drag over another normal control in the same modal
+does not steal capture. Actual EventRouter resource-dialog regression covers
+pointer focus/capture and IME Enter/Escape before ordinary Enter confirmation.
+
+The Widget root declares its active keyboard focus scope directly. TreeWalker
+collects Tab/Shift+Tab order only within that subtree. EventRouter suspends the
+background focus, establishes modal focus before routing input, restricts keyboard
+bubbling to the scope, and blocks global shortcut fallback while the scope is
+active. Closing restores the original focus only if the control still exists and
+is focusable. Replacing a modal retains the original background restoration target.
+Scopes without focusable controls still consume keyboard input without targeting
+the background. This contract is independent of pointer overlay hit testing.
+
+Focused controls receive Tab first so an active IME or an editor's own Tab
+command can consume it before traversal. Resource locale updates change captions
+and hints in place; TextInput and Button caption setters retain identity and
+interaction state. Resource search caches normalized library captions on open
+and localizes empty results without changing the selected author reference.
+
+The actual resource-shell LUT acceptance traverses native-picker adapter output,
+one author transaction, Undo/Redo, durable `.mdp` save/reopen and the compiled
+Float32 graph executor. A Unicode cube path swaps red/blue while preserving alpha.
+Cancellation, unchanged/stale confirmation, picker cancellation/failure/multiple
+selection, declared file filters and locked-owner invalidation have explicit
+regressions. This does not qualify physical native dialogs or third-party
+plugin resource providers on another platform.
+
+Resource confirmation checks unchanged author intent before applying new-input
+URI or provider-availability checks, without allocating a replacement reference.
+Unavailable original ProjectAsset references remain visibly bound and unchanged
+confirmation closes without a transaction. File/folder captions follow the
+declared resource path kind. New changed references still require full admission.
+
+## Workspace window resizing
+
+The undecorated workspace uses client-side edge and corner hit testing on
+Windows/Linux to start the native winit resize operation on left-button press.
+Hit geometry is evaluated in logical pixels so display scaling preserves the
+grab area. Matching native cursor hints take priority at the border. Startup,
+maximized/fullscreen windows, active widget capture and the eyedropper do not
+enter this path. AppKit retains its native resize handling because winit does
+not support explicit drag-resize on macOS. Workspace minimum size remains a
+native window constraint; startup retains matching minimum and maximum sizes.

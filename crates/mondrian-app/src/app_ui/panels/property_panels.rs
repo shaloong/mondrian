@@ -2662,21 +2662,6 @@ pub(super) fn effect_property_value_widget(
     )
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum InspectorPropertyTarget {
-    Clip {
-        parameter: AnimationParameterAddress,
-    },
-    Effect {
-        effect_id: EffectId,
-        parameter: AnimationParameterAddress,
-    },
-    Mask {
-        mask_id: MaskId,
-        parameter: AnimationParameterAddress,
-    },
-}
-
 pub(super) fn inspector_property_value_widget(
     localizer: &Localizer,
     property: &InspectorEffectPropertyModel,
@@ -2856,29 +2841,22 @@ pub(super) fn inspector_property_value_widget(
             )
         }
         PropertyValue::Resource(reference) => {
-            let text = match reference {
-                ParameterResourceReference::Unbound => String::new(),
+            let label = match reference {
+                ParameterResourceReference::Unbound => localizer.text("resource-unbound"),
                 ParameterResourceReference::ExternalFile { path } => path.display().to_string(),
-                ParameterResourceReference::ProjectAsset { asset_id } => asset_id.to_string(),
+                ParameterResourceReference::ProjectAsset { .. } => {
+                    localizer.text("resource-project-asset")
+                }
                 ParameterResourceReference::Uri { uri } => uri.clone(),
             };
-            let selected_clip = selection;
-            Box::new(
-                TextInput::new(&property.label).with_text(text).enabled(can_edit).on_commit(
-                    move |text| {
-                        let value = if text.trim().is_empty() {
-                            ParameterResourceReference::Unbound
-                        } else {
-                            ParameterResourceReference::ExternalFile { path: PathBuf::from(text) }
-                        };
-                        inspector_property_action(
-                            selected_clip,
-                            target.clone(),
-                            PropertyValue::Resource(value),
-                        )
-                    },
-                ),
-            )
+            let action = selection.map(|selection| {
+                crate::app_ui::resource_dialog::ResourceEditorAction::Open {
+                    clip_id: selection.clip_id,
+                    target,
+                }
+                .action()
+            });
+            Box::new(Button::new(label).enabled(can_edit && action.is_some()).on_click(action))
         }
         PropertyValue::Curve(curve) => {
             let points =
@@ -3259,26 +3237,5 @@ fn inspector_property_write_action(
     write: impl FnOnce(AnimationParameterAddress) -> ParameterValueWrite,
 ) -> Option<Action> {
     let selection = selection?;
-    Some(match target {
-        InspectorPropertyTarget::Clip { parameter } => {
-            clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
-                clip_id: selection.clip_id,
-                writes: vec![write(parameter)],
-            })
-        }
-        InspectorPropertyTarget::Effect { effect_id, parameter } => {
-            visual_effect_set_parameter_value_action(VisualEffectSetParameterValuePayload {
-                clip_id: selection.clip_id,
-                effect_id,
-                write: write(parameter),
-            })
-        }
-        InspectorPropertyTarget::Mask { mask_id, parameter } => {
-            visual_mask_set_parameter_value_action(VisualMaskSetParameterValuePayload {
-                clip_id: selection.clip_id,
-                mask_id,
-                write: write(parameter),
-            })
-        }
-    })
+    Some(target.write_action(selection.clip_id, write))
 }

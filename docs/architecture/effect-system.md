@@ -1241,3 +1241,10 @@ addresses. Curves, Qualifier and LUT processing-space options retain canonical
 keys for graph/property evaluation; localized UI captions do not replace values.
 LUT spaces declare their standard technical names rather than displaying internal
 snake-case keys when the translation catalog cannot resolve an address.
+
+## LUT resource declaration
+
+The built-in LUT path parameter declares external File bindings with the cube
+suffix. ProjectAsset and Uri are rejected before author mutation, matching the
+actual prepared cube-LUT provider. Inspector and native browsing read this same
+schema contract; extension checks preserve spelling and admit uppercase suffixes.

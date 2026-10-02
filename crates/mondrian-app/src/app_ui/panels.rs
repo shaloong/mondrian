@@ -131,28 +131,26 @@ use crate::app::ui_actions::{
     viewer_set_preview_resolution_scale_action, viewer_set_zoom_scale_action,
     visual_effect_add_to_clip_action, visual_effect_edit_numeric_curve_action,
     visual_effect_remove_action, visual_effect_reorder_action, visual_effect_select_action,
-    visual_effect_set_enabled_action, visual_effect_set_parameter_value_action,
-    visual_effect_toggle_current_key_action, visual_mask_add_to_clip_action,
-    visual_mask_cancel_tracking_action, visual_mask_recompute_tracking_action,
-    visual_mask_remove_action, visual_mask_reorder_action, visual_mask_select_action,
-    visual_mask_set_enabled_action, visual_mask_set_locked_action,
-    visual_mask_set_parameter_value_action, visual_mask_set_shape_animation_enabled_action,
-    visual_mask_start_tracking_action, visual_mask_write_shape_action,
-    AppShellInputColorPipelineDiagnostics, AppShellInterpretAssetDialogPayload,
-    AppShellRelinkAssetDialogPayload, AppShellRelocatePanelPayload,
-    AppShellRevealInFileManagerPayload, AppShellVideoSignalDiagnostics, AssetsCreateAssetPayload,
-    AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
-    AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
-    AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
-    AssetsPrepareDragPayload, AssetsRebindAudioComponentPayload,
-    AssetsRefreshAudioComponentsPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
-    AssetsSetProxyModePayload, ClipCurveEditPayload, ClipEditNumericCurvePayload,
-    ClipNormalizedCurvePointPayload, ClipSetEnabledPayload, ClipSetSolidColorPayload,
-    ClipWriteParameterValuesPayload, DockDropAreaPayload, ExportDraftEdit,
-    ExportOutputDialogPayload, ImportMediaDialogPayload, ParameterValueWrite,
-    SequenceTargetPayload, TimelineClipSelectionModePayload, TimelineDropAssetPayload,
-    TimelineDropFilePayload, TimelineExportRequest, TimelineInOutPointKind,
-    TimelineMoveClipPayload, TimelineSeekSource as AppTimelineSeekSource,
+    visual_effect_set_enabled_action, visual_effect_toggle_current_key_action,
+    visual_mask_add_to_clip_action, visual_mask_cancel_tracking_action,
+    visual_mask_recompute_tracking_action, visual_mask_remove_action, visual_mask_reorder_action,
+    visual_mask_select_action, visual_mask_set_enabled_action, visual_mask_set_locked_action,
+    visual_mask_set_shape_animation_enabled_action, visual_mask_start_tracking_action,
+    visual_mask_write_shape_action, AppShellInputColorPipelineDiagnostics,
+    AppShellInterpretAssetDialogPayload, AppShellRelinkAssetDialogPayload,
+    AppShellRelocatePanelPayload, AppShellRevealInFileManagerPayload,
+    AppShellVideoSignalDiagnostics, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
+    AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
+    AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
+    AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsPrepareDragPayload,
+    AssetsRebindAudioComponentPayload, AssetsRefreshAudioComponentsPayload,
+    AssetsRenameAssetPayload, AssetsRenameFolderPayload, AssetsSetProxyModePayload,
+    ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
+    ClipSetEnabledPayload, ClipSetSolidColorPayload, ClipWriteParameterValuesPayload,
+    DockDropAreaPayload, ExportDraftEdit, ExportOutputDialogPayload, ImportMediaDialogPayload,
+    ParameterValueWrite, SequenceTargetPayload, TimelineClipSelectionModePayload,
+    TimelineDropAssetPayload, TimelineDropFilePayload, TimelineExportRequest,
+    TimelineInOutPointKind, TimelineMoveClipPayload, TimelineSeekSource as AppTimelineSeekSource,
     TimelineSelectClipPayload, TimelineSetInOutPointPayload, TimelineTrimClipsPayload,
     TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload, TrackAuthorControl,
     TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
@@ -161,10 +159,14 @@ use crate::app::ui_actions::{
     ViewerSetPreviewResolutionScalePayload, ViewerSetZoomScalePayload,
     VisualEffectAddToClipPayload, VisualEffectEditNumericCurvePayload,
     VisualEffectParameterTargetPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
-    VisualEffectSetParameterValuePayload, VisualEffectTargetPayload, VisualMaskAddToClipPayload,
-    VisualMaskReorderPayload, VisualMaskSetEnabledPayload, VisualMaskSetLockedPayload,
-    VisualMaskSetParameterValuePayload, VisualMaskSetShapeAnimationEnabledPayload,
-    VisualMaskStartTrackingPayload, VisualMaskTargetPayload, VisualMaskWriteShapePayload,
+    VisualEffectTargetPayload, VisualMaskAddToClipPayload, VisualMaskReorderPayload,
+    VisualMaskSetEnabledPayload, VisualMaskSetLockedPayload,
+    VisualMaskSetShapeAnimationEnabledPayload, VisualMaskStartTrackingPayload,
+    VisualMaskTargetPayload, VisualMaskWriteShapePayload,
+};
+#[cfg(test)]
+use crate::app::ui_actions::{
+    visual_effect_set_parameter_value_action, VisualEffectSetParameterValuePayload,
 };
 use crate::app::waveform_service::AudioWaveformSource;
 use crate::app::{
@@ -218,6 +220,7 @@ use crate::app_ui::localization::{
     AppUiLocale, Localizer,
 };
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
+use crate::app_ui::resource_dialog::InspectorPropertyTarget;
 use crate::app_ui::shortcuts::shortcut_label_for_action;
 use crate::app_ui::workspace_layout::AppUiWorkspaceLayout;
 

@@ -129,7 +129,10 @@ fn find_parent_id(
 
 fn collect_focusable(tree: &dyn WidgetTree) -> Vec<WidgetId> {
     let mut order = Vec::new();
-    let root = tree.root_id();
+    let root = tree
+        .get(tree.root_id())
+        .and_then(|root| root.keyboard_focus_scope())
+        .unwrap_or_else(|| tree.root_id());
     collect_focusable_recursive(tree, root, &mut order);
     order
 }

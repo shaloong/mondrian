@@ -377,3 +377,19 @@ constructors choose SingleLine and Basic Title declares MultiLine explicitly.
 Serialized Text schemas without a mode are rejected rather than repaired with a
 compatibility fallback.
 Authoring footprint accounting treats this fixed-size enum as inline metadata.
+
+## Resource parameter admission
+
+Resource schemas carry a definition-owned ParameterResourceContract: unique
+allowed binding families, external file/directory browsing shape and optional
+file suffixes. Unbound is always admitted for clear/recovery. Core validates
+schemas, defaults, persisted values and author writes against the contract
+without consulting host filesystem availability. Offline recoverable paths
+remain author intent; executable providers retain physical resolution ownership.
+### Resource admission and modal keyboard ownership
+
+Resource contracts reject missing or mismatched declarations, inadmissible
+defaults and persisted values, including NUL-containing external paths, before
+author mutation. Offline path existence is evaluated at execution rather than
+used to erase recoverable author intent. UI Core roots declare modal keyboard
+scope; UI Events owns scope focus, traversal, restoration and shortcut isolation.

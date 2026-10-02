@@ -39,6 +39,7 @@ mod product_logging;
 pub mod project_settings_dialog;
 pub mod recovery_dialog;
 pub mod rendering;
+pub(crate) mod resource_dialog;
 pub mod runtime;
 pub(crate) mod scopes;
 pub mod sequence_settings_dialog;

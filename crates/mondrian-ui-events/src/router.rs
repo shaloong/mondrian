@@ -63,6 +63,8 @@ pub struct EventRouter {
     root_widget_id: WidgetId,
     hovered: Option<WidgetId>,
     focused: Option<WidgetId>,
+    active_focus_scope: Option<WidgetId>,
+    suspended_focus: Option<WidgetId>,
     capture: PointerCaptureState,
     active_drag: Option<ActiveDrag>,
 
@@ -99,6 +101,8 @@ impl EventRouter {
             root_widget_id,
             hovered: None,
             focused: None,
+            active_focus_scope: None,
+            suspended_focus: None,
             capture: PointerCaptureState::default(),
             active_drag: None,
             focus_mgr: FocusManagerImpl::new(),
@@ -118,6 +122,8 @@ impl EventRouter {
             root_widget_id,
             hovered: None,
             focused: None,
+            active_focus_scope: None,
+            suspended_focus: None,
             capture: PointerCaptureState::default(),
             active_drag: None,
             focus_mgr: FocusManagerImpl::new(),
@@ -145,6 +151,8 @@ impl EventRouter {
             root_widget_id,
             hovered: None,
             focused: None,
+            active_focus_scope: None,
+            suspended_focus: None,
             capture: PointerCaptureState::default(),
             active_drag: None,
             focus_mgr: FocusManagerImpl::new(),
@@ -249,6 +257,7 @@ impl EventRouter {
         dispatch: &dyn Fn(Action),
     ) -> EventResult {
         self.prune_stale_widget_state(tree, dispatch);
+        self.synchronize_focus_scope(tree, dispatch);
         if matches!(&event, UiEvent::FocusLost) {
             return self.route_window_focus_lost(tree, dispatch);
         }
@@ -323,6 +332,14 @@ impl EventRouter {
                     && let Some(reverse) = tab_traversal_reverse(*modifiers)
                 {
                     let current = self.focus_mgr.focused_widget();
+                    // IME composition and editors with an explicit Tab command
+                    // own the key before framework focus traversal.
+                    if let Some(focused) = current
+                        && self.dispatch_direct_event(tree, focused, &event, dispatch)
+                            == EventResult::Handled
+                    {
+                        return EventResult::Handled;
+                    }
                     let traversal_origin = current.unwrap_or_default();
                     let next = if reverse {
                         TreeWalker::focus_prev(tree, traversal_origin)
@@ -331,7 +348,11 @@ impl EventRouter {
                     };
                     if next.is_none() {
                         self.sync_focus_from_manager();
-                        return EventResult::Ignored;
+                        return if self.active_focus_scope.is_some() {
+                            EventResult::Handled
+                        } else {
+                            EventResult::Ignored
+                        };
                     }
                     if next == current {
                         self.sync_focus_from_manager();
@@ -365,7 +386,7 @@ impl EventRouter {
 
                 let target = if is_keyboard {
                     // Keyboard events go to the focused widget, not hit-tested
-                    self.focus_mgr.focused_widget()
+                    self.focus_mgr.focused_widget().or(self.active_focus_scope)
                 } else {
                     self.pointer_target(tree, position)
                 };
@@ -409,6 +430,13 @@ impl EventRouter {
                     }
                     let mut current = Some(target_id);
                     while let Some(id) = current {
+                        if is_keyboard
+                            && self
+                                .active_focus_scope
+                                .is_some_and(|scope| !self.is_ancestor_or_self(tree, scope, id))
+                        {
+                            break;
+                        }
                         if let Some(widget) = tree.get_mut(id) {
                             let mut requests = EventRequests::default();
                             let result = {
@@ -433,6 +461,9 @@ impl EventRouter {
                     }
                 }
 
+                if self.active_focus_scope.is_some() && is_keyboard {
+                    return EventResult::Handled;
+                }
                 if let UiEvent::KeyDown { key, modifiers } = &event {
                     let shortcut_context = ShortcutContext::new(
                         self.focus_mgr.focused_widget(),
@@ -600,10 +631,10 @@ impl EventRouter {
     }
 
     fn pointer_target(&mut self, tree: &dyn WidgetTree, position: Point) -> Option<WidgetId> {
-        let overlay_target = overlay_hit_test_deepest(tree, position);
         let Some(captured) = self.capture.owner() else {
-            return overlay_target.or_else(|| hit_test_deepest(tree, position));
+            return hit_test_deepest(tree, position);
         };
+        let overlay_target = overlay_hit_test_deepest(tree, position);
 
         match overlay_target {
             Some(overlay)
@@ -658,6 +689,39 @@ impl EventRouter {
         }
         normalize_focused_panel(&mut self.focus_mgr, tree);
         self.sync_focus_from_manager();
+    }
+
+    fn synchronize_focus_scope(&mut self, tree: &mut dyn WidgetTree, dispatch: &dyn Fn(Action)) {
+        let scope = tree.get(tree.root_id()).and_then(|root| root.keyboard_focus_scope());
+        if scope != self.active_focus_scope {
+            if self.active_focus_scope.is_none() && scope.is_some() {
+                self.suspended_focus = self.focus_mgr.focused_widget();
+            }
+            self.active_focus_scope = scope;
+            if scope.is_none() {
+                if let Some(previous) = self.suspended_focus.take()
+                    && tree.get(previous).is_some_and(|widget| widget.can_focus())
+                {
+                    self.move_focus_to(tree, previous, FocusSource::Keyboard, dispatch);
+                }
+                return;
+            }
+        }
+        if let Some(scope) = scope {
+            if self
+                .focus_mgr
+                .focused_widget()
+                .is_some_and(|focused| self.is_ancestor_or_self(tree, scope, focused))
+            {
+                return;
+            }
+            if let Some(next) = TreeWalker::focus_next(tree, WidgetId::default()) {
+                self.move_focus_to(tree, next, FocusSource::Keyboard, dispatch);
+            } else if let Some(focused) = self.focus_mgr.focused_widget() {
+                self.blur_focus(tree, focused, dispatch);
+                self.disable_ime_for_cleared_focus();
+            }
+        }
     }
 
     fn move_focus_to(
@@ -1038,6 +1102,7 @@ mod tests {
         bounds: Rect,
         log: Rc<RefCell<Vec<String>>>,
         focusable: Rc<Cell<bool>>,
+        scope: Rc<Cell<Option<WidgetId>>>,
     }
 
     impl RecordingWidget {
@@ -1047,6 +1112,7 @@ mod tests {
                 bounds,
                 log,
                 focusable: Rc::new(Cell::new(true)),
+                scope: Rc::new(Cell::new(None)),
             }
         }
 
@@ -1055,11 +1121,20 @@ mod tests {
             log: Rc<RefCell<Vec<String>>>,
             focusable: Rc<Cell<bool>>,
         ) -> Self {
-            Self { id: WidgetId::new(), bounds, log, focusable }
+            Self {
+                id: WidgetId::new(),
+                bounds,
+                log,
+                focusable,
+                scope: Rc::new(Cell::new(None)),
+            }
         }
     }
 
     impl Widget for RecordingWidget {
+        fn keyboard_focus_scope(&self) -> Option<WidgetId> {
+            self.scope.get()
+        }
         fn id(&self) -> WidgetId {
             self.id
         }
@@ -1280,6 +1355,96 @@ mod tests {
         nodes: HashMap<WidgetId, Box<dyn Widget>>,
         parents: HashMap<WidgetId, WidgetId>,
         children: HashMap<WidgetId, Vec<WidgetId>>,
+    }
+
+    #[test]
+    fn modal_scope_blocks_shortcuts_and_handles_replacement_empty_and_removed_owners() {
+        use mondrian_ui_core::shortcut::ShortcutBinding;
+        for remove_background in [false, true] {
+            let log = Rc::new(RefCell::new(Vec::new()));
+            let bounds = Rect::new(0.0, 0.0, 100.0, 100.0);
+            let root = RecordingWidget::with_focusable_flag(
+                bounds,
+                log.clone(),
+                Rc::new(Cell::new(false)),
+            );
+            let scope = root.scope.clone();
+            let mut tree = TestTree::single(root);
+            let background = RecordingWidget::new(bounds, log.clone());
+            let background_id = background.id();
+            tree.parents.insert(background_id, tree.root);
+            tree.children.insert(tree.root, vec![background_id]);
+            tree.nodes.insert(background_id, Box::new(background));
+            let mut router = EventRouter::new(tree.root);
+            router.focus_manager_mut().set_focused_widget(Some(background_id), None);
+            router
+                .shortcut_manager_mut()
+                .register_global(ShortcutBinding::ctrl(KeyCode::S), Action::SaveProject);
+            let actions = RefCell::new(Vec::new());
+            let dispatch = |action| actions.borrow_mut().push(action);
+            for focusable in [true, false] {
+                let modal = RecordingWidget::with_focusable_flag(
+                    bounds,
+                    log.clone(),
+                    Rc::new(Cell::new(focusable)),
+                );
+                let modal_id = modal.id();
+                tree.parents.insert(modal_id, tree.root);
+                tree.children.get_mut(&tree.root).expect("root children").push(modal_id);
+                tree.nodes.insert(modal_id, Box::new(modal));
+                scope.set(Some(modal_id));
+                assert_eq!(
+                    router.route(
+                        UiEvent::KeyDown { key: KeyCode::S, modifiers: Modifiers::ctrl() },
+                        &mut tree,
+                        &dispatch
+                    ),
+                    EventResult::Handled
+                );
+                assert!(
+                    actions.borrow().is_empty(),
+                    "background Save shortcut must remain suspended"
+                );
+                assert_eq!(
+                    router.focus_manager().focused_widget(),
+                    focusable.then_some(modal_id)
+                );
+                for modifiers in [Modifiers::none(), Modifiers::shift()] {
+                    assert_eq!(
+                        router.route(
+                            UiEvent::KeyDown { key: KeyCode::Tab, modifiers },
+                            &mut tree,
+                            &dispatch
+                        ),
+                        EventResult::Handled
+                    );
+                    assert_eq!(
+                        router.focus_manager().focused_widget(),
+                        focusable.then_some(modal_id)
+                    );
+                }
+                tree.nodes.remove(&modal_id);
+                tree.children
+                    .get_mut(&tree.root)
+                    .expect("children")
+                    .retain(|id| *id != modal_id);
+                tree.parents.remove(&modal_id);
+            }
+            if remove_background {
+                tree.nodes.remove(&background_id);
+                tree.children.get_mut(&tree.root).expect("children").clear();
+            }
+            scope.set(None);
+            router.route(
+                UiEvent::KeyUp { key: KeyCode::Tab, modifiers: Modifiers::none() },
+                &mut tree,
+                &dispatch,
+            );
+            assert_eq!(
+                router.focus_manager().focused_widget(),
+                (!remove_background).then_some(background_id)
+            );
+        }
     }
 
     impl TestTree {

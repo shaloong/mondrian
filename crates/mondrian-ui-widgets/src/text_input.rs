@@ -236,6 +236,11 @@ impl TextInput {
         self.edit.text()
     }
 
+    /// Replace the hint without resetting the draft, selection or IME composition.
+    pub fn set_placeholder(&mut self, placeholder: impl Into<String>) {
+        self.placeholder = placeholder.into();
+    }
+
     /// Whether an IME preedit owns keyboard input before committing text.
     pub fn is_composing(&self) -> bool {
         self.composition.is_active()

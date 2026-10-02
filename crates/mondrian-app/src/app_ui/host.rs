@@ -1485,6 +1485,26 @@ impl AppUiHost {
                 needs_layout = true;
                 continue;
             }
+
+            let action = match self.root.try_handle_resource_action(
+                &action,
+                &self.app_state.borrow(),
+                platform,
+            ) {
+                Ok(crate::app_ui::resource_dialog::ResourceActionOutcome::Unhandled) => action,
+                Ok(crate::app_ui::resource_dialog::ResourceActionOutcome::Handled(Some(
+                    author,
+                ))) => author,
+                Ok(crate::app_ui::resource_dialog::ResourceActionOutcome::Handled(None)) => {
+                    needs_layout = true;
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "resource editor action failed");
+                    needs_layout = true;
+                    continue;
+                }
+            };
             if !self.is_action_enabled(&action) {
                 tracing::debug!(?action, "disabled custom UI action ignored");
                 continue;
