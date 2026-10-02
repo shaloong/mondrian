@@ -160,11 +160,17 @@ For the package-pinned PQ View, OCIO represents the HLG-to-display-reference
 inverse OETF as a half-domain 1D texture. The wgpu compiler replaces only that
 fingerprinted texture operation with the normative inverse HLG expression after
 proving the selected package, View, shader language, LUT identity, and the
-preceding formation LUT's normalized output domain. The PQ OETF remains the
-OCIO-authored LUT. A changed package, custom config, resource payload, source
-identity, or domain retains the unmodified OCIO program. This removes three
-texture fetches per output pixel without moving the nonlinear operation across
-the tetrahedral formation LUT.
+preceding formation LUT's normalized output domain. The final PQ half-domain
+LUT is also fingerprinted and replaced at that same curve boundary by shader
+code extracted from OCIO's own `LinToPq` fixed function. Its input remains the
+same normalized-nits value after HLG decoding, surround and scale; the formation
+LUT, CPU reference processor and authored rendering semantics are unchanged.
+The production Float16 output must satisfy the original CPU channel-error and
+Delta E ITP budgets; the two GPU representations are not claimed bit-identical.
+A changed package, custom config, resource payload, source identity, or domain
+retains the unmodified OCIO program. This removes three
+texture fetches for HLG decoding and three for PQ encoding per output pixel,
+without moving either nonlinear operation across the tetrahedral formation LUT.
 
 Output-target resolution maps Rec.2100 HLG and PQ to that HDR View while SDR
 targets map to the SDR View. A display without its target-class Standard View
