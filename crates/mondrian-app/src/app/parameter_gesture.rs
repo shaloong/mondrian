@@ -1,7 +1,8 @@
 //! Continuous parameter edits over the canonical Clip/Effect/Mask author paths.
 
 use super::product_action::{
-    ClipProductAction, ClipWriteParameterValuesPayload, ProductAction, VisualEffectProductAction,
+    ClipEditNumericCurvePayload, ClipProductAction, ClipWriteParameterValuesPayload, ProductAction,
+    VisualEffectEditNumericCurvePayload, VisualEffectProductAction,
     VisualEffectSetParameterValuePayload, VisualMaskProductAction,
     VisualMaskSetParameterValuePayload,
 };
@@ -28,12 +29,50 @@ pub(crate) enum ParameterGestureEdit {
     Clip(ClipWriteParameterValuesPayload),
     Effect(VisualEffectSetParameterValuePayload),
     Mask(VisualMaskSetParameterValuePayload),
+    ClipCurve(ClipEditNumericCurvePayload),
+    EffectCurve(VisualEffectEditNumericCurvePayload),
+}
+
+/// Stable owner of a local numeric curve draft, before its single release commit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "owner", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum ParameterCurveGestureTarget {
+    Clip {
+        clip_id: ClipId,
+        parameter: AnimationParameterAddress,
+    },
+    Effect {
+        clip_id: ClipId,
+        effect_id: EffectId,
+        parameter: AnimationParameterAddress,
+    },
+}
+
+impl ParameterCurveGestureTarget {
+    fn target(&self) -> ParameterGestureTarget {
+        let (clip, owner, parameter) = match self {
+            Self::Clip { clip_id, parameter } => (*clip_id, ParameterOwner::Clip, parameter),
+            Self::Effect { clip_id, effect_id, parameter } => {
+                (*clip_id, ParameterOwner::Effect(*effect_id), parameter)
+            }
+        };
+        ParameterGestureTarget {
+            clip,
+            owner,
+            kind: ParameterGestureKind::NumericCurve,
+            parameters: vec![(parameter.clone(), None)],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
 /// Explicit lifecycle events; no nested or opaque author commands are admitted.
 pub(crate) enum ParameterGestureAction {
+    BeginCurve {
+        gesture_id: AuthoringGestureId,
+        target: ParameterCurveGestureTarget,
+    },
     Begin {
         gesture_id: AuthoringGestureId,
         edit: ParameterGestureEdit,
@@ -56,8 +95,15 @@ enum ParameterOwner {
     Effect(EffectId),
     Mask(MaskId),
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParameterGestureKind {
+    Value,
+    NumericCurve,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParameterGestureTarget {
+    kind: ParameterGestureKind,
     clip: ClipId,
     owner: ParameterOwner,
     parameters: Vec<(AnimationParameterAddress, Option<Vec<usize>>)>,
@@ -84,11 +130,23 @@ impl ParameterGestureEdit {
             ProductAction::VisualMask(VisualMaskProductAction::SetParameterValue(edit)) => {
                 Some(Self::Mask(*edit))
             }
+            ProductAction::Clip(ClipProductAction::EditNumericCurve(edit)) => {
+                Some(Self::ClipCurve(*edit))
+            }
+            ProductAction::VisualEffect(VisualEffectProductAction::EditNumericCurve(edit)) => {
+                Some(Self::EffectCurve(*edit))
+            }
             _ => None,
         }
     }
     fn into_product(self) -> ProductAction {
         match self {
+            Self::ClipCurve(edit) => {
+                ProductAction::Clip(ClipProductAction::EditNumericCurve(Box::new(edit)))
+            }
+            Self::EffectCurve(edit) => ProductAction::VisualEffect(
+                VisualEffectProductAction::EditNumericCurve(Box::new(edit)),
+            ),
             Self::Clip(edit) => {
                 ProductAction::Clip(ClipProductAction::WriteParameterValues(Box::new(edit)))
             }
@@ -114,17 +172,31 @@ impl ParameterGestureEdit {
             )
         };
         match self {
+            Self::ClipCurve(edit) => ParameterCurveGestureTarget::Clip {
+                clip_id: edit.clip_id,
+                parameter: edit.parameter.clone(),
+            }
+            .target(),
+            Self::EffectCurve(edit) => ParameterCurveGestureTarget::Effect {
+                clip_id: edit.clip_id,
+                effect_id: edit.effect_id,
+                parameter: edit.parameter.clone(),
+            }
+            .target(),
             Self::Clip(edit) => ParameterGestureTarget {
+                kind: ParameterGestureKind::Value,
                 clip: edit.clip_id,
                 owner: ParameterOwner::Clip,
                 parameters: edit.writes.iter().map(parameter).collect(),
             },
             Self::Effect(edit) => ParameterGestureTarget {
+                kind: ParameterGestureKind::Value,
                 clip: edit.clip_id,
                 owner: ParameterOwner::Effect(edit.effect_id),
                 parameters: vec![parameter(&edit.write)],
             },
             Self::Mask(edit) => ParameterGestureTarget {
+                kind: ParameterGestureKind::Value,
                 clip: edit.clip_id,
                 owner: ParameterOwner::Mask(edit.mask_id),
                 parameters: vec![parameter(&edit.write)],
@@ -186,6 +258,57 @@ impl AppState {
         }
     }
 
+    fn begin_parameter_gesture(
+        &mut self,
+        id: AuthoringGestureId,
+        target: ParameterGestureTarget,
+    ) -> Result<bool> {
+        self.finish_parameter_gesture()?;
+        if !self.parameter_target_is_current(&target) {
+            return Ok(false);
+        }
+        if target.kind == ParameterGestureKind::NumericCurve {
+            let clip = self
+                .active_sequence()
+                .and_then(|sequence| sequence.find_clip(target.clip))
+                .ok_or_else(|| gesture_error("missing curve Clip"))?;
+            let valid = match target.owner {
+                ParameterOwner::Clip => {
+                    let bag = clip.intrinsic_parameter_bag();
+                    target.parameters.iter().all(|(address, _)| {
+                        bag.property_by_address(address)
+                            .is_some_and(|(_, property)| property.descriptor.schema.is_animatable)
+                    })
+                }
+                ParameterOwner::Effect(id) => {
+                    clip.effects.iter().find(|effect| effect.id == id).is_some_and(|effect| {
+                        target.parameters.iter().all(|(address, _)| {
+                            effect.properties.property_by_address(address).is_some_and(
+                                |(_, property)| property.descriptor.schema.is_animatable,
+                            )
+                        })
+                    })
+                }
+                ParameterOwner::Mask(_) => false,
+            };
+            if !valid {
+                return Err(gesture_error("invalid numeric curve parameter owner"));
+            }
+        }
+        let sequence =
+            self.active_sequence_id().ok_or_else(|| gesture_error("no active Sequence"))?;
+        let session =
+            self.authoring.as_mut().ok_or_else(|| gesture_error("no authoring Session"))?;
+        session.begin_sequence_gesture(id, sequence)?;
+        self.active_parameter_gesture = Some(ActiveParameterGesture {
+            id,
+            session: session.session_id(),
+            sequence,
+            target,
+        });
+        Ok(true)
+    }
+
     /// Whether the UI owner and its authoritative author-generation lease still match.
     pub(crate) fn parameter_gesture_is_current(&self) -> bool {
         self.active_parameter_gesture.as_ref().is_some_and(|active| {
@@ -195,6 +318,13 @@ impl AppState {
                 && self.authoring.as_ref().is_some_and(|session| {
                     session.sequence_gesture_is_current(active.id, active.sequence)
                 })
+        })
+    }
+
+    /// Whether one matching pointer identity owns a local numeric curve draft.
+    pub(crate) fn parameter_gesture_is_numeric_curve(&self, id: AuthoringGestureId) -> bool {
+        self.active_parameter_gesture.as_ref().is_some_and(|active| {
+            active.id == id && active.target.kind == ParameterGestureKind::NumericCurve
         })
     }
 
@@ -241,6 +371,10 @@ impl AppState {
         action: ParameterGestureAction,
     ) -> Result<()> {
         let (id, edit, begin) = match action {
+            ParameterGestureAction::BeginCurve { gesture_id, target } => {
+                self.begin_parameter_gesture(gesture_id, target.target())?;
+                return Ok(());
+            }
             ParameterGestureAction::Cancel { gesture_id } => {
                 return self.cancel_parameter_gesture(gesture_id)
             }
@@ -259,21 +393,9 @@ impl AppState {
         };
         let target = edit.target();
         if begin {
-            self.finish_parameter_gesture()?;
-            if !self.parameter_target_is_current(&target) {
+            if !self.begin_parameter_gesture(id, target)? {
                 return Ok(());
             }
-            let sequence =
-                self.active_sequence_id().ok_or_else(|| gesture_error("no active Sequence"))?;
-            let session =
-                self.authoring.as_mut().ok_or_else(|| gesture_error("no authoring Session"))?;
-            session.begin_sequence_gesture(id, sequence)?;
-            self.active_parameter_gesture = Some(ActiveParameterGesture {
-                id,
-                session: session.session_id(),
-                sequence,
-                target,
-            });
         } else if !self.parameter_gesture_is_current()
             || self
                 .active_parameter_gesture
@@ -392,12 +514,138 @@ mod tests {
             ParameterGestureEdit::Clip(edit) => &mut edit.writes[0],
             ParameterGestureEdit::Effect(edit) => &mut edit.write,
             ParameterGestureEdit::Mask(edit) => &mut edit.write,
+            ParameterGestureEdit::ClipCurve(_) | ParameterGestureEdit::EffectCurve(_) => {
+                panic!("scalar fixture expected")
+            }
         };
         let ParameterValueWrite::Value { value: current, .. } = write else {
             panic!("scalar fixture");
         };
         *current = PropertyValue::Float(value);
         edit
+    }
+
+    #[test]
+    fn deferred_numeric_curve_gestures_share_exact_owner_history_and_undo_redo() {
+        use crate::app::product_action::{ClipCurveEditPayload, ClipNormalizedCurvePointPayload};
+        for owner in [TestOwner::Clip, TestOwner::Effect] {
+            let (mut state, value_edit) = fixture(owner);
+            let (target, curve_edit) = match &value_edit {
+                ParameterGestureEdit::Clip(value) => {
+                    let parameter = value.writes[0].parameter().clone();
+                    (
+                        ParameterCurveGestureTarget::Clip {
+                            clip_id: value.clip_id,
+                            parameter: parameter.clone(),
+                        },
+                        ParameterGestureEdit::ClipCurve(ClipEditNumericCurvePayload {
+                            clip_id: value.clip_id,
+                            parameter,
+                            edit: ClipCurveEditPayload::Upsert {
+                                keyframe_id: None,
+                                point: ClipNormalizedCurvePointPayload {
+                                    time_ratio: 0.5,
+                                    value_ratio: 0.8,
+                                },
+                            },
+                        }),
+                    )
+                }
+                ParameterGestureEdit::Effect(value) => {
+                    let parameter = value.write.parameter().clone();
+                    (
+                        ParameterCurveGestureTarget::Effect {
+                            clip_id: value.clip_id,
+                            effect_id: value.effect_id,
+                            parameter: parameter.clone(),
+                        },
+                        ParameterGestureEdit::EffectCurve(VisualEffectEditNumericCurvePayload {
+                            clip_id: value.clip_id,
+                            effect_id: value.effect_id,
+                            parameter,
+                            edit: ClipCurveEditPayload::Upsert {
+                                keyframe_id: None,
+                                point: ClipNormalizedCurvePointPayload {
+                                    time_ratio: 0.5,
+                                    value_ratio: 0.8,
+                                },
+                            },
+                        }),
+                    )
+                }
+                _ => panic!("numeric fixture"),
+            };
+            let original = state.active_sequence().expect("origin").clone();
+            let before = state.authoring_history().expect("history").diagnostics();
+            let id = AuthoringGestureId::new();
+            state
+                .dispatch_action(
+                    ParameterGestureAction::BeginCurve { gesture_id: id, target }.action(),
+                )
+                .expect("open local draft");
+            assert!(state.parameter_gesture_is_current());
+            assert_eq!(state.active_sequence().expect("draft"), &original);
+            assert_eq!(
+                state.authoring_history().expect("history").diagnostics(),
+                before
+            );
+            state
+                .dispatch_action(
+                    ParameterGestureAction::Update {
+                        gesture_id: id,
+                        edit: with_value(value_edit, 0.7),
+                    }
+                    .action(),
+                )
+                .expect("foreign edit family ignored");
+            assert_eq!(state.active_sequence().expect("draft"), &original);
+            state
+                .dispatch_action(
+                    ParameterGestureAction::Update { gesture_id: id, edit: curve_edit.clone() }
+                        .action(),
+                )
+                .expect("release curve edit");
+            assert!(
+                state.parameter_gesture_is_current(),
+                "the canonical curve commit must retain its owner generation lease"
+            );
+            assert_eq!(
+                state.authoring_history().expect("history").diagnostics().pending_entries,
+                1
+            );
+            let updated = state.active_sequence().expect("updated").clone();
+            let updated_history = state.authoring_history().expect("history").diagnostics();
+            state
+                .dispatch_action(
+                    ParameterGestureAction::Update { gesture_id: id, edit: curve_edit }.action(),
+                )
+                .expect("identical curve update keeps the gesture");
+            assert!(state.parameter_gesture_is_current());
+            assert_eq!(state.active_sequence().expect("unchanged update"), &updated);
+            assert_eq!(
+                state.authoring_history().expect("history").diagnostics(),
+                updated_history
+            );
+            state
+                .dispatch_action(ParameterGestureAction::Finish { gesture_id: id }.action())
+                .expect("finish curve");
+            let accepted = state.active_sequence().expect("accepted").clone();
+            assert!(!accepted.author_state_eq_ignoring_revision(&original));
+            assert_eq!(
+                state.authoring_history().expect("history").diagnostics().undo_entries,
+                before.undo_entries + 1
+            );
+            assert!(state.undo_timeline().expect("Undo curve"));
+            assert!(state
+                .active_sequence()
+                .expect("Undo")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(state.redo_timeline().expect("Redo curve"));
+            assert!(state
+                .active_sequence()
+                .expect("Redo")
+                .author_state_eq_ignoring_revision(&accepted));
+        }
     }
 
     #[test]

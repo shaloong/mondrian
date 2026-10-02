@@ -1564,6 +1564,9 @@ impl AppState {
                     payload.parameter,
                     edit,
                 )?;
+                if !outcome.changed && self.parameter_gesture_command.is_some() {
+                    return Ok(());
+                }
                 require_action_executed(
                     outcome.changed,
                     "visual_effect_edit_numeric_curve",
@@ -1717,6 +1720,9 @@ impl AppState {
                 let property = payload.parameter.clone();
                 let removing = matches!(&payload.edit, ClipCurveEditPayload::Remove { .. });
                 let outcome = self.edit_clip_numeric_curve_payload(*payload)?;
+                if !outcome.changed && self.parameter_gesture_command.is_some() {
+                    return Ok(());
+                }
                 require_action_executed(
                     outcome.changed,
                     "clip_edit_numeric_curve",

@@ -4,6 +4,10 @@
 //! parent panel Module retains aggregate projection and dock composition.
 
 use super::*;
+use crate::app::parameter_gesture::{
+    ParameterCurveGestureTarget, ParameterGestureAction, ParameterGestureEdit,
+};
+use mondrian_ui_widgets::CurveGestureEvent;
 
 pub(super) fn audio_mixer_panel(
     model: &AudioMixerPanelModel,
@@ -417,6 +421,10 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
     }
     let curve = if let Some(curve_model) = model.opacity_curve.clone() {
         numeric_curve_editor(
+            selected_clip.map(|selection| ParameterCurveGestureTarget::Clip {
+                clip_id: selection.clip_id,
+                parameter: curve_model.property.clone(),
+            }),
             curve_model,
             can_edit,
             None,
@@ -1469,6 +1477,13 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                                 &property.label,
                             ),
                             Box::new(numeric_curve_editor(
+                                selected_clip.map(|selection| {
+                                    ParameterCurveGestureTarget::Effect {
+                                        clip_id: selection.clip_id,
+                                        effect_id,
+                                        parameter: curve_model.property.clone(),
+                                    }
+                                }),
                                 curve_model,
                                 can_edit,
                                 Some(property.schema.allowed_interpolations.clone()),
@@ -1900,7 +1915,6 @@ where
     let slider_action = Rc::clone(&action);
     let author_interaction = std::cell::Cell::new(false);
     slider = slider.on_edit(move |phase, ratio| {
-        use crate::app::parameter_gesture::{ParameterGestureAction, ParameterGestureEdit};
         use mondrian_ui_widgets::SliderEdit;
         if author_interaction.get() {
             let boundary = match phase {
@@ -2413,6 +2427,7 @@ pub(super) fn inspector_reorder_mask_action(
 }
 
 fn numeric_curve_editor(
+    target: Option<ParameterCurveGestureTarget>,
     model: InspectorCurveModel,
     can_edit: bool,
     allowed_interpolations: Option<Vec<ParameterInterpolation>>,
@@ -2471,7 +2486,26 @@ fn numeric_curve_editor(
         .with_display_points(display_points)
         .with_point_context_menus(interpolation_menus)
         .enabled(can_edit)
-        .on_edit(move |edit| on_edit(&model, edit))
+        .on_gesture(move |event| match event {
+            CurveGestureEvent::Begin(gesture_id) => target
+                .clone()
+                .map(|target| ParameterGestureAction::BeginCurve { gesture_id, target }.action()),
+            CurveGestureEvent::Edit { gesture_id, edit } => {
+                let action = on_edit(&model, edit)?;
+                if let Some(gesture_id) = gesture_id {
+                    ParameterGestureEdit::from_action(&action)
+                        .map(|edit| ParameterGestureAction::Update { gesture_id, edit }.action())
+                } else {
+                    Some(action)
+                }
+            }
+            CurveGestureEvent::Finish(gesture_id) => {
+                Some(ParameterGestureAction::Finish { gesture_id }.action())
+            }
+            CurveGestureEvent::Cancel(gesture_id) => {
+                Some(ParameterGestureAction::Cancel { gesture_id }.action())
+            }
+        })
 }
 
 fn numeric_curve_edit_payload(

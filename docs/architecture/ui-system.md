@@ -2931,7 +2931,7 @@ in a typed gesture action; preferences/form draft callbacks remain local. App
 validates the selected owner, actual lock and current Session/Sequence/generation
 lease on every update, then invokes the same property author modules. A failed
 or stale lease cannot keep authoring an obsolete captured control. Boundary/no-op
-actions do not request another Viewer evaluation; live changes retain the bounded
+actions do not publish author invalidations; live changes retain the bounded
 Viewer update path and defer dock rebuilding until release.
 
 All Host Root model replacements seal an active parameter gesture through the
@@ -2962,3 +2962,35 @@ unchanged press and a drag returned to its origin. Cancellation emits no
 incremental key edit; late pointer release or focus loss cannot commit a cancelled
 drag. Capture ownership is an interaction fact rather than a value-difference
 heuristic.
+
+
+### Numeric curve draft ownership
+
+CurveEditor can expose typed Begin/Edit/Finish/Cancel lifecycle events. This
+callback replaces live value and incremental callbacks: a pointer drag remains a
+local normalized draft until release or focus-loss acceptance. Keyboard nudges
+while captured adjust that draft without committing another edit. Delete accepts
+one deletion and releases capture; deleting an uncommitted inserted point cancels
+the draft. Escape, disabling and replacement of points cancel capture without
+emitting an incremental author edit. Standalone keyboard edits carry no pointer
+identity.
+
+Clip and Effect numeric Inspector curves register a stable parameter owner on
+pointer down through App's shared parameter gesture protocol. BeginCurve opens
+the existing AuthoringSession Sequence/generation lease without an initial
+write. Release sends one typed curve intent through the canonical curve authoring
+module, then Finish. Curve and value intents use distinct target kinds, so a
+matching interaction identity cannot authorize another edit family. Host checks
+owner selection, actual lock, Session, Sequence and author generation before
+transient refresh deferral. A stale lease discards the old control; late events
+cannot recreate or commit its draft. This does not wrap AI/headless product
+commands in UI selection policy, and does not introduce a second keyframe model.
+
+
+An identical numeric curve update inside a valid gesture is a no-op rather than
+an edit failure: it retains the live interaction and any preceding effective
+update. Ordinary independent no-op product commands keep their explicit failure
+contract. Finish/Cancel of a matching numeric curve draft refreshes its canonical
+model even if frame/value lowering yielded no author change, so local normalized
+points cannot remain as misleading unsaved curve geometry. No-op updates do not
+advance author generations or publish author invalidations.

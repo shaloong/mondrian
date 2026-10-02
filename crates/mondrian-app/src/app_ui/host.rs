@@ -1573,11 +1573,25 @@ impl AppUiHost {
                 continue;
             }
             tracing::debug!(?action, "custom UI action");
-            let parameter_gesture =
+            let parameter_gesture_action =
                 crate::app::parameter_gesture::ParameterGestureAction::decode(&action)
                     .ok()
-                    .flatten()
-                    .is_some();
+                    .flatten();
+            let parameter_gesture = parameter_gesture_action.is_some();
+            let begins_parameter_gesture = matches!(
+                parameter_gesture_action,
+                Some(
+                    crate::app::parameter_gesture::ParameterGestureAction::Begin { .. }
+                        | crate::app::parameter_gesture::ParameterGestureAction::BeginCurve { .. }
+                )
+            );
+            let ends_numeric_curve = match &parameter_gesture_action {
+                Some(
+                    crate::app::parameter_gesture::ParameterGestureAction::Finish { gesture_id }
+                    | crate::app::parameter_gesture::ParameterGestureAction::Cancel { gesture_id },
+                ) => self.app_state.borrow().parameter_gesture_is_numeric_curve(*gesture_id),
+                _ => false,
+            };
             let generation_before = self
                 .app_state
                 .borrow()
@@ -1593,11 +1607,17 @@ impl AppUiHost {
                     self.mark_dirty();
                 }
             }
+            if begins_parameter_gesture && !self.app_state.borrow().parameter_gesture_is_current() {
+                // A rejected start still owns a locally captured stale control.
+                self.force_model_refresh.set(true);
+                self.mark_dirty();
+            }
             let transport_intent = self.app_state.borrow().preview_transport_intent();
             self.preview_service.synchronize_transport_intent(transport_intent);
             if lightweight_transport_refresh {
                 self.refresh_transport_intent_without_preview();
             } else if !parameter_gesture
+                || ends_numeric_curve
                 || self
                     .app_state
                     .borrow()
@@ -5221,6 +5241,268 @@ mod tests {
                     == history_before.undo_entries,
                 "resource draft added no history"
             );
+        }
+    }
+
+    fn inspector_numeric_curve(
+        widget: &dyn Widget,
+        in_inspector: bool,
+    ) -> Option<mondrian_ui_core::WidgetId> {
+        let in_inspector = in_inspector || widget.panel_kind() == Some(PanelKind::Inspector);
+        if in_inspector
+            && widget.can_focus()
+            && widget
+                .as_any()
+                .is_some_and(|value| value.is::<mondrian_ui_widgets::CurveEditor>())
+        {
+            return Some(widget.id());
+        }
+        (0..widget.child_count()).find_map(|index| {
+            widget
+                .child(index)
+                .and_then(|child| inspector_numeric_curve(child, in_inspector))
+        })
+    }
+
+    #[test]
+    fn inspector_curve_capture_cannot_outlive_selection_lock_or_author_generation() {
+        use crate::app::product_action::{
+            ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
+        };
+        use crate::app::ui_actions::{
+            clip_edit_numeric_curve_action, track_set_author_control_action, TrackAuthorControl,
+            TrackSetAuthorControlPayload,
+        };
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        use mondrian_ui_events::EventRouter;
+        for invalidation in 0..7 {
+            let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+            let bounds = Rect::new(0.0, 0.0, 1280.0, 1600.0);
+            let mut state = workspace_app_state_with_timed_solid();
+            let sequence = state.active_sequence().expect("Sequence");
+            let track_id = sequence.video_tracks[0].id;
+            let clip = &sequence.video_tracks[0].clips[0];
+            let clip_id = clip.id;
+            let parameter = clip
+                .intrinsic_parameter_bag()
+                .address_for_path(mondrian_timeline::clip::Transform2D::OPACITY_PATH)
+                .expect("opacity");
+            state.selection.selected_clips =
+                vec![crate::app::SelectedClipRef { track_id, clip_id, is_video_track: true }];
+            for ratio in [0.0, 0.5, 1.0] {
+                state
+                    .dispatch_action(clip_edit_numeric_curve_action(
+                        ClipEditNumericCurvePayload {
+                            clip_id,
+                            parameter: parameter.clone(),
+                            edit: ClipCurveEditPayload::Upsert {
+                                keyframe_id: None,
+                                point: ClipNormalizedCurvePointPayload {
+                                    time_ratio: ratio,
+                                    value_ratio: ratio,
+                                },
+                            },
+                        },
+                    ))
+                    .expect("fixture key");
+            }
+            let mut host = AppUiHost::new_with_preferences_path(
+                state,
+                AppUiPreferences::default(),
+                temp_preferences_path("curve-owner"),
+            );
+            TreeWalker::layout(host.active_root_mut(), bounds);
+            let curve_id =
+                inspector_numeric_curve(host.active_root(), false).expect("numeric curve");
+            let point = {
+                let tree = WidgetTreeView::new(host.active_root_mut());
+                let curve = tree.get(curve_id).expect("curve");
+                let mut min = Point::new(f32::MAX, f32::MAX);
+                let mut max = Point::new(0.0, 0.0);
+                for y in (0..1600).step_by(2) {
+                    for x in (0..1280).step_by(2) {
+                        let point = Point::new(x as f32, y as f32);
+                        if curve.hit_test(point) {
+                            min.x = min.x.min(point.x);
+                            min.y = min.y.min(point.y);
+                            max.x = max.x.max(point.x);
+                            max.y = max.y.max(point.y);
+                        }
+                    }
+                }
+                assert!(min.x < max.x && min.y < max.y);
+                Point::new((min.x + max.x) * 0.5, (min.y + max.y) * 0.5)
+            };
+            let pending = PendingUiActions::default();
+            let dispatch = |action| pending.push(action);
+            let mut router = EventRouter::new(host.active_root().id());
+            let original = host.app_state().active_sequence().expect("origin").clone();
+            let original_history =
+                host.app_state().authoring_history().expect("history").diagnostics();
+            if invalidation == 6 {
+                pending.push(Action::DeselectAll);
+            }
+            for event in [
+                UiEvent::MouseDown {
+                    position: point,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::MouseMove {
+                    position: Point::new(point.x + 12.0, point.y - 12.0),
+                    modifiers: Modifiers::none(),
+                },
+            ] {
+                router.route(
+                    event,
+                    &mut WidgetTreeView::new(host.active_root_mut()),
+                    &dispatch,
+                );
+            }
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            if invalidation == 6 {
+                assert!(WidgetTreeView::new(host.active_root_mut()).get(curve_id).is_none(), "rejected Begin must discard captured stale input even without author generation changes");
+                router.route(
+                    UiEvent::MouseUp {
+                        position: point,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut WidgetTreeView::new(host.active_root_mut()),
+                    &dispatch,
+                );
+                host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+                assert!(router.captured().is_none());
+                assert!(host
+                    .app_state()
+                    .active_sequence()
+                    .expect("late")
+                    .author_state_eq_ignoring_revision(&original));
+                assert_eq!(
+                    host.app_state().authoring_history().expect("history").diagnostics(),
+                    original_history
+                );
+                continue;
+            }
+            assert_eq!(router.captured(), Some(curve_id));
+            assert!(
+                host.app_state()
+                    .active_sequence()
+                    .expect("pending")
+                    .author_state_eq_ignoring_revision(&original),
+                "curve remains a local draft before release"
+            );
+            assert!(
+                WidgetTreeView::new(host.active_root_mut()).get(curve_id).is_some(),
+                "valid captured curve survives refresh"
+            );
+            if invalidation >= 3 {
+                let terminal = match invalidation {
+                    4 => UiEvent::KeyDown {
+                        key: mondrian_ui_core::types::KeyCode::Escape,
+                        modifiers: Modifiers::none(),
+                    },
+                    5 => UiEvent::FocusLost,
+                    _ => UiEvent::MouseUp {
+                        position: point,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                };
+                router.route(
+                    terminal,
+                    &mut WidgetTreeView::new(host.active_root_mut()),
+                    &dispatch,
+                );
+                host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+                assert!(router.captured().is_none());
+                assert!(host.app_state().active_parameter_gesture.is_none());
+                let accepted = host.app_state().active_sequence().expect("result").clone();
+                let history = host.app_state().authoring_history().expect("history").diagnostics();
+                if invalidation == 4 {
+                    assert!(accepted.author_state_eq_ignoring_revision(&original));
+                    assert_eq!(history, original_history);
+                } else {
+                    assert!(!accepted.author_state_eq_ignoring_revision(&original));
+                    assert_eq!(history.undo_entries, original_history.undo_entries + 1);
+                    assert!(host
+                        .app_state
+                        .borrow_mut()
+                        .undo_timeline()
+                        .expect("Undo accepted curve"));
+                    assert!(host
+                        .app_state()
+                        .active_sequence()
+                        .expect("Undo")
+                        .author_state_eq_ignoring_revision(&original));
+                    assert!(host
+                        .app_state
+                        .borrow_mut()
+                        .redo_timeline()
+                        .expect("Redo accepted curve"));
+                    assert!(host
+                        .app_state()
+                        .active_sequence()
+                        .expect("Redo")
+                        .author_state_eq_ignoring_revision(&accepted));
+                }
+                continue;
+            }
+            pending.push(match invalidation {
+                0 => Action::DeselectAll,
+                1 => track_set_author_control_action(TrackSetAuthorControlPayload {
+                    track_id,
+                    control: TrackAuthorControl::Lock,
+                    enabled: true,
+                }),
+                _ => clip_edit_numeric_curve_action(ClipEditNumericCurvePayload {
+                    clip_id,
+                    parameter: parameter.clone(),
+                    edit: ClipCurveEditPayload::Upsert {
+                        keyframe_id: None,
+                        point: ClipNormalizedCurvePointPayload {
+                            time_ratio: 0.25,
+                            value_ratio: 0.8,
+                        },
+                    },
+                }),
+            });
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            let after = host.app_state().active_sequence().expect("intervening").clone();
+            let history = host.app_state().authoring_history().expect("history").diagnostics();
+            assert!(
+                WidgetTreeView::new(host.active_root_mut()).get(curve_id).is_none(),
+                "invalid author lease must discard the captured curve before transient deferral"
+            );
+            for event in [
+                UiEvent::MouseMove {
+                    position: Point::new(point.x + 22.0, point.y - 22.0),
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::MouseUp {
+                    position: point,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::FocusLost,
+            ] {
+                router.route(
+                    event,
+                    &mut WidgetTreeView::new(host.active_root_mut()),
+                    &dispatch,
+                );
+            }
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("late")
+                .author_state_eq_ignoring_revision(&after));
+            assert_eq!(
+                host.app_state().authoring_history().expect("history").diagnostics(),
+                history
+            );
+            assert!(router.captured().is_none());
         }
     }
 

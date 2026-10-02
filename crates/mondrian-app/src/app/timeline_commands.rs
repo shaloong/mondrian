@@ -401,18 +401,13 @@ impl AppState {
         description: impl Into<String>,
         edit: impl FnOnce(&mut Sequence) -> mondrian_core::Result<T>,
     ) -> mondrian_core::Result<T> {
-        let (value, commit) = self
-            .authoring
-            .as_mut()
-            .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+        let sequence_id = self.active_sequence_id().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "commit_active_sequence_edit".to_owned(),
                 reason: "当前没有打开的项目".to_owned(),
-            })?
-            .edit_active_sequence(description, edit)?;
-        if let Some(commit) = commit {
-            self.consume_authoring_commit(commit);
-        }
-        Ok(value)
+            }
+        })?;
+        self.commit_sequence_edit(sequence_id, description, edit)
     }
 
     pub(super) fn commit_project_snapshot_command(

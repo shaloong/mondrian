@@ -416,3 +416,19 @@ generations when author state changes and preserving completed history. Ordinary
 commands accept pending work in their own prepared history plan. Undo accepts and
 reverses a changed interaction, or skips a net-zero interaction atomically. Stale
 or foreign interaction identities cannot overwrite intervening author changes.
+
+
+Numeric Clip/Effect curve drafts use the same ephemeral Sequence/generation
+lease as live numeric parameter gestures. Their begin is deferred: canonical
+state and history remain unchanged while the pointer draft is local. Acceptance
+enters the existing curve authoring module once; cancellation releases the lease
+without a write. The typed target distinguishes numeric curves from parameter
+value writes. Intervening author commits or UI owner changes invalidate captured
+curve controls before Host considers deferring a full model refresh.
+
+
+App's active-Sequence edit adapter resolves the active typed SequenceId and
+forwards to the sole named-Sequence commit adapter. Both paths therefore honor
+the same explicit gesture command and authoring lease; an active Clip property
+mutation cannot silently bypass staging or invalidate its own gesture generation.
+Ordinary commands still commit independently when no gesture command is present.

@@ -117,6 +117,25 @@ pub enum CurveEdit {
 /// Adapter that maps one committed point edit to an editor [`Action`].
 pub type CurveEditAction = dyn Fn(CurveEdit) -> Option<Action>;
 
+/// Lifecycle of a local pointer curve draft and its atomic committed edits.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CurveGestureEvent {
+    /// Open a pointer draft without committing author state.
+    Begin(mondrian_core::AuthoringGestureId),
+    /// Commit one edit; keyboard edits have no pointer gesture identity.
+    Edit {
+        gesture_id: Option<mondrian_core::AuthoringGestureId>,
+        edit: CurveEdit,
+    },
+    /// Accept the pointer draft after its optional edit.
+    Finish(mondrian_core::AuthoringGestureId),
+    /// Discard the pointer draft without an incremental edit.
+    Cancel(mondrian_core::AuthoringGestureId),
+}
+
+/// Adapter for explicit local curve draft ownership and committed edits.
+pub type CurveGestureAction = dyn Fn(CurveGestureEvent) -> Option<Action>;
+
 /// Interactive normalized curve editor.
 pub struct CurveEditor {
     id: WidgetId,
@@ -136,6 +155,8 @@ pub struct CurveEditor {
     enabled: bool,
     on_change: Option<Box<CurveChangeAction>>,
     on_edit: Option<Box<CurveEditAction>>,
+    on_gesture: Option<Box<CurveGestureAction>>,
+    gesture: Option<mondrian_core::AuthoringGestureId>,
     point_context_menus: Vec<Option<Vec<MenuItem>>>,
     context_menu: Option<ContextMenu>,
 }
@@ -171,6 +192,8 @@ impl CurveEditor {
             enabled: true,
             on_change: None,
             on_edit: None,
+            on_gesture: None,
+            gesture: None,
             point_context_menus: Vec::new(),
             context_menu: None,
         };
@@ -212,6 +235,7 @@ impl CurveEditor {
         F: Fn(&[CurvePoint]) -> R + 'static,
         R: Into<Option<Action>>,
     {
+        self.on_gesture = None;
         self.on_change = Some(Box::new(move |points| action(points).into()));
         self
     }
@@ -226,7 +250,23 @@ impl CurveEditor {
         F: Fn(CurveEdit) -> R + 'static,
         R: Into<Option<Action>>,
     {
+        self.on_gesture = None;
         self.on_edit = Some(Box::new(move |edit| action(edit).into()));
+        self
+    }
+
+    /// Dispatch pointer lifecycle boundaries and atomic edits instead of `on_edit`.
+    /// Pointer drafts begin before release and emit Finish or Cancel once; keyboard
+    /// edits carry no pointer identity. This replaces both value and incremental
+    /// edit callbacks, keeping a pointer draft local until acceptance.
+    pub fn on_gesture<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(CurveGestureEvent) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_edit = None;
+        self.on_change = None;
+        self.on_gesture = Some(Box::new(move |event| action(event).into()));
         self
     }
 
@@ -287,6 +327,11 @@ impl CurveEditor {
 
     /// Replace curve points. Points are clamped and sorted by x.
     pub fn set_points(&mut self, points: Vec<CurvePoint>) {
+        if self.dragging.take().is_some() {
+            self.pending_capture_release = true;
+            self.drag_origin = None;
+            self.drag_inserted = false;
+        }
         self.points = normalize_points(points);
         self.point_policies = default_point_policies(self.points.len());
         self.point_context_menus.clear();
@@ -368,7 +413,32 @@ impl CurveEditor {
         }
     }
 
+    fn dispatch_gesture(&self, event: CurveGestureEvent, ctx: &mut EventContext) {
+        if let Some(callback) = &self.on_gesture
+            && let Some(action) = callback(event)
+        {
+            (ctx.dispatch)(action);
+        }
+    }
+
+    fn end_gesture(&mut self, cancel: bool, ctx: &mut EventContext) {
+        if let Some(id) = self.gesture.take() {
+            self.dispatch_gesture(
+                if cancel {
+                    CurveGestureEvent::Cancel(id)
+                } else {
+                    CurveGestureEvent::Finish(id)
+                },
+                ctx,
+            );
+        }
+    }
+
     fn dispatch_edit(&self, edit: CurveEdit, ctx: &mut EventContext) {
+        self.dispatch_gesture(
+            CurveGestureEvent::Edit { gesture_id: self.gesture, edit },
+            ctx,
+        );
         if let Some(action) = &self.on_edit
             && let Some(action) = action(edit)
         {
@@ -376,7 +446,13 @@ impl CurveEditor {
         }
     }
 
-    fn begin_drag(&mut self, index: usize, inserted: bool) {
+    fn begin_drag(&mut self, index: usize, inserted: bool, ctx: &mut EventContext) {
+        self.end_gesture(true, ctx);
+        if self.on_gesture.is_some() {
+            let id = mondrian_core::AuthoringGestureId::new();
+            self.gesture = Some(id);
+            self.dispatch_gesture(CurveGestureEvent::Begin(id), ctx);
+        }
         self.dragging = Some(index);
         self.drag_origin = (!inserted).then(|| self.points[index]);
         self.drag_inserted = inserted;
@@ -398,6 +474,7 @@ impl CurveEditor {
         }
         self.drag_origin = None;
         self.drag_inserted = false;
+        self.end_gesture(false, ctx);
     }
 
     fn cancel_drag_state(&mut self) -> bool {
@@ -457,7 +534,9 @@ impl CurveEditor {
             return false;
         }
         let point = self.points[index];
-        self.dispatch_edit(CurveEdit::Move { index, point }, ctx);
+        if self.dragging.is_none() {
+            self.dispatch_edit(CurveEdit::Move { index, point }, ctx);
+        }
         true
     }
 
@@ -487,11 +566,26 @@ impl CurveEditor {
             return false;
         }
 
+        if self.drag_inserted {
+            self.cancel_drag_state();
+            self.selected = None;
+            self.end_gesture(true, ctx);
+            self.dispatch_change(ctx);
+            ctx.release_pointer_capture(self.id);
+            ctx.request_repaint();
+            return true;
+        }
+        let was_dragging = self.dragging.take().is_some();
+        self.drag_origin = None;
         self.points.remove(index);
         self.point_policies.remove(index);
         self.selected = (!self.points.is_empty()).then(|| index.min(self.points.len() - 1));
         self.dispatch_change(ctx);
         self.dispatch_edit(CurveEdit::Delete { index }, ctx);
+        if was_dragging {
+            self.end_gesture(false, ctx);
+            ctx.release_pointer_capture(self.id);
+        }
         ctx.request_repaint();
         true
     }
@@ -516,6 +610,10 @@ impl Default for CurveEditor {
 }
 
 impl Widget for CurveEditor {
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn id(&self) -> WidgetId {
         self.id
     }
@@ -541,6 +639,7 @@ impl Widget for CurveEditor {
         }
         if self.pending_capture_release || (!self.enabled && self.dragging.is_some()) {
             ctx.release_pointer_capture(self.id);
+            self.end_gesture(true, ctx);
             self.pending_capture_release = false;
         }
         if !self.enabled {
@@ -573,12 +672,12 @@ impl Widget for CurveEditor {
                 self.focus_visible = false;
                 if let Some(index) = self.hit_point(*position) {
                     self.selected = Some(index);
-                    self.begin_drag(index, false);
+                    self.begin_drag(index, false, ctx);
                     ctx.request_pointer_capture(self.id);
                     return EventResult::Handled;
                 }
                 if let Some(index) = self.insert_point_from_input(*position, ctx) {
-                    self.begin_drag(index, true);
+                    self.begin_drag(index, true, ctx);
                     ctx.request_pointer_capture(self.id);
                     return EventResult::Handled;
                 }
@@ -616,6 +715,7 @@ impl Widget for CurveEditor {
             UiEvent::KeyDown { key: KeyCode::Escape, .. } if self.selected.is_some() => {
                 let was_dragging = self.dragging.is_some();
                 let changed = self.cancel_drag_state();
+                self.end_gesture(true, ctx);
                 self.selected = None;
                 if changed {
                     self.dispatch_change(ctx);
@@ -1102,6 +1202,109 @@ mod tests {
                 point: inserted,
             })]
         );
+    }
+
+    #[test]
+    fn curve_gesture_lifecycle_keeps_drafts_local_and_finishes_or_cancels_once() {
+        for finish in 0..6 {
+            let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let recorded = std::rc::Rc::clone(&events);
+            let mut editor = CurveEditor::with_points(vec![
+                CurvePoint::new(0.0, 0.0),
+                CurvePoint::new(0.5, 0.5),
+                CurvePoint::new(1.0, 1.0),
+            ])
+            .on_gesture(move |event| {
+                recorded.borrow_mut().push(event);
+                None::<Action>
+            });
+            editor.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+            let start = editor.to_screen(editor.points()[1]);
+            let mut ctx = event_ctx();
+            editor.event(
+                &UiEvent::MouseDown {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            let CurveGestureEvent::Begin(id) = events.borrow()[0] else {
+                panic!("begin");
+            };
+            if finish != 0 {
+                editor.event(
+                    &UiEvent::MouseMove {
+                        position: Point::new(start.x + 20.0, start.y - 15.0),
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                );
+                editor.event(
+                    &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+                    &mut ctx,
+                );
+            }
+            assert_eq!(
+                events.borrow().len(),
+                1,
+                "pointer and keyboard changes remain in the local captured draft"
+            );
+            let terminal = match finish {
+                2 => UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                3 => UiEvent::FocusLost,
+                4 => {
+                    editor.set_enabled(false);
+                    UiEvent::MouseMove { position: start, modifiers: Modifiers::none() }
+                }
+                5 => UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
+                _ => UiEvent::MouseUp {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+            };
+            editor.event(&terminal, &mut ctx);
+            assert!(!editor.has_active_pointer_interaction());
+            assert_eq!(
+                ctx.requests.pointer_capture,
+                Some(mondrian_ui_core::widget::PointerCaptureRequest::Release(
+                    editor.id()
+                ))
+            );
+            for event in [
+                UiEvent::MouseUp {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::FocusLost,
+            ] {
+                editor.event(&event, &mut ctx);
+            }
+            let events = events.borrow();
+            if finish == 2 || finish == 4 {
+                assert_eq!(
+                    events.as_slice(),
+                    &[CurveGestureEvent::Begin(id), CurveGestureEvent::Cancel(id)]
+                );
+                assert_eq!(editor.points()[1], CurvePoint::new(0.5, 0.5));
+            } else if finish == 0 {
+                assert_eq!(
+                    events.as_slice(),
+                    &[CurveGestureEvent::Begin(id), CurveGestureEvent::Finish(id)]
+                );
+            } else {
+                assert_eq!(events.len(), 3);
+                assert!(
+                    matches!(events[1], CurveGestureEvent::Edit { gesture_id: Some(edit_id), .. } if edit_id == id)
+                );
+                assert_eq!(events[2], CurveGestureEvent::Finish(id));
+                if finish == 5 {
+                    assert_eq!(editor.points().len(), 2);
+                }
+            }
+        }
     }
 
     #[test]
