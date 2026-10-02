@@ -62,10 +62,3 @@ Critical issues receive immediate prioritization. Publicly known medium or
 higher severity vulnerabilities must not remain unpatched for more than
 60 days. If a fix is blocked, escalate to repository administrators and publish
 safe mitigation guidance; an explanation alone does not satisfy that limit.
-
-The process follows the public-reporting and response requirements in the
-[OpenSSF Passing criteria](https://www.bestpractices.dev/en/criteria/0) and draws
-on [Scorecard's reporting workflow](https://github.com/ossf/scorecard/blob/main/SECURITY.md)
-and [curl's coordinated disclosure process](https://curl.se/dev/vuln-disclosure.html).
-Their contacts, service commitments, and project-specific exclusions do not
-apply to Mondrian.

@@ -29,8 +29,6 @@ material change, including generated code and workflow changes.
 ## Independent review
 
 The project targets review by another human for every production change.
-At least 50% of proposed modifications must receive author-independent review
-before release to meet the OpenSSF Gold criterion `two_person_review`.
 Reviewers record their assessment on GitHub and resolve material concerns before
 approval. An AI review can assist but does not constitute another person's review.
 

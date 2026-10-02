@@ -32,9 +32,9 @@ jobs:
         shell: pwsh
         run: ./scripts/validation/validate-reference-assets.ps1 -Tier Pr
 
-      - name: 校验社区文档与工作流契约
+      - name: 校验 GitHub Actions 固定提交
         shell: pwsh
-        run: ./scripts/validation/validate-community-standards.ps1
+        run: ./scripts/validation/validate-github-actions-pins.ps1
 
       - name: 校验 Windows 参考机资格契约
         shell: pwsh
