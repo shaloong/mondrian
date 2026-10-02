@@ -2886,8 +2886,24 @@ the background. This contract is independent of pointer overlay hit testing.
 Focused controls receive Tab first so an active IME or an editor's own Tab
 command can consume it before traversal. Resource locale updates change captions
 and hints in place; TextInput and Button caption setters retain identity and
-interaction state. Resource search caches normalized library captions on open
-and localizes empty results without changing the selected author reference.
+interaction state. Resource search caches normalized library captions and
+reconciles them when the Library connection identity or database revision changes.
+The connection identity uses a weak reference so the chooser cannot keep a retired
+Library alive. Host reconciles before transient-input refresh deferral; direct
+Root refresh and resource events use the same boundary. A revision is captured
+before reading rows so a later concurrent commit cannot mark older rows current.
+Unchanged revisions avoid listing and normalizing the Library again. Providers
+that disallow ProjectAsset bindings do not load the chooser catalog.
+
+Candidate replacement uses Dropdown's existing model API, retaining widget
+identity, focus and popup state while clearing obsolete row indices. It preserves
+the Resource draft, selected reference, search input and IME composition. Renamed
+and newly imported assets appear in current search results; retired assets leave
+the candidate list without silently changing a bound reference. Empty-result
+feedback is recomputed, and confirmation independently validates current membership.
+Catalog refresh errors do not block local draft edits or cancellation. Opening a
+new chooser and confirming a changed ProjectAsset still require authoritative
+Library reads; failures leave author state unchanged and retain a recoverable draft.
 
 The actual resource-shell LUT acceptance traverses native-picker adapter output,
 one author transaction, Undo/Redo, durable `.mdp` save/reopen and the compiled

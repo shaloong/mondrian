@@ -18,6 +18,20 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_widgets::{Button, DialogSurface, Dropdown, Label, MenuItem, TextInput};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Weak;
+
+/// Connection identity and revision of the chooser's last library projection.
+#[derive(Clone)]
+pub(crate) struct ResourceAssetCatalogRevision {
+    pub(crate) library: Weak<mondrian_assets::AssetLibrary>,
+    pub(crate) revision: u64,
+}
+impl PartialEq for ResourceAssetCatalogRevision {
+    fn eq(&self, other: &Self) -> bool {
+        self.library.ptr_eq(&other.library) && self.revision == other.revision
+    }
+}
+impl Eq for ResourceAssetCatalogRevision {}
 
 /// Outcome of routing a shell-local resource editor event.
 pub(crate) enum ResourceActionOutcome {
@@ -230,7 +244,8 @@ impl ResourceDraft {
             search: String::new(),
         }
     }
-    fn allows_kind(&self, kind: ResourceKind) -> bool {
+    /// Whether the provider admits this reference kind in its authoring schema.
+    pub(crate) fn allows_kind(&self, kind: ResourceKind) -> bool {
         let binding = match kind {
             ResourceKind::Unbound => return true,
             ResourceKind::ExternalFile => ParameterResourceKind::ExternalFile,
@@ -419,6 +434,7 @@ impl ResourceDraft {
 pub struct ResourceDialog {
     id: WidgetId,
     pub(crate) draft: ResourceDraft,
+    pub(crate) asset_catalog_revision: Option<ResourceAssetCatalogRevision>,
     assets: Vec<ResourceAssetChoice>,
     asset_search_keys: Vec<String>,
     error_key: Option<String>,
@@ -441,6 +457,7 @@ impl ResourceDialog {
         draft: ResourceDraft,
         label: String,
         assets: Vec<ResourceAssetChoice>,
+        asset_catalog_revision: Option<ResourceAssetCatalogRevision>,
         locale: AppUiLocale,
     ) -> Self {
         let localizer = Localizer::new(locale).expect("bundled UI catalogs must be valid");
@@ -450,6 +467,7 @@ impl ResourceDialog {
         let mut dialog = Self {
             id: WidgetId::new(),
             draft,
+            asset_catalog_revision,
             assets,
             asset_search_keys,
             error_key: None,
@@ -463,7 +481,7 @@ impl ResourceDialog {
                 .with_padding(0.0, 0.0),
             kind: Dropdown::new("", Vec::new()),
             input: TextInput::new(""),
-            choices: Dropdown::new("", Vec::new()),
+            choices: Dropdown::new("", Vec::new()).with_max_visible_items(8),
             file: Button::new(localizer.text("resource-browse-file")).on_click(Some(
                 ResourceEditorAction::Browse { id, folder: false }.action(),
             )),
@@ -499,7 +517,7 @@ impl ResourceDialog {
             .checked(self.draft.kind == kind)
         })
         .collect();
-        self.kind = Dropdown::new(
+        self.kind.set_model(
             self.localizer.text(self.draft.kind_message(self.draft.kind)),
             items,
         );
@@ -524,6 +542,11 @@ impl ResourceDialog {
                 .action()
             });
         }
+        self.rebuild_asset_choices();
+        self.layout(self.bounds);
+    }
+    fn rebuild_asset_choices(&mut self) {
+        let id = self.draft.id;
         let query = self.draft.search.to_lowercase();
         let items: Vec<_> = self
             .assets
@@ -541,6 +564,9 @@ impl ResourceDialog {
             .collect();
         if self.asset_mode() && !query.is_empty() && items.is_empty() {
             self.set_error("resource-no-assets-match");
+        } else if self.error_key.as_deref() == Some("resource-no-assets-match") {
+            self.error_key = None;
+            self.error.set_text(String::new());
         }
         let label =
             self.assets.iter().find(|asset| Some(asset.id) == self.draft.asset).map_or_else(
@@ -553,8 +579,18 @@ impl ResourceDialog {
                 },
                 |asset| asset.label.clone(),
             );
-        self.choices = Dropdown::new(label, items).with_max_visible_items(8);
-        self.layout(self.bounds);
+        self.choices.set_model(label, items);
+    }
+    /// Refresh only library presentation, retaining the draft and input interaction.
+    pub(crate) fn replace_asset_catalog(
+        &mut self,
+        revision: Option<ResourceAssetCatalogRevision>,
+        assets: Vec<ResourceAssetChoice>,
+    ) {
+        self.asset_search_keys = assets.iter().map(|asset| asset.label.to_lowercase()).collect();
+        self.assets = assets;
+        self.asset_catalog_revision = revision;
+        self.rebuild_asset_choices();
     }
     pub(crate) fn apply_update(&mut self, update: ResourceUpdate) {
         let replace_input = matches!(update, ResourceUpdate::Kind(_));
@@ -786,8 +822,13 @@ mod tests {
             uri: "https://example.test/original".to_owned(),
         });
         let draft_id = draft.id;
-        let mut dialog =
-            ResourceDialog::new(draft, "Resource".to_owned(), Vec::new(), AppUiLocale::EnUs);
+        let mut dialog = ResourceDialog::new(
+            draft,
+            "Resource".to_owned(),
+            Vec::new(),
+            None,
+            AppUiLocale::EnUs,
+        );
         dialog.layout(Rect::new(0.0, 0.0, 800.0, 600.0));
         let input_id = dialog.input.id();
         let area = dialog.surface.content_rect(dialog.card);
@@ -961,6 +1002,7 @@ mod tests {
             draft(reference),
             "Asset".to_owned(),
             Vec::new(),
+            None,
             AppUiLocale::EnUs,
         );
         assert_eq!(dialog.choices.label(), "Unavailable asset");
@@ -978,6 +1020,7 @@ mod tests {
             draft(reference.clone()),
             "Resource".to_owned(),
             Vec::new(),
+            None,
             AppUiLocale::EnUs,
         );
         dialog.layout(Rect::new(0.0, 0.0, 800.0, 600.0));
@@ -1069,7 +1112,7 @@ mod tests {
         for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
             let _guard = crate::app_ui::test_utils::theme_test_guard();
             let mut dialog =
-                ResourceDialog::new(draft.clone(), "LUT".to_owned(), Vec::new(), locale);
+                ResourceDialog::new(draft.clone(), "LUT".to_owned(), Vec::new(), None, locale);
             assert_eq!(dialog.kind.items().len(), 2);
             dialog.apply_update(ResourceUpdate::Kind(ResourceKind::Uri));
             assert_eq!(dialog.draft.kind, ResourceKind::Unbound);
@@ -1090,6 +1133,73 @@ mod tests {
     }
 
     #[test]
+    fn resource_asset_catalog_reconciles_search_and_retired_selection_in_place() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let selected = AssetId::new();
+        let original = ParameterResourceReference::ProjectAsset { asset_id: selected };
+        let mut dialog = ResourceDialog::new(
+            draft(original.clone()),
+            "Asset".to_owned(),
+            vec![ResourceAssetChoice { id: selected, label: "Old name".to_owned() }],
+            None,
+            AppUiLocale::EnUs,
+        );
+        dialog.input.set_text("FILM".to_owned());
+        dialog.apply_update(ResourceUpdate::Search("FILM".to_owned()));
+        assert_eq!(
+            dialog.error_key.as_deref(),
+            Some("resource-no-assets-match")
+        );
+        let input = dialog.input.id();
+        let choices = dialog.choices.id();
+        let added = AssetId::new();
+        dialog.replace_asset_catalog(
+            None,
+            vec![
+                ResourceAssetChoice { id: selected, label: "Film renamed".to_owned() },
+                ResourceAssetChoice { id: added, label: "Film new".to_owned() },
+            ],
+        );
+        assert_eq!(dialog.input.id(), input);
+        assert_eq!(dialog.choices.id(), choices);
+        assert_eq!(dialog.input.text(), "FILM");
+        assert_eq!(dialog.choices.items().len(), 2);
+        assert_eq!(dialog.choices.label(), "Film renamed");
+        assert!(dialog.error_key.is_none());
+        assert_eq!(dialog.draft.value().expect("retained value"), original);
+        dialog.replace_asset_catalog(
+            None,
+            vec![ResourceAssetChoice { id: added, label: "Film new".to_owned() }],
+        );
+        assert_eq!(dialog.choices.items().len(), 1);
+        assert_eq!(dialog.choices.label(), "Unavailable asset");
+        assert_eq!(
+            dialog.draft.confirmed_value(),
+            Ok(None),
+            "unchanged original stays a no-op"
+        );
+        let action = dialog.choices.items()[0].action().expect("new asset choice");
+        let Action::Custom { payload, .. } = action else {
+            panic!("resource action")
+        };
+        let ResourceEditorAction::Update { update: ResourceUpdate::Asset(asset), .. } =
+            serde_json::from_value(payload.clone()).expect("typed new asset action")
+        else {
+            panic!("asset selection")
+        };
+        assert_eq!(asset, added);
+        dialog.apply_update(ResourceUpdate::Asset(added));
+        assert_eq!(
+            dialog.draft.confirmed_value(),
+            Ok(Some(ParameterResourceReference::ProjectAsset {
+                asset_id: added
+            },))
+        );
+        assert_eq!(dialog.input.id(), input);
+        assert_eq!(dialog.choices.id(), choices);
+    }
+
+    #[test]
     fn resource_asset_search_has_localized_empty_results_without_losing_selection() {
         let _guard = crate::app_ui::test_utils::theme_test_guard();
         let selected = AssetId::new();
@@ -1107,6 +1217,7 @@ mod tests {
                     label: "Film · folder B/Shared.mov".to_owned(),
                 },
             ],
+            None,
             AppUiLocale::EnUs,
         );
         assert_eq!(dialog.choices.items().len(), 2);

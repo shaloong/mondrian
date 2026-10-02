@@ -1122,7 +1122,10 @@ impl AppUiHost {
         }
         // A live draft may defer rebuilding its widgets, but never defer
         // validation of the author owner it is allowed to edit.
-        self.root.cancel_stale_resource_draft(&self.app_state.borrow());
+        if let Err(error) = self.root.synchronize_resource_draft(&self.app_state.borrow()) {
+            tracing::warn!(%error, "failed to refresh resource asset catalog before input deferral");
+            self.ui_dirty.set(true);
+        }
         let stale_parameter_gesture = {
             let state = self.app_state.borrow();
             state.active_parameter_gesture.is_some() && !state.parameter_gesture_is_current()

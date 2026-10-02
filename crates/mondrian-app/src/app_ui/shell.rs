@@ -1045,6 +1045,45 @@ pub struct AppUiAppRoot {
     bounds: Rect,
 }
 
+fn resource_asset_catalog_revision(
+    state: &AppState,
+) -> Result<Option<crate::app_ui::resource_dialog::ResourceAssetCatalogRevision>> {
+    state
+        .asset_library_handle()
+        .map(|library| {
+            Ok(
+                crate::app_ui::resource_dialog::ResourceAssetCatalogRevision {
+                    library: std::sync::Arc::downgrade(&library),
+                    revision: library.database_revision()?,
+                },
+            )
+        })
+        .transpose()
+}
+
+fn resource_asset_choices(
+    state: &AppState,
+) -> Result<Vec<crate::app_ui::resource_dialog::ResourceAssetChoice>> {
+    let mut assets = state
+        .asset_library()
+        .map(|library| library.list_assets())
+        .transpose()?
+        .unwrap_or_default()
+        .into_iter()
+        .map(
+            |asset| crate::app_ui::resource_dialog::ResourceAssetChoice {
+                id: asset.id,
+                label: asset.file_path().map_or_else(
+                    || asset.name.clone(),
+                    |path| format!("{} · {}", asset.name, path.display()),
+                ),
+            },
+        )
+        .collect::<Vec<_>>();
+    assets.sort_by(|a, b| a.label.cmp(&b.label).then_with(|| a.id.cmp(&b.id)));
+    Ok(assets)
+}
+
 impl AppUiAppRoot {
     /// Route typed resource drafts before ordinary author actions.
     pub(crate) fn try_handle_resource_action(
@@ -1054,8 +1093,8 @@ impl AppUiAppRoot {
         platform: &dyn PlatformService,
     ) -> Result<crate::app_ui::resource_dialog::ResourceActionOutcome> {
         use crate::app_ui::resource_dialog::{
-            ResourceActionOutcome, ResourceAssetChoice, ResourceDialog, ResourceDraft,
-            ResourceEditorAction, RESOURCE_EDITOR,
+            ResourceActionOutcome, ResourceDialog, ResourceDraft, ResourceEditorAction,
+            RESOURCE_EDITOR,
         };
         let Action::Custom { namespace, name, payload } = action else {
             return Ok(ResourceActionOutcome::Unhandled);
@@ -1065,6 +1104,11 @@ impl AppUiAppRoot {
         }
         let event: ResourceEditorAction = serde_json::from_value(payload.clone())
             .map_err(|error| app_shell_action_error(name, error))?;
+        // A failed presentation read must not prevent editing or cancelling a
+        // local draft. Open and changed-asset Confirm still require fresh reads.
+        if let Err(error) = self.synchronize_resource_draft(state) {
+            tracing::warn!(%error, "failed to refresh resource asset catalog before draft event");
+        }
         let refreshed = matches!(
             &event,
             ResourceEditorAction::Open { .. } | ResourceEditorAction::Confirm { .. }
@@ -1080,21 +1124,6 @@ impl AppUiAppRoot {
             let mondrian_core::PropertyValue::Resource(reference) = &property.value else {
                 return Ok(ResourceActionOutcome::Handled(None));
             };
-            let mut assets = state
-                .asset_library()
-                .map(|library| library.list_assets())
-                .transpose()?
-                .unwrap_or_default()
-                .into_iter()
-                .map(|asset| ResourceAssetChoice {
-                    id: asset.id,
-                    label: asset.file_path().map_or_else(
-                        || asset.name.clone(),
-                        |path| format!("{} · {}", asset.name, path.display()),
-                    ),
-                })
-                .collect::<Vec<_>>();
-            assets.sort_by(|a, b| a.label.cmp(&b.label).then_with(|| a.id.cmp(&b.id)));
             let draft = ResourceDraft::new(
                 clip_id,
                 target,
@@ -1103,10 +1132,20 @@ impl AppUiAppRoot {
                 state.authoring_session_id(),
                 state.active_sequence_id(),
             );
+            let (catalog_revision, assets) =
+                if draft.allows_kind(crate::app_ui::resource_dialog::ResourceKind::ProjectAsset) {
+                    (
+                        resource_asset_catalog_revision(state)?,
+                        resource_asset_choices(state)?,
+                    )
+                } else {
+                    (None, Vec::new())
+                };
             self.modal = Some(ShellModal::Resource(Box::new(ResourceDialog::new(
                 draft,
                 property.label.clone(),
                 assets,
+                catalog_revision,
                 self.localizer.locale(),
             ))));
             self.layout(self.bounds);
@@ -1514,8 +1553,8 @@ impl AppUiAppRoot {
         self.title_bar.id()
     }
 
-    /// Cancel a resource draft as soon as its author owner ceases to apply.
-    pub(crate) fn cancel_stale_resource_draft(&mut self, state: &AppState) {
+    /// Validate the draft owner and reconcile changed library presentation before input deferral.
+    pub(crate) fn synchronize_resource_draft(&mut self, state: &AppState) -> Result<()> {
         if self
             .modal
             .as_ref()
@@ -1524,6 +1563,22 @@ impl AppUiAppRoot {
         {
             self.modal = None;
         }
+        let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_resource_mut) else {
+            return Ok(());
+        };
+        if !dialog
+            .draft
+            .allows_kind(crate::app_ui::resource_dialog::ResourceKind::ProjectAsset)
+        {
+            return Ok(());
+        }
+        let revision = resource_asset_catalog_revision(state)?;
+        if dialog.asset_catalog_revision != revision {
+            // Capture the revision before reading rows. A concurrent later commit
+            // then causes another refresh, rather than marking older rows current.
+            dialog.replace_asset_catalog(revision, resource_asset_choices(state)?);
+        }
+        Ok(())
     }
 
     /// Replace panel contents from a fresh model snapshot while preserving the
@@ -1683,11 +1738,8 @@ impl AppUiAppRoot {
             .refresh_for_app_state_with_shortcut_overrides(state, &preferences.shortcut_overrides);
         self.status_bar.sync_history(state.status_log());
         self.active_sequence = state.active_sequence().cloned();
-        if self.modal.as_ref().and_then(ShellModal::as_resource).is_some_and(|dialog| {
-            dialog.draft.session != state.authoring_session_id()
-                || dialog.draft.sequence != state.active_sequence_id()
-        }) {
-            self.modal = None;
+        if let Err(error) = self.synchronize_resource_draft(state) {
+            tracing::warn!(%error, "failed to refresh resource asset catalog");
         }
 
         self.project_color_environment = state.project_color_environment().clone();
@@ -5435,6 +5487,253 @@ mod tests {
             );
         }
         assert_eq!(router.focus_manager().focused_widget(), Some(background));
+    }
+
+    #[test]
+    fn resource_catalog_refreshes_during_ime_without_replacing_draft_controls() {
+        use crate::app_ui::action_queue::PendingUiActions;
+        use crate::app_ui::host::AppUiHost;
+        use crate::app_ui::resource_dialog::{
+            InspectorPropertyTarget, ResourceEditorAction, ResourceUpdate,
+        };
+        use mondrian_core::automation::PropertyDescriptor;
+        use mondrian_core::{ParameterResourceReference, PropertyValue, TimelineTime};
+        use mondrian_effects::{
+            instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
+            EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
+            EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
+            EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent, EffectType,
+        };
+        use mondrian_ui_core::{FocusManager, TreeWalker};
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(mondrian_timeline::Sequence::new("Catalog acceptance")));
+        let selected = state
+            .asset_library()
+            .expect("library")
+            .create_solid_color_asset(Some("Film selected"))
+            .expect("selected asset");
+        let other = state
+            .asset_library()
+            .expect("library")
+            .create_solid_color_asset(Some("Film other"))
+            .expect("other asset");
+        let kind = EffectType::Plugin("test.resource.live-catalog".to_owned());
+        let builder = EffectPluginDefinitionBuilder::new(
+            kind.key(),
+            "Live resource catalog",
+            EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            determinism: EffectDeterminism::Deterministic,
+            state_model: EffectStateModel::Stateless,
+            temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+            resource_lifetime: EffectResourceLifetime::Frame,
+            topology: EffectGraphTopology::LinearChain,
+        })
+        .with_branching_graph(|_, _, graph| {
+            graph.apply(EffectRenderOp::Sharpen { amount: 0.0 });
+        })
+        .property(
+            PropertyDescriptor::new(
+                "asset",
+                "Asset",
+                PropertyValue::Resource(ParameterResourceReference::ProjectAsset {
+                    asset_id: selected,
+                }),
+            )
+            .with_parameter_id(kind.parameter_id("asset").expect("parameter")),
+        );
+        register_effect_definition(builder.build()).expect("definition");
+        let effect = instantiate_effect_node(kind).expect("effect");
+        let target = InspectorPropertyTarget::Effect {
+            effect_id: effect.id,
+            parameter: effect.properties.property("asset").expect("resource").address(),
+        };
+        let mut clip = mondrian_timeline::Clip::new_basic_title(
+            "Title",
+            "Arial",
+            TimelineTime::ZERO,
+            TimelineTime::new(1, 1).expect("duration"),
+        )
+        .expect("clip");
+        let clip_id = clip.id;
+        clip.add_effect_node(effect);
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0]
+            .add_clip(clip)
+            .expect("add clip");
+        state.select_clip_by_id(clip_id).expect("select clip");
+        let preferences =
+            std::env::temp_dir().join(format!("catalog-{}.json", uuid::Uuid::new_v4()));
+        let mut host =
+            AppUiHost::new_with_preferences_path(state, AppUiPreferences::default(), preferences);
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let pending = PendingUiActions::default();
+        let platform = FakePlatform::default();
+        pending.push(ResourceEditorAction::Open { clip_id, target }.action());
+        host.drain_pending_actions(&pending, bounds, &platform);
+        let (draft_id, input, point) = {
+            let dialog =
+                host.root().modal.as_ref().and_then(ShellModal::as_resource).expect("dialog");
+            let input = dialog.child(2).expect("search input");
+            let point = (0..720)
+                .step_by(4)
+                .find_map(|y| {
+                    (0..1280).step_by(4).find_map(|x| {
+                        let point = Point::new(x as f32, y as f32);
+                        input.hit_test(point).then_some(point)
+                    })
+                })
+                .expect("input point");
+            (dialog.draft.id, input.id(), point)
+        };
+        let history = host.app_state().authoring_history().expect("history").diagnostics();
+        let mut router = EventRouter::new(host.active_root().id());
+        {
+            let mut tree = WidgetTreeView::new(host.active_root_mut());
+            let dispatch = |action| pending.push(action);
+            for event in [
+                UiEvent::MouseDown {
+                    position: point,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::MouseUp {
+                    position: point,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::TextInput("Film".to_owned()),
+                UiEvent::ImePreedit("候选".to_owned()),
+            ] {
+                router.route(event, &mut tree, &dispatch);
+            }
+        }
+        host.drain_pending_actions(&pending, bounds, &platform);
+        let choices = host
+            .root()
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .expect("dialog")
+            .child(3)
+            .expect("choices")
+            .id();
+        let added = {
+            let state = host.app_state();
+            let library = state.asset_library().expect("library");
+            library.rename_asset(selected, "Film renamed").expect("rename");
+            library.retire_assets(&[other]).expect("retire other");
+            library.create_solid_color_asset(Some("Film new")).expect("new asset")
+        };
+        host.mark_dirty();
+        host.refresh_if_dirty(bounds);
+        let dialog = host
+            .root()
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .expect("retained dialog");
+        assert_eq!(dialog.draft.id, draft_id);
+        assert_eq!(dialog.child(2).expect("search").id(), input);
+        assert_eq!(router.focus_manager().focused_widget(), Some(input));
+        assert!(dialog.is_composing(), "library refresh must preserve IME");
+        assert_eq!(dialog.child(3).expect("choices").id(), choices);
+        assert_eq!(
+            dialog.child(3).expect("choices").accessibility().expect("choice caption").name,
+            Some("Film renamed".to_owned()),
+            "live chooser must reflect authoritative asset rename"
+        );
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            history
+        );
+        {
+            let mut tree = WidgetTreeView::new(host.active_root_mut());
+            let dispatch = |action| pending.push(action);
+            for event in [
+                UiEvent::ImeCancel,
+                UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+                UiEvent::KeyDown { key: KeyCode::Space, modifiers: Modifiers::none() },
+                UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            ] {
+                router.route(event, &mut tree, &dispatch);
+            }
+        }
+        let actions = pending.take_all();
+        assert_eq!(
+            actions.len(),
+            1,
+            "keyboard selection emits one local draft update"
+        );
+        let Action::Custom { payload, .. } = &actions[0] else {
+            panic!("resource action")
+        };
+        let ResourceEditorAction::Update { id, update: ResourceUpdate::Asset(chosen) } =
+            serde_json::from_value(payload.clone()).expect("selection")
+        else {
+            panic!("asset update")
+        };
+        assert_eq!(id, draft_id);
+        assert_eq!(
+            chosen, added,
+            "fresh imported asset must be the first matching choice"
+        );
+        pending.push(actions[0].clone());
+        host.drain_pending_actions(&pending, bounds, &platform);
+        // An unchanged revision must not reset an open menu's keyboard row.
+        {
+            let mut tree = WidgetTreeView::new(host.active_root_mut());
+            let dispatch = |action| pending.push(action);
+            for key in [KeyCode::Space, KeyCode::Down] {
+                router.route(
+                    UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                    &mut tree,
+                    &dispatch,
+                );
+            }
+        }
+        host.mark_dirty();
+        host.refresh_if_dirty(bounds);
+        {
+            let mut tree = WidgetTreeView::new(host.active_root_mut());
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut tree,
+                &|action| pending.push(action),
+            );
+        }
+        let actions = pending.take_all();
+        assert_eq!(
+            actions.len(),
+            1,
+            "unchanged library must preserve the highlighted row"
+        );
+        let Action::Custom { payload, .. } = &actions[0] else {
+            panic!("resource action")
+        };
+        let ResourceEditorAction::Update { update: ResourceUpdate::Asset(chosen), .. } =
+            serde_json::from_value(payload.clone()).expect("selection")
+        else {
+            panic!("asset update")
+        };
+        assert_eq!(chosen, selected);
+        // Delayed selection of a retired row cannot author a new binding.
+        pending.push(
+            ResourceEditorAction::Update { id: draft_id, update: ResourceUpdate::Asset(other) }
+                .action(),
+        );
+        pending.push(ResourceEditorAction::Confirm { id: draft_id }.action());
+        host.drain_pending_actions(&pending, bounds, &platform);
+        assert!(host.root().modal.as_ref().and_then(ShellModal::as_resource).is_some());
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            history
+        );
     }
 
     #[test]
