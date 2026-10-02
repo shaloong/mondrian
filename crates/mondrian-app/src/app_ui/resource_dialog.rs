@@ -87,7 +87,11 @@ impl InspectorPropertyTarget {
             ),
             Self::Mask { mask_id, parameter } => (
                 parameter,
-                &model.masks.iter().find(|mask| mask.mask_id == *mask_id)?.properties,
+                &model
+                    .masks
+                    .iter()
+                    .find(|mask| mask.mask_id == *mask_id && !mask.locked)?
+                    .properties,
             ),
         };
         properties.iter().find(|property| property.address == *parameter)
@@ -348,6 +352,49 @@ impl ResourceDraft {
             return Err("resource-not-admitted");
         }
         Ok(value)
+    }
+    /// Validate against author authority without rebuilding Inspector curves.
+    pub(crate) fn matches_state(&self, state: &crate::app::AppState) -> bool {
+        if self.session != state.authoring_session_id()
+            || self.sequence != state.active_sequence_id()
+            || state
+                .primary_selected_clip()
+                .is_none_or(|selection| selection.clip_id != self.clip_id)
+        {
+            return false;
+        }
+        let Some(sequence) = state.active_sequence() else {
+            return false;
+        };
+        if sequence
+            .clip_track_location(self.clip_id)
+            .is_none_or(|location| location.is_locked)
+        {
+            return false;
+        }
+        let Some(clip) = sequence.find_clip(self.clip_id) else {
+            return false;
+        };
+        let matches = |bag: &mondrian_core::automation::PropertyBag, parameter| {
+            bag.property_by_address(parameter).is_some_and(|(_, property)| {
+                property.descriptor.schema == self.schema
+                    && matches!(property.static_value(), PropertyValue::Resource(reference) if reference == &self.original)
+            })
+        };
+        match &self.target {
+            InspectorPropertyTarget::Clip { parameter } => clip
+                .content
+                .basic_title()
+                .is_some_and(|title| matches(&title.property_bag(), parameter)),
+            InspectorPropertyTarget::Effect { effect_id, parameter } => clip
+                .effects
+                .iter()
+                .find(|effect| effect.id == *effect_id)
+                .is_some_and(|effect| matches(&effect.properties, parameter)),
+            InspectorPropertyTarget::Mask { mask_id, parameter } => clip
+                .mask(*mask_id)
+                .is_some_and(|mask| !mask.locked && matches(&mask.properties, parameter)),
+        }
     }
     pub(crate) fn matches_model(&self, model: &InspectorPanelModel) -> bool {
         self.target.property(self.clip_id, model).is_some_and(|property| {

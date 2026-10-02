@@ -2913,3 +2913,12 @@ maximized/fullscreen windows, active widget capture and the eyedropper do not
 enter this path. AppKit retains its native resize handling because winit does
 not support explicit drag-resize on macOS. Workspace minimum size remains a
 native window constraint; startup retains matching minimum and maximum sizes.
+
+Resource drafts validate their stable author owner before Host defers a full
+refresh for focused text, IME or pointer interactions. Validation resolves the
+current Session/Sequence, selected Clip, actual Track lock, property instance
+address, schema and original resource directly from author state without
+rebuilding Inspector curve projections. Removed/locked/switched owners cancel
+the modal immediately; valid focused drafts retain their widgets and IME.
+Each resource update and browse request uses the same current-author check, so
+a delayed event cannot open a picker or retain input against an invalid owner.

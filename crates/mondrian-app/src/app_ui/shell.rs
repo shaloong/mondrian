@@ -1120,6 +1120,7 @@ impl AppUiAppRoot {
         }
         if dialog.draft.session != state.authoring_session_id()
             || dialog.draft.sequence != state.active_sequence_id()
+            || !dialog.draft.matches_state(state)
             || !dialog.draft.matches_model(model)
         {
             self.modal = None;
@@ -1511,6 +1512,18 @@ impl AppUiAppRoot {
     #[cfg(test)]
     pub(crate) fn title_bar_id_for_test(&self) -> WidgetId {
         self.title_bar.id()
+    }
+
+    /// Cancel a resource draft as soon as its author owner ceases to apply.
+    pub(crate) fn cancel_stale_resource_draft(&mut self, state: &AppState) {
+        if self
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .is_some_and(|dialog| !dialog.draft.matches_state(state))
+        {
+            self.modal = None;
+        }
     }
 
     /// Replace panel contents from a fresh model snapshot while preserving the

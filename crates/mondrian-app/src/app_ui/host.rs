@@ -1118,6 +1118,9 @@ impl AppUiHost {
             self.sync_mode_from_app_state(bounds);
             return;
         }
+        // A live draft may defer rebuilding its widgets, but never defer
+        // validation of the author owner it is allowed to edit.
+        self.root.cancel_stale_resource_draft(&self.app_state.borrow());
         let next_mode = mode_for_app_state(&self.app_state.borrow());
         if next_mode == self.mode && widget_tree_has_transient_interaction(self.active_root()) {
             self.ui_dirty.set(true);
@@ -5038,6 +5041,166 @@ mod tests {
 
         assert_eq!(commands, AppUiShellCommands::default());
         assert!(host.root().dock().ratio() > 0.0);
+    }
+
+    #[test]
+    fn resource_modal_cancels_invalid_owner_even_during_ime() {
+        use crate::app::ui_actions::{
+            track_set_author_control_action, visual_effect_remove_action, TrackAuthorControl,
+            TrackSetAuthorControlPayload, VisualEffectTargetPayload,
+        };
+        use crate::app_ui::resource_dialog::{InspectorPropertyTarget, ResourceEditorAction};
+        use mondrian_effects::EffectType;
+        use mondrian_ui_core::FocusManager;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        for (composing, change) in [(false, 0), (true, 0), (true, 1), (true, 2)] {
+            let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+            let mut state = workspace_app_state_with_timed_solid();
+            let sequence = state.active_sequence_mut_uncommitted().expect("Sequence");
+            let track_id = sequence.video_tracks[0].id;
+            let clip = &mut sequence.video_tracks[0].clips[0];
+            let clip_id = clip.id;
+            let mut effect =
+                mondrian_effects::instantiate_effect_node(EffectType::Lut3D).expect("LUT");
+            effect
+                .set_static_value_by_parameter(
+                    &EffectType::Lut3D.parameter_id("path").expect("path"),
+                    mondrian_core::PropertyValue::Resource(
+                        mondrian_core::ParameterResourceReference::ExternalFile {
+                            path: std::path::PathBuf::from("original.cube"),
+                        },
+                    ),
+                )
+                .expect("fixture resource");
+            let effect_id = effect.id;
+            let target = InspectorPropertyTarget::Effect {
+                effect_id: effect.id,
+                parameter: effect
+                    .properties
+                    .property(&EffectType::Lut3D.property_path("path"))
+                    .expect("resource")
+                    .address(),
+            };
+            clip.add_effect_node(effect);
+            state.select_clip_by_id(clip_id).expect("select owner");
+            let mut host = AppUiHost::new_with_preferences_path(
+                state,
+                AppUiPreferences::default(),
+                temp_preferences_path("resource-owner-lock"),
+            );
+            TreeWalker::layout(host.active_root_mut(), bounds);
+            let pending = PendingUiActions::default();
+            let history_before =
+                host.app_state().authoring_history().expect("history").diagnostics();
+            pending.push(ResourceEditorAction::Open { clip_id, target }.action());
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            assert!(
+                host.root().keyboard_focus_scope().is_some(),
+                "actual resource modal opened"
+            );
+            assert!(
+                host.app_state()
+                    .authoring_history()
+                    .expect("history")
+                    .diagnostics()
+                    .undo_entries
+                    == history_before.undo_entries,
+                "opening is not an author edit"
+            );
+            if composing {
+                use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+                use mondrian_ui_events::EventRouter;
+                let scope = host.root().keyboard_focus_scope().expect("modal");
+                let (input_id, point) = {
+                    let tree = WidgetTreeView::new(host.active_root_mut());
+                    let input = tree.get(scope).expect("modal").child(2).expect("resource input");
+                    let point = (0..720)
+                        .step_by(4)
+                        .find_map(|y| {
+                            (0..1280).step_by(4).find_map(|x| {
+                                let point = Point::new(x as f32, y as f32);
+                                input.hit_test(point).then_some(point)
+                            })
+                        })
+                        .expect("visible input");
+                    (input.id(), point)
+                };
+                let mut router = EventRouter::new(host.active_root().id());
+                let dispatch = |action| pending.push(action);
+                let mut tree = WidgetTreeView::new(host.active_root_mut());
+                for event in [
+                    UiEvent::MouseDown {
+                        position: point,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    UiEvent::MouseUp {
+                        position: point,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    UiEvent::ImePreedit("输入中".to_owned()),
+                ] {
+                    router.route(event, &mut tree, &dispatch);
+                }
+                assert_eq!(router.focus_manager().focused_widget(), Some(input_id));
+                assert!(
+                    widget_tree_has_transient_interaction(host.active_root()),
+                    "actual focused composition defers full refresh"
+                );
+            }
+            let modal = host.root().keyboard_focus_scope();
+            host.mark_dirty();
+            host.refresh_if_dirty(bounds);
+            assert_eq!(
+                host.root().keyboard_focus_scope(),
+                modal,
+                "valid drafts survive refresh"
+            );
+            pending.push(match change {
+                0 => track_set_author_control_action(TrackSetAuthorControlPayload {
+                    track_id,
+                    control: TrackAuthorControl::Lock,
+                    enabled: true,
+                }),
+                1 => visual_effect_remove_action(VisualEffectTargetPayload { clip_id, effect_id }),
+                _ => Action::DeselectAll,
+            });
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            if change == 0 {
+                assert!(
+                    host.app_state().active_sequence().expect("Sequence").video_tracks[0].is_locked
+                );
+            } else if change == 1 {
+                assert!(host
+                    .app_state()
+                    .active_sequence()
+                    .expect("Sequence")
+                    .find_clip(clip_id)
+                    .expect("clip")
+                    .effects
+                    .iter()
+                    .all(|effect| effect.id != effect_id));
+            } else {
+                assert!(host.app_state().primary_selected_clip().is_none());
+            }
+            assert!(
+                host.root().keyboard_focus_scope().is_none(),
+                "actual Host refresh must cancel a draft whose author owner is now locked"
+            );
+            if change != 2 {
+                assert!(host.app_state.borrow_mut().undo_timeline().expect("undo owner mutation"));
+            }
+            assert!(
+                host.app_state()
+                    .authoring_history()
+                    .expect("history")
+                    .diagnostics()
+                    .undo_entries
+                    == history_before.undo_entries,
+                "resource draft added no history"
+            );
+        }
     }
 
     #[test]
