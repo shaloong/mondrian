@@ -36,7 +36,7 @@ use super::{
     PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES,
 };
 #[cfg(mondrian_ffmpeg_7_1)]
-use super::{FfmpegAvD3D12VaFrame, FfmpegAvD3D12VaSyncContext};
+use crate::d3d12va_abi::{AvD3D12VaFrame, AvD3D12VaSyncContext};
 use crate::decoder::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
     DecodedVideoMatrix, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
@@ -606,20 +606,22 @@ fn synthetic_d3d12_frame(
     // The fake COM pointers are only checked for non-null and never called.
     unsafe {
         let raw = frame.as_mut_ptr();
-        let descriptor = ffmpeg::ffi::av_buffer_alloc(std::mem::size_of::<FfmpegAvD3D12VaFrame>());
+        let descriptor = ffmpeg::ffi::av_buffer_alloc(std::mem::size_of::<AvD3D12VaFrame>());
         assert!(
             !descriptor.is_null(),
             "test D3D12 descriptor allocation must succeed"
         );
-        let native = (*descriptor).data.cast::<FfmpegAvD3D12VaFrame>();
-        native.write(FfmpegAvD3D12VaFrame {
+        let native = (*descriptor).data.cast::<AvD3D12VaFrame>();
+        native.write(AvD3D12VaFrame {
             texture: std::ptr::NonNull::<u8>::dangling().as_ptr().cast::<c_void>(),
+            #[cfg(mondrian_ffmpeg_d3d12va_frame_v2)]
             subresource_index: 0,
-            sync_ctx: FfmpegAvD3D12VaSyncContext {
+            sync_ctx: AvD3D12VaSyncContext {
                 fence: std::ptr::NonNull::<u16>::dangling().as_ptr().cast::<c_void>(),
                 event: std::ptr::null_mut(),
                 fence_value: 9,
             },
+            #[cfg(mondrian_ffmpeg_d3d12va_frame_v2)]
             flags: 0,
         });
         (*raw).buf[0] = descriptor;
@@ -2345,7 +2347,7 @@ fn ffmpeg_native_resource_retains_d3d11_surface_buffer_and_abi_view() {
     assert_eq!(view.array_slice(), 3);
 }
 
-#[cfg(mondrian_ffmpeg_7_1)]
+#[cfg(all(mondrian_ffmpeg_7_1, target_pointer_width = "64"))]
 #[test]
 fn ffmpeg_native_resource_retains_d3d12_resource_and_fence_abi() {
     let mut frame = ffmpeg::util::frame::video::Video::empty();
@@ -2354,28 +2356,29 @@ fn ffmpeg_native_resource_retains_d3d12_resource_and_fence_abi() {
     frame.set_height(2160);
     let texture = std::ptr::NonNull::<u8>::dangling().as_ptr().cast::<c_void>();
     let fence = std::ptr::NonNull::<u16>::dangling().as_ptr().cast::<c_void>();
-    let native = Box::new(FfmpegAvD3D12VaFrame {
-        texture,
-        subresource_index: 0,
-        sync_ctx: FfmpegAvD3D12VaSyncContext {
-            fence,
-            event: std::ptr::null_mut(),
-            fence_value: 42,
-        },
-        flags: 0,
-    });
-    // SAFETY: the synthetic native descriptor remains alive until after
-    // every parsed view is consumed. The AVBufferRef only exercises the
-    // retained AVFrame ownership path and no COM pointer is dereferenced.
+    // Header-defined 64-bit words, deliberately independent of the Rust mirror.
+    // The event must differ from the fence so a one-word ABI shift cannot pass.
+    let event = 0xbe4_u64;
+    #[cfg(not(mondrian_ffmpeg_d3d12va_frame_v2))]
+    let descriptor = [texture as u64, fence as u64, event, 42];
+    #[cfg(mondrian_ffmpeg_d3d12va_frame_v2)]
+    let descriptor = [texture as u64, 0, fence as u64, event, 42, 0];
+    // SAFETY: the AVBufferRef owns the entire native descriptor and AVFrame
+    // clones retain that buffer. Fake pointers are inspected but never invoked.
     let source_buffer = unsafe {
         let raw = frame.as_mut_ptr();
-        let buffer = ffmpeg::ffi::av_buffer_alloc(1);
+        let buffer = ffmpeg::ffi::av_buffer_alloc(std::mem::size_of_val(&descriptor));
         assert!(
             !buffer.is_null(),
             "test AVBufferRef allocation must succeed"
         );
         (*raw).buf[0] = buffer;
-        (*raw).data[0] = (&*native as *const FfmpegAvD3D12VaFrame).cast_mut().cast();
+        std::ptr::copy_nonoverlapping(
+            descriptor.as_ptr().cast::<u8>(),
+            (*buffer).data,
+            std::mem::size_of_val(&descriptor),
+        );
+        (*raw).data[0] = (*buffer).data;
         buffer
     };
     // SAFETY: source_buffer remains owned by frame.
@@ -2401,7 +2404,6 @@ fn ffmpeg_native_resource_retains_d3d12_resource_and_fence_abi() {
     assert_eq!(view.texture_ptr(), texture);
     assert_eq!(view.fence_ptr(), fence);
     assert_eq!(view.fence_value(), 42);
-    drop(native);
 }
 
 #[test]

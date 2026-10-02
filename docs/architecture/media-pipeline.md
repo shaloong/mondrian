@@ -4232,3 +4232,15 @@ CUDA handle validation, Vulkan allocation/adoption, and the device-to-device
 plane copy; this work must not be recorded as source-contract validation or as
 a zero-cost bridge. A generated fixture proves this software route and timing
 only, not original-native-media qualification.
+
+### D3D12VA descriptor ABI authority
+
+Preview decode and resident encode share the private `d3d12va_abi` descriptor.
+The installed `hwcontext_d3d12va.h` selects whether texture-array fields exist;
+libavcodec major versions cannot determine this layout. On 64-bit original
+FFmpeg 8.0 headers the descriptor is 32 bytes with `sync_ctx` at offset 8;
+headers with texture-array fields use 48 bytes and offset 16. Compile-time
+size and offset assertions cover both layouts. AVFrame/AVBufferRef ownership
+continues to retain resources and fences; no native GPU import is bypassed.
+A mismatched offset would read a Win32 completion event as an ID3D12Fence,
+so decode and encode must never declare independent copies of this ABI.

@@ -319,7 +319,7 @@ try {
             throw "Complete Golden pass $index exceeded its external deadline."
         }
         if (-not $processResult.terminal_report_observed) {
-            throw "Complete Golden pass $index exited without a terminal report."
+            throw "Complete Golden pass $index exited without a terminal report (exit code $($processResult.exit_code), elapsed $($processResult.elapsed_ms) ms; log: $logPath)."
         }
 
         $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json

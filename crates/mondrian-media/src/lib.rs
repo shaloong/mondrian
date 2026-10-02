@@ -23,6 +23,8 @@ mod audio_output;
 mod audio_playback;
 pub mod audio_source;
 mod camera_raw;
+#[cfg(mondrian_ffmpeg_7_1)]
+mod d3d12va_abi;
 pub mod decoder;
 mod ffmpeg_command;
 mod ffmpeg_runtime;
