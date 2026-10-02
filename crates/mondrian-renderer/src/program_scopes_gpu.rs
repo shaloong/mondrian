@@ -131,6 +131,11 @@ pub struct GpuProgramScopesBufferLayout {
     pub waveform_offset: u32,
     /// First 64x64 vectorscope counter.
     pub vectorscope_offset: u32,
+    /// Number of pixels with non-finite RGB. Non-zero invalidates all plots.
+    pub invalid_pixel_count_offset: u32,
+    /// Earliest invalid RGB sample, encoded as `u32::MAX - (pixel * 3 + channel)`.
+    /// Zero means valid; pixel is row-major and channel is R=0, G=1, B=2.
+    pub first_invalid_sample_offset: u32,
     /// Total u32 counter elements in the buffer.
     pub counter_count: u32,
 }
@@ -143,11 +148,14 @@ impl GpuProgramScopesBufferLayout {
         let waveform_offset = histogram_offset + request.bins * 4;
         let vectorscope_offset =
             waveform_offset + request.waveform_width * request.bins * request.waveform_channels();
+        let invalid_pixel_count_offset = vectorscope_offset + VECTOR_GRID * VECTOR_GRID;
         Self {
             histogram_offset,
             waveform_offset,
             vectorscope_offset,
-            counter_count: vectorscope_offset + VECTOR_GRID * VECTOR_GRID,
+            invalid_pixel_count_offset,
+            first_invalid_sample_offset: invalid_pixel_count_offset + 1,
+            counter_count: invalid_pixel_count_offset + 2,
         }
     }
 
@@ -251,6 +259,9 @@ impl GpuProgramScopesRuntime {
     ///
     /// Callers represent hidden-panel behavior by not calling this method; the
     /// runtime performs no allocation, clear, upload, or dispatch on its own.
+    /// Success accepts commands, not completed sample validity. Non-finite RGB
+    /// invalidates all three plots on-device: a red cross replaces densities.
+    /// GPU status records the first invalid sample without a normal CPU readback.
     pub fn record(
         &mut self,
         device: &wgpu::Device,
@@ -261,12 +272,7 @@ impl GpuProgramScopesRuntime {
         input_height: u32,
         request: GpuProgramScopesRequest,
     ) -> Result<GpuProgramScopesRecord, GpuProgramScopesError> {
-        if input_width == 0 || input_height == 0 {
-            return Err(GpuProgramScopesError::InvalidDimensions {
-                width: input_width,
-                height: input_height,
-            });
-        }
+        let sample_count = scope_sample_count(input_width, input_height)?;
         let colorimetry = ProgramSignalColorimetry::for_color_space(request.signal_color_space)
             .map_err(GpuProgramScopesError::UnsupportedSignal)?;
         self.prepare_backend(device, request.waveform_mode);
@@ -304,12 +310,12 @@ impl GpuProgramScopesRuntime {
             vectorscope_offset: resources.layout.vectorscope_offset,
             kr: colorimetry.kr(),
             kb: colorimetry.kb(),
-            sample_count: input_width.saturating_mul(input_height) as f32,
+            sample_count: sample_count as f32,
             max_column_samples: max_column_samples as f32,
             scale_kind: u32::from(request.scale.maximum_nits().is_some()),
             transfer_kind: scope_transfer_kind(request.signal_color_space),
             scale_max_nits: request.scale.maximum_nits().unwrap_or(100) as f32,
-            _padding: 0,
+            validation_offset: resources.layout.invalid_pixel_count_offset,
         };
         // The resource key fixes every request-derived uniform. Only input
         // dimensions can change while these resources remain in use.
@@ -402,8 +408,8 @@ impl GpuProgramScopesRuntime {
 /// Failures at the renderer-owned GPU scopes boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum GpuProgramScopesError {
-    /// Source dimensions must describe a real Program Output texture.
-    #[error("GPU Program Output scopes require non-zero dimensions, got {width}x{height}")]
+    /// Source dimensions must describe a non-empty, u32-addressable RGB sample extent.
+    #[error("GPU Program Output scopes require non-zero, u32-addressable RGB dimensions, got {width}x{height}")]
     InvalidDimensions { width: u32, height: u32 },
     /// The requested identity is not an encoded signal color space.
     #[error("unsupported GPU Program Output scope signal: {0}")]
@@ -411,6 +417,13 @@ pub enum GpuProgramScopesError {
     /// Retained runtime initialization failed unexpectedly.
     #[error("GPU Program Output scopes runtime entered an invalid internal state")]
     InternalState,
+}
+
+fn scope_sample_count(width: u32, height: u32) -> Result<u32, GpuProgramScopesError> {
+    width
+        .checked_mul(height)
+        .filter(|&pixels| pixels != 0 && pixels.checked_mul(3).is_some())
+        .ok_or(GpuProgramScopesError::InvalidDimensions { width, height })
 }
 
 #[repr(C)]
@@ -431,7 +444,7 @@ struct ScopesUniforms {
     scale_kind: u32,
     transfer_kind: u32,
     scale_max_nits: f32,
-    _padding: u32,
+    validation_offset: u32,
 }
 
 fn scope_transfer_kind(color_space: ColorSpace) -> u32 {
@@ -554,7 +567,13 @@ fn create_display_texture(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | if cfg!(test) {
+                wgpu::TextureUsages::COPY_SRC
+            } else {
+                wgpu::TextureUsages::empty()
+            },
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -597,7 +616,14 @@ impl ScopesPipelines {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("program-scopes-display-layout"),
                 entries: &[
-                    storage_buffer_layout_entry(0),
+                    wgpu::BindGroupLayoutEntry {
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        ..storage_buffer_layout_entry(0)
+                    },
                     uniform_buffer_layout_entry(1),
                     storage_texture_layout_entry(2),
                     storage_texture_layout_entry(3),
@@ -879,7 +905,7 @@ struct Uniforms {
     scale_kind: u32,
     transfer_kind: u32,
     scale_max_nits: f32,
-    _padding: u32,
+    validation_offset: u32,
 };
 
 @group(0) @binding(0) var source: texture_2d<f32>;
@@ -1009,7 +1035,14 @@ fn aggregate(gid: vec3<u32>, rgb_waveform: bool) {
             continue;
         }
         let rgb = textureLoad(source, vec2<i32>(i32(x), i32(gid.y)), 0).rgb;
-        if any(rgb != rgb) {
+        // WGSL permits finite-math assumptions; float self-comparison can be
+        // optimized away. IEEE exponent bits reject both NaN and infinity.
+        let non_finite = (bitcast<vec3<u32>>(rgb) & vec3<u32>(0x7f800000u)) == vec3<u32>(0x7f800000u);
+        if any(non_finite) {
+            let channel = select(select(2u, 1u, non_finite.g), 0u, non_finite.r);
+            let sample_key = (gid.y * uniforms.input_width + x) * 3u + channel;
+            atomicAdd(&counts[uniforms.validation_offset], 1u);
+            atomicMax(&counts[uniforms.validation_offset + 1u], 0xffffffffu - sample_key);
             continue;
         }
         let y = signal_luma(rgb);
@@ -1115,6 +1148,7 @@ fn main_rgb(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+// Aggregation and reduction finish before this immutable display input is read.
 const DISPLAY_SHADER: &str = r#"
 struct Uniforms {
     input_width: u32,
@@ -1132,10 +1166,10 @@ struct Uniforms {
     scale_kind: u32,
     transfer_kind: u32,
     scale_max_nits: f32,
-    _padding: u32,
+    validation_offset: u32,
 };
 
-@group(0) @binding(0) var<storage, read_write> counts: array<atomic<u32>>;
+@group(0) @binding(0) var<storage, read> counts: array<u32>;
 @group(0) @binding(1) var<uniform> uniforms: Uniforms;
 @group(0) @binding(2) var histogram_out: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(3) var waveform_out: texture_storage_2d<rgba8unorm, write>;
@@ -1147,11 +1181,25 @@ fn log_density(count: u32, maximum: f32) -> f32 {
 
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if counts[uniforms.validation_offset] != 0u {
+        var extent = vec2<u32>(256u, 256u);
+        if gid.z == 0u { extent = vec2<u32>(uniforms.bins, 128u); }
+        if gid.z == 1u { extent = vec2<u32>(uniforms.waveform_width, uniforms.bins); }
+        if any(gid.xy >= extent) { return; }
+        let uv = (vec2<f32>(gid.xy) + vec2<f32>(0.5)) / vec2<f32>(extent);
+        let stroke = 2.0 / f32(min(extent.x, extent.y));
+        let cross = abs(uv.x - uv.y) < stroke || abs(uv.x + uv.y - 1.0) < stroke;
+        let color = vec4<f32>(select(vec3<f32>(0.025), vec3<f32>(0.8, 0.06, 0.06), cross), 1.0);
+        if gid.z == 0u { textureStore(histogram_out, vec2<i32>(gid.xy), color); }
+        else if gid.z == 1u { textureStore(waveform_out, vec2<i32>(gid.xy), color); }
+        else { textureStore(vectorscope_out, vec2<i32>(gid.xy), color); }
+        return;
+    }
     if gid.z == 0u {
         if gid.x >= uniforms.bins || gid.y >= 128u { return; }
-        let r = log_density(atomicLoad(&counts[uniforms.histogram_offset + gid.x]), uniforms.sample_count);
-        let g = log_density(atomicLoad(&counts[uniforms.histogram_offset + uniforms.bins + gid.x]), uniforms.sample_count);
-        let b = log_density(atomicLoad(&counts[uniforms.histogram_offset + 2u * uniforms.bins + gid.x]), uniforms.sample_count);
+        let r = log_density(counts[uniforms.histogram_offset + gid.x], uniforms.sample_count);
+        let g = log_density(counts[uniforms.histogram_offset + uniforms.bins + gid.x], uniforms.sample_count);
+        let b = log_density(counts[uniforms.histogram_offset + 2u * uniforms.bins + gid.x], uniforms.sample_count);
         let threshold = 1.0 - (f32(gid.y) + 0.5) / 128.0;
         textureStore(histogram_out, vec2<i32>(gid.xy), vec4<f32>(select(0.0, 1.0, r >= threshold), select(0.0, 1.0, g >= threshold), select(0.0, 1.0, b >= threshold), 1.0));
         return;
@@ -1161,20 +1209,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let bin = uniforms.bins - 1u - gid.y;
         let base = uniforms.waveform_offset + gid.x * uniforms.bins + bin;
         if uniforms.waveform_channels == 1u {
-            let d = log_density(atomicLoad(&counts[base]), uniforms.max_column_samples);
+            let d = log_density(counts[base], uniforms.max_column_samples);
             textureStore(waveform_out, vec2<i32>(gid.xy), vec4<f32>(d, d, d, 1.0));
         } else {
             let plane = uniforms.waveform_width * uniforms.bins;
-            let r = log_density(atomicLoad(&counts[base]), uniforms.max_column_samples);
-            let g = log_density(atomicLoad(&counts[base + plane]), uniforms.max_column_samples);
-            let b = log_density(atomicLoad(&counts[base + 2u * plane]), uniforms.max_column_samples);
+            let r = log_density(counts[base], uniforms.max_column_samples);
+            let g = log_density(counts[base + plane], uniforms.max_column_samples);
+            let b = log_density(counts[base + 2u * plane], uniforms.max_column_samples);
             textureStore(waveform_out, vec2<i32>(gid.xy), vec4<f32>(r, g, b, 1.0));
         }
         return;
     }
     if gid.x >= 256u || gid.y >= 256u { return; }
     let cell = (gid.y / 4u) * 64u + gid.x / 4u;
-    let d = log_density(atomicLoad(&counts[uniforms.vectorscope_offset + cell]), uniforms.sample_count);
+    let d = log_density(counts[uniforms.vectorscope_offset + cell], uniforms.sample_count);
     let center = gid.x == 127u || gid.x == 128u || gid.y == 127u || gid.y == 128u;
     let guide = select(0.0, 0.12, center);
     textureStore(vectorscope_out, vec2<i32>(gid.xy), vec4<f32>(guide + d * 0.25, guide + d, guide + d * 0.55, 1.0));
@@ -1199,7 +1247,15 @@ mod tests {
         assert_eq!(layout.histogram_offset, 8);
         assert_eq!(layout.waveform_offset, 8 + 4 * 256);
         assert_eq!(layout.vectorscope_offset, 8 + 4 * 256 + 3 * 512 * 256);
-        assert_eq!(layout.counter_count, layout.vectorscope_offset + 64 * 64);
+        assert_eq!(
+            layout.invalid_pixel_count_offset,
+            layout.vectorscope_offset + 64 * 64
+        );
+        assert_eq!(
+            layout.first_invalid_sample_offset,
+            layout.invalid_pixel_count_offset + 1
+        );
+        assert_eq!(layout.counter_count, layout.invalid_pixel_count_offset + 2);
         assert!(layout.byte_size() < 2 * 1024 * 1024);
     }
 
@@ -1320,6 +1376,10 @@ mod tests {
         context.queue.submit(std::iter::once(encoder.finish()));
         let bytes = map_test_readback(&context.device, &readback);
         let actual = bytemuck::cast_slice::<u8, u32>(&bytes);
+        assert_eq!(
+            &actual[record.buffer_layout.invalid_pixel_count_offset as usize..],
+            &[0, 0]
+        );
         let cpu = compute_program_color_scopes_rgba8_with_scale(
             &pixels,
             2,
@@ -1353,7 +1413,13 @@ mod tests {
             actual[waveform..vectorscope].iter().copied().sum::<u32>(),
             4
         );
-        assert_eq!(actual[vectorscope..].iter().copied().sum::<u32>(), 4);
+        assert_eq!(
+            actual[vectorscope..record.buffer_layout.invalid_pixel_count_offset as usize]
+                .iter()
+                .copied()
+                .sum::<u32>(),
+            4
+        );
         assert_eq!(
             prepared_pipeline,
             runtime.prepared_pipeline(&context.device, WaveformMode::Luma)
@@ -1567,6 +1633,10 @@ mod tests {
             context.queue.submit(std::iter::once(encoder.finish()));
             let bytes = map_test_readback(&context.device, &readback);
             let actual = bytemuck::cast_slice::<u8, u32>(&bytes);
+            assert_eq!(
+                &actual[record.buffer_layout.invalid_pixel_count_offset as usize..],
+                &[0, 0]
+            );
             let cpu = compute_program_color_scopes_rgba8_with_scale(
                 &pixels,
                 WIDTH,
@@ -1618,7 +1688,7 @@ mod tests {
                 expected_vectorscope[y * 64 + x] = sample.weight;
             }
             assert_eq!(
-                &actual[vectorscope..],
+                &actual[vectorscope..record.buffer_layout.invalid_pixel_count_offset as usize],
                 expected_vectorscope,
                 "{signal_color_space:?} {mode:?} width={waveform_width}"
             );
@@ -1714,6 +1784,10 @@ mod tests {
         context.queue.submit(std::iter::once(encoder.finish()));
         let bytes = map_test_readback(&context.device, &readback);
         let actual = bytemuck::cast_slice::<u8, u32>(&bytes);
+        assert_eq!(
+            &actual[record.buffer_layout.invalid_pixel_count_offset as usize..],
+            &[0, 0]
+        );
         let cpu = compute_program_color_scopes_rgba_f32(
             &pixels,
             width,
@@ -1766,8 +1840,272 @@ mod tests {
             let y = ((sample.v + 0.5) * 64.0).floor() as usize;
             expected_vectorscope[y * 64 + x] = sample.weight;
         }
-        assert_eq!(&actual[vectorscope..], expected_vectorscope.as_slice());
-        assert_eq!(actual[vectorscope..].iter().copied().sum::<u32>(), width);
+        assert_eq!(
+            &actual[vectorscope..record.buffer_layout.invalid_pixel_count_offset as usize],
+            expected_vectorscope.as_slice()
+        );
+        assert_eq!(
+            actual[vectorscope..record.buffer_layout.invalid_pixel_count_offset as usize]
+                .iter()
+                .copied()
+                .sum::<u32>(),
+            width
+        );
+    }
+
+    #[test]
+    fn scope_dimensions_preserve_nonzero_invalid_sample_encoding() {
+        for (width, height) in [(0, 1), (1, 0), (u32::MAX, 2), (u32::MAX / 3 + 1, 1)] {
+            assert!(matches!(
+                scope_sample_count(width, height),
+                Err(GpuProgramScopesError::InvalidDimensions { .. })
+            ));
+        }
+        assert_eq!(scope_sample_count(u32::MAX / 3, 1).unwrap(), u32::MAX / 3);
+    }
+
+    #[tokio::test]
+    async fn gpu_nonfinite_rgb_invalidates_all_plots_and_recovers_without_cpu_feedback() {
+        let policy = crate::GpuColorQualificationExecutionPolicy::from_environment()
+            .expect("GPU scopes qualification policy");
+        let Some(context) = policy
+            .admit_adapter("gpu-scopes-nonfinite", GpuContext::new().await)
+            .expect("GPU scopes adapter admission")
+        else {
+            eprintln!("skipping diagnostic GPU scopes test: no adapter available");
+            return;
+        };
+        const WIDTH: u32 = 35;
+        const HEIGHT: u32 = 33;
+        for subgroups in [false, true] {
+            if subgroups && !context.adapter.features().contains(wgpu::Features::SUBGROUP) {
+                continue;
+            }
+            let features = if subgroups {
+                wgpu::Features::SUBGROUP
+            } else {
+                wgpu::Features::empty()
+            };
+            let (device, queue) = context
+                .adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    required_features: features,
+                    ..Default::default()
+                })
+                .await
+                .expect("scope aggregation device");
+            for format in [
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::TextureFormat::Rgba32Float,
+            ] {
+                for mode in [WaveformMode::Luma, WaveformMode::RgbParade] {
+                    let mut runtime = GpuProgramScopesRuntime::default();
+                    let request = GpuProgramScopesRequest::new(ColorSpace::Rec709, mode, 16, 64)
+                        .expect("scope request");
+                    let cases: &[&[(usize, usize, f32)]] = &[
+                        &[],
+                        &[(0, 0, f32::NAN)],
+                        &[(34, 1, f32::NAN)],
+                        &[(1154, 2, f32::NAN)],
+                        &[(35, 0, f32::INFINITY)],
+                        &[(65, 2, f32::NEG_INFINITY)],
+                        &[
+                            (100, 2, f32::INFINITY),
+                            (2, 1, f32::NAN),
+                            (2, 0, f32::NEG_INFINITY),
+                        ],
+                        &[(0, 3, f32::NAN)],
+                        &[],
+                    ];
+                    for (case, edits) in cases.iter().enumerate() {
+                        let mut pixels = vec![[0.25, 0.5, 0.75, 1.0]; (WIDTH * HEIGHT) as usize];
+                        pixels[0][3] = 0.0;
+                        pixels[1154] = [-0.25, 1.5, 0.5, 1.0];
+                        for &(pixel, channel, value) in *edits {
+                            pixels[pixel][channel] = value;
+                        }
+                        let data: Vec<u8> = if format == wgpu::TextureFormat::Rgba16Float {
+                            let half: Vec<[half::f16; 4]> =
+                                pixels.iter().map(|pixel| pixel.map(half::f16::from_f32)).collect();
+                            pixels =
+                                half.iter().map(|pixel| pixel.map(half::f16::to_f32)).collect();
+                            let bits: Vec<[u16; 4]> =
+                                half.iter().map(|pixel| pixel.map(half::f16::to_bits)).collect();
+                            bytemuck::cast_slice(&bits).to_vec()
+                        } else {
+                            bytemuck::cast_slice(&pixels).to_vec()
+                        };
+                        let cpu = compute_program_color_scopes_rgba_f32(
+                            &pixels,
+                            WIDTH,
+                            HEIGHT,
+                            ColorSpace::Rec709,
+                            mode,
+                            16,
+                        );
+                        let input = device.create_texture(&wgpu::TextureDescriptor {
+                            label: Some("nonfinite-scope-input"),
+                            size: wgpu::Extent3d {
+                                width: WIDTH,
+                                height: HEIGHT,
+                                depth_or_array_layers: 1,
+                            },
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format,
+                            usage: wgpu::TextureUsages::COPY_DST
+                                | wgpu::TextureUsages::TEXTURE_BINDING,
+                            view_formats: &[],
+                        });
+                        queue.write_texture(
+                            input.as_image_copy(),
+                            &data,
+                            wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(
+                                    WIDTH
+                                        * if format == wgpu::TextureFormat::Rgba16Float {
+                                            8
+                                        } else {
+                                            16
+                                        },
+                                ),
+                                rows_per_image: Some(HEIGHT),
+                            },
+                            input.size(),
+                        );
+                        let mut encoder = device.create_command_encoder(&Default::default());
+                        let record = runtime
+                            .record(
+                                &device,
+                                &queue,
+                                &mut encoder,
+                                &input.create_view(&Default::default()),
+                                WIDTH,
+                                HEIGHT,
+                                request,
+                            )
+                            .expect("record scope commands");
+                        assert_eq!(record.used_subgroups, subgroups);
+                        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("nonfinite-scope-test-counts"),
+                            size: record.buffer_layout.byte_size(),
+                            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                            mapped_at_creation: false,
+                        });
+                        encoder.copy_buffer_to_buffer(
+                            record.counts(),
+                            0,
+                            &readback,
+                            0,
+                            record.buffer_layout.byte_size(),
+                        );
+                        queue.submit([encoder.finish()]);
+                        // Test observation follows completion, never feeds production execution.
+                        let bytes = map_test_readback(&device, &readback);
+                        let counts = bytemuck::cast_slice::<u8, u32>(&bytes);
+                        let invalid = record.buffer_layout.invalid_pixel_count_offset as usize;
+                        match cpu {
+                            Err(ProgramColorScopeError::NonFiniteSample { pixel, channel }) => {
+                                let invalid_pixels = pixels
+                                    .iter()
+                                    .filter(|pixel| pixel[..3].iter().any(|v| !v.is_finite()))
+                                    .count();
+                                assert_eq!(counts[invalid], invalid_pixels as u32);
+                                let sample = u32::MAX - counts[invalid + 1];
+                                assert_eq!(
+                                    (sample as usize / 3, sample as usize % 3),
+                                    (pixel, channel)
+                                );
+                                for view in [
+                                    &record.histogram_view,
+                                    &record.waveform_view,
+                                    &record.vectorscope_view,
+                                ] {
+                                    let display = read_scope_display(&device, &queue, view);
+                                    let red = |p: &[u8]| {
+                                        p[0] > 150 && p[1] < 30 && p[2] < 30 && p[3] == 255
+                                    };
+                                    assert!(display.chunks_exact(4).any(red));
+                                    assert!(display.chunks_exact(4).all(|p| red(p)
+                                        || (p[0] == p[1]
+                                            && p[1] == p[2]
+                                            && p[0] < 15
+                                            && p[3] == 255)));
+                                }
+                            }
+                            Ok(cpu) => {
+                                assert_eq!(&counts[invalid..], &[0, 0]);
+                                let hist = record.buffer_layout.histogram_offset as usize;
+                                for (channel, expected) in [
+                                    cpu.histogram.red,
+                                    cpu.histogram.green,
+                                    cpu.histogram.blue,
+                                    cpu.histogram.luma,
+                                ]
+                                .iter()
+                                .enumerate()
+                                {
+                                    assert_eq!(
+                                        &counts[hist + channel * 16..hist + (channel + 1) * 16],
+                                        expected
+                                    );
+                                }
+                                for view in [
+                                    &record.histogram_view,
+                                    &record.waveform_view,
+                                    &record.vectorscope_view,
+                                ] {
+                                    let display = read_scope_display(&device, &queue, view);
+                                    assert!(display
+                                        .chunks_exact(4)
+                                        .any(|p| p[1] >= 30 || p[0] >= 30 && p[2] >= 30));
+                                }
+                            }
+                            Err(error) => panic!("unexpected CPU scope error: {error}"),
+                        }
+                        eprintln!("nonfinite scope: {format:?} {mode:?} subgroups={subgroups} case={case} verified");
+                    }
+                    assert_eq!(runtime.diagnostics().pipeline_creations, 1);
+                    assert_eq!(runtime.diagnostics().buffer_allocations, 1);
+                    assert_eq!(runtime.diagnostics().texture_allocations, 3);
+                }
+            }
+        }
+    }
+
+    fn read_scope_display(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+    ) -> Vec<u8> {
+        let texture = view.texture();
+        let row = (texture.width() * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("nonfinite-scope-test-display"),
+            size: u64::from(row) * u64::from(texture.height()),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(texture.height()),
+                },
+            },
+            texture.size(),
+        );
+        queue.submit([encoder.finish()]);
+        map_test_readback(device, &buffer)
+            .chunks_exact(row as usize)
+            .flat_map(|bytes| bytes[..texture.width() as usize * 4].iter().copied())
+            .collect()
     }
 
     fn map_test_readback(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<u8> {

@@ -1640,7 +1640,14 @@ measure working pixels or a monitor-adapted `ViewerFrameImage`. GPU scopes must
 use the shared `ProgramSignalColorimetry` coefficients and a compute/reduction
 path over the selected retained tap texture; they must not introduce a per-frame
 GPU-to-CPU readback. The production GPU runtime uses exact atomic-u32 counts and
-generates display density textures on-device. CPU/GPU tests compare exact bin
+generates display density textures on-device. Non-finite RGB invalidates the
+entire GPU scope frame: IEEE exponent bits are checked before aggregation,
+on-device status retains the first invalid row-major RGB sample, and all three
+plots display a red cross instead of partial density data. Alpha does not hide
+invalid RGB. The next frame clears this status; recording success means commands
+were accepted, not that completed samples are valid. Visualization reads the
+completed count buffer as immutable storage, without CPU feedback or a new pass.
+CPU/GPU tests compare exact bin
 counts for both encoded-signal and nits execution.
 
 GPU preview should use OCIO shader extraction instead of CPU processor execution
