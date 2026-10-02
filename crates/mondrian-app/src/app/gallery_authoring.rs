@@ -193,6 +193,7 @@ impl AppState {
         let mut effect = mondrian_effects::instantiate_effect_node(EffectType::ColorWheel)
             .map_err(|error| gallery_error(error.to_string()))?;
         effect.instantiate_for_clip("Grade · Shot Match".to_owned());
+        self.resolve_effect_resources(&mut effect)?;
         set_vec3_parameter(&mut effect, "gain", solution.gain_rgb)?;
         set_vec3_parameter(&mut effect, "offset", solution.offset_rgb)?;
         let evidence = ShotMatchEvidence {

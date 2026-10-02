@@ -140,6 +140,7 @@ impl AppState {
         let mut effect = mondrian_effects::instantiate_effect_node(payload.effect_type.clone())
             .map_err(|error| grade_error(error.to_string()))?;
         effect.instantiate_for_clip(format!("Grade · {}", payload.effect_type.display_name()));
+        self.resolve_effect_resources(&mut effect)?;
         self.commit_active_sequence_edit("添加调色节点", move |sequence| {
             let definition = sequence
                 .grade_definitions

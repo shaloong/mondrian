@@ -493,13 +493,14 @@ impl AppState {
     ) -> mondrian_core::Result<EffectId> {
         let sequence = active_sequence_for_visual_effect(self, "add_effect_to_clip")?;
         authorable_visual_effect_clip(sequence, clip_id, "add_effect_to_clip")?;
-        let effect =
+        let mut effect =
             mondrian_effects::instantiate_effect_node(effect_type.clone()).map_err(|error| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "add_effect_to_clip".to_owned(),
                     reason: error.to_string(),
                 }
             })?;
+        self.resolve_effect_resources(&mut effect)?;
         let description = format!("添加{}", effect_type.display_name());
         let (_sequence_id, effect_id) =
             self.commit_active_sequence_edit(description, move |seq| {

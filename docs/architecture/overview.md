@@ -450,6 +450,16 @@ graph for a no-op. Definition defaults and graph/Effect/parameter identities are
 preserved; a rejected graph cannot change canonical state or history. Resource
 schemas do not admit animation, so this seam does not invent resource keyframes.
 
+Clip Effect addition, shared Grade node addition and Gallery Shot Match creation
+use the same Effect-instance resource admission before the author transaction.
+Relative default values are Project-owned instance intent, while provider schema
+defaults remain unchanged templates. Two Projects therefore bind the same
+definition independently. Absolute provider paths remain unchanged; a provider
+requiring bundle-owned data must supply its explicit bundle path. Expanded paths
+are checked against the provider's resource contract, including UTF-8 byte limits;
+failure creates neither an Effect/history entry nor an external filesystem object.
+Binding happens at author admission, never in the per-frame execution path.
+
 Windows binding uses the standard PathBuf join rules for drive/share roots and
 verbatim paths, including their native dot-component normalization. It preserves
 unpaired UTF-16 filename units without UTF-8 conversion. Absolute references
