@@ -290,7 +290,7 @@ impl GpuProgramScopesRuntime {
                 self.diagnostics.texture_allocations.saturating_add(3);
         }
         let pipelines = self.pipelines.as_ref().ok_or(GpuProgramScopesError::InternalState)?;
-        let resources = self.resources.as_ref().ok_or(GpuProgramScopesError::InternalState)?;
+        let resources = self.resources.as_mut().ok_or(GpuProgramScopesError::InternalState)?;
         let max_column_samples =
             input_height.saturating_mul(input_width.div_ceil(request.waveform_width)).max(1);
         let uniforms = ScopesUniforms {
@@ -311,7 +311,12 @@ impl GpuProgramScopesRuntime {
             scale_max_nits: request.scale.maximum_nits().unwrap_or(100) as f32,
             _padding: 0,
         };
-        queue.write_buffer(&resources.uniforms, 0, bytemuck::bytes_of(&uniforms));
+        // The resource key fixes every request-derived uniform. Only input
+        // dimensions can change while these resources remain in use.
+        if resources.uniform_input_size != Some((input_width, input_height)) {
+            queue.write_buffer(&resources.uniforms, 0, bytemuck::bytes_of(&uniforms));
+            resources.uniform_input_size = Some((input_width, input_height));
+        }
         encoder.clear_buffer(resources.counts.as_ref(), 0, None);
 
         let aggregate_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -450,6 +455,7 @@ struct ScopesResources {
     layout: GpuProgramScopesBufferLayout,
     counts: Arc<wgpu::Buffer>,
     uniforms: wgpu::Buffer,
+    uniform_input_size: Option<(u32, u32)>,
     _histogram_texture: wgpu::Texture,
     histogram_view: wgpu::TextureView,
     _waveform_texture: wgpu::Texture,
@@ -523,6 +529,7 @@ impl ScopesResources {
             layout,
             counts,
             uniforms,
+            uniform_input_size: None,
             _histogram_texture,
             histogram_view,
             _waveform_texture,
