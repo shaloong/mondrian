@@ -774,6 +774,15 @@ fn add_subgroup_key(key: u32, amount: u32, enabled: bool, subgroup_invocation_id
 }
 
 fn add_grouped_subgroup(keys: vec4<u32>, subgroup_invocation_id: u32) {
+    // A collective branch skips three empty key groups when each lane's
+    // pixels share one key. Tail sentinels contribute no samples.
+    let one_key = all((keys == vec4<u32>(keys.x)) | (keys == vec4<u32>(INVALID_KEY)));
+    if subgroupAll(one_key) {
+        let amount = 1u + select(0u, 1u, keys.y == keys.x)
+            + select(0u, 1u, keys.z == keys.x) + select(0u, 1u, keys.w == keys.x);
+        add_subgroup_key(keys.x, amount, keys.x != INVALID_KEY, subgroup_invocation_id);
+        return;
+    }
     let k0 = keys.x;
     let k1 = keys.y;
     let k2 = keys.z;
