@@ -5446,6 +5446,8 @@ mod tests {
             ParameterResourceReference, PropertyValue, TimelineTime, WorkingColorSpace,
         };
         use mondrian_effects::EffectType;
+        use mondrian_ui_core::{FocusManager, TreeWalker, WidgetTree};
+        use mondrian_ui_events::EventRouter;
         let _guard = crate::app_ui::test_utils::theme_test_guard();
         let directory = std::env::temp_dir().join(format!(
             "mondrian-resource-workflow-{}",
@@ -5484,6 +5486,12 @@ mod tests {
         state.select_clip_by_id(clip_id).expect("select clip");
         let mut root = AppUiAppRoot::from_app_state(&state);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let background = {
+            let tree = WidgetTreeView::new(&mut root);
+            TreeWalker::focus_next(&tree, WidgetId::default()).expect("background focus")
+        };
+        let mut router = EventRouter::new(root.id());
+        router.focus_manager_mut().set_focused_widget(Some(background), None);
         let target = InspectorPropertyTarget::Effect { effect_id, parameter: parameter.clone() };
         let platform = FakePlatform {
             open_paths: Some(vec![cube.clone()]),
@@ -5519,12 +5527,56 @@ mod tests {
             ResourceEditorAction::Browse { id: cancelled, folder: false }
         )
         .is_none());
+        let scope = root.keyboard_focus_scope().expect("resource modal scope");
+        let keyboard_actions = std::cell::RefCell::new(Vec::new());
+        let dispatch = |action| keyboard_actions.borrow_mut().push(action);
+        {
+            let mut tree = WidgetTreeView::new(&mut root);
+            let mut visited = std::collections::HashSet::new();
+            for modifiers in [Modifiers::none(), Modifiers::shift()] {
+                for _ in 0..24 {
+                    assert_eq!(
+                        router.route(
+                            UiEvent::KeyDown { key: KeyCode::Tab, modifiers },
+                            &mut tree,
+                            &dispatch,
+                        ),
+                        EventResult::Handled
+                    );
+                    let focused = router.focus_manager().focused_widget().expect("modal focus");
+                    visited.insert(focused);
+                    let mut ancestor = Some(focused);
+                    while ancestor.is_some() && ancestor != Some(scope) {
+                        ancestor = ancestor.and_then(|id| tree.parent_id(id));
+                    }
+                    assert_eq!(ancestor, Some(scope), "resource Tab escaped the modal");
+                    assert_ne!(focused, background);
+                }
+            }
+            assert!(
+                visited.len() >= 4,
+                "Tab must reach input, browse and confirmation controls"
+            );
+        }
+        assert!(
+            keyboard_actions.borrow().is_empty(),
+            "Tab must not confirm or edit a resource"
+        );
         assert!(route(
             &mut root,
             &state,
             ResourceEditorAction::Cancel { id: cancelled }
         )
         .is_none());
+        {
+            let mut tree = WidgetTreeView::new(&mut root);
+            router.route(
+                UiEvent::KeyUp { key: KeyCode::Tab, modifiers: Modifiers::none() },
+                &mut tree,
+                &dispatch,
+            );
+        }
+        assert_eq!(router.focus_manager().focused_widget(), Some(background));
         assert_eq!(
             state.active_sequence().expect("sequence").revision,
             revision
@@ -5687,6 +5739,45 @@ mod tests {
         );
         assert!(state.redo_timeline().expect("redo binding"));
         assert_eq!(resource(&state), bound);
+        let execute_lut = |state: &AppState| {
+            let sequence = state.active_sequence().expect("sequence");
+            let clip = sequence.find_clip(clip_id).expect("clip");
+            let graph = mondrian_effects::compile_clip_effect_graph(
+                &clip.effects,
+                &[],
+                TimelineTime::ZERO,
+                WorkingColorSpace::LinearRec709,
+            )
+            .expect("compile authored LUT");
+            mondrian_effects::apply_compiled_effect_graph_rgba_f32(
+                &[
+                    [1.0, 0.0, 0.0, 0.375],
+                    [0.125, 0.25, 0.75, 1.0],
+                    [0.75, 0.5, 0.125, 0.0],
+                    [0.125, 0.25, 0.75, 1.0 / 65_535.0],
+                    [1.0, 1.0, 1.0, 1.0],
+                    [0.5, 0.5, 0.5, 0.25],
+                ],
+                3,
+                2,
+                &graph,
+                0,
+            )
+            .expect("execute real LUT pixels")
+        };
+        let before_save = execute_lut(&state);
+        assert_eq!(
+            before_save,
+            vec![
+                [0.0, 0.0, 1.0, 0.375],
+                [0.75, 0.25, 0.125, 1.0],
+                [0.75, 0.5, 0.125, 0.0],
+                [0.75, 0.25, 0.125, 1.0 / 65_535.0],
+                [1.0, 1.0, 1.0, 1.0],
+                [0.5, 0.5, 0.5, 0.25],
+            ],
+            "LUT must transform every positive-alpha sample, preserve alpha and retain zero-alpha hidden RGB"
+        );
         assert_eq!(
             state.asset_library().expect("library").list_assets().expect("assets").len(),
             0,
@@ -5706,6 +5797,11 @@ mod tests {
         let mut reopened = AppState::new();
         reopened.open_project_file(project).expect("reopen actual container");
         assert_eq!(resource(&reopened), bound);
+        assert_eq!(
+            execute_lut(&reopened),
+            before_save,
+            "durable reopen must preserve exact output"
+        );
         let clip = reopened
             .active_sequence()
             .expect("reopened sequence")

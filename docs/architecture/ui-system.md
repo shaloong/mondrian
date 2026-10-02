@@ -2891,7 +2891,12 @@ and localizes empty results without changing the selected author reference.
 
 The actual resource-shell LUT acceptance traverses native-picker adapter output,
 one author transaction, Undo/Redo, durable `.mdp` save/reopen and the compiled
-Float32 graph executor. A Unicode cube path swaps red/blue while preserving alpha.
+Float32 graph executor. The same resource modal traverses forward/reverse Tab
+through its editable, browse and confirmation controls without emitting author
+actions, then restores the background focus on cancellation. A Unicode cube path
+swaps red/blue for cube corners and fractional interior samples while preserving
+transparent, translucent and opaque alpha. Output before save and after durable
+reopen is compared exactly, in addition to checking the persisted binding.
 Cancellation, unchanged/stale confirmation, picker cancellation/failure/multiple
 selection, declared file filters and locked-owner invalidation have explicit
 regressions. This does not qualify physical native dialogs or third-party
