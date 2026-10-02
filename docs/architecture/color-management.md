@@ -1640,7 +1640,19 @@ measure working pixels or a monitor-adapted `ViewerFrameImage`. GPU scopes must
 use the shared `ProgramSignalColorimetry` coefficients and a compute/reduction
 path over the selected retained tap texture; they must not introduce a per-frame
 GPU-to-CPU readback. The production GPU runtime uses exact atomic-u32 counts and
-generates display density textures on-device. Non-finite RGB invalidates the
+generates display density textures on-device. Both Scope taps sample the full
+Sequence raster, independent of Viewer zoom, crop and presentation size. When
+that raster differs from presentation, the existing color execution Session
+materializes an additional float Program Output from the complete working
+composite; Monitor Output analysis adapts that same full raster before ICC.
+Viewer reconstruction still filters in working-linear space before its own
+Program Output materialization. An uncropped full-size Viewer shares the float
+Program texture with Scope analysis. Scope demand preserves a float carrier
+even for an SDR 8-bit display, so monitor policy cannot introduce an 8-bit
+quantization boundary into Program analysis. The active working-set estimator
+accounts for each additional raster before recording; no extra color authority,
+CPU pixel transfer or per-frame readback is introduced.
+Non-finite RGB invalidates the
 entire GPU scope frame: IEEE exponent bits are checked before aggregation,
 on-device status retains the first invalid row-major RGB sample, and all three
 plots display a red cross instead of partial density data. Alpha does not hide

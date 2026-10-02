@@ -10,6 +10,9 @@ mod display_calibration_tests;
 #[cfg(test)]
 #[path = "viewer_runtime/retirement_tests.rs"]
 mod retirement_tests;
+#[cfg(test)]
+#[path = "viewer_runtime/scope_contract_tests.rs"]
+mod scope_contract_tests;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -95,10 +98,35 @@ pub struct ViewerGpuExecutionRequest<'a> {
     pub output_precision: ViewerGpuOutputPrecision,
     /// Optional proven display calibration applied after the output boundary.
     pub display_calibration: Option<ViewerGpuDisplayCalibration>,
-    /// Optional demand-driven analysis of Program Output before monitor adaptation.
+    /// Optional full-raster float analysis before ICC and Viewer crop/resize.
     pub program_scopes: Option<GpuProgramScopesRequest>,
     /// Optional fused false-color, zebra, and gamut warning pass.
     pub signal_monitoring: Option<GpuSignalMonitorRequest>,
+}
+
+impl ViewerGpuExecutionRequest<'_> {
+    pub(crate) fn program_output_texture_format(&self) -> GpuColorFrameTextureFormat {
+        self.output_precision.program_texture_format(
+            self.monitor_adaptation,
+            self.program_scopes.is_some(),
+            self.signal_monitoring.is_some(),
+        )
+    }
+
+    pub(crate) fn has_distinct_scope_raster(&self) -> bool {
+        self.program_scopes.is_some()
+            && (self.source_rect != ViewerSourceRect::FULL
+                || self.width != self.output_width
+                || self.height != self.output_height)
+    }
+
+    pub(crate) fn has_distinct_monitor_scope_raster(&self) -> bool {
+        self.has_distinct_scope_raster()
+            && self
+                .program_scopes
+                .is_some_and(|scopes| scopes.tap() == ProgramScopesTap::MonitorOutput)
+            && self.monitor_adaptation.requires_pass()
+    }
 }
 
 /// Precision contract between a presentation Adapter and Viewer GPU execution.
@@ -131,6 +159,19 @@ impl ViewerGpuOutputPrecision {
         match self {
             Self::Encoded8 => GpuColorFrameTextureFormat::Rgba8Unorm,
             Self::EncodedFloat16 => GpuColorFrameTextureFormat::Rgba16Float,
+        }
+    }
+
+    pub(crate) fn program_texture_format(
+        self,
+        monitor_adaptation: &RenderMonitorAdaptation,
+        scopes_active: bool,
+        signal_monitoring_active: bool,
+    ) -> GpuColorFrameTextureFormat {
+        if scopes_active || monitor_adaptation.requires_pass() || signal_monitoring_active {
+            GpuColorFrameTextureFormat::Rgba16Float
+        } else {
+            self.texture_format()
         }
     }
 }
@@ -1000,12 +1041,7 @@ impl ViewerGpuExecutionRuntime {
             ViewerGpuExecutionGpuStage::Spatial,
         )?;
         let program_output_boundary_started = Instant::now();
-        let program_output_texture_format =
-            if request.monitor_adaptation.requires_pass() || request.signal_monitoring.is_some() {
-                GpuColorFrameTextureFormat::Rgba16Float
-            } else {
-                request.output_precision.texture_format()
-            };
+        let program_output_texture_format = request.program_output_texture_format();
         let program_output_record = color_output
             .record_wgpu_output_boundary_gpu_frame_owned_backend(
                 request.program_output_boundary,
@@ -1020,20 +1056,43 @@ impl ViewerGpuExecutionRuntime {
                 },
             )
             .map_err(|error| ViewerGpuExecutionError::ProgramOutputBoundary(Box::new(error)))?;
+        stage_diagnostics.accumulate(program_output_record.stage_diagnostics);
+        let presentation_program_output = program_output_record.materialized.output;
+        // Viewer filtering stays in working-linear space. Scopes instead sample
+        // the complete composite through the same Program boundary and session.
+        // Full-size uncropped presentation already supplies that exact raster.
+        let program_output = if request.has_distinct_scope_raster() {
+            let canonical_record = color_output
+                .record_wgpu_output_boundary_gpu_frame_owned_backend(
+                    request.program_output_boundary,
+                    &composite.output,
+                    program_output_texture_format,
+                    RenderColorTransformGpuOptions::default(),
+                    RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                        device,
+                        queue,
+                        encoder,
+                        load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    },
+                )
+                .map_err(|error| ViewerGpuExecutionError::ProgramOutputBoundary(Box::new(error)))?;
+            stage_diagnostics.accumulate(canonical_record.stage_diagnostics);
+            canonical_record.materialized.output
+        } else {
+            presentation_program_output.clone()
+        };
         let program_output_boundary_us = elapsed_us(program_output_boundary_started);
         mark_gpu_stage(
             &mut stage_marker,
             encoder,
             ViewerGpuExecutionGpuStage::ProgramOutputBoundary,
         )?;
-        stage_diagnostics.accumulate(program_output_record.stage_diagnostics);
-        let program_output = program_output_record.materialized.output;
         let monitor_adaptation_started = Instant::now();
         let output = if let Some(transform) = request.monitor_adaptation.gpu_transform() {
             let monitor_record = color_output
                 .record_wgpu_intermediate_color_transform_owned_backend(
                     &transform,
-                    &program_output,
+                    &presentation_program_output,
                     GpuColorFrameTextureFormat::Rgba16Float,
                     "viewer-monitor-adaptation",
                     RenderColorTransformGpuOptions::default(),
@@ -1048,7 +1107,32 @@ impl ViewerGpuExecutionRuntime {
             stage_diagnostics.accumulate(monitor_record.stage_diagnostics);
             monitor_record.materialized.output
         } else {
-            program_output.clone()
+            presentation_program_output.clone()
+        };
+        let monitor_scope_output = if request.has_distinct_monitor_scope_raster() {
+            let transform = request
+                .monitor_adaptation
+                .gpu_transform()
+                .expect("distinct monitor Scope requires adaptation");
+            let monitor_record = color_output
+                .record_wgpu_intermediate_color_transform_owned_backend(
+                    &transform,
+                    &program_output,
+                    GpuColorFrameTextureFormat::Rgba16Float,
+                    "scope-monitor-adaptation",
+                    RenderColorTransformGpuOptions::default(),
+                    RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                        device,
+                        queue,
+                        encoder,
+                        load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    },
+                )
+                .map_err(|error| ViewerGpuExecutionError::MonitorAdaptation(Box::new(error)))?;
+            stage_diagnostics.accumulate(monitor_record.stage_diagnostics);
+            Some(monitor_record.materialized.output)
+        } else {
+            None
         };
         let monitor_adaptation_us = elapsed_us(monitor_adaptation_started);
         mark_gpu_stage(
@@ -1060,7 +1144,13 @@ impl ViewerGpuExecutionRuntime {
         let program_scopes = if let Some(scopes_request) = request.program_scopes {
             let scope_input = match scopes_request.tap() {
                 ProgramScopesTap::ProgramOutput => &program_output,
-                ProgramScopesTap::MonitorOutput => &output,
+                ProgramScopesTap::MonitorOutput => {
+                    if request.monitor_adaptation.requires_pass() {
+                        monitor_scope_output.as_ref().unwrap_or(&output)
+                    } else {
+                        &program_output
+                    }
+                }
             };
             let scope_input_view = color_output
                 .frame_table()
@@ -1078,8 +1168,8 @@ impl ViewerGpuExecutionRuntime {
                         queue,
                         encoder,
                         &scope_input_view,
-                        request.output_width,
-                        request.output_height,
+                        scope_input.descriptor().width,
+                        scope_input.descriptor().height,
                         scopes_request,
                     )
                     .map_err(|error| ViewerGpuExecutionError::ProgramScopes(Box::new(error)))?,
@@ -1096,7 +1186,7 @@ impl ViewerGpuExecutionRuntime {
         let signal_monitoring_started = Instant::now();
         let (mut output, output_owner) = if let Some(monitoring) = request.signal_monitoring {
             let signal = match monitoring.tap {
-                ProgramScopesTap::ProgramOutput => &program_output,
+                ProgramScopesTap::ProgramOutput => &presentation_program_output,
                 ProgramScopesTap::MonitorOutput => &output,
             };
             let signal_resource = color_output.frame_table().get(signal).map_err(|error| {

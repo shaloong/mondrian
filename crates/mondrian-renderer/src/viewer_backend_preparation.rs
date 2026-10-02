@@ -13,11 +13,10 @@ use mondrian_core::{WaveformMode, WorkingColorSpace};
 
 use crate::{
     ColorFrameAlpha, ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding,
-    ColorFrameResidency, GpuColorFrameTextureFormat, GpuProgramScopesRuntime,
-    GpuProgramScopesRuntimeDiagnostics, RenderColorTransformGpuOptions,
-    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeDiagnostics,
-    RenderGpuOutputBoundaryRuntimeRecordError, RenderMonitorAdaptation, RenderOutputColorBoundary,
-    ViewerGpuOutputPrecision,
+    ColorFrameResidency, GpuProgramScopesRuntime, GpuProgramScopesRuntimeDiagnostics,
+    RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
+    RenderGpuOutputBoundaryRuntimeDiagnostics, RenderGpuOutputBoundaryRuntimeRecordError,
+    RenderMonitorAdaptation, RenderOutputColorBoundary, ViewerGpuOutputPrecision,
 };
 
 /// Frozen production contract for preparing Program Output and scopes device objects.
@@ -39,12 +38,11 @@ impl ViewerGpuBackendPreparation {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> Result<(), RenderGpuOutputBoundaryRuntimeRecordError> {
-        let output_texture_format =
-            if self.monitor_adaptation.requires_pass() || self.signal_monitoring_active {
-                GpuColorFrameTextureFormat::Rgba16Float
-            } else {
-                self.output_precision.texture_format()
-            };
+        let output_texture_format = self.output_precision.program_texture_format(
+            &self.monitor_adaptation,
+            self.waveform_mode.is_some(),
+            self.signal_monitoring_active,
+        );
         runtime.prepare_wgpu_output_boundary_gpu_frame_backend(
             &self.program_output_boundary,
             ColorFrameDescriptor {

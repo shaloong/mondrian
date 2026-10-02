@@ -183,7 +183,7 @@ pub struct GpuProgramScopesRecord {
 
 impl GpuProgramScopesRecord {
     #[cfg(test)]
-    fn counts(&self) -> &wgpu::Buffer {
+    pub(crate) fn counts(&self) -> &wgpu::Buffer {
         self._counts.as_ref()
     }
 }

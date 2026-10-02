@@ -494,9 +494,20 @@ pub fn estimate_viewer_gpu_active_working_set(
     estimate.program_output = ViewerGpuActiveTextureDemand::checked_texture(
         request.output_width,
         request.output_height,
-        u64::from(program_output_texture_format(request).bytes_per_pixel()),
+        u64::from(request.program_output_texture_format().bytes_per_pixel()),
         ViewerGpuActiveWorkingSetStage::ProgramOutput,
     )?;
+    if request.has_distinct_scope_raster() {
+        estimate.program_output.checked_add(
+            ViewerGpuActiveTextureDemand::checked_texture(
+                request.width,
+                request.height,
+                u64::from(request.program_output_texture_format().bytes_per_pixel()),
+                ViewerGpuActiveWorkingSetStage::ProgramOutput,
+            )?,
+            ViewerGpuActiveWorkingSetStage::ProgramOutput,
+        )?;
+    }
     estimate.program_scopes = estimate_program_scopes(request)?;
     if request.monitor_adaptation.requires_pass() {
         estimate.monitor_adaptation = ViewerGpuActiveTextureDemand::checked_texture(
@@ -505,12 +516,23 @@ pub fn estimate_viewer_gpu_active_working_set(
             8,
             ViewerGpuActiveWorkingSetStage::MonitorAdaptation,
         )?;
+        if request.has_distinct_monitor_scope_raster() {
+            estimate.monitor_adaptation.checked_add(
+                ViewerGpuActiveTextureDemand::checked_texture(
+                    request.width,
+                    request.height,
+                    8,
+                    ViewerGpuActiveWorkingSetStage::MonitorAdaptation,
+                )?,
+                ViewerGpuActiveWorkingSetStage::MonitorAdaptation,
+            )?;
+        }
     }
     if request.signal_monitoring.is_some() {
         let format = if request.monitor_adaptation.requires_pass() {
             GpuColorFrameTextureFormat::Rgba16Float
         } else {
-            program_output_texture_format(request)
+            request.program_output_texture_format()
         };
         estimate.signal_monitoring = ViewerGpuActiveTextureDemand::checked_texture(
             request.output_width,
@@ -1011,27 +1033,13 @@ fn estimate_display_calibration(
     Ok(demand)
 }
 
-fn program_output_texture_format(
-    request: &ViewerGpuExecutionRequest<'_>,
-) -> GpuColorFrameTextureFormat {
-    if request.monitor_adaptation.requires_pass() || request.signal_monitoring.is_some() {
-        GpuColorFrameTextureFormat::Rgba16Float
-    } else {
-        match request.output_precision {
-            crate::ViewerGpuOutputPrecision::Encoded8 => GpuColorFrameTextureFormat::Rgba8Unorm,
-            crate::ViewerGpuOutputPrecision::EncodedFloat16 => {
-                GpuColorFrameTextureFormat::Rgba16Float
-            }
-        }
-    }
-}
-
 fn estimate_presentation_output(
     request: &ViewerGpuExecutionRequest<'_>,
 ) -> Result<ViewerGpuActiveTextureDemand, ViewerGpuActiveWorkingSetEstimateError> {
     let texture_format = if request.display_calibration.is_some()
         || request.monitor_adaptation.requires_pass()
         || request.signal_monitoring.is_some()
+        || request.program_scopes.is_some()
     {
         // The calibrated output and the monitor-adaptation output both
         // become RGBA16F presentation leases. Signal monitoring likewise
