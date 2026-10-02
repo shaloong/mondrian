@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 use crate::openfx_adapter::OpenFxBinaryInspection;
 use crate::openfx_host::{
     describe_openfx_filter, OpenFxDoubleType, OpenFxFilterDescription, OpenFxFilterSession,
-    OpenFxFloatFrame, OpenFxHostError, OpenFxRenderTiming, OpenFxScalarValue,
+    OpenFxFloatFrame, OpenFxHostError, OpenFxParameterValue, OpenFxRenderTiming,
 };
 
 /// A selected Filter cannot be represented by the admitted visual effect contract.
@@ -44,14 +44,14 @@ pub enum OpenFxEffectRegistrationError {
 struct BoundParameter {
     name: String,
     parameter_id: Option<ParameterId>,
-    default_value: OpenFxScalarValue,
+    default_value: OpenFxParameterValue,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OpenFxGraphParameters {
     timing: OpenFxRenderTiming,
-    values: BTreeMap<String, OpenFxScalarValue>,
+    values: BTreeMap<String, OpenFxParameterValue>,
 }
 
 /// A definition retains only an immutable selection, never a native instance.
@@ -212,17 +212,21 @@ fn build_definition(
             let parameter_id = ParameterId::new(stable_key("openfx.param.", &identity))
                 .map_err(|error| OpenFxEffectRegistrationError::Schema(error.to_string()))?;
             let path = stable_key("openfx.control.", parameter.name.as_bytes());
-            let default_value = match parameter.default_value {
-                OpenFxScalarValue::Double(value) => PropertyValue::Double(value),
-                OpenFxScalarValue::Boolean(value) => PropertyValue::Bool(value),
-                OpenFxScalarValue::Integer(value) => PropertyValue::Int(i64::from(value)),
-                OpenFxScalarValue::Choice(value) => PropertyValue::Enum(value.to_string()),
+            let default_value = match parameter.default_value.clone() {
+                OpenFxParameterValue::Double(value) => PropertyValue::Double(value),
+                OpenFxParameterValue::Boolean(value) => PropertyValue::Bool(value),
+                OpenFxParameterValue::Integer(value) => PropertyValue::Int(i64::from(value)),
+                OpenFxParameterValue::Choice(value) => PropertyValue::Enum(value.to_string()),
+                OpenFxParameterValue::StrChoice(key) => PropertyValue::Enum(key),
             };
             let mut descriptor = PropertyDescriptor::try_new(path, &parameter.label, default_value)
                 .map_err(|error| OpenFxEffectRegistrationError::Schema(error.to_string()))?
                 .with_parameter_id(parameter_id.clone())
                 .with_animatable(parameter.can_animate);
-            if matches!(parameter.default_value, OpenFxScalarValue::Choice(_)) {
+            if matches!(
+                parameter.default_value,
+                OpenFxParameterValue::Choice(_) | OpenFxParameterValue::StrChoice(_)
+            ) {
                 descriptor = descriptor.with_enum_options(
                     parameter
                         .choices
@@ -230,7 +234,7 @@ fn build_definition(
                         .enumerate()
                         .map(|(index, option)| {
                             let mut choice = mondrian_core::automation::ParameterEnumOption::new(
-                                index.to_string(),
+                                &option.key,
                                 &option.label,
                                 format!("{parameter_id}.choice.{index}"),
                             );
@@ -242,7 +246,7 @@ fn build_definition(
                         .collect(),
                 );
             }
-            if matches!(parameter.default_value, OpenFxScalarValue::Integer(_)) {
+            if matches!(parameter.default_value, OpenFxParameterValue::Integer(_)) {
                 descriptor.schema.allowed_interpolations = vec![
                     mondrian_core::automation::ParameterInterpolation::Hold,
                     mondrian_core::automation::ParameterInterpolation::Linear,
@@ -262,7 +266,7 @@ fn build_definition(
             descriptor.ui_metadata.group_name = Some("OpenFX".to_owned());
             if matches!(
                 parameter.default_value,
-                OpenFxScalarValue::Double(_) | OpenFxScalarValue::Integer(_)
+                OpenFxParameterValue::Double(_) | OpenFxParameterValue::Integer(_)
             ) {
                 let (Some(min), Some(max), Some(display_min), Some(display_max)) = (
                     parameter.minimum,
@@ -285,7 +289,8 @@ fn build_definition(
                 let numeric = ParameterNumericContract::new(
                     hard_range,
                     soft_range,
-                    matches!(parameter.default_value, OpenFxScalarValue::Integer(_)).then_some(1.0),
+                    matches!(parameter.default_value, OpenFxParameterValue::Integer(_))
+                        .then_some(1.0),
                     ParameterInvalidValuePolicy::Reject,
                 )
                 .map_err(|error| OpenFxEffectRegistrationError::Schema(error.to_string()))?;
@@ -293,7 +298,7 @@ fn build_definition(
                     Some(OpenFxDoubleType::Plain | OpenFxDoubleType::Scale) => {
                         ParameterUnit::Unitless
                     }
-                    None if matches!(parameter.default_value, OpenFxScalarValue::Integer(_)) => {
+                    None if matches!(parameter.default_value, OpenFxParameterValue::Integer(_)) => {
                         ParameterUnit::Unitless
                     }
                     None => {
@@ -351,30 +356,40 @@ fn build_definition(
                     Some(parameter_id) => {
                         match effect.evaluate_parameter(parameter_id, context.time) {
                             Some(PropertyValue::Double(value)) if value.is_finite() => {
-                                OpenFxScalarValue::Double(value)
+                                OpenFxParameterValue::Double(value)
                             }
                             Some(PropertyValue::Enum(key))
                                 if matches!(
                                     parameter.default_value,
-                                    OpenFxScalarValue::Choice(_)
+                                    OpenFxParameterValue::Choice(_)
                                 ) =>
                             {
-                                OpenFxScalarValue::Choice(key.parse::<i32>().map_err(|_| {
+                                OpenFxParameterValue::Choice(key.parse::<i32>().map_err(|_| {
                                     invalid(format!(
                                         "parameter `{}` has invalid Choice key",
                                         parameter.name
                                     ))
                                 })?)
                             }
-                            Some(PropertyValue::Bool(value)) => OpenFxScalarValue::Boolean(value),
-                            Some(PropertyValue::Int(value)) => {
-                                OpenFxScalarValue::Integer(i32::try_from(value).map_err(|_| {
+                            Some(PropertyValue::Enum(key))
+                                if matches!(
+                                    parameter.default_value,
+                                    OpenFxParameterValue::StrChoice(_)
+                                ) =>
+                            {
+                                OpenFxParameterValue::StrChoice(key)
+                            }
+                            Some(PropertyValue::Bool(value)) => {
+                                OpenFxParameterValue::Boolean(value)
+                            }
+                            Some(PropertyValue::Int(value)) => OpenFxParameterValue::Integer(
+                                i32::try_from(value).map_err(|_| {
                                     invalid(format!(
                                         "parameter `{}` exceeds the OFX Integer range",
                                         parameter.name
                                     ))
-                                })?)
-                            }
+                                })?,
+                            ),
                             _ => {
                                 return Err(invalid(format!(
                                     "parameter `{}` has no valid value",
@@ -520,7 +535,7 @@ mod tests {
                     name: "gain".to_owned(),
                     label: "Gain".to_owned(),
                     hint: "Multiply every channel".to_owned(),
-                    default_value: OpenFxScalarValue::Double(1.0),
+                    default_value: OpenFxParameterValue::Double(1.0),
                     choices: Vec::new(),
                     preferred_interpolation:
                         mondrian_core::automation::ParameterInterpolation::Linear,
@@ -537,7 +552,7 @@ mod tests {
                     name: "internalSwitch".to_owned(),
                     label: "Internal Switch".to_owned(),
                     hint: String::new(),
-                    default_value: OpenFxScalarValue::Boolean(false),
+                    default_value: OpenFxParameterValue::Boolean(false),
                     choices: Vec::new(),
                     preferred_interpolation:
                         mondrian_core::automation::ParameterInterpolation::Hold,

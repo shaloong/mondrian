@@ -161,3 +161,20 @@ where current-value access is legal, and verifies preservation of the current
 index. A resident worker processes default/0/2/1/default edits without changing
 process identity. Full parameter-suite semantics beyond this scenario require
 separate qualification.
+
+## String-valued choices
+
+Set `MONDRIAN_OPENFX_SESSION_PROBE_MODE` to `strchoice` or `strchoice_default`
+and run the ignored `string_choice_filter_preserves_keys_and_native_pixels`
+integration test. The wrapper declares stable enum strings independently of
+captions/ranks. Tests compare direct and compiled-graph Float32 pixels and
+reuse one worker across edits/default restoration. Invalid plugin writes in
+InstanceChanged must retain the current string value. The second mode omits
+the default and requires the SDK-defined first enum.
+
+For `strchoice_duplicate`, `strchoice_gap`, `strchoice_missing_enum` and
+`strchoice_bad_default`, run the ignored
+`malformed_string_choice_is_rejected_before_registration` integration test.
+Each scenario must reject both description and effect registration before
+any processor instance is authored. These fixtures do not establish historical
+time access, dynamic option rebinding or the broader vendor matrix.

@@ -68,15 +68,23 @@ bool imageUnavailable(const void* handle, OfxPropertySetHandle in) {
   }
   return status == kOfxStatFailed;
 }
-bool applyInteger(const void* handle, OfxPropertySetHandle in, const char* name = "count", bool choice = false) {
+bool applyDiscreteGain(const void* handle, OfxPropertySetHandle in, const char* name = "count", bool choice = false) {
   OfxParamSetHandle params = nullptr;
   OfxParamHandle count = nullptr;
   double time = 0.0;
   int value = 0;
   if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
       gParamHost->paramGetHandle(params, name, &count, nullptr) != kOfxStatOK ||
-      gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
-      gParamHost->paramGetValueAtTime(count, time, &value) != kOfxStatOK) { return false; }
+      gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK) { return false; }
+  if (mode().find("strchoice") == 0 && choice) {
+    char* key = nullptr;
+    if (gParamHost->paramGetValueAtTime(count, time, &key) != kOfxStatOK || !key) { return false; }
+    const std::string selected(key);
+    if (selected == "vendor.red") { value = 0; }
+    else if (selected == "vendor.green") { value = 1; }
+    else if (selected == "vendor.blue") { value = 2; }
+    else { return false; }
+  } else if (gParamHost->paramGetValueAtTime(count, time, &value) != kOfxStatOK) { return false; }
   // Render reads use the requested time; getValue/setValue belong to change
   // or interact actions, not Render (OfxParameterSuiteV1 contract).
   if (choice) { ++value; }
@@ -220,7 +228,7 @@ OfxStatus probe(const char* action, const void* handle,
           gPropHost->propReset(props, kOfxParamInterpType) != kOfxStatErrValue ||
           gPropHost->propGetString(props, kOfxParamInterpType, 0, &value) != kOfxStatOK ||
           !value || std::string(value) != kOfxParamInterpTypeConstantStep) { return kOfxStatFailed; }
-    } else if (operation == kOfxImageEffectActionRender && !applyInteger(handle, in)) { return kOfxStatFailed; }
+    } else if (operation == kOfxImageEffectActionRender && !applyDiscreteGain(handle, in)) { return kOfxStatFailed; }
   }
   if (selected == "choice" && result == kOfxStatOK) {
     if (operation == kOfxImageEffectActionDescribeInContext) {
@@ -234,9 +242,38 @@ OfxStatus probe(const char* action, const void* handle,
           gPropHost->propSetInt(props, kOfxParamPropDefault, 0, 1) != kOfxStatOK ||
           gPropHost->propSetStringN(props, kOfxParamPropChoiceOption, 3, labels) != kOfxStatOK ||
           gPropHost->propSetIntN(props, kOfxParamPropChoiceOrder, 3, ranks) != kOfxStatOK) { return kOfxStatFailed; }
-    } else if (operation == kOfxImageEffectActionRender && !applyInteger(handle, in, "mode", true)) {
+    } else if (operation == kOfxImageEffectActionRender && !applyDiscreteGain(handle, in, "mode", true)) {
       return kOfxStatFailed;
     }
+  }
+  if (selected.find("strchoice") == 0 && result == kOfxStatOK) {
+    if (operation == kOfxImageEffectActionDescribeInContext) {
+      OfxParamSetHandle params = nullptr;
+      OfxPropertySetHandle props = nullptr;
+      const char* labels[] = { "Same", "Same", "Third" };
+      const char* keys[] = { "vendor.red", "vendor.green", "vendor.blue" };
+      const int ranks[] = { 2147483647, -2147483647 - 1, 0 };
+      if (selected == "strchoice_duplicate") { keys[2] = keys[1]; }
+      if (selected == "strchoice_gap") { keys[1] = ""; }
+      if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+          gParamHost->paramDefine(params, kOfxParamTypeStrChoice, "mode", &props) != kOfxStatOK ||
+          gPropHost->propSetString(props, kOfxPropLabel, 0, "Mode") != kOfxStatOK ||
+          gPropHost->propSetStringN(props, kOfxParamPropChoiceOption, 3, labels) != kOfxStatOK ||
+          gPropHost->propSetStringN(props, kOfxParamPropChoiceEnum, selected == "strchoice_missing_enum" ? 2 : 3, keys) != kOfxStatOK ||
+          gPropHost->propSetIntN(props, kOfxParamPropChoiceOrder, 3, ranks) != kOfxStatOK) { return kOfxStatFailed; }
+      if (selected != "strchoice_default" &&
+          gPropHost->propSetString(props, kOfxParamPropDefault, 0, selected == "strchoice_bad_default" ? "vendor.unknown" : "vendor.green") != kOfxStatOK) { return kOfxStatFailed; }
+    } else if (operation == kOfxActionInstanceChanged) {
+      OfxParamSetHandle params = nullptr;
+      OfxParamHandle parameter = nullptr;
+      char* value = nullptr;
+      if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+          gParamHost->paramGetHandle(params, "mode", &parameter, nullptr) != kOfxStatOK ||
+          gParamHost->paramGetValue(parameter, &value) != kOfxStatOK || !value) { return kOfxStatFailed; }
+      const std::string before(value);
+      if (gParamHost->paramSetValue(parameter, "vendor.unknown") != kOfxStatErrValue ||
+          gParamHost->paramGetValue(parameter, &value) != kOfxStatOK || !value || before != value) { return kOfxStatFailed; }
+    } else if (operation == kOfxImageEffectActionRender && !applyDiscreteGain(handle, in, "mode", true)) { return kOfxStatFailed; }
   }
   return result;
 }

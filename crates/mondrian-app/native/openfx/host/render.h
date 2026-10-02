@@ -10,8 +10,10 @@ extern "C" {
 
 struct MondrianOpenFxParameter {
   const char* name;
-  int kind; // 1: double, 2: boolean, 3: integer, 4: choice
+  int kind; // 1: double, 2: boolean, 3: integer, 4: choice, 5: string choice
   double value;
+  const char* string_value;
+  size_t string_length;
 };
 
 struct MondrianOpenFxFrameInfo {
@@ -29,6 +31,8 @@ struct MondrianOpenFxChoiceOption {
   size_t label_length;
   int rank_present;
   int display_rank;
+  const char* key;
+  size_t key_length;
 };
 
 struct MondrianOpenFxParameterInfo {
@@ -38,7 +42,7 @@ struct MondrianOpenFxParameterInfo {
   size_t label_length;
   const char* hint;
   size_t hint_length;
-  int kind; // 1: double, 2: boolean, 3: integer, 4: choice
+  int kind; // 1: double, 2: boolean, 3: integer, 4: choice, 5: string choice
   int preferred_interpolation; // 0: hold, 1: linear, 2: smooth
   int double_type; // 0: plain, 1: scale, -1: not a Double
   double default_value;
@@ -51,6 +55,8 @@ struct MondrianOpenFxParameterInfo {
   int enabled;
   const struct MondrianOpenFxChoiceOption* choices;
   size_t choice_count;
+  const char* string_default;
+  size_t string_default_length;
 };
 
 typedef int (*MondrianOpenFxParameterCallback)(

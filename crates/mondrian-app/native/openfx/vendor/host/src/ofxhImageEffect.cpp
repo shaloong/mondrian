@@ -2698,6 +2698,8 @@ namespace OFX {
         { kOfxParamHostPropSupportsCustomInteract, Property::eInt, 1, true, "0" },
         { kOfxParamHostPropSupportsStringAnimation, Property::eInt, 1, true, "0" },
         { kOfxParamHostPropSupportsChoiceAnimation, Property::eInt, 1, true, "0"  },
+        { kOfxParamHostPropSupportsStrChoice, Property::eInt, 1, true, "0" },
+        { kOfxParamHostPropSupportsStrChoiceAnimation, Property::eInt, 1, true, "0" },
         { kOfxParamHostPropSupportsBooleanAnimation, Property::eInt, 1, true, "0" },
         { kOfxParamHostPropSupportsCustomAnimation, Property::eInt, 1, true, "0" },
         { kOfxPropHostOSHandle, Property::ePointer, 1, true, NULL },

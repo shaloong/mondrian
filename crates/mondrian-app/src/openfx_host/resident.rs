@@ -32,7 +32,7 @@ enum Request {
     Render {
         sequence: u64,
         timing: OpenFxRenderTiming,
-        parameters: BTreeMap<String, OpenFxScalarValue>,
+        parameters: BTreeMap<String, OpenFxParameterValue>,
     },
     Shutdown {},
 }
@@ -254,7 +254,7 @@ impl OpenFxFilterSession {
     pub fn render(
         &mut self,
         timing: &OpenFxRenderTiming,
-        parameters: &BTreeMap<String, OpenFxScalarValue>,
+        parameters: &BTreeMap<String, OpenFxParameterValue>,
         frame: &OpenFxFloatFrame,
         owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
     ) -> Result<OpenFxFloatFrame, OpenFxHostError> {
@@ -272,7 +272,7 @@ impl OpenFxFilterSession {
     fn render_inner(
         &mut self,
         timing: &OpenFxRenderTiming,
-        parameters: &BTreeMap<String, OpenFxScalarValue>,
+        parameters: &BTreeMap<String, OpenFxParameterValue>,
         frame: &OpenFxFloatFrame,
         owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
     ) -> Result<OpenFxFloatFrame, OpenFxHostError> {
@@ -603,35 +603,42 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
                     &prepare.bundle_path,
                     &prepare.binary_sha256,
                 )?;
-                let names = parameters
-                    .keys()
-                    .map(|name| {
-                        CString::new(name.as_str())
-                            .map_err(|_| invalid("parameter name contains a null byte"))
+                let strings = parameters
+                    .iter()
+                    .map(|(name, value)| {
+                        let name = CString::new(name.as_str())
+                            .map_err(|_| invalid("parameter name contains null"))?;
+                        let text = if let OpenFxParameterValue::StrChoice(key) = value {
+                            Some(
+                                CString::new(key.as_str())
+                                    .map_err(|_| invalid("StrChoice key contains null"))?,
+                            )
+                        } else {
+                            None
+                        };
+                        Ok((name, text))
                     })
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .collect::<Result<Vec<_>, OpenFxHostError>>()?;
                 let native = parameters
                     .values()
-                    .zip(&names)
-                    .map(|(value, name)| match value {
-                        OpenFxScalarValue::Double(value) => {
-                            NativeParameter { name: name.as_ptr(), kind: 1, value: *value }
+                    .zip(&strings)
+                    .map(|(value, (name, text))| {
+                        let (kind, number) = match value {
+                            OpenFxParameterValue::Double(value) => (1, *value),
+                            OpenFxParameterValue::Boolean(value) => (2, f64::from(*value as u8)),
+                            OpenFxParameterValue::Integer(value) => (3, f64::from(*value)),
+                            OpenFxParameterValue::Choice(value) => (4, f64::from(*value)),
+                            OpenFxParameterValue::StrChoice(_) => (5, 0.0),
+                        };
+                        NativeParameter {
+                            name: name.as_ptr(),
+                            kind,
+                            value: number,
+                            string_value: text
+                                .as_ref()
+                                .map_or(std::ptr::null(), |text| text.as_ptr()),
+                            string_length: text.as_ref().map_or(0, |text| text.as_bytes().len()),
                         }
-                        OpenFxScalarValue::Integer(value) => NativeParameter {
-                            name: name.as_ptr(),
-                            kind: 3,
-                            value: f64::from(*value),
-                        },
-                        OpenFxScalarValue::Choice(value) => NativeParameter {
-                            name: name.as_ptr(),
-                            kind: 4,
-                            value: f64::from(*value),
-                        },
-                        OpenFxScalarValue::Boolean(value) => NativeParameter {
-                            name: name.as_ptr(),
-                            kind: 2,
-                            value: f64::from(*value as u8),
-                        },
                     })
                     .collect::<Vec<_>>();
                 let info = NativeFrameInfo {

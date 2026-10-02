@@ -574,3 +574,27 @@ restoration, same-instance edits, invalid values/types, signed extreme display
 ranks, and equal direct/compiled-graph Float32 pixels. An invalid plugin write
 in InstanceChanged preserves the current index. This does not qualify StrChoice,
 historical-time access, dynamic option rebinding, or the wider vendor matrix.
+
+## Native String Choice parameters
+
+OpenFxParameterValue is the sole typed native value model, including StrChoice
+strings; no scalar-name alias remains. Both Choice families carry canonical keys
+separately from captions and signed display ranks. Integer Choice keys encode
+original indices; StrChoice keys copy the declared ChoiceEnum strings. The matched
+ABI bounds and copies borrowed enum/default metadata during its callback and owns
+value CStrings for each serialized resident call.
+
+HostSupport registers the StrChoice type and Option/Enum/Order properties. Native
+instances retain string keys, reject unknown assignments, and provide timed access
+only at the current frame. Unspecified StrChoice defaults select the first enum
+per SDK semantics. Description validation rejects mismatched arrays, unknown
+defaults and duplicate keys. Effects author Enum values using the original keys
+and pass those same strings to the prepared native processor.
+
+Unicode/invalid-key unit tests and seven real native scenarios qualify current
+Choice/StrChoice values, explicit/unspecified defaults, same-instance edits,
+compiled-graph pixels and malformed-description rejection before registration.
+String default storage, choice arrays and descriptor-owned strings outlive the
+synchronous metadata callback; Rust copies the borrowed payload before returning.
+Full temporal, dynamic metadata, editor/interact and vendor-format qualification
+remain separate requirements.

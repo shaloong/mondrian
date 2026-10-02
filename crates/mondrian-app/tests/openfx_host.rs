@@ -7,7 +7,7 @@ use mondrian_app::openfx_adapter::inspect_openfx_binary;
 use mondrian_app::openfx_effect::register_selected_openfx_filter;
 use mondrian_app::openfx_host::{
     describe_openfx_filter, render_openfx_filter_frame, OpenFxDoubleType, OpenFxFilterSession,
-    OpenFxFloatFrame, OpenFxHostError, OpenFxRenderTiming, OpenFxScalarValue,
+    OpenFxFloatFrame, OpenFxHostError, OpenFxParameterValue, OpenFxRenderTiming,
 };
 use mondrian_core::automation::PropertyValue;
 use mondrian_core::{
@@ -45,7 +45,7 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
         .iter()
         .find(|parameter| parameter.name == "scale")
         .expect("overall gain control");
-    assert_eq!(scale.default_value, OpenFxScalarValue::Double(1.0));
+    assert_eq!(scale.default_value, OpenFxParameterValue::Double(1.0));
     assert_eq!(scale.double_type, Some(OpenFxDoubleType::Scale));
     assert_eq!(scale.minimum, Some(0.0));
     assert_eq!(scale.display_maximum, Some(100.0));
@@ -54,7 +54,7 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
         .iter()
         .find(|parameter| parameter.name == "scaleComponents")
         .expect("component scaling switch");
-    assert_eq!(switch.default_value, OpenFxScalarValue::Boolean(false));
+    assert_eq!(switch.default_value, OpenFxParameterValue::Boolean(false));
     assert_eq!(switch.label, "Scale Individual Components");
     let mut stale = inspection.clone();
     stale.binary_sha256 = "0".repeat(64);
@@ -72,10 +72,10 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
         pixels: (0..16).map(|index| [index as f32 / 16.0, 0.2, 0.3, 0.4]).collect(),
     };
     let parameters = BTreeMap::from([
-        ("scale".to_owned(), OpenFxScalarValue::Double(1.5)),
+        ("scale".to_owned(), OpenFxParameterValue::Double(1.5)),
         (
             "scaleComponents".to_owned(),
-            OpenFxScalarValue::Boolean(false),
+            OpenFxParameterValue::Boolean(false),
         ),
     ]);
     let timing = OpenFxRenderTiming {
@@ -117,15 +117,15 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
             .collect(),
     };
     let component_parameters = BTreeMap::from([
-        ("scale".to_owned(), OpenFxScalarValue::Double(0.5)),
+        ("scale".to_owned(), OpenFxParameterValue::Double(0.5)),
         (
             "scaleComponents".to_owned(),
-            OpenFxScalarValue::Boolean(true),
+            OpenFxParameterValue::Boolean(true),
         ),
-        ("scaleR".to_owned(), OpenFxScalarValue::Double(2.0)),
-        ("scaleG".to_owned(), OpenFxScalarValue::Double(0.5)),
-        ("scaleB".to_owned(), OpenFxScalarValue::Double(1.0)),
-        ("scaleA".to_owned(), OpenFxScalarValue::Double(3.0)),
+        ("scaleR".to_owned(), OpenFxParameterValue::Double(2.0)),
+        ("scaleG".to_owned(), OpenFxParameterValue::Double(0.5)),
+        ("scaleB".to_owned(), OpenFxParameterValue::Double(1.0)),
+        ("scaleA".to_owned(), OpenFxParameterValue::Double(3.0)),
     ]);
     let component_timing = OpenFxRenderTiming {
         frame: 42.0,
@@ -163,10 +163,10 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
     assert!(matches!(rejected, Err(OpenFxHostError::Invalid(_))));
 
     let out_of_range = BTreeMap::from([
-        ("scale".to_owned(), OpenFxScalarValue::Double(-0.5)),
+        ("scale".to_owned(), OpenFxParameterValue::Double(-0.5)),
         (
             "scaleComponents".to_owned(),
-            OpenFxScalarValue::Boolean(false),
+            OpenFxParameterValue::Boolean(false),
         ),
     ]);
     assert!(matches!(
@@ -283,7 +283,7 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
     ] {
         timing.frame = frame;
         timing.pixel_aspect_ratio = aspect;
-        let values = BTreeMap::from([("scale".to_owned(), OpenFxScalarValue::Double(gain))]);
+        let values = BTreeMap::from([("scale".to_owned(), OpenFxParameterValue::Double(gain))]);
         let output = preview
             .render(&timing, &values, &input, &mut checkpoint(&cancellation))
             .expect("resident render");
@@ -503,7 +503,7 @@ fn official_basic_resident_transfer_preserves_partial_blocks_and_changed_rasters
             })
             .collect(),
     };
-    let gain = BTreeMap::from([("scale".to_owned(), OpenFxScalarValue::Double(1.5))]);
+    let gain = BTreeMap::from([("scale".to_owned(), OpenFxParameterValue::Double(1.5))]);
     let output = session
         .render(&timing, &gain, &input, &mut || Ok(()))
         .expect("complete transfer");
@@ -954,7 +954,7 @@ fn integer_filter_preserves_typed_authoring_and_native_pixels() {
     let description =
         describe_openfx_filter(product_executable(), &inspection, identifier).expect("describe");
     let count = description.parameters.iter().find(|p| p.name == "count").expect("integer");
-    assert_eq!(count.default_value, OpenFxScalarValue::Integer(2));
+    assert_eq!(count.default_value, OpenFxParameterValue::Integer(2));
     assert_eq!(count.minimum, Some(0.0));
     assert_eq!(count.maximum, Some(9.0));
     assert!(count.can_animate);
@@ -976,7 +976,7 @@ fn integer_filter_preserves_typed_authoring_and_native_pixels() {
             &inspection,
             identifier,
             &timing,
-            &BTreeMap::from([("count".to_owned(), OpenFxScalarValue::Integer(value))]),
+            &BTreeMap::from([("count".to_owned(), OpenFxParameterValue::Integer(value))]),
             &input,
         )
         .expect("native integer");
@@ -987,10 +987,10 @@ fn integer_filter_preserves_typed_authoring_and_native_pixels() {
         }
     }
     for value in [
-        OpenFxScalarValue::Integer(-1),
-        OpenFxScalarValue::Integer(10),
-        OpenFxScalarValue::Double(1.5),
-        OpenFxScalarValue::Boolean(true),
+        OpenFxParameterValue::Integer(-1),
+        OpenFxParameterValue::Integer(10),
+        OpenFxParameterValue::Double(1.5),
+        OpenFxParameterValue::Boolean(true),
     ] {
         assert!(render_openfx_filter_frame(
             product_executable(),
@@ -1073,6 +1073,58 @@ fn choice_filter_preserves_canonical_indices_and_native_pixels() {
         std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
         "choice"
     );
+    qualify_native_discrete_filter(false);
+}
+
+#[test]
+#[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and MONDRIAN_OPENFX_SESSION_PROBE_MODE=strchoice or strchoice_default"]
+fn string_choice_filter_preserves_keys_and_native_pixels() {
+    let mode = std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode");
+    assert!(matches!(mode.as_str(), "strchoice" | "strchoice_default"));
+    qualify_native_discrete_filter(true);
+}
+
+#[test]
+#[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and malformed strchoice probe mode"]
+fn malformed_string_choice_is_rejected_before_registration() {
+    let mode = std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode");
+    assert!(matches!(
+        mode.as_str(),
+        "strchoice_duplicate"
+            | "strchoice_gap"
+            | "strchoice_missing_enum"
+            | "strchoice_bad_default"
+    ));
+    let binary =
+        PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));
+    let inspection =
+        inspect_openfx_binary(product_executable(), &binary).expect("inspect malformed probe");
+    let identifier = "uk.co.thefoundry.BasicGainPlugin";
+    assert!(matches!(
+        describe_openfx_filter(product_executable(), &inspection, identifier),
+        Err(OpenFxHostError::WorkerFailed(_))
+    ));
+    assert!(
+        register_selected_openfx_filter(product_executable(), &inspection, identifier).is_err()
+    );
+}
+
+fn qualify_native_discrete_filter(string_choice: bool) {
+    let keys = if string_choice {
+        ["vendor.red", "vendor.green", "vendor.blue"]
+    } else {
+        ["0", "1", "2"]
+    };
+    let native_value = |index: usize| {
+        if string_choice {
+            OpenFxParameterValue::StrChoice(keys[index].into())
+        } else {
+            OpenFxParameterValue::Choice(index as i32)
+        }
+    };
+    let default_index = usize::from(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode") != "strchoice_default",
+    );
     let binary =
         PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));
     let inspection = inspect_openfx_binary(product_executable(), &binary).expect("inspect");
@@ -1080,7 +1132,11 @@ fn choice_filter_preserves_canonical_indices_and_native_pixels() {
     let description =
         describe_openfx_filter(product_executable(), &inspection, identifier).expect("describe");
     let count = description.parameters.iter().find(|p| p.name == "mode").expect("choice");
-    assert_eq!(count.default_value, OpenFxScalarValue::Choice(1));
+    assert_eq!(count.default_value, native_value(default_index));
+    assert_eq!(
+        count.choices.iter().map(|option| option.key.as_str()).collect::<Vec<_>>(),
+        keys
+    );
     assert_eq!(count.choices.len(), 3);
     assert_eq!(count.choices[0].label, count.choices[1].label);
     assert_eq!(
@@ -1112,13 +1168,13 @@ fn choice_filter_preserves_canonical_indices_and_native_pixels() {
     let worker = resident.worker_process_id();
     for index in [None, Some(0), Some(2), Some(1), None] {
         let values = index
-            .map(|value| BTreeMap::from([("mode".into(), OpenFxScalarValue::Choice(value))]))
+            .map(|value| BTreeMap::from([("mode".into(), native_value(value))]))
             .unwrap_or_default();
         let output = resident
             .render(&timing, &values, &input, &mut || Ok(()))
             .expect("resident choice edit");
         assert_eq!(resident.worker_process_id(), worker);
-        let gain = (index.unwrap_or(1) + 1) as f32;
+        let gain = (index.unwrap_or(default_index) + 1) as f32;
         for (actual, original) in output.pixels.iter().zip(&input.pixels) {
             for channel in 0..4 {
                 assert!((actual[channel] - original[channel] * gain).abs() < 1e-6);
@@ -1131,7 +1187,7 @@ fn choice_filter_preserves_canonical_indices_and_native_pixels() {
             &inspection,
             identifier,
             &timing,
-            &BTreeMap::from([("mode".to_owned(), OpenFxScalarValue::Choice(value))]),
+            &BTreeMap::from([("mode".to_owned(), native_value(value))]),
             &input,
         )
         .expect("native choice");
@@ -1142,10 +1198,18 @@ fn choice_filter_preserves_canonical_indices_and_native_pixels() {
         }
     }
     for value in [
-        OpenFxScalarValue::Choice(-1),
-        OpenFxScalarValue::Choice(3),
-        OpenFxScalarValue::Double(1.5),
-        OpenFxScalarValue::Boolean(true),
+        if string_choice {
+            OpenFxParameterValue::StrChoice("vendor.unknown".into())
+        } else {
+            OpenFxParameterValue::Choice(-1)
+        },
+        if string_choice {
+            OpenFxParameterValue::Integer(1)
+        } else {
+            OpenFxParameterValue::Choice(3)
+        },
+        OpenFxParameterValue::Double(1.5),
+        OpenFxParameterValue::Boolean(true),
     ] {
         assert!(render_openfx_filter_frame(
             product_executable(),
@@ -1170,10 +1234,10 @@ fn choice_filter_preserves_canonical_indices_and_native_pixels() {
         .parameter_id()
         .clone();
     effect
-        .set_static_value_by_parameter(&id, PropertyValue::Enum("2".into()))
+        .set_static_value_by_parameter(&id, PropertyValue::Enum(keys[2].into()))
         .expect("author canonical choice");
     assert!(effect
-        .set_static_value_by_parameter(&id, PropertyValue::Enum("3".into()))
+        .set_static_value_by_parameter(&id, PropertyValue::Enum("unknown".into()))
         .is_err());
     let range = TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::new(10, 24).expect("end"))
         .expect("range");

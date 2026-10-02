@@ -96,6 +96,7 @@ struct ParameterUpdate {
   int kind;
   double value;
   bool changed;
+  std::string stringValue;
 };
 
 // Declared in lifetime order: the instance dies before its plugin binary,
@@ -167,6 +168,21 @@ struct MondrianOpenFxSession {
         if ((value && value->kind != 4) || !std::isfinite(target) || std::trunc(target) != target ||
             target < 0 || target >= options || choice->get(current) != kOfxStatOK) { return 4; }
         updates.push_back({parameter, 4, target, current != target});
+      } else if (type == kOfxParamTypeStrChoice) {
+        auto* choice = dynamic_cast<OFX::Host::Param::StringInstance*>(parameter);
+        if (!choice || (value && (value->kind != 5 || !value->string_value || value->string_length > 256))) { return 4; }
+        std::string target = value ? std::string(value->string_value, value->string_length)
+                                  : properties.getStringProperty(kOfxParamPropDefault);
+        const int options = properties.getDimension(kOfxParamPropChoiceEnum);
+        if (options < 1 || options != properties.getDimension(kOfxParamPropChoiceOption)) { return 4; }
+        if (!value && target.empty()) { target = properties.getStringProperty(kOfxParamPropChoiceEnum, 0); }
+        bool found = false;
+        for (int index = 0; index < options; ++index) {
+          found = found || target == properties.getStringProperty(kOfxParamPropChoiceEnum, index);
+        }
+        std::string current;
+        if (!found || choice->get(current) != kOfxStatOK) { return 4; }
+        updates.push_back({parameter, 5, 0.0, current != target, std::move(target)});
       } else { return 7; }
       changed = changed || updates.back().changed;
     }
@@ -181,6 +197,8 @@ struct MondrianOpenFxSession {
         status = static_cast<OFX::Host::Param::IntegerInstance*>(update.parameter)->set(static_cast<int>(update.value));
       } else if (update.kind == 4) {
         status = static_cast<OFX::Host::Param::ChoiceInstance*>(update.parameter)->set(static_cast<int>(update.value));
+      } else if (update.kind == 5) {
+        status = static_cast<OFX::Host::Param::StringInstance*>(update.parameter)->set(update.stringValue.c_str());
       } else {
         status = static_cast<OFX::Host::Param::BooleanInstance*>(update.parameter)->set(update.value == 1.0);
       }
@@ -327,6 +345,8 @@ static int describe(const char* binary, const char* bundle,
     if (++count > 4096) { return 7; }
     MondrianOpenFxParameterInfo info{};
     std::vector<MondrianOpenFxChoiceOption> choices;
+    // All borrowed description storage must outlive the callback below.
+    std::string stringDefault;
     const std::string& name = parameter->getName();
     const std::string& label = parameter->getLabel();
     const std::string& hint = parameter->getHint();
@@ -376,14 +396,22 @@ static int describe(const char* binary, const char* bundle,
       info.maximum = 1.0;
       info.display_minimum = 0.0;
       info.display_maximum = 1.0;
-    } else if (type == kOfxParamTypeChoice) {
-      info.kind = 4;
+    } else if (type == kOfxParamTypeChoice || type == kOfxParamTypeStrChoice) {
+      const bool stringChoice = type == kOfxParamTypeStrChoice;
+      info.kind = stringChoice ? 5 : 4;
       info.double_type = -1;
-      info.default_value = properties.getIntProperty(kOfxParamPropDefault);
+      if (!stringChoice) { info.default_value = properties.getIntProperty(kOfxParamPropDefault); }
+      if (stringChoice) { stringDefault = properties.getStringProperty(kOfxParamPropDefault); }
       const int options = properties.getDimension(kOfxParamPropChoiceOption);
       const int ranks = properties.getDimension(kOfxParamPropChoiceOrder);
       if (options < 1 || options > 4096 || (ranks != 0 && ranks != options) ||
-          info.default_value < 0 || info.default_value >= options) { return 7; }
+          (!stringChoice && (info.default_value < 0 || info.default_value >= options)) ||
+          (stringChoice && properties.getDimension(kOfxParamPropChoiceEnum) != options)) { return 7; }
+      if (stringChoice && stringDefault.empty()) {
+        stringDefault = properties.getStringProperty(kOfxParamPropChoiceEnum, 0);
+      }
+      bool defaultFound = !stringChoice;
+      std::set<std::string> seenKeys;
       std::set<int> seenRanks;
       choices.reserve(options);
       for (int index = 0; index < options; ++index) {
@@ -391,7 +419,16 @@ static int describe(const char* binary, const char* bundle,
         if (caption.empty() || caption.size() > 256) { return 7; }
         const int rank = ranks ? properties.getIntProperty(kOfxParamPropChoiceOrder, index) : 0;
         if (ranks && !seenRanks.insert(rank).second) { return 7; }
-        choices.push_back({caption.data(), caption.size(), ranks ? 1 : 0, rank});
+        const auto& key = properties.getStringProperty(stringChoice ? kOfxParamPropChoiceEnum : kOfxParamPropChoiceOption, index);
+        if (stringChoice && (key.empty() || key.size() > 256 || !seenKeys.insert(key).second)) { return 7; }
+        defaultFound = defaultFound || stringDefault == key;
+        choices.push_back({caption.data(), caption.size(), ranks ? 1 : 0, rank,
+                           stringChoice ? key.data() : nullptr, stringChoice ? key.size() : 0});
+      }
+      if (!defaultFound) { return 7; }
+      if (stringChoice) {
+        info.string_default = stringDefault.data();
+        info.string_default_length = stringDefault.size();
       }
       info.choices = choices.data();
       info.choice_count = choices.size();

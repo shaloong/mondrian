@@ -189,6 +189,43 @@ namespace MondrianOpenFx {
         ? set(value) : kOfxStatErrMissingHostFeature;
   }
 
+  StrChoiceParameter::StrChoiceParameter(FilterEffectInstance* effect,
+      OFX::Host::Param::Descriptor& descriptor)
+    : OFX::Host::Param::StringInstance(descriptor), _effect(effect),
+      _value(descriptor.getProperties().getStringProperty(kOfxParamPropDefault)) {
+    if (_value.empty() && getProperties().getDimension(kOfxParamPropChoiceEnum) > 0) {
+      _value = getProperties().getStringProperty(kOfxParamPropChoiceEnum, 0);
+    }
+  }
+
+  bool StrChoiceParameter::contains(const std::string& value) const {
+    const auto& properties = getProperties();
+    const int count = properties.getDimension(kOfxParamPropChoiceEnum);
+    if (count != properties.getDimension(kOfxParamPropChoiceOption)) { return false; }
+    for (int index = 0; index < count; ++index) {
+      if (value == properties.getStringProperty(kOfxParamPropChoiceEnum, index)) { return true; }
+    }
+    return false;
+  }
+  OfxStatus StrChoiceParameter::get(std::string& value) {
+    if (!contains(_value)) { return kOfxStatErrValue; }
+    value = _value;
+    return kOfxStatOK;
+  }
+  OfxStatus StrChoiceParameter::get(OfxTime time, std::string& value) {
+    return std::isfinite(time) && time == _effect->frameState().info.frame
+        ? get(value) : kOfxStatErrMissingHostFeature;
+  }
+  OfxStatus StrChoiceParameter::set(const char* value) {
+    if (!value || !contains(value)) { return kOfxStatErrValue; }
+    _value = value;
+    return kOfxStatOK;
+  }
+  OfxStatus StrChoiceParameter::set(OfxTime time, const char* value) {
+    return std::isfinite(time) && time == _effect->frameState().info.frame
+        ? set(value) : kOfxStatErrMissingHostFeature;
+  }
+
   //
   // RgbaParameter
   //

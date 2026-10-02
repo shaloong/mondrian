@@ -177,6 +177,7 @@ namespace OFX {
         { kOfxParamTypeDouble,    Property::eDouble, 1 },
         { kOfxParamTypeBoolean,   Property::eInt,    1 },
         { kOfxParamTypeChoice,    Property::eInt,    1 },
+        { kOfxParamTypeStrChoice, Property::eString, 1 },
         { kOfxParamTypeRGBA,      Property::eDouble, 4 },
         { kOfxParamTypeRGB,       Property::eDouble, 3 },
         { kOfxParamTypeDouble2D,  Property::eDouble, 2 },
@@ -268,6 +269,11 @@ namespace OFX {
           Property::propSpecEnd
         };
 
+        static const Property::PropSpec allStrChoice[] = {
+          { kOfxParamPropChoiceEnum, Property::eString, 0, false, "" },
+          Property::propSpecEnd
+        };
+
         static const Property::PropSpec allCustom[] = {
           { kOfxParamPropCustomInterpCallbackV1,    Property::ePointer,    1,    false,    0 },
           Property::propSpecEnd
@@ -309,8 +315,11 @@ namespace OFX {
           addInteractParamProps(type);
         }
 
-        if (type == kOfxParamTypeChoice) {
+        if (type == kOfxParamTypeChoice || type == kOfxParamTypeStrChoice) {
           _properties.addProperties(allChoice);
+        }
+        if (type == kOfxParamTypeStrChoice) {
+          _properties.addProperties(allStrChoice);
         }
 
         if (type == kOfxParamTypeCustom) {
@@ -376,7 +385,7 @@ namespace OFX {
         /// - kOfxParamTypeChoice
         /// If host doesn't support animation on them, then setting kOfxParamPropIsAnimating to 0 or 1 doesn't matter
         /// so just set the kOfxParamPropIsAnimating property to 0 for all those "extra animating" params.
-        bool animates = type != kOfxParamTypeCustom && type != kOfxParamTypeString && type != kOfxParamTypeBoolean && type != kOfxParamTypeChoice;
+        bool animates = type != kOfxParamTypeCustom && type != kOfxParamTypeString && type != kOfxParamTypeBoolean && type != kOfxParamTypeChoice && type != kOfxParamTypeStrChoice;
 
         Property::PropSpec variantProps[] = {
           { kOfxParamPropAnimates,    Property::eInt, 1,       false, animates ? "1" : "0" },
