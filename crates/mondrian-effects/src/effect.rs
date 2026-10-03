@@ -4411,7 +4411,15 @@ mod tests {
             .default_properties()
             .iter()
             .find(|(_, property)| property.descriptor.parameter_id() == &radius_id)
-            .and_then(|(_, property)| property.descriptor.schema.numeric)
+            .and_then(|(_, property)| {
+                property
+                    .descriptor
+                    .schema
+                    .numeric
+                    .as_ref()
+                    .and_then(|contracts| contracts.first())
+                    .copied()
+            })
             .map(|numeric| numeric.hard_range.max)
             .expect("blur radius hard maximum");
         assert_eq!(

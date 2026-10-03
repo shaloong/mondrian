@@ -1284,3 +1284,10 @@ ownerless relative references return author-edit resource-unavailable evidence
 before filesystem access. OpenFX filename parameters additionally require exact
 UTF-8 according to the declared SDK contract. Preview and export retain the same
 compiled graph and prepared resource interpretation.
+
+### Numeric definition bounds
+
+Effect numeric schemas carry complete ordered channel contracts, including
+independent hard/soft ranges and admission policies. Uniform built-in bounds
+expand to each declared component. Graph signatures retain the canonical schema;
+this foundation does not itself admit native OpenFX double tuples or temporal APIs.

@@ -851,7 +851,16 @@ mod tests {
         assert_eq!(schema.parameter_id.as_str(), "clap.param.7");
         assert_eq!(schema.default_value, PropertyValue::Double(0.5));
         assert!(schema.is_animatable);
-        assert_eq!(schema.numeric.expect("numeric bounds").hard_range.max, 1.0);
+        assert_eq!(
+            schema
+                .numeric
+                .as_ref()
+                .and_then(|contracts| contracts.first())
+                .expect("numeric bounds")
+                .hard_range
+                .max,
+            1.0
+        );
         assert!(validate_parameters(&[parameter.clone(), parameter.clone()]).is_err());
         assert!(validate_parameters(&[ClapParameterDescriptor {
             default_value: 2.0,

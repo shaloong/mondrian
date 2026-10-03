@@ -333,12 +333,19 @@ fn prepare_curve_edit(
             address.parameter_id
         )));
     }
-    let numeric = property.descriptor.schema.numeric.ok_or_else(|| {
-        curve_error(format!(
-            "parameter {} has no finite numeric editor range",
-            address.parameter_id
-        ))
-    })?;
+    let numeric = property
+        .descriptor
+        .schema
+        .numeric
+        .as_ref()
+        .and_then(|contracts| contracts.first())
+        .copied()
+        .ok_or_else(|| {
+            curve_error(format!(
+                "parameter {} has no finite numeric editor range",
+                address.parameter_id
+            ))
+        })?;
     let value_span = numeric.soft_range.max - numeric.soft_range.min;
     if !value_span.is_finite() || value_span <= 0.0 {
         return Err(curve_error(format!(

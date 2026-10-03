@@ -1713,7 +1713,13 @@ pub(super) fn with_audio_processor_rack_sections(
                                 .muted(),
                         ),
                     ));
-                } else if let Some(numeric) = parameter.schema.numeric {
+                } else if let Some(numeric) = parameter
+                    .schema
+                    .numeric
+                    .as_ref()
+                    .and_then(|contracts| contracts.first())
+                    .copied()
+                {
                     section = section.with_row(PropertyRow::new(
                         label.clone(),
                         audio_processor_static_parameter_control(
@@ -3153,26 +3159,49 @@ pub(super) fn vector_property_widget(
     selection: Option<SelectedClipRef>,
     target: InspectorPropertyTarget,
 ) -> Box<dyn Widget> {
-    let ((min, max), (hard_min, hard_max)) = parameter_numeric_ranges(property, 0.0, 1.0);
-    let values = values
-        .iter()
-        .map(|value| finite_f32_from_f32(*value).unwrap_or(hard_min).clamp(hard_min, hard_max))
-        .collect::<Vec<_>>();
     let rows = labels
         .iter()
         .zip(values.iter())
         .enumerate()
         .map(|(component_index, (label, value))| {
+            let numeric = property
+                .schema
+                .numeric
+                .as_ref()
+                .and_then(|contracts| contracts.get(component_index));
+            let ((min, max), (hard_min, hard_max), step) = if let Some(numeric) = numeric {
+                let hard = numeric_property_range(
+                    Some(numeric.hard_range.min),
+                    Some(numeric.hard_range.max),
+                    -f32::MAX,
+                    f32::MAX,
+                );
+                let soft = numeric_property_range(
+                    Some(numeric.soft_range.min),
+                    Some(numeric.soft_range.max),
+                    0.0,
+                    1.0,
+                );
+                (
+                    (soft.0.clamp(hard.0, hard.1), soft.1.clamp(hard.0, hard.1)),
+                    hard,
+                    numeric.step,
+                )
+            } else {
+                let (soft, hard) = parameter_numeric_ranges(property, 0.0, 1.0);
+                (soft, hard, property.step)
+            };
+            let value = finite_f32_from_f32(*value).unwrap_or(hard_min).clamp(hard_min, hard_max);
             let selected_clip = selection;
             let target = target.clone();
             let control = numeric_slider_input_control_with_hard_range(
-                *value,
+                value,
                 min,
                 max,
                 hard_min,
                 hard_max,
-                property_step(property.step, None),
-                numeric_decimals(property.step, *value),
+                property_step(step, None),
+                numeric_decimals(step, value),
                 can_edit,
                 move |v| {
                     inspector_property_channel_action(

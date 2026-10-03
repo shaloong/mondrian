@@ -2416,7 +2416,17 @@ fn inspector_property_model(
     author_time: TimelineTime,
     localizer: &Localizer,
 ) -> InspectorEffectPropertyModel {
-    let numeric = property.descriptor.schema.numeric;
+    let numeric = (property.channel_count() == 1)
+        .then(|| {
+            property
+                .descriptor
+                .schema
+                .numeric
+                .as_ref()
+                .and_then(|contracts| contracts.first())
+                .copied()
+        })
+        .flatten();
     InspectorEffectPropertyModel {
         schema: property.descriptor.schema.clone(),
         address: AnimationParameterAddress {
@@ -4061,7 +4071,7 @@ fn numeric_curve_model_for_property(
     {
         return None;
     }
-    let numeric = property.descriptor.schema.numeric?;
+    let numeric = property.descriptor.schema.numeric.as_ref()?.first().copied()?;
     let value_span = numeric.soft_range.max - numeric.soft_range.min;
     if !value_span.is_finite() || value_span <= 0.0 {
         return None;

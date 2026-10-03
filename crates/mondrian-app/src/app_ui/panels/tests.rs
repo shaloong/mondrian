@@ -6166,6 +6166,115 @@ fn inspector_effect_vec3_property_widget_dispatches_component_change() {
 }
 
 #[test]
+fn inspector_vector_slider_uses_its_own_channel_contract() {
+    let effect_id = EffectId::new();
+    let selection = SelectedClipRef {
+        track_id: TrackId::new(),
+        is_video_track: true,
+        clip_id: ClipId::new(),
+    };
+    let property = InspectorEffectPropertyModel {
+        schema: ParameterSchema::v1(
+            mondrian_core::ParameterId::new_static("mondrian.test.lighting_direction"),
+            PropertyValue::Vec3(glam::Vec3::new(0.1, 20.0, -20.0)),
+        )
+        .with_channel_numeric_contracts(
+            mondrian_core::automation::ParameterUnit::Unitless,
+            [(0.0, 1.0, 0.01), (10.0, 30.0, 0.1), (-30.0, -10.0, 1.0)]
+                .into_iter()
+                .map(|(min, max, step)| {
+                    mondrian_core::automation::ParameterNumericContract::closed(
+                        min,
+                        max,
+                        Some(step),
+                        mondrian_core::automation::ParameterInvalidValuePolicy::Reject,
+                    )
+                    .expect("channel contract")
+                })
+                .collect::<Vec<_>>(),
+        ),
+        address: test_parameter_address("mondrian.test.lighting_direction"),
+        path: "lighting.direction".to_string(),
+        label: "Direction".to_string(),
+        group_name: None,
+        group_label: None,
+        enum_labels: BTreeMap::new(),
+        value: PropertyValue::Vec3(glam::Vec3::new(0.1, 20.0, -20.0)),
+        min: Some(0.0),
+        max: Some(1.0),
+        hard_min: None,
+        hard_max: None,
+        step: Some(0.01),
+        is_animatable: true,
+        numeric_curve: None,
+    };
+    let mut widget = effect_property_value_widget(
+        &chinese_localizer(),
+        &property,
+        true,
+        Some(selection),
+        effect_id,
+    );
+    widget.layout(Rect::new(0.0, 0.0, 220.0, 94.0));
+
+    let actions = RefCell::new(Vec::new());
+    let dispatch = |action| actions.borrow_mut().push(action);
+    let mut focus = DummyFocus;
+    let mut shortcut = DummyShortcut;
+    let mut tooltip = DummyTooltip;
+    let mut requests = EventRequests::default();
+    let mut ctx = event_ctx(
+        &mut focus,
+        &mut shortcut,
+        &mut tooltip,
+        &mut requests,
+        &dispatch,
+    );
+
+    let result = widget.event(
+        &UiEvent::MouseDown {
+            position: Point::new(80.0, 75.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        &mut ctx,
+    );
+
+    assert_eq!(result, EventResult::Handled);
+    let recorded = actions.borrow();
+    assert_eq!(recorded.len(), 1);
+    let Some(crate::app::parameter_gesture::ParameterGestureAction::Begin {
+        edit: crate::app::parameter_gesture::ParameterGestureEdit::Effect(payload),
+        ..
+    }) = crate::app::parameter_gesture::ParameterGestureAction::decode(&recorded[0])
+        .expect("valid gesture envelope")
+    else {
+        panic!("expected effect gesture begin, got {:?}", recorded[0]);
+    };
+    assert_eq!(payload.clip_id, selection.clip_id);
+    assert_eq!(payload.effect_id, effect_id);
+    let ParameterValueWrite::Channels { parameter, channel_values } = payload.write else {
+        panic!("expected sparse component write");
+    };
+    assert_eq!(parameter, property.address);
+    assert_eq!(channel_values.len(), 1);
+    assert_eq!(channel_values[0].0, 2);
+    assert!(
+        (-30.0..=-10.0).contains(&channel_values[0].1),
+        "Z must use its negative range, not X or model scalar hints"
+    );
+    assert_eq!(
+        channel_values[0].1.fract(),
+        0.0,
+        "Z uses its own integer step"
+    );
+    assert_ne!(
+        channel_values[0].1, -20.0,
+        "pointer changes the selected component"
+    );
+}
+
+#[test]
 fn numeric_draft_cancel_preserves_automation_and_history() {
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation};
     let mut sequence = Sequence::new("Draft Cancellation");
@@ -8007,7 +8116,13 @@ fn audio_rack_numeric_widget_preserves_double_and_rejects_fractional_integer_inp
             rack,
             processor,
             parameter,
-            parameter.schema.numeric.expect("numeric"),
+            parameter
+                .schema
+                .numeric
+                .as_ref()
+                .and_then(|contracts| contracts.first())
+                .copied()
+                .expect("numeric"),
             true,
         );
         widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));

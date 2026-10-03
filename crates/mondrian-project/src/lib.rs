@@ -35,7 +35,7 @@ use migration::JsonMigrationRegistry;
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 28;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 29;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 6;
 
@@ -3343,7 +3343,7 @@ mod tests {
     #[test]
     fn older_schemas_are_rejected_without_an_alpha_compatibility_migration() {
         let mut legacy = serde_json::to_value(test_document()).expect("serialize document");
-        for version in [5, 6, 10, 14, 17, 26, 27] {
+        for version in [5, 6, 10, 14, 17, 26, 27, 28] {
             legacy["schema_version"] = serde_json::json!(version);
             let err = DOCUMENT_MIGRATIONS
                 .migrate(legacy.clone())

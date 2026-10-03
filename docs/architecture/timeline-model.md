@@ -1592,3 +1592,9 @@ existing stable keys. Caption equality never merges distinct author choices.
 Clip blend choice message addresses are the registered `blend-mode-*` messages,
 shared with the specialized menu rather than a second unresolved address set.
 Generic Inspector choices therefore use the same English/Chinese/pseudo catalog.
+
+### Processor channel admission
+
+Scalar audio automation and exact integer processor values consume channel zero
+of their validated canonical schema. Core enforces complete contract cardinality
+and atomic normalization for every full or sparse property write.

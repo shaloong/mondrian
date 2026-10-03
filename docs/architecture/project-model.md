@@ -763,9 +763,11 @@ preparation, budget admission or validation leaves author state and both history
 ledgers unchanged. Disabled or insufficient Undo retention does not disable
 cancellation: pending origin admission has its own explicit byte budget.
 
-### Schema 28 and portable package version 2
+### Schema 29 and portable package version 2
 
-Schema 28 persists external processor resources as platform-tagged native units.
+Schema 29 persists external processor resources as platform-tagged native units
+and numeric parameter bounds as complete ordered channel-contract lists. Earlier
+alpha schemas, including scalar-contract schema 28, are rejected without migration.
 The Alpha document registry has no earlier-schema migration steps or plain-string
 resource aliases. Non-Unicode native filenames survive save/reopen exactly.
 Portable package version 2 uses the same representation for original source

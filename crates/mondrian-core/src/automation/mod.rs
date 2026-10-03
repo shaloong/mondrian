@@ -677,8 +677,9 @@ pub struct ParameterSchema {
     pub is_animatable: bool,
     /// Physical/UI interpretation of numeric values.
     pub unit: ParameterUnit,
-    /// Enforced numeric bounds and editor stepping, when numeric.
-    pub numeric: Option<ParameterNumericContract>,
+    /// Complete ordered per-channel bounds and editor stepping, or no bounds.
+    /// A present list must contain exactly one contract per numeric value channel.
+    pub numeric: Option<AuthoringList<ParameterNumericContract>>,
     /// Required for text parameters; absent for every other value type.
     pub text_mode: Option<ParameterTextMode>,
     /// Required exactly for Resource parameters; governs author and picker admission.
@@ -759,7 +760,19 @@ impl ParameterSchema {
         numeric: ParameterNumericContract,
     ) -> Self {
         self.unit = unit;
-        self.numeric = Some(numeric);
+        self.numeric =
+            Some(std::iter::repeat_n(numeric, self.value_type.channel_count().max(1)).collect());
+        self
+    }
+
+    /// Declare complete per-channel numeric bounds without a scalar fallback.
+    pub fn with_channel_numeric_contracts(
+        mut self,
+        unit: ParameterUnit,
+        numeric: impl Into<AuthoringList<ParameterNumericContract>>,
+    ) -> Self {
+        self.unit = unit;
+        self.numeric = Some(numeric.into());
         self
     }
 
@@ -829,8 +842,27 @@ impl ParameterSchema {
         {
             return Err(ParameterSchemaError::InterpolationTypeMismatch);
         }
-        if let Some(numeric) = self.numeric {
-            numeric.validate()?;
+        if let Some(contracts) = &self.numeric {
+            if matches!(
+                self.value_type,
+                PropertyValueType::Bool
+                    | PropertyValueType::Curve
+                    | PropertyValueType::QualifierSamples
+                    | PropertyValueType::Enum
+                    | PropertyValueType::Resource
+                    | PropertyValueType::Text
+            ) {
+                return Err(ParameterSchemaError::NumericContractTypeMismatch);
+            }
+            if contracts.len() != self.value_type.channel_count() {
+                return Err(ParameterSchemaError::NumericChannelCountMismatch {
+                    expected: self.value_type.channel_count(),
+                    actual: contracts.len(),
+                });
+            }
+            for numeric in contracts {
+                numeric.validate()?;
+            }
         }
         if self.value_type == PropertyValueType::Int
             && self.allowed_interpolations != [ParameterInterpolation::Hold]
@@ -843,8 +875,10 @@ impl ParameterSchema {
                 return Err(ParameterSchemaError::DefaultValueOutsideHardRange);
             }
             let exact_limit = (1_u64 << 53) as f64;
-            if self.numeric.is_none_or(|numeric| {
-                numeric.hard_range.min < -exact_limit || numeric.hard_range.max > exact_limit
+            if self.numeric.as_ref().is_none_or(|contracts| {
+                contracts.iter().any(|numeric| {
+                    numeric.hard_range.min < -exact_limit || numeric.hard_range.max > exact_limit
+                })
             }) {
                 return Err(ParameterSchemaError::InterpolationTypeMismatch);
             }
@@ -878,19 +912,6 @@ impl ParameterSchema {
             }
             _ => {}
         }
-        if self.numeric.is_some()
-            && matches!(
-                self.value_type,
-                PropertyValueType::Bool
-                    | PropertyValueType::Curve
-                    | PropertyValueType::QualifierSamples
-                    | PropertyValueType::Enum
-                    | PropertyValueType::Resource
-                    | PropertyValueType::Text
-            )
-        {
-            return Err(ParameterSchemaError::NumericContractTypeMismatch);
-        }
         if matches!(self.value_type, PropertyValueType::Resource)
             && !matches!(
                 self.cache_impact,
@@ -908,11 +929,16 @@ impl ParameterSchema {
             }
             _ => {}
         }
-        for value in self.default_value.to_channel_values() {
+        for (index, value) in self.default_value.to_channel_values().into_iter().enumerate() {
             if !value.is_finite() {
                 return Err(ParameterSchemaError::NonFiniteDefaultValue);
             }
-            if self.numeric.is_some_and(|numeric| !numeric.hard_range.contains(value)) {
+            if self
+                .numeric
+                .as_ref()
+                .and_then(|contracts| contracts.get(index))
+                .is_some_and(|numeric| !numeric.hard_range.contains(value))
+            {
                 return Err(ParameterSchemaError::DefaultValueOutsideHardRange);
             }
         }
@@ -1053,6 +1079,11 @@ pub enum ParameterSchemaError {
     InvalidResourceDefault,
     #[error("numeric constraints require a numeric property type")]
     NumericContractTypeMismatch,
+    /// Bound lists must cover exactly the declared numeric value shape.
+    #[error(
+        "numeric channel contract count {actual} does not match value channel count {expected}"
+    )]
+    NumericChannelCountMismatch { expected: usize, actual: usize },
     #[error("descriptor value type does not match its default value")]
     ValueTypeMismatch,
     #[error("parameter value type cannot be animated")]
@@ -1584,6 +1615,16 @@ impl PropertyDescriptor {
         self
     }
 
+    /// Declare complete ordered numeric bounds for each component of this property.
+    pub fn with_channel_numeric_contracts(
+        mut self,
+        unit: ParameterUnit,
+        numeric: impl Into<AuthoringList<ParameterNumericContract>>,
+    ) -> Self {
+        self.schema = self.schema.with_channel_numeric_contracts(unit, numeric);
+        self
+    }
+
     /// Attach the stable option set used by a discrete enum parameter.
     pub fn with_enum_options(mut self, options: Vec<ParameterEnumOption>) -> Self {
         self.schema = self.schema.with_enum_options(options);
@@ -1816,7 +1857,7 @@ impl AnimatedProperty {
                     ));
                 }
                 previous_time = Some(keyframe.time);
-                let value = self.normalize_numeric_channel(keyframe.value)?;
+                let value = self.normalize_numeric_channel(expected_index, keyframe.value)?;
                 if value != keyframe.value {
                     return Err(parameter_value_error(
                         &self.descriptor.path,
@@ -2236,7 +2277,7 @@ impl AnimatedProperty {
         validate_channel_updates(self.channel_count(), channel_values, &self.descriptor.path)?;
         let channel_values = channel_values
             .iter()
-            .map(|(index, value)| Ok((*index, self.normalize_numeric_channel(*value)?)))
+            .map(|(index, value)| Ok((*index, self.normalize_numeric_channel(*index, *value)?)))
             .collect::<Result<Vec<_>>>()?;
 
         if self.animation_enabled
@@ -2511,7 +2552,7 @@ impl AnimatedProperty {
         channel_index: usize,
         value: f64,
     ) -> Result<()> {
-        let value = self.normalize_numeric_channel(value)?;
+        let value = self.normalize_numeric_channel(channel_index, value)?;
         let channel = self.channels.get_mut(channel_index).ok_or_else(|| {
             MondrianError::WorkflowStepFailed {
                 step_id: "property_update_channel_keyframe_value".to_string(),
@@ -2611,7 +2652,8 @@ impl AnimatedProperty {
         }
         let normalized = channels
             .iter()
-            .map(|value| self.normalize_numeric_channel(*value))
+            .enumerate()
+            .map(|(index, value)| self.normalize_numeric_channel(index, *value))
             .collect::<Result<Vec<_>>>()?;
         if self.descriptor.schema.numeric.is_none() {
             return Ok(value);
@@ -2665,16 +2707,25 @@ impl AnimatedProperty {
         PropertyValue::from_channel_values(self.value_type(), channels, fallback)
     }
 
-    fn normalize_numeric_channel(&self, value: f64) -> Result<f64> {
+    fn normalize_numeric_channel(&self, index: usize, value: f64) -> Result<f64> {
         if !value.is_finite() {
             return Err(parameter_value_error(
                 &self.descriptor.path,
                 "numeric values must be finite",
             ));
         }
-        let Some(contract) = self.descriptor.schema.numeric else {
+        let Some(contracts) = self.descriptor.schema.numeric.as_ref() else {
             return Ok(value);
         };
+        if contracts.len() != self.value_type().channel_count() {
+            return Err(parameter_value_error(
+                &self.descriptor.path,
+                "numeric channel contracts must cover every declared channel",
+            ));
+        }
+        let contract = contracts.get(index).ok_or_else(|| {
+            parameter_value_error(&self.descriptor.path, "numeric channel contract is missing")
+        })?;
         if contract.hard_range.contains(value) {
             return Ok(value);
         }
@@ -3017,7 +3068,7 @@ impl PropertyBag {
         }
         let mut candidate = current.clone();
         for &(index, value) in channel_values {
-            candidate[index] = property.normalize_numeric_channel(value)?;
+            candidate[index] = property.normalize_numeric_channel(index, value)?;
         }
         let normalized = property
             .normalize_value(property.value_from_channel_values(&candidate, &current_value))?;
@@ -3944,7 +3995,7 @@ impl crate::AuthoringFootprint for ParameterSchema {
             default_value,
             is_animatable: _,
             unit: _,
-            numeric: _,
+            numeric,
             text_mode: _,
             resource,
             allowed_interpolations,
@@ -3954,6 +4005,7 @@ impl crate::AuthoringFootprint for ParameterSchema {
         collector.collect(parameter_id)?;
         collector.collect(message_id)?;
         collector.collect(default_value)?;
+        collector.collect(numeric)?;
         collector.collect(allowed_interpolations)?;
         collector.collect(enum_options)?;
         collector.collect(resource)
@@ -4495,6 +4547,113 @@ mod tests {
     }
 
     #[test]
+    fn numeric_channel_contracts_admit_asymmetric_ranges_and_write_atomically() {
+        let descriptor = PropertyDescriptor::new(
+            "native.point",
+            "Point",
+            PropertyValue::Vec2(Vec2::new(0.25, 20.0)),
+        );
+        let contracts = vec![
+            ParameterNumericContract::closed(
+                0.0,
+                1.0,
+                Some(0.01),
+                ParameterInvalidValuePolicy::Clamp,
+            )
+            .expect("X range"),
+            ParameterNumericContract::closed(
+                10.0,
+                30.0,
+                Some(0.1),
+                ParameterInvalidValuePolicy::Reject,
+            )
+            .expect("Y range"),
+        ];
+        let mut wire = serde_json::to_value(&descriptor).expect("descriptor wire");
+        wire["schema"]["numeric"] = serde_json::to_value(&contracts).expect("component contracts");
+        let descriptor: PropertyDescriptor = serde_json::from_value(wire)
+            .expect("one complete numeric contract per component must be admitted");
+        descriptor.validate().expect("asymmetric default lies inside its own ranges");
+        let mut property = AnimatedProperty::from_descriptor(descriptor);
+        let original = property.clone();
+        assert!(property.set_static_value(PropertyValue::Vec2(Vec2::new(2.0, 31.0))).is_err());
+        assert_eq!(
+            property, original,
+            "a rejected Y cannot publish the clamped X"
+        );
+        property
+            .set_static_value(PropertyValue::Vec2(Vec2::new(2.0, 25.0)))
+            .expect("component-specific policies");
+        assert_eq!(
+            property.static_value(),
+            &PropertyValue::Vec2(Vec2::new(1.0, 25.0))
+        );
+        let first = Keyframe::linear(tt(0), PropertyValue::Vec2(Vec2::new(0.25, 20.0)));
+        let first_id = first.id;
+        property.set_exact_keyframe(first).expect("complete first key");
+        property
+            .set_exact_keyframe(Keyframe::linear(
+                tt(10),
+                PropertyValue::Vec2(Vec2::new(0.75, 30.0)),
+            ))
+            .expect("complete last key");
+        assert_eq!(property.channel(0).expect("X").keyframes[0].id, first_id);
+        assert_eq!(property.channel(1).expect("Y").keyframes[0].id, first_id);
+        assert_eq!(
+            property.evaluate(tt(5)),
+            PropertyValue::Vec2(Vec2::new(0.5, 25.0))
+        );
+        let before_rejection = property.clone();
+        assert!(property
+            .write_channels(
+                tt(5),
+                &[(0, -1.0), (1, 31.0)],
+                InterpolationType::Linear,
+                None
+            )
+            .is_err());
+        assert_eq!(
+            property, before_rejection,
+            "all channel bounds validate before any key mutation"
+        );
+        property
+            .write_channels(
+                tt(5),
+                &[(0, -1.0), (1, 25.0)],
+                InterpolationType::Linear,
+                None,
+            )
+            .expect("X clamps independently, Y remains valid");
+        assert_eq!(
+            property.evaluate(tt(5)),
+            PropertyValue::Vec2(Vec2::new(0.0, 25.0))
+        );
+        let serialized = serde_json::to_value(&property).expect("complete author wire");
+        let restored: AnimatedProperty =
+            serde_json::from_value(serialized.clone()).expect("restore");
+        restored.validate().expect("persisted channel bounds");
+        assert_eq!(restored, property);
+        let mut missing = serialized;
+        missing["descriptor"]["schema"]["numeric"]
+            .as_array_mut()
+            .expect("contracts")
+            .pop();
+        let mut malformed: AnimatedProperty = serde_json::from_value(missing).expect("wire shape");
+        assert!(
+            malformed.validate().is_err(),
+            "a partial contract must not make a sibling unbounded"
+        );
+        let before = malformed.clone();
+        assert!(
+            malformed
+                .write_channels(tt(5), &[(0, 0.75)], InterpolationType::Linear, None)
+                .is_err(),
+            "a sparse write must reject an incomplete contract"
+        );
+        assert_eq!(malformed, before);
+    }
+
+    #[test]
     fn parameter_numeric_contract_is_enforced_on_every_write_shape() {
         let numeric = ParameterNumericContract::closed(
             0.0,
@@ -4642,7 +4801,8 @@ mod tests {
         }
         let exact_max = 1_i64 << 53;
         let mut exact = descriptor.clone();
-        exact.schema.numeric = Some(
+        exact.schema = exact.schema.with_numeric_contract(
+            ParameterUnit::Unitless,
             ParameterNumericContract::closed(
                 0.0,
                 exact_max as f64,
@@ -4662,7 +4822,8 @@ mod tests {
         property
             .set_static_value(PropertyValue::Int(exact_max))
             .expect("exact endpoint");
-        descriptor.schema.numeric = Some(
+        descriptor.schema = descriptor.schema.with_numeric_contract(
+            ParameterUnit::Unitless,
             ParameterNumericContract::closed(
                 0.0,
                 ((1_u64 << 53) + 2) as f64,

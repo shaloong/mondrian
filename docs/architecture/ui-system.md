@@ -3117,3 +3117,10 @@ one before opening a fresh identity. All matching terminal parameter boundaries
 refresh canonical controls, including unchanged or rejected local values; late
 pointer release/focus loss cannot commit a cancelled edit. Existing numeric curve
 and ordinary slider behavior is qualified alongside the structured curve matrix.
+
+### Component-specific numeric controls
+
+Inspector vector controls read the matching schema channel range and step.
+Scalar model hints are projected only for scalar parameters; they do not stand
+in for all vector components. Sparse component actions retain the canonical
+parameter address and write only the selected index through the author session.

@@ -1592,3 +1592,9 @@ An explicit CLAP rebind probes the currently installed definition and checks
 its complete saved parameter schema against the authored snapshot before a
 single Rack transaction updates the binary revision. Curves, opaque state,
 bypass, and processor identity survive the edit and Undo/Redo.
+
+### Scalar processor numeric contracts
+
+Validated scalar processor schemas use their sole numeric channel contract for
+static edits and automation range projection. CLAP descriptor bounds populate
+the same canonical list; audio authoring does not introduce a second range model.

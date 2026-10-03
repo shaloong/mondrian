@@ -1657,6 +1657,8 @@ fn validate_parameter_value(
     }
     if schema
         .numeric
+        .as_ref()
+        .and_then(|contracts| contracts.first())
         .is_some_and(|numeric| value < numeric.hard_range.min || value > numeric.hard_range.max)
     {
         return Err(AudioAuthoringError::InvalidProcessorParameterValue);

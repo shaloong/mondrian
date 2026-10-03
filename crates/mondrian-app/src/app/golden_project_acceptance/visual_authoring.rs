@@ -1504,6 +1504,9 @@ pub(super) fn execute_visual_stage(
             .descriptor
             .schema
             .numeric
+            .as_ref()
+            .and_then(|contracts| contracts.first())
+            .copied()
             .context("font size property has no numeric editor contract")?;
         let value = f64::from(keyframe.value.as_f32().context("font size endpoint is not scalar")?);
         let ratio = ((value - numeric.soft_range.min)

@@ -480,3 +480,13 @@ components and separator spellings. Local `OsString` storage borrows a `Path`
 or transfers its existing buffer into `PathBuf` at the execution seam without
 copying filename units. Package inventory copies one canonical file while
 retaining every exact source coordinate for foreign-platform rebinding.
+
+### Numeric parameter channel contracts
+
+Core schemas hold an optional complete, ordered COW list of numeric contracts.
+Each declared channel has its own hard/soft range, step and reject/clamp policy.
+Schema admission rejects missing or extra contracts; sparse writes check complete
+cardinality before normalization and prepare all values before publishing mutations.
+The list participates in authoring footprint accounting and shares snapshot roots.
+Uniform contract builders expand across the declared arity; serialized scalar
+contracts are not accepted through an alpha compatibility adapter.

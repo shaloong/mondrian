@@ -397,7 +397,13 @@ pub fn inspect_audio_automation<'a>(
                     parameter_id: parameter_id.clone(),
                 }
             })?;
-            let Some(numeric) = parameter.schema.numeric else {
+            let Some(numeric) = parameter
+                .schema
+                .numeric
+                .as_ref()
+                .and_then(|contracts| contracts.first())
+                .copied()
+            else {
                 return Err(AudioAutomationAddressError::NotAnimatable(
                     parameter_id.clone(),
                 ));

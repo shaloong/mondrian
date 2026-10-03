@@ -84,7 +84,7 @@ impl AudioProcessorParameterModel {
         {
             return None;
         }
-        let contract = self.schema.numeric?;
+        let contract = self.schema.numeric.as_ref()?.first()?;
         (value >= contract.hard_range.min && value <= contract.hard_range.max).then_some(value)
     }
 }
