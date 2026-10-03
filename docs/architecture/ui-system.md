@@ -3149,3 +3149,7 @@ OpenFX descriptor/temporal/color binding remain outstanding product work.
 ### Transfer curve insertion capacity
 
 CurveEditor accepts an optional user insertion limit without truncating supplied points. Structured normalized transfer curves configure the canonical 32-point limit; ordinary keyframe curves retain unrestricted insertion. Empty-plot clicks at capacity are rejected before a value gesture or pointer capture starts, preserving draft state and Undo/Redo history. Existing points remain editable and deleting an interior point frees capacity. Inspector captions show localized current and maximum point counts.
+
+### Curve drag coordinates
+
+A captured point drag owns its point index, original normalized point, original pointer position and insertion intent together. Movement is computed from pointer displacement, preserving the grab offset and the untouched axis exactly; a stationary pointer does not change the point. A collapsed plot axis retains its original coordinate without dividing by zero. Cancel restores the original point or removes a newly inserted point. Audio automation lowering retains the canonical key's original exact time or value when its projected axis has not changed, so horizontal movement never re-applies value stepping and vertical movement never quantizes existing author time.

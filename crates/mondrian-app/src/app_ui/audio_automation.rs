@@ -308,9 +308,14 @@ pub(crate) fn audio_automation_curve_edit_action(
             AudioAutomationEdit::UpsertKeyframe { keyframe }
         }
         CurveEdit::Move { index, point } => {
-            let mut keyframe = model.keys.get(index)?.keyframe.clone()?;
-            keyframe.time = denormalized_time(model.viewport.range, point.x)?;
-            keyframe.value = denormalized_value(model, point.y)?;
+            let key = model.keys.get(index)?;
+            let mut keyframe = key.keyframe.clone()?;
+            if point.x != key.point.x {
+                keyframe.time = denormalized_time(model.viewport.range, point.x)?;
+            }
+            if point.y != key.point.y {
+                keyframe.value = denormalized_value(model, point.y)?;
+            }
             AudioAutomationEdit::UpsertKeyframe { keyframe }
         }
         CurveEdit::Delete { index } => AudioAutomationEdit::RemoveKeyframe {
@@ -512,5 +517,68 @@ mod tests {
                 }
             ))) if keyframe.value == -100.0
         ));
+    }
+
+    #[test]
+    fn single_axis_audio_key_drag_preserves_the_untouched_exact_coordinate() {
+        for horizontal in [true, false] {
+            let mut sequence = Sequence::new("Exact audio key drag");
+            let target = AudioAutomationTarget::ChannelFader {
+                owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+            };
+            let time = TimelineTime::new(1, 3).unwrap();
+            let value = -6.123456789;
+            let keyframe = ExactAutomationKeyframe::linear(time, value);
+            let keyframe_id = keyframe.id;
+            mondrian_timeline::apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                },
+            )
+            .unwrap();
+            let viewport = AudioAutomationViewport {
+                domain: AuthoringTimeDomain::Sequence(sequence.id),
+                range: TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE).unwrap(),
+            };
+            let model = project_audio_automation(&sequence, target.clone(), viewport).unwrap();
+            let original = model.keys[1].point;
+            let point = if horizontal {
+                CurvePoint::new(0.75, original.y)
+            } else {
+                CurvePoint::new(original.x, 0.25)
+            };
+            let action =
+                audio_automation_curve_edit_action(&model, CurveEdit::Move { index: 1, point })
+                    .unwrap();
+            let Some(ProductAction::Audio(AudioProductAction::EditAutomation(request))) =
+                ProductAction::decode_external(&action).unwrap()
+            else {
+                panic!("canonical audio automation edit");
+            };
+            mondrian_timeline::apply_audio_automation_edit(&mut sequence, &request).unwrap();
+            let inspection = inspect_audio_automation(&sequence, &target).unwrap();
+            let moved = inspection
+                .curve()
+                .unwrap()
+                .keyframes
+                .iter()
+                .find(|key| key.id == keyframe_id)
+                .unwrap();
+            if horizontal {
+                assert_eq!(
+                    moved.value, value,
+                    "horizontal drag must preserve exact author value"
+                );
+                assert_eq!(moved.time, TimelineTime::new(3, 4).unwrap());
+            } else {
+                assert_eq!(
+                    moved.time, time,
+                    "vertical drag must preserve exact author time"
+                );
+                assert_ne!(moved.value, value);
+            }
+        }
     }
 }

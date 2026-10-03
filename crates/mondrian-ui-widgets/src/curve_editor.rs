@@ -140,6 +140,14 @@ pub type CurveGestureAction = dyn Fn(CurveGestureEvent) -> Option<Action>;
 /// Adapter for complete live curve values and their authoring boundaries.
 pub type CurveValueEditAction = dyn Fn(ValueEdit, &[CurvePoint]) -> Option<Action>;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CurvePointDrag {
+    index: usize,
+    origin: CurvePoint,
+    pointer_origin: Point,
+    inserted: bool,
+}
+
 /// Interactive normalized curve editor.
 pub struct CurveEditor {
     id: WidgetId,
@@ -149,10 +157,8 @@ pub struct CurveEditor {
     point_policies: Vec<CurvePointPolicy>,
     display_points: Option<Vec<CurvePoint>>,
     selected: Option<usize>,
-    dragging: Option<usize>,
-    drag_origin: Option<CurvePoint>,
+    dragging: Option<CurvePointDrag>,
     drag_value_origin: Option<(Vec<CurvePoint>, Vec<CurvePointPolicy>)>,
-    drag_inserted: bool,
     grid_columns: usize,
     grid_rows: usize,
     focused: bool,
@@ -190,9 +196,7 @@ impl CurveEditor {
             display_points: None,
             selected: None,
             dragging: None,
-            drag_origin: None,
             drag_value_origin: None,
-            drag_inserted: false,
             grid_columns: 4,
             grid_rows: 3,
             focused: false,
@@ -368,19 +372,12 @@ impl CurveEditor {
     pub fn set_points(&mut self, points: Vec<CurvePoint>) {
         if self.dragging.take().is_some() {
             self.pending_capture_release = true;
-            self.drag_origin = None;
-            self.drag_inserted = false;
         }
         self.points = normalize_points(points);
         self.point_policies = default_point_policies(self.points.len());
         self.point_context_menus.clear();
         self.context_menu = None;
         self.selected = self.selected.filter(|index| *index < self.points.len());
-        self.dragging = self.dragging.filter(|index| *index < self.points.len());
-        if self.dragging.is_none() {
-            self.drag_origin = None;
-            self.drag_inserted = false;
-        }
     }
 
     /// Selected point index, if any.
@@ -403,10 +400,6 @@ impl CurveEditor {
 
     fn to_screen(&self, point: CurvePoint) -> Point {
         self.geometry().curve_to_screen(point)
-    }
-
-    fn screen_to_curve(&self, point: Point) -> CurvePoint {
-        self.geometry().screen_to_curve(point)
     }
 
     fn hit_point(&self, position: Point) -> Option<usize> {
@@ -522,7 +515,13 @@ impl CurveEditor {
         }
     }
 
-    fn begin_drag(&mut self, index: usize, inserted: bool, ctx: &mut EventContext) {
+    fn begin_drag(
+        &mut self,
+        index: usize,
+        inserted: bool,
+        pointer_origin: Point,
+        ctx: &mut EventContext,
+    ) {
         if self.on_value_edit.is_some() {
             if !inserted {
                 self.begin_value_gesture(ctx);
@@ -535,66 +534,60 @@ impl CurveEditor {
             self.gesture = Some(id);
             self.dispatch_gesture(CurveGestureEvent::Begin(id), ctx);
         }
-        self.dragging = Some(index);
-        self.drag_origin = (!inserted).then(|| self.points[index]);
-        self.drag_inserted = inserted;
+        self.dragging = Some(CurvePointDrag {
+            index,
+            origin: self.points[index],
+            pointer_origin,
+            inserted,
+        });
     }
 
     fn commit_drag_edit(&mut self, ctx: &mut EventContext) {
-        let Some(index) = self.dragging.take() else {
+        let Some(drag) = self.dragging.take() else {
             return;
         };
-        let point = self.points.get(index).copied();
-        if self.drag_inserted {
+        let point = self.points.get(drag.index).copied();
+        if drag.inserted {
             if let Some(point) = point {
-                self.dispatch_edit(CurveEdit::Insert { index, point }, ctx);
+                self.dispatch_edit(CurveEdit::Insert { index: drag.index, point }, ctx);
             }
-        } else if let (Some(origin), Some(point)) = (self.drag_origin, point)
-            && origin != point
+        } else if let Some(point) = point
+            && drag.origin != point
         {
-            self.dispatch_edit(CurveEdit::Move { index, point }, ctx);
+            self.dispatch_edit(CurveEdit::Move { index: drag.index, point }, ctx);
         }
-        self.drag_origin = None;
-        self.drag_inserted = false;
         self.end_gesture(false, ctx);
     }
 
     fn cancel_drag_state(&mut self) -> bool {
-        let Some(index) = self.dragging.take() else {
+        let Some(drag) = self.dragging.take() else {
             return false;
         };
         if let Some((points, policies)) = self.drag_value_origin.take() {
             let changed = self.points != points;
             self.points = points;
             self.point_policies = policies;
-            self.drag_origin = None;
-            self.drag_inserted = false;
             self.selected = self.selected.filter(|index| *index < self.points.len());
             return changed;
         }
-        let changed = if self.drag_inserted {
-            if index < self.points.len() {
-                self.points.remove(index);
-                self.point_policies.remove(index);
+        if drag.inserted {
+            if drag.index < self.points.len() {
+                self.points.remove(drag.index);
+                self.point_policies.remove(drag.index);
                 true
             } else {
                 false
             }
-        } else if let Some(origin) = self.drag_origin {
+        } else {
             self.points
-                .get_mut(index)
+                .get_mut(drag.index)
                 .map(|point| {
-                    let changed = *point != origin;
-                    *point = origin;
+                    let changed = *point != drag.origin;
+                    *point = drag.origin;
                     changed
                 })
                 .unwrap_or(false)
-        } else {
-            false
-        };
-        self.drag_origin = None;
-        self.drag_inserted = false;
-        changed
+        }
     }
 
     fn nudge_selected(
@@ -658,7 +651,7 @@ impl CurveEditor {
             return false;
         }
 
-        if self.drag_inserted {
+        if self.dragging.is_some_and(|drag| drag.inserted) {
             self.cancel_drag_state();
             self.selected = None;
             self.end_gesture(true, ctx);
@@ -670,7 +663,6 @@ impl CurveEditor {
             return true;
         }
         let was_dragging = self.dragging.take().is_some();
-        self.drag_origin = None;
         self.points.remove(index);
         self.point_policies.remove(index);
         self.selected = (!self.points.is_empty()).then(|| index.min(self.points.len() - 1));
@@ -766,7 +758,7 @@ impl Widget for CurveEditor {
                 self.focus_visible = false;
                 if let Some(index) = self.hit_point(*position) {
                     self.selected = Some(index);
-                    self.begin_drag(index, false, ctx);
+                    self.begin_drag(index, false, *position, ctx);
                     ctx.request_pointer_capture(self.id);
                     return EventResult::Handled;
                 }
@@ -774,7 +766,7 @@ impl Widget for CurveEditor {
                     return EventResult::Handled;
                 }
                 if let Some(index) = self.insert_point_from_input(*position, ctx) {
-                    self.begin_drag(index, true, ctx);
+                    self.begin_drag(index, true, *position, ctx);
                     ctx.request_pointer_capture(self.id);
                     return EventResult::Handled;
                 }
@@ -782,8 +774,21 @@ impl Widget for CurveEditor {
                 EventResult::Handled
             }
             UiEvent::MouseMove { position, .. } => {
-                if let Some(index) = self.dragging {
-                    self.move_point_from_input(index, self.screen_to_curve(*position), ctx);
+                if let Some(drag) = self.dragging {
+                    let plot = self.plot_rect();
+                    let point = CurvePoint::new(
+                        if plot.width > 0.0 {
+                            drag.origin.x + (position.x - drag.pointer_origin.x) / plot.width
+                        } else {
+                            drag.origin.x
+                        },
+                        if plot.height > 0.0 {
+                            drag.origin.y - (position.y - drag.pointer_origin.y) / plot.height
+                        } else {
+                            drag.origin.y
+                        },
+                    );
+                    self.move_point_from_input(drag.index, point, ctx);
                     return EventResult::Handled;
                 }
                 EventResult::Ignored
@@ -1241,6 +1246,116 @@ mod tests {
         assert!(!editor.has_active_pointer_interaction());
         assert_eq!(editor.points()[1].x, 1.0);
         assert!(editor.points()[1].y < 0.2);
+    }
+
+    #[test]
+    fn single_axis_drag_preserves_grab_offset_and_untouched_coordinate() {
+        for horizontal in [true, false] {
+            let original = CurvePoint::new(0.33333334, 0.73123455);
+            let mut editor = CurveEditor::with_points(vec![
+                CurvePoint::new(0.0, 0.0),
+                original,
+                CurvePoint::new(1.0, 1.0),
+            ]);
+            editor.layout(Rect::new(17.0, 23.0, 317.0, 173.0));
+            let center = editor.to_screen(original);
+            let grab = Point::new(center.x + 2.0, center.y + 2.0);
+            let mut ctx = event_ctx();
+            editor.event(
+                &UiEvent::MouseDown {
+                    position: grab,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            assert_eq!(editor.selected_index(), Some(1));
+            editor.event(
+                &UiEvent::MouseMove { position: grab, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+            assert_eq!(
+                editor.points()[1],
+                original,
+                "stationary pointer must not move the grabbed point"
+            );
+            let target = if horizontal {
+                Point::new(grab.x + 20.0, grab.y)
+            } else {
+                Point::new(grab.x, grab.y - 20.0)
+            };
+            editor.event(
+                &UiEvent::MouseMove { position: target, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+            if horizontal {
+                assert_eq!(editor.points()[1].y, original.y);
+                assert!(editor.points()[1].x > original.x);
+            } else {
+                assert_eq!(editor.points()[1].x, original.x);
+                assert!(editor.points()[1].y > original.y);
+            }
+        }
+    }
+
+    #[test]
+    fn resizing_a_captured_curve_to_collapsed_axes_keeps_coordinates_finite() {
+        for (width, height) in [(10.0, 173.0), (317.0, 10.0), (10.0, 10.0)] {
+            let original = CurvePoint::new(0.33333334, 0.73123455);
+            let mut editor = CurveEditor::with_points(vec![
+                CurvePoint::new(0.0, 0.0),
+                original,
+                CurvePoint::new(1.0, 1.0),
+            ]);
+            editor.layout(Rect::new(17.0, 23.0, 317.0, 173.0));
+            let grab = editor.to_screen(original);
+            let mut ctx = event_ctx();
+            editor.event(
+                &UiEvent::MouseDown {
+                    position: grab,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            editor.layout(Rect::new(17.0, 23.0, width, height));
+            editor.event(
+                &UiEvent::MouseMove { position: grab, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+            assert_eq!(
+                editor.points()[1],
+                original,
+                "collapsed geometry must preserve a stationary point"
+            );
+            let target = Point::new(grab.x + 20.0, grab.y - 20.0);
+            editor.event(
+                &UiEvent::MouseMove { position: target, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+            assert!(editor.points()[1].x.is_finite() && editor.points()[1].y.is_finite());
+            if width == 10.0 {
+                assert_eq!(editor.points()[1].x, original.x);
+            }
+            if height == 10.0 {
+                assert_eq!(editor.points()[1].y, original.y);
+            }
+            editor.event(
+                &UiEvent::MouseUp {
+                    position: target,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            assert!(!editor.has_active_pointer_interaction());
+            assert_eq!(
+                ctx.requests.pointer_capture,
+                Some(mondrian_ui_core::widget::PointerCaptureRequest::Release(
+                    editor.id()
+                ))
+            );
+        }
     }
 
     #[test]
@@ -1983,7 +2098,7 @@ mod tests {
             ),
             EventResult::Handled
         );
-        assert_eq!(editor.dragging, Some(1));
+        assert_eq!(editor.dragging.map(|drag| drag.index), Some(1));
         ctx.requests.pointer_capture = None;
 
         editor.set_enabled(false);
