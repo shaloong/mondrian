@@ -1,9 +1,9 @@
-//! Continuous parameter edits over the canonical Clip/Effect/Mask author paths.
+//! Continuous parameter edits over the canonical visual and audio author paths.
 
 use super::product_action::{
-    ClipEditNumericCurvePayload, ClipProductAction, ClipWriteParameterValuesPayload, ProductAction,
-    VisualEffectEditNumericCurvePayload, VisualEffectProductAction,
-    VisualEffectSetParameterValuePayload, VisualMaskProductAction,
+    AudioProductAction, ClipEditNumericCurvePayload, ClipProductAction,
+    ClipWriteParameterValuesPayload, ProductAction, VisualEffectEditNumericCurvePayload,
+    VisualEffectProductAction, VisualEffectSetParameterValuePayload, VisualMaskProductAction,
     VisualMaskSetParameterValuePayload,
 };
 use super::AppState;
@@ -12,6 +12,9 @@ use mondrian_core::{
     SequenceId,
 };
 use mondrian_editor_state::{Action, AuthoringSessionId};
+use mondrian_timeline::{
+    AudioAutomationEditRequest, AudioAutomationTarget, AudioProcessorRackAddress,
+};
 use serde::{Deserialize, Serialize};
 
 const NAMESPACE: &str = "mondrian.parameter_gesture";
@@ -31,6 +34,7 @@ pub(crate) enum ParameterGestureEdit {
     Mask(VisualMaskSetParameterValuePayload),
     ClipCurve(ClipEditNumericCurvePayload),
     EffectCurve(VisualEffectEditNumericCurvePayload),
+    AudioCurve(AudioAutomationEditRequest),
 }
 
 /// Stable owner of a local numeric curve draft, before its single release commit.
@@ -46,6 +50,9 @@ pub(crate) enum ParameterCurveGestureTarget {
         effect_id: EffectId,
         parameter: AnimationParameterAddress,
     },
+    Audio {
+        target: AudioAutomationTarget,
+    },
 }
 
 impl ParameterCurveGestureTarget {
@@ -55,13 +62,14 @@ impl ParameterCurveGestureTarget {
             Self::Effect { clip_id, effect_id, parameter } => {
                 (*clip_id, ParameterOwner::Effect(*effect_id), parameter)
             }
+            Self::Audio { target } => return ParameterGestureTarget::AudioCurve(target.clone()),
         };
-        ParameterGestureTarget {
+        ParameterGestureTarget::Visual(VisualParameterGestureTarget {
             clip,
             owner,
             kind: ParameterGestureKind::NumericCurve,
             parameters: vec![(parameter.clone(), None)],
-        }
+        })
     }
 }
 
@@ -102,7 +110,13 @@ enum ParameterGestureKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ParameterGestureTarget {
+enum ParameterGestureTarget {
+    Visual(VisualParameterGestureTarget),
+    AudioCurve(AudioAutomationTarget),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VisualParameterGestureTarget {
     kind: ParameterGestureKind,
     clip: ClipId,
     owner: ParameterOwner,
@@ -136,11 +150,17 @@ impl ParameterGestureEdit {
             ProductAction::VisualEffect(VisualEffectProductAction::EditNumericCurve(edit)) => {
                 Some(Self::EffectCurve(*edit))
             }
+            ProductAction::Audio(AudioProductAction::EditAutomation(edit)) => {
+                Some(Self::AudioCurve(edit))
+            }
             _ => None,
         }
     }
     fn into_product(self) -> ProductAction {
         match self {
+            Self::AudioCurve(edit) => {
+                ProductAction::Audio(AudioProductAction::EditAutomation(edit))
+            }
             Self::ClipCurve(edit) => {
                 ProductAction::Clip(ClipProductAction::EditNumericCurve(Box::new(edit)))
             }
@@ -172,6 +192,7 @@ impl ParameterGestureEdit {
             )
         };
         match self {
+            Self::AudioCurve(edit) => ParameterGestureTarget::AudioCurve(edit.target.clone()),
             Self::ClipCurve(edit) => ParameterCurveGestureTarget::Clip {
                 clip_id: edit.clip_id,
                 parameter: edit.parameter.clone(),
@@ -183,24 +204,24 @@ impl ParameterGestureEdit {
                 parameter: edit.parameter.clone(),
             }
             .target(),
-            Self::Clip(edit) => ParameterGestureTarget {
+            Self::Clip(edit) => ParameterGestureTarget::Visual(VisualParameterGestureTarget {
                 kind: ParameterGestureKind::Value,
                 clip: edit.clip_id,
                 owner: ParameterOwner::Clip,
                 parameters: edit.writes.iter().map(parameter).collect(),
-            },
-            Self::Effect(edit) => ParameterGestureTarget {
+            }),
+            Self::Effect(edit) => ParameterGestureTarget::Visual(VisualParameterGestureTarget {
                 kind: ParameterGestureKind::Value,
                 clip: edit.clip_id,
                 owner: ParameterOwner::Effect(edit.effect_id),
                 parameters: vec![parameter(&edit.write)],
-            },
-            Self::Mask(edit) => ParameterGestureTarget {
+            }),
+            Self::Mask(edit) => ParameterGestureTarget::Visual(VisualParameterGestureTarget {
                 kind: ParameterGestureKind::Value,
                 clip: edit.clip_id,
                 owner: ParameterOwner::Mask(edit.mask_id),
                 parameters: vec![parameter(&edit.write)],
-            },
+            }),
         }
     }
 }
@@ -233,6 +254,38 @@ impl ParameterGestureAction {
 
 impl AppState {
     fn parameter_target_is_current(&self, target: &ParameterGestureTarget) -> bool {
+        let target = match target {
+            ParameterGestureTarget::Visual(target) => target,
+            ParameterGestureTarget::AudioCurve(target) => {
+                let Some(sequence) = self.active_sequence() else {
+                    return false;
+                };
+                if !mondrian_timeline::inspect_audio_automation(sequence, target)
+                    .is_ok_and(|inspection| inspection.is_editable())
+                {
+                    return false;
+                }
+                return match target {
+                    AudioAutomationTarget::ComponentVolume { clip_id, .. }
+                    | AudioAutomationTarget::ComponentPan { clip_id, .. } => self
+                        .primary_selected_clip()
+                        .is_some_and(|selection| selection.clip_id == *clip_id),
+                    AudioAutomationTarget::ProcessingScopeInputGain { scope_id }
+                    | AudioAutomationTarget::ProcessorParameter {
+                        rack: AudioProcessorRackAddress::ProcessingScope { scope_id },
+                        ..
+                    } => self
+                        .primary_selected_clip()
+                        .and_then(|selection| sequence.find_clip(selection.clip_id))
+                        .is_some_and(|clip| {
+                            clip.audio_components
+                                .iter()
+                                .any(|edit| edit.processing.scope_id == *scope_id)
+                        }),
+                    _ => true,
+                };
+            }
+        };
         if self
             .primary_selected_clip()
             .is_none_or(|selection| selection.clip_id != target.clip)
@@ -267,7 +320,9 @@ impl AppState {
         if !self.parameter_target_is_current(&target) {
             return Ok(false);
         }
-        if target.kind == ParameterGestureKind::NumericCurve {
+        if let ParameterGestureTarget::Visual(target) = &target
+            && target.kind == ParameterGestureKind::NumericCurve
+        {
             let clip = self
                 .active_sequence()
                 .and_then(|sequence| sequence.find_clip(target.clip))
@@ -512,7 +567,9 @@ mod tests {
             ParameterGestureEdit::Clip(edit) => &mut edit.writes[0],
             ParameterGestureEdit::Effect(edit) => &mut edit.write,
             ParameterGestureEdit::Mask(edit) => &mut edit.write,
-            ParameterGestureEdit::ClipCurve(_) | ParameterGestureEdit::EffectCurve(_) => {
+            ParameterGestureEdit::ClipCurve(_)
+            | ParameterGestureEdit::EffectCurve(_)
+            | ParameterGestureEdit::AudioCurve(_) => {
                 panic!("scalar fixture expected")
             }
         };

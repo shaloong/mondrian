@@ -5303,13 +5303,14 @@ mod tests {
         }
     }
 
-    fn inspector_curve_with_point_count(
+    fn panel_curve_with_point_count(
         widget: &dyn Widget,
-        in_inspector: bool,
+        panel: PanelKind,
+        in_panel: bool,
         point_count: usize,
     ) -> Option<mondrian_ui_core::WidgetId> {
-        let in_inspector = in_inspector || widget.panel_kind() == Some(PanelKind::Inspector);
-        if in_inspector
+        let in_panel = in_panel || widget.panel_kind() == Some(panel);
+        if in_panel
             && widget.can_focus()
             && widget
                 .as_any()
@@ -5319,9 +5320,9 @@ mod tests {
             return Some(widget.id());
         }
         (0..widget.child_count()).find_map(|index| {
-            widget.child(index).and_then(|child| {
-                inspector_curve_with_point_count(child, in_inspector, point_count)
-            })
+            widget
+                .child(index)
+                .and_then(|child| panel_curve_with_point_count(child, panel, in_panel, point_count))
         })
     }
 
@@ -5392,8 +5393,13 @@ mod tests {
             temp_preferences_path("full-transfer-curve"),
         );
         TreeWalker::layout(host.active_root_mut(), bounds);
-        let curve_id = inspector_curve_with_point_count(host.active_root(), false, point_count)
-            .expect("full curve in actual inspector");
+        let curve_id = panel_curve_with_point_count(
+            host.active_root(),
+            PanelKind::Inspector,
+            false,
+            point_count,
+        )
+        .expect("full curve in actual inspector");
         let point = {
             let tree = WidgetTreeView::new(host.active_root_mut());
             let curve = tree.get(curve_id).expect("curve");
@@ -5456,10 +5462,248 @@ mod tests {
                 .expect("sequence")
                 .author_state_eq_ignoring_revision(&original));
             assert!(
-                inspector_curve_with_point_count(host.active_root(), false, point_count).is_some(),
+                panel_curve_with_point_count(
+                    host.active_root(),
+                    PanelKind::Inspector,
+                    false,
+                    point_count
+                )
+                .is_some(),
                 "rejection must not leave an uncommitted visible extra point"
             );
         }
+    }
+
+    #[test]
+    fn audio_curve_late_release_cannot_overwrite_an_intervening_author_edit() {
+        audio_curve_router_lifecycle(0);
+    }
+
+    #[test]
+    fn audio_curve_escape_preserves_original_redo_through_real_router() {
+        audio_curve_router_lifecycle(1);
+    }
+
+    #[test]
+    fn audio_curve_release_and_focus_loss_commit_one_reversible_command() {
+        audio_curve_router_lifecycle(2);
+        audio_curve_router_lifecycle(3);
+    }
+
+    #[test]
+    fn audio_curve_late_release_cannot_commit_after_track_lock() {
+        audio_curve_router_lifecycle(4);
+    }
+
+    fn audio_curve_router_lifecycle(boundary: usize) {
+        use crate::app::ui_actions::audio_automation_edit_action;
+        use mondrian_core::{ExactAutomationKeyframe, TimeScale};
+        use mondrian_timeline::{
+            AudioAutomationEdit, AudioAutomationEditRequest, AudioAutomationTarget,
+            AudioChannelStripOwner,
+        };
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1600.0);
+        let mut state = workspace_app_state_with_timed_solid();
+        let sequence = state.active_sequence().expect("sequence");
+        let target = AudioAutomationTarget::ChannelFader {
+            owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+        };
+        let time = sequence
+            .total_duration()
+            .expect("duration")
+            .checked_scale(TimeScale::new(1, 2).expect("midpoint"))
+            .expect("key time");
+        let keyframe = ExactAutomationKeyframe::linear(time, -24.0);
+        let keyframe_id = keyframe.id;
+        state
+            .dispatch_action(audio_automation_edit_action(AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+            }))
+            .expect("initial audio key");
+        if boundary == 1 {
+            let sequence_id = state.active_sequence().expect("sequence").id;
+            state
+                .authoring
+                .as_mut()
+                .expect("Session")
+                .edit_sequence(sequence_id, "original branch", |sequence| {
+                    sequence.name = "original branch".into();
+                    Ok(())
+                })
+                .expect("original branch");
+            assert!(state.undo_timeline().expect("original Undo"));
+        }
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences {
+                workspace_preset: WorkspacePreset::Audio,
+                ..Default::default()
+            },
+            temp_preferences_path("audio-curve-intervening-edit"),
+        );
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let curve_id = panel_curve_with_point_count(host.active_root(), PanelKind::Mixer, false, 3)
+            .expect("actual Mixer automation curve");
+        let point = {
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let curve = tree.get(curve_id).expect("curve");
+            let mut min = Point::new(f32::MAX, f32::MAX);
+            let mut max = Point::new(0.0, 0.0);
+            for y in (0..1600).step_by(2) {
+                for x in (0..1280).step_by(2) {
+                    let point = Point::new(x as f32, y as f32);
+                    if curve.hit_test(point) {
+                        min.x = min.x.min(point.x);
+                        min.y = min.y.min(point.y);
+                        max.x = max.x.max(point.x);
+                        max.y = max.y.max(point.y);
+                    }
+                }
+            }
+            assert!(min.x < max.x && min.y < max.y, "visible Mixer curve");
+            Point::new((min.x + max.x) * 0.5, (min.y + max.y) * 0.5)
+        };
+        let pending = PendingUiActions::default();
+        let dispatch = |action| pending.push(action);
+        let mut router = EventRouter::new(host.active_root().id());
+        let before = host.app_state().active_sequence().expect("origin").clone();
+        let original_history = host.app_state().authoring_history().expect("history").diagnostics();
+        for event in [
+            UiEvent::MouseDown {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseMove {
+                position: Point::new(point.x + 12.0, point.y - 12.0),
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            router.route(
+                event,
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &dispatch,
+            );
+        }
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert_eq!(router.captured(), Some(curve_id));
+        assert!(
+            host.app_state()
+                .active_sequence()
+                .expect("draft")
+                .author_state_eq_ignoring_revision(&before),
+            "audio drag remains a local draft until release"
+        );
+
+        assert!(host.app_state().parameter_gesture_is_current());
+        if (1..=3).contains(&boundary) {
+            let terminal = match boundary {
+                1 => UiEvent::KeyDown {
+                    key: mondrian_ui_core::types::KeyCode::Escape,
+                    modifiers: Modifiers::none(),
+                },
+                3 => UiEvent::FocusLost,
+                _ => UiEvent::MouseUp {
+                    position: point,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+            };
+            router.route(
+                terminal,
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &dispatch,
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            assert!(router.captured().is_none());
+            assert!(host.app_state().active_parameter_gesture.is_none());
+            let accepted = host.app_state().active_sequence().expect("accepted").clone();
+            let history = host.app_state().authoring_history().expect("history").diagnostics();
+            if boundary == 1 {
+                assert!(accepted.author_state_eq_ignoring_revision(&before));
+                assert_eq!(history, original_history);
+                assert!(history.redo_entries > 0);
+                pending.push(Action::Redo);
+                host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+                assert_eq!(
+                    host.app_state().active_sequence().expect("original Redo").name,
+                    "original branch"
+                );
+            } else {
+                assert!(!accepted.author_state_eq_ignoring_revision(&before));
+                assert_eq!(history.undo_entries, original_history.undo_entries + 1);
+                pending.push(Action::Undo);
+                host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+                assert!(host
+                    .app_state()
+                    .active_sequence()
+                    .expect("Undo")
+                    .author_state_eq_ignoring_revision(&before));
+                pending.push(Action::Redo);
+                host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+                assert!(host
+                    .app_state()
+                    .active_sequence()
+                    .expect("Redo")
+                    .author_state_eq_ignoring_revision(&accepted));
+            }
+            return;
+        }
+
+        if boundary == 4 {
+            use crate::app::ui_actions::{
+                track_set_author_control_action, TrackAuthorControl, TrackSetAuthorControlPayload,
+            };
+            let AudioAutomationTarget::ChannelFader {
+                owner: AudioChannelStripOwner::Track { track_id },
+            } = target
+            else {
+                panic!("track fader fixture");
+            };
+            pending.push(track_set_author_control_action(
+                TrackSetAuthorControlPayload {
+                    track_id,
+                    control: TrackAuthorControl::Lock,
+                    enabled: true,
+                },
+            ));
+        } else {
+            let mut changed = ExactAutomationKeyframe::linear(time, -18.0);
+            changed.id = keyframe_id;
+            pending.push(audio_automation_edit_action(AudioAutomationEditRequest {
+                target,
+                edit: AudioAutomationEdit::UpsertKeyframe { keyframe: changed },
+            }));
+        }
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        let after = host.app_state().active_sequence().expect("intervening edit").clone();
+        let history = host.app_state().authoring_history().expect("history").diagnostics();
+        router.route(
+            UiEvent::MouseUp {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &dispatch,
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert!(
+            host.app_state()
+                .active_sequence()
+                .expect("late release")
+                .author_state_eq_ignoring_revision(&after),
+            "stale captured audio draft must not overwrite the intervening key edit"
+        );
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            history
+        );
+        assert!(router.captured().is_none());
     }
 
     #[test]
@@ -5558,8 +5802,9 @@ mod tests {
                 temp_preferences_path("curve-owner"),
             );
             TreeWalker::layout(host.active_root_mut(), bounds);
-            let curve_id = inspector_curve_with_point_count(host.active_root(), false, 3)
-                .expect("numeric curve");
+            let curve_id =
+                panel_curve_with_point_count(host.active_root(), PanelKind::Inspector, false, 3)
+                    .expect("numeric curve");
             let point = {
                 let tree = WidgetTreeView::new(host.active_root_mut());
                 let curve = tree.get(curve_id).expect("curve");

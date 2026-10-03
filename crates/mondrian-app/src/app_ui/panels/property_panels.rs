@@ -1825,7 +1825,33 @@ pub(super) fn audio_automation_curve_control(
             .with_display_points(model.display_points.clone())
             .with_point_context_menus(interpolation_menus)
             .enabled(model.is_editable)
-            .on_edit(move |edit| audio_automation_curve_edit_action(&action_model, edit)),
+            .on_gesture(move |event| match event {
+                CurveGestureEvent::Begin(gesture_id) => Some(
+                    ParameterGestureAction::BeginCurve {
+                        gesture_id,
+                        target: ParameterCurveGestureTarget::Audio {
+                            target: action_model.target.clone(),
+                        },
+                    }
+                    .action(),
+                ),
+                CurveGestureEvent::Edit { gesture_id, edit } => {
+                    let action = audio_automation_curve_edit_action(&action_model, edit)?;
+                    if let Some(gesture_id) = gesture_id {
+                        ParameterGestureEdit::from_action(&action).map(|edit| {
+                            ParameterGestureAction::Update { gesture_id, edit }.action()
+                        })
+                    } else {
+                        Some(action)
+                    }
+                }
+                CurveGestureEvent::Finish(gesture_id) => {
+                    Some(ParameterGestureAction::Finish { gesture_id }.action())
+                }
+                CurveGestureEvent::Cancel(gesture_id) => {
+                    Some(ParameterGestureAction::Cancel { gesture_id }.action())
+                }
+            }),
     )
 }
 

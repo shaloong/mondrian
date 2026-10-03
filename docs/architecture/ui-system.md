@@ -3157,3 +3157,16 @@ A captured point drag owns its point index, original normalized point, original 
 ### Professional export localization
 
 Export controls and summaries resolve owned wording through the same Fluent locale snapshot, including video range and bit depth, alpha and legalizer titles, VBV units, integer PCM depth, fixed professional PCM descriptions, IMF/DCP package captions and essence descriptions. Codec, profile and color-standard identities remain presentation arguments or protocol labels; localized captions never determine preset values or dispatch. Chinese catalog copy also covers Processing Scope ownership, Sample Delay, ICC calibration, Camera RAW summaries and typed shell/startup/preferences/asset-browser failures without rewriting opaque diagnostic arguments.
+
+### Audio automation curve ownership
+
+Audio curves retain a local pointer draft and acquire the shared author-session
+gesture lease before capture. Release lowers the draft through the canonical
+audio automation action and seals one reversible command; Escape cancels without
+discarding the original Redo branch. The lease validates Session, Sequence,
+author generation and the authoritative audio target's editability. Component
+targets require their selected Clip; Processing Scope targets require a selected
+Clip bound to that scope. Mixer channel-strip targets remain independent of Clip
+selection. A locked, removed or superseded owner cannot accept a late release.
+Visual and audio target identities are separate enum variants, without dummy
+Clip identities or a second audio-authoring interpretation.
