@@ -11,10 +11,10 @@
 //!
 //! The worker never decides semantic presentation. An exact queue callback
 //! publishes completion into `ViewerGpuSubmissionLifecycle` and marks the
-//! cleanup ticket carried by the progress command. Native waits merely drive
-//! that callback. A non-timeout failure terminalizes the complete device
-//! generation, rejects future permits, and continues bounded latest-submission
-//! waits until the already-submitted cleanup ticket is observed. Device-owner
+//! cleanup ticket carried by the progress command. Nonblocking fence checks drive
+//! that callback without holding wgpu resource locks during worker pacing.
+//! A non-timeout failure terminalizes the complete device generation, rejects
+//! future permits, and continues paced latest-submission checks until the already-submitted cleanup ticket is observed. Device-owner
 //! retirement closes admission and appends one FIFO retirement envelope to the
 //! same non-UI worker, so submitted GPU/native owners outlive both Window and
 //! Headless Adapter teardown without blocking either caller thread.
@@ -135,7 +135,7 @@ impl Default for ViewerGpuDeviceProgressWake {
     }
 }
 
-/// Bound for one native `Device::poll(Wait)` call.
+/// Bound for worker pacing between nonblocking completion checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ViewerGpuDeviceProgressPolicy {
     wait_quantum: Duration,
@@ -1218,10 +1218,11 @@ trait ViewerGpuDeviceWait<I>: Send + 'static {
     /// Drive already-ready callbacks without waiting for untracked GPU work.
     fn poll(&mut self) -> Result<(), String>;
 
-    fn wait(
+    /// Observe an exact fence (or the current queue barrier) without sleeping.
+    /// The worker retains incomplete owners and paces outside device locks.
+    fn check_completion(
         &mut self,
         submission_index: Option<&I>,
-        timeout: Duration,
     ) -> Result<ViewerGpuDeviceWaitStatus, String>;
 }
 
@@ -1237,14 +1238,18 @@ impl ViewerGpuDeviceWait<wgpu::SubmissionIndex> for WgpuViewerGpuDeviceWait {
             .map_err(|error| error.to_string())
     }
 
-    fn wait(
+    fn check_completion(
         &mut self,
         submission_index: Option<&wgpu::SubmissionIndex>,
-        timeout: Duration,
     ) -> Result<ViewerGpuDeviceWaitStatus, String> {
         match self.device.poll(wgpu::PollType::Wait {
             submission_index: submission_index.cloned(),
-            timeout: Some(timeout),
+            // wgpu holds its device resource read lock throughout a native
+            // fence wait. Surface::present needs the corresponding write
+            // lock, so even a background wait can block the UI. Preserve
+            // the exact fence result, but never sleep while holding that
+            // lock: the owner paces incomplete checks outside this call.
+            timeout: Some(Duration::ZERO),
         }) {
             Ok(wgpu::PollStatus::QueueEmpty | wgpu::PollStatus::WaitSucceeded) => {
                 Ok(ViewerGpuDeviceWaitStatus::Satisfied)
@@ -1275,7 +1280,7 @@ where
     // can submit a native import before its Viewer progress command exists;
     // an idle Wait would then strand that new command behind unrelated GPU
     // work for a complete wait quantum. Command receipt supplies idle pacing;
-    // only owned Track/cleanup/retirement commands may wait for a fence.
+    // only owned Track/cleanup/retirement commands may check a fence.
     loop {
         let command = match command_receiver.recv_timeout(policy.wait_quantum) {
             Ok(command) => command,
@@ -1376,9 +1381,8 @@ fn drive_viewer_gpu_submission<I, D>(
         let wait_started = Instant::now();
         let callback_was_observed = callback_observed.load(Ordering::Acquire);
         let wait = catch_unwind(AssertUnwindSafe(|| {
-            driver.wait(
+            driver.check_completion(
                 (!callback_was_observed && exact_wait).then_some(&submission_index),
-                policy.wait_quantum,
             )
         }));
         poll_count = poll_count.saturating_add(1);
@@ -1453,7 +1457,7 @@ fn drive_viewer_gpu_submission<I, D>(
         // `Device::poll` is on this stack. Observe that release before pacing;
         // otherwise every already-complete frame pays an artificial full
         // wait quantum and 60 fps playback loses almost half its frame budget.
-        // The bounded wait's `WaitSucceeded` fence result is also authoritative
+        // The nonblocking check's `WaitSucceeded` fence result is also authoritative
         // GPU completion evidence: publish it even when the supplementary
         // callback races or lags this poll (wgpu 30 defers callback delivery),
         // otherwise the completion notice stays stranded behind an unavailable
@@ -1521,7 +1525,7 @@ fn drive_renderer_cleanup<I, D>(
         }
 
         let wait_started = Instant::now();
-        let wait = catch_unwind(AssertUnwindSafe(|| driver.wait(None, policy.wait_quantum)));
+        let wait = catch_unwind(AssertUnwindSafe(|| driver.check_completion(None)));
         // As above, loss reported from this poll outranks a simultaneous
         // satisfied return and therefore suppresses cleanup publication.
         if let Some(terminal) = health.terminal() {
@@ -1612,7 +1616,7 @@ where
 
         let wait_started = Instant::now();
         if !wgpu_queue_quiesced {
-            let wait = catch_unwind(AssertUnwindSafe(|| driver.wait(None, policy.wait_quantum)));
+            let wait = catch_unwind(AssertUnwindSafe(|| driver.check_completion(None)));
             match wait {
                 Ok(Ok(ViewerGpuDeviceWaitStatus::TimedOut)) => {}
                 Ok(Ok(ViewerGpuDeviceWaitStatus::Satisfied)) => {
@@ -1879,10 +1883,9 @@ mod tests {
             Ok(())
         }
 
-        fn wait(
+        fn check_completion(
             &mut self,
             submission_index: Option<&u64>,
-            _timeout: Duration,
         ) -> Result<ViewerGpuDeviceWaitStatus, String> {
             self.calls.lock().expect("wait call log").push(submission_index.copied());
             self.results
@@ -1902,10 +1905,9 @@ mod tests {
             Ok(())
         }
 
-        fn wait(
+        fn check_completion(
             &mut self,
             _submission_index: Option<&u64>,
-            _timeout: Duration,
         ) -> Result<ViewerGpuDeviceWaitStatus, String> {
             self.callback_observed.store(true, Ordering::Release);
             Ok(ViewerGpuDeviceWaitStatus::Satisfied)
@@ -1922,10 +1924,9 @@ mod tests {
             Ok(())
         }
 
-        fn wait(
+        fn check_completion(
             &mut self,
             _submission_index: Option<&u64>,
-            _timeout: Duration,
         ) -> Result<ViewerGpuDeviceWaitStatus, String> {
             // This is the counterexample ordering exposed by wgpu: work-done
             // may run earlier than device-lost in one native poll closure set.
@@ -2024,10 +2025,9 @@ mod tests {
                 self.poll_error.take().map_or(Ok(()), Err)
             }
 
-            fn wait(
+            fn check_completion(
                 &mut self,
                 index: Option<&u64>,
-                _: Duration,
             ) -> Result<ViewerGpuDeviceWaitStatus, String> {
                 self.waits.lock().expect("wait log").push(index.copied());
                 Ok(ViewerGpuDeviceWaitStatus::Satisfied)
@@ -2875,13 +2875,12 @@ mod tests {
         }
         impl ViewerGpuDeviceWait<u64> for GatedPanicWait {
             fn poll(&mut self) -> Result<(), String> {
-                self.wait(None, Duration::ZERO).map(|_| ())
+                self.check_completion(None).map(|_| ())
             }
 
-            fn wait(
+            fn check_completion(
                 &mut self,
                 _: Option<&u64>,
-                _: Duration,
             ) -> Result<ViewerGpuDeviceWaitStatus, String> {
                 self.entered.send(()).expect("observe idle wait");
                 self.release.recv_timeout(Duration::from_secs(5)).expect("release panic");
