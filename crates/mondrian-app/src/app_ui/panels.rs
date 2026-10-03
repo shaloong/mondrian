@@ -5857,9 +5857,15 @@ fn export_bit_depth_label(
 ) -> String {
     match bit_depth {
         ExportParameter::FollowSequence => localizer.text("export-follow-sequence"),
-        ExportParameter::Explicit(DeliveryBitDepth::Eight) => "8-bit".to_owned(),
-        ExportParameter::Explicit(DeliveryBitDepth::Ten) => "10-bit".to_owned(),
-        ExportParameter::Explicit(DeliveryBitDepth::Twelve) => "12-bit".to_owned(),
+        ExportParameter::Explicit(DeliveryBitDepth::Eight) => {
+            localizer.format_text("export-depth-value", "bits", "8")
+        }
+        ExportParameter::Explicit(DeliveryBitDepth::Ten) => {
+            localizer.format_text("export-depth-value", "bits", "10")
+        }
+        ExportParameter::Explicit(DeliveryBitDepth::Twelve) => {
+            localizer.format_text("export-depth-value", "bits", "12")
+        }
     }
 }
 
@@ -5885,8 +5891,8 @@ fn export_bit_depth_items(preset: &ExportPreset, localizer: &Localizer) -> Vec<M
 fn export_video_range_label(range: ExportParameter<VideoRange>, localizer: &Localizer) -> String {
     match range {
         ExportParameter::FollowSequence => localizer.text("export-follow-sequence"),
-        ExportParameter::Explicit(VideoRange::Full) => "Full".to_owned(),
-        ExportParameter::Explicit(VideoRange::Legal) => "Legal / Video".to_owned(),
+        ExportParameter::Explicit(VideoRange::Full) => localizer.text("export-video-range-full"),
+        ExportParameter::Explicit(VideoRange::Legal) => localizer.text("export-video-range-legal"),
     }
 }
 
@@ -6168,19 +6174,25 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
     let media = model.preset.media_file();
     let professional = model.preset.professional_delivery();
     let professional_container_label = professional.map(|delivery| match delivery.profile {
-        ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25 => "IMF package",
-        ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => "AS-11 X9 OP1a MXF",
-        ProfessionalDeliveryProfile::SmpteDcp2kFlat24 => "SMPTE DCP package",
+        ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25 => {
+            localizer.text("export-container-imf")
+        }
+        ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => "AS-11 X9 OP1a MXF".to_owned(),
+        ProfessionalDeliveryProfile::SmpteDcp2kFlat24 => localizer.text("export-container-dcp"),
     });
     let professional_video_label = professional.map(|delivery| match delivery.profile {
-        ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25 => "ProRes 422 HQ / RDD 45",
-        ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => "AVC High 4:2:2 / AS-11 X9",
-        ProfessionalDeliveryProfile::SmpteDcp2kFlat24 => "JPEG 2000 / ST 428-1 XYZ 12-bit",
+        ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25 => {
+            "ProRes 422 HQ / RDD 45".to_owned()
+        }
+        ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => "AVC High 4:2:2 / AS-11 X9".to_owned(),
+        ProfessionalDeliveryProfile::SmpteDcp2kFlat24 => {
+            localizer.text("export-professional-dcp-video")
+        }
     });
     let container_dropdown = Dropdown::new(
         media
             .map(|media| export_container_label(&media.container).to_owned())
-            .or_else(|| professional_container_label.map(str::to_owned))
+            .or(professional_container_label)
             .unwrap_or_else(|| localizer.text("export-image-sequence-directory")),
         export_container_items(&model.preset),
     )
@@ -6189,7 +6201,7 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
     let video_codec_dropdown = Dropdown::new(
         media
             .map(|media| export_video_codec_label(&media.video).to_owned())
-            .or_else(|| professional_video_label.map(str::to_owned))
+            .or(professional_video_label)
             .unwrap_or_else(|| {
                 model
                     .preset
@@ -6279,7 +6291,7 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
     let audio_codec_dropdown = Dropdown::new(
         media
             .map(|media| export_audio_codec_label(&media.audio, localizer))
-            .or_else(|| professional.map(|_| "PCM 24-bit / 48 kHz / stereo".to_owned()))
+            .or_else(|| professional.map(|_| localizer.text("export-professional-pcm")))
             .unwrap_or_else(|| localizer.text("export-no-audio-image-sequence")),
         export_audio_codec_items(&model.preset, localizer),
     )
@@ -6588,7 +6600,10 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
             localizer.text("export-chroma"),
             Box::new(chroma_dropdown),
         ))
-        .with_row(PropertyRow::new("Alpha", Box::new(alpha_dropdown)));
+        .with_row(PropertyRow::new(
+            localizer.text("export-alpha"),
+            Box::new(alpha_dropdown),
+        ));
     let color_section = PropertySection::new(localizer.text("export-color-output"))
         .with_row(PropertyRow::new(
             localizer.text("export-processing-mode"),
@@ -6598,7 +6613,10 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
             localizer.text("export-target-space"),
             Box::new(color_target_space_dropdown),
         ))
-        .with_row(PropertyRow::new("Legalizer", Box::new(legalizer_checkbox)));
+        .with_row(PropertyRow::new(
+            localizer.text("export-legalizer"),
+            Box::new(legalizer_checkbox),
+        ));
 
     let mut encoding_section = PropertySection::new(localizer.text("export-encoding-parameters"));
     if let Some((rate_control, max_crf)) =
@@ -6647,7 +6665,10 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
                 localizer.text("export-max-bitrate"),
                 Box::new(max_bitrate_input),
             ))
-            .with_row(PropertyRow::new("VBV buffer kbit", Box::new(buffer_input)));
+            .with_row(PropertyRow::new(
+                localizer.text("export-vbv-buffer"),
+                Box::new(buffer_input),
+            ));
 
         match media.map(|media| media.video_coding) {
             Some(VideoCodingStructure::H26xLongGop {
@@ -6857,7 +6878,11 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
                         media.audio = AudioCodecConfig::Pcm { bit_depth: candidate };
                     }
                     MenuItem::new(
-                        format!("{candidate}-bit integer"),
+                        localizer.format_text(
+                            "export-integer-depth",
+                            "bits",
+                            &candidate.to_string(),
+                        ),
                         export_preset_update_action(updated),
                     )
                 })
@@ -6865,8 +6890,15 @@ fn export_panel(model: &ExportPanelModel, localizer: &Localizer) -> PropertyPane
             audio_section = audio_section.with_row(PropertyRow::new(
                 localizer.text("export-sample-depth"),
                 Box::new(
-                    Dropdown::new(format!("{bit_depth}-bit integer"), items)
-                        .with_max_visible_items(3),
+                    Dropdown::new(
+                        localizer.format_text(
+                            "export-integer-depth",
+                            "bits",
+                            &bit_depth.to_string(),
+                        ),
+                        items,
+                    )
+                    .with_max_visible_items(3),
                 ),
             ));
         }
@@ -7275,17 +7307,17 @@ fn export_preset_summary(preset: Option<&ExportPreset>, localizer: &Localizer) -
             ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25 => (
                 "IMF RDD 45",
                 localizer.text("export-directory-package"),
-                "ProRes 422 HQ 10-bit 4:2:2",
+                localizer.text("export-essence-prores"),
             ),
             ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => (
                 "AMWA AS-11 X9",
                 localizer.text("export-op1a-mxf-file"),
-                "AVC High 4:2:2 10-bit intra",
+                localizer.text("export-essence-avc"),
             ),
             ProfessionalDeliveryProfile::SmpteDcp2kFlat24 => (
                 "SMPTE DCP 2K Flat",
                 localizer.text("export-directory-package"),
-                "JPEG 2000 XYZ 12-bit",
+                localizer.text("export-essence-jpeg2000"),
             ),
         };
         let mut args = fluent_bundle::FluentArgs::new();
@@ -7355,7 +7387,9 @@ fn export_preset_summary(preset: Option<&ExportPreset>, localizer: &Localizer) -
     let audio = match media.audio {
         AudioCodecConfig::Disabled => localizer.text("export-no-audio"),
         AudioCodecConfig::Aac { bitrate_kbps } => format!("AAC {bitrate_kbps} kbps"),
-        AudioCodecConfig::Pcm { bit_depth } => format!("PCM {bit_depth}-bit"),
+        AudioCodecConfig::Pcm { bit_depth } => {
+            localizer.format_text("export-pcm-depth", "bits", &bit_depth.to_string())
+        }
         AudioCodecConfig::Mp3 { bitrate_kbps } => format!("MP3 {bitrate_kbps} kbps"),
     };
     let mut args = fluent_bundle::FluentArgs::new();

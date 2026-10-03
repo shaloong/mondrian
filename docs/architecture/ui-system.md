@@ -3153,3 +3153,7 @@ CurveEditor accepts an optional user insertion limit without truncating supplied
 ### Curve drag coordinates
 
 A captured point drag owns its point index, original normalized point, original pointer position and insertion intent together. Movement is computed from pointer displacement, preserving the grab offset and the untouched axis exactly; a stationary pointer does not change the point. A collapsed plot axis retains its original coordinate without dividing by zero. Cancel restores the original point or removes a newly inserted point. Audio automation lowering retains the canonical key's original exact time or value when its projected axis has not changed, so horizontal movement never re-applies value stepping and vertical movement never quantizes existing author time.
+
+### Professional export localization
+
+Export controls and summaries resolve owned wording through the same Fluent locale snapshot, including video range and bit depth, alpha and legalizer titles, VBV units, integer PCM depth, fixed professional PCM descriptions, IMF/DCP package captions and essence descriptions. Codec, profile and color-standard identities remain presentation arguments or protocol labels; localized captions never determine preset values or dispatch. Chinese catalog copy also covers Processing Scope ownership, Sample Delay, ICC calibration, Camera RAW summaries and typed shell/startup/preferences/asset-browser failures without rewriting opaque diagnostic arguments.

@@ -642,7 +642,7 @@ mod tests {
         assert_eq!(racks.len(), 1);
         assert_eq!(
             racks[0].ownership_label.replace(['\u{2068}', '\u{2069}'], ""),
-            "共享 Processing Scope · 2 个 Component"
+            "共享处理范围 · 2 个音频组件"
         );
         assert_eq!(racks[0].processors[0].label, "增益");
         assert_eq!(racks[0].processors[0].parameters[0].label, "增益");
