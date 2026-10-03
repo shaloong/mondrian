@@ -148,11 +148,12 @@ pub(crate) struct AppUiBackgroundTaskPollOutcome {
 
 impl AppUiBackgroundTaskPollOutcome {
     const fn from_changes(full_model_changed: bool, preview: PlaybackPreviewPumpOutcome) -> Self {
+        // The existing execution turn retries candidates before waiting. A
+        // retry hint alone does not change the currently published picture.
         Self {
             repaint_required: full_model_changed
                 || preview.visible_change
-                || preview.transport_change
-                || preview.candidate_retry_required,
+                || preview.transport_change,
             needs_follow_up_poll: preview.needs_follow_up_poll,
             quit_requested: false,
         }
@@ -1123,6 +1124,12 @@ impl AppUiHost {
         set_theme_preset(next);
         self.mark_dirty();
         true
+    }
+
+    /// Whether the existing visible UI projection needs a refresh before paint.
+    /// GPU capacity release and ticketless preparation are not visual changes.
+    pub(crate) fn has_pending_ui_refresh(&self) -> bool {
+        self.ui_dirty.get() || self.preview_dirty.get()
     }
 
     /// Refresh the root widget models when editor state changed.
@@ -2689,17 +2696,19 @@ mod tests {
     use crate::app_ui::workspace_layout::AppUiWorkspaceLayout;
 
     #[test]
-    fn bounded_background_remainder_requests_poll_without_repaint() {
-        let outcome = AppUiBackgroundTaskPollOutcome::from_changes(
-            false,
-            PlaybackPreviewPumpOutcome {
-                needs_follow_up_poll: true,
-                ..PlaybackPreviewPumpOutcome::default()
-            },
-        );
-
-        assert!(!outcome.repaint_required);
-        assert!(outcome.needs_follow_up_poll);
+    fn background_remainder_and_candidate_retry_do_not_require_surface_repaint() {
+        for (retry, remainder) in [(false, true), (true, false), (true, true)] {
+            let outcome = AppUiBackgroundTaskPollOutcome::from_changes(
+                false,
+                PlaybackPreviewPumpOutcome {
+                    candidate_retry_required: retry,
+                    needs_follow_up_poll: remainder,
+                    ..PlaybackPreviewPumpOutcome::default()
+                },
+            );
+            assert!(!outcome.repaint_required);
+            assert_eq!(outcome.needs_follow_up_poll, remainder);
+        }
     }
 
     #[test]
@@ -2723,13 +2732,6 @@ mod tests {
                 false,
                 PlaybackPreviewPumpOutcome {
                     transport_change: true,
-                    ..PlaybackPreviewPumpOutcome::default()
-                },
-            ),
-            (
-                false,
-                PlaybackPreviewPumpOutcome {
-                    candidate_retry_required: true,
                     ..PlaybackPreviewPumpOutcome::default()
                 },
             ),
@@ -3319,6 +3321,7 @@ mod tests {
             panic!("original publication must remain Ready");
         };
         host.preview_dirty.set(false);
+        host.ui_dirty.set(false);
         for _ in 0..2 {
             assert_eq!(
                 host.present_current_viewer_output(
@@ -3334,8 +3337,8 @@ mod tests {
                     if frame == &visible
             ));
             assert!(
-                !host.preview_dirty.get(),
-                "unchanged pixels cannot schedule another repaint"
+                !host.has_pending_ui_refresh(),
+                "unchanged pixels cannot schedule another surface repaint"
             );
             assert_eq!(host.app_state.borrow().playback_evidence_report(), evidence);
         }
@@ -3492,6 +3495,9 @@ mod tests {
             ViewerFrameContent::ExternalTexture(output),
         ));
 
+        host.ui_dirty.set(false);
+        host.preview_dirty.set(false);
+        assert!(!host.has_pending_ui_refresh());
         assert!(
             !host.clear_external_viewer_frame_for_artifact(&key, "window-gpu:submission:older"),
             "a different physical submission must not revoke the current artifact"
@@ -3502,7 +3508,15 @@ mod tests {
                 if frame.key == "window-gpu:submission:7"
         ));
 
+        assert!(
+            !host.has_pending_ui_refresh(),
+            "retirement of another submission cannot repaint the retained picture"
+        );
         assert!(host.clear_external_viewer_frame_for_artifact(&key, "window-gpu:submission:7"));
+        assert!(
+            host.has_pending_ui_refresh(),
+            "exact revocation must repaint even without a new Ready frame"
+        );
         assert!(!host.preview_service.has_retained_gpu_output());
         assert!(matches!(
             &*host.window_preview_state.borrow(),

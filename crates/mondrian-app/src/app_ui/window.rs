@@ -4064,6 +4064,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
             Event::UserEvent(AppUiUserEvent::ViewerGpuCompletionAvailable) => {
                 if poll_viewer_heterogeneous_completion(device, session, &host)
                     == ViewerHeterogeneousCompletionPoll::TerminalChange
+                    && host.has_pending_ui_refresh()
                 {
                     sync_window_session_role(
                         &mut host,
@@ -4202,17 +4203,6 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             adapter,
                             device,
                             session,
-                        );
-                        let prepare_started = Instant::now();
-                        prepare_viewer_gpu_preview(
-                            device,
-                            queue,
-                            session,
-                            &host,
-                        );
-                        session.event_loop_telemetry.record_stage_duration(
-                            AppUiEventLoopStage::PrepareViewerGpuPreview,
-                            prepare_started.elapsed(),
                         );
                         let refresh_started = Instant::now();
                         host.refresh_if_dirty(session.current_bounds.get());
@@ -4669,6 +4659,18 @@ fn run_app_ui_with_initial_state_on_event_loop(
                 if background_tasks.needs_follow_up_poll {
                     elwt.set_control_flow(ControlFlow::Poll);
                 }
+                // Preview execution follows owner clock/results directly. It
+                // must not wait for a repaint (and a native drawable) before
+                // satisfying an already-bound presentation ticket. Paint only
+                // consumes the existing published physical slot.
+                let prepare_started = Instant::now();
+                prepare_viewer_gpu_preview(device, queue, session, &host);
+                session.event_loop_telemetry.record_stage_duration(
+                    AppUiEventLoopStage::PrepareViewerGpuPreview,
+                    prepare_started.elapsed(),
+                );
+                // Include any newly submitted owner's original completion
+                // deadline in this same event-loop wait.
                 let heterogeneous_completion = drive_viewer_heterogeneous_completion(
                     device,
                     session,
@@ -4691,6 +4693,9 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         elwt.control_flow(),
                         next_wake,
                     ));
+                }
+                if host.has_pending_ui_refresh() {
+                    session.window.request_redraw();
                 }
                 if let Some(deadline) = host.playback_next_wake_deadline() {
                     elwt.set_control_flow(control_flow_wake_no_later_than(
@@ -6885,7 +6890,8 @@ fn drive_viewer_heterogeneous_completion(
 ) -> ViewerHeterogeneousCompletionDrive {
     let poll = poll_viewer_heterogeneous_completion(device, session, host);
     ViewerHeterogeneousCompletionDrive {
-        redraw_required: poll == ViewerHeterogeneousCompletionPoll::TerminalChange,
+        redraw_required: poll == ViewerHeterogeneousCompletionPoll::TerminalChange
+            && host.has_pending_ui_refresh(),
         next_wake: session.viewer_gpu_submissions.next_wake().map(|wake| wake.max(now)),
     }
 }
