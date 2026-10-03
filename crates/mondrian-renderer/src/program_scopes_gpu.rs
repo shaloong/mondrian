@@ -24,6 +24,9 @@ const PIXELS_PER_INVOCATION: u32 = 4;
 const SUBGROUP_TILE_WIDTH: u32 = 1;
 const SUBGROUP_TILE_HEIGHT: u32 = 256;
 const DISPLAY_WORKGROUP_SIZE: u32 = 8;
+// Four submitted frames plus the current and prepared physical publications.
+// Exhaustion is explicit; an escaped record never authorizes unbounded growth.
+const MAX_SCOPE_RESOURCE_SETS: usize = 6;
 
 /// Bounded configuration for one GPU Program Output scope request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,7 +167,12 @@ impl GpuProgramScopesBufferLayout {
     }
 }
 
-/// GPU textures and exact count-buffer layout produced for one frame.
+/// GPU textures and exact counts retained for one frame.
+///
+/// Clones retain the same output allocation. Callers keep a record through GPU
+/// completion and for as long as its plots are published; the runtime cannot
+/// overwrite that allocation while any record remains alive.
+#[derive(Clone)]
 pub struct GpuProgramScopesRecord {
     /// Request that defined the aggregation geometry and signal coefficients.
     pub request: GpuProgramScopesRequest,
@@ -178,13 +186,13 @@ pub struct GpuProgramScopesRecord {
     pub vectorscope_view: wgpu::TextureView,
     /// True when this frame used hardware subgroup atomic coalescing.
     pub used_subgroups: bool,
-    _counts: Arc<wgpu::Buffer>,
+    _resources: Arc<ScopesResources>,
 }
 
 impl GpuProgramScopesRecord {
     #[cfg(test)]
     pub(crate) fn counts(&self) -> &wgpu::Buffer {
-        self._counts.as_ref()
+        &self._resources.counts
     }
 }
 
@@ -193,9 +201,9 @@ impl GpuProgramScopesRecord {
 pub struct GpuProgramScopesRuntimeDiagnostics {
     /// Pipeline bundles created for this device.
     pub pipeline_creations: u64,
-    /// Exact-count buffers allocated after request-shape changes.
+    /// Exact-count buffers allocated for request shapes and retained frames.
     pub buffer_allocations: u64,
-    /// Display textures allocated after request-shape changes.
+    /// Display textures allocated for request shapes and retained frames.
     pub texture_allocations: u64,
     /// Frames for which aggregation and visualization were recorded.
     pub frames_recorded: u64,
@@ -207,7 +215,7 @@ pub struct GpuProgramScopesRuntimeDiagnostics {
 #[derive(Default)]
 pub struct GpuProgramScopesRuntime {
     pipelines: Option<ScopesPipelines>,
-    resources: Option<ScopesResources>,
+    resources: Vec<Arc<ScopesResources>>,
     diagnostics: GpuProgramScopesRuntimeDiagnostics,
 }
 
@@ -220,13 +228,13 @@ impl GpuProgramScopesRuntime {
     /// Release device resources after a device transition.
     pub fn clear(&mut self) {
         self.pipelines = None;
-        self.resources = None;
+        self.resources.clear();
     }
 
     /// Revoke frame buffers and display textures on this same device while
     /// retaining immutable pipelines. A new device requires a new runtime.
     pub fn clear_frame_resources(&mut self) {
-        self.resources = None;
+        self.resources.clear();
     }
 
     /// Prepare device pipelines only. No frame buffers, textures, commands or
@@ -282,21 +290,36 @@ impl GpuProgramScopesRuntime {
             .ok_or(GpuProgramScopesError::InternalState)?
             .aggregate_pipeline(device, request.waveform_mode);
         let key = ScopesResourceKey { request };
-        if self.resources.as_ref().is_none_or(|resources| resources.key != key) {
+        // Only unleased allocations can be recycled, including their mutable
+        // uniforms. A prepared successor must not rewrite the current plots.
+        self.resources
+            .retain(|resources| resources.key == key || Arc::strong_count(resources) != 1);
+        let resource_index = self
+            .resources
+            .iter()
+            .position(|resources| resources.key == key && Arc::strong_count(resources) == 1);
+        let resource_index = if let Some(index) = resource_index {
+            index
+        } else {
+            if self.resources.len() == MAX_SCOPE_RESOURCE_SETS {
+                return Err(GpuProgramScopesError::RetainedFrameCapacity);
+            }
             let display_layout = &self
                 .pipelines
                 .as_ref()
                 .ok_or(GpuProgramScopesError::InternalState)?
                 .display_bind_group_layout;
             let resources = ScopesResources::new(device, key, display_layout);
-            self.resources = Some(resources);
+            self.resources.push(Arc::new(resources));
             self.diagnostics.buffer_allocations =
                 self.diagnostics.buffer_allocations.saturating_add(1);
             self.diagnostics.texture_allocations =
                 self.diagnostics.texture_allocations.saturating_add(3);
-        }
+            self.resources.len() - 1
+        };
         let pipelines = self.pipelines.as_ref().ok_or(GpuProgramScopesError::InternalState)?;
-        let resources = self.resources.as_mut().ok_or(GpuProgramScopesError::InternalState)?;
+        let resources = Arc::get_mut(&mut self.resources[resource_index])
+            .ok_or(GpuProgramScopesError::InternalState)?;
         let max_column_samples =
             input_height.saturating_mul(input_width.div_ceil(request.waveform_width)).max(1);
         let uniforms = ScopesUniforms {
@@ -323,7 +346,7 @@ impl GpuProgramScopesRuntime {
             queue.write_buffer(&resources.uniforms, 0, bytemuck::bytes_of(&uniforms));
             resources.uniform_input_size = Some((input_width, input_height));
         }
-        encoder.clear_buffer(resources.counts.as_ref(), 0, None);
+        encoder.clear_buffer(&resources.counts, 0, None);
 
         let aggregate_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("program-scopes-aggregate-bind-group"),
@@ -400,7 +423,7 @@ impl GpuProgramScopesRuntime {
             waveform_view: resources.waveform_view.clone(),
             vectorscope_view: resources.vectorscope_view.clone(),
             used_subgroups: pipelines.use_subgroups,
-            _counts: Arc::clone(&resources.counts),
+            _resources: Arc::clone(&self.resources[resource_index]),
         })
     }
 }
@@ -408,6 +431,9 @@ impl GpuProgramScopesRuntime {
 /// Failures at the renderer-owned GPU scopes boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum GpuProgramScopesError {
+    /// Every bounded output set is retained by submitted or published frames.
+    #[error("GPU Program Output scopes retained-frame capacity is exhausted")]
+    RetainedFrameCapacity,
     /// Source dimensions must describe a non-empty, u32-addressable RGB sample extent.
     #[error("GPU Program Output scopes require non-zero, u32-addressable RGB dimensions, got {width}x{height}")]
     InvalidDimensions { width: u32, height: u32 },
@@ -466,7 +492,7 @@ struct ScopesResourceKey {
 struct ScopesResources {
     key: ScopesResourceKey,
     layout: GpuProgramScopesBufferLayout,
-    counts: Arc<wgpu::Buffer>,
+    counts: wgpu::Buffer,
     uniforms: wgpu::Buffer,
     uniform_input_size: Option<(u32, u32)>,
     _histogram_texture: wgpu::Texture,
@@ -485,14 +511,14 @@ impl ScopesResources {
         display_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> Self {
         let layout = GpuProgramScopesBufferLayout::for_request(key.request);
-        let counts = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+        let counts = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("program-scopes-exact-counts"),
             size: layout.byte_size(),
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
-        }));
+        });
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("program-scopes-uniforms"),
             size: std::mem::size_of::<ScopesUniforms>() as u64,
@@ -1447,6 +1473,13 @@ mod tests {
             u64::from(record.used_subgroups)
         );
 
+        let used_subgroups = record.used_subgroups;
+        let retired_counts = record.counts().clone();
+        let retired_waveform = record.waveform_view.clone();
+        // Warm reuse is permitted after both presentation and GPU completion
+        // release the frame record, not merely after copying its texture view.
+        drop(record);
+
         let mut warm_encoder =
             context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("program-scopes-warm-reuse-encoder"),
@@ -1472,7 +1505,7 @@ mod tests {
         assert_eq!(runtime.diagnostics().frames_recorded, 2);
         assert_eq!(
             runtime.diagnostics().subgroup_frames_recorded,
-            2 * u64::from(record.used_subgroups)
+            2 * u64::from(used_subgroups)
         );
 
         let old_pipeline = runtime
@@ -1496,8 +1529,8 @@ mod tests {
                 request,
             )
             .expect("new physical scope generation");
-        assert_ne!(next.counts(), record.counts());
-        assert_ne!(next.waveform_view, record.waveform_view);
+        assert_ne!(next.counts(), &retired_counts);
+        assert_ne!(next.waveform_view, retired_waveform);
         assert_eq!(
             runtime.pipelines.as_ref().unwrap().aggregate_luma_pipeline.as_ref().unwrap(),
             &old_pipeline
@@ -1521,6 +1554,166 @@ mod tests {
         assert_eq!(runtime.diagnostics().pipeline_creations, 1);
         assert_eq!(runtime.diagnostics().buffer_allocations, 2);
         assert_eq!(runtime.diagnostics().texture_allocations, 6);
+    }
+
+    #[tokio::test]
+    async fn retained_scope_frames_preserve_counts_plots_and_uniforms_until_release() {
+        let policy = crate::GpuColorQualificationExecutionPolicy::from_environment()
+            .expect("GPU scopes qualification policy");
+        let Some(context) = policy
+            .admit_adapter("retained-program-scopes", GpuContext::new().await)
+            .expect("GPU scopes adapter policy")
+        else {
+            return;
+        };
+        let request = GpuProgramScopesRequest::default();
+        let mut runtime = GpuProgramScopesRuntime::default();
+        let mut records = Vec::new();
+        let mut commands = Vec::new();
+        let mut input_views = Vec::new();
+        // Record both inputs before submission. Shared mutable uniforms would
+        // also corrupt the smaller first frame when the second changes extent.
+        for (width, value) in [(2, 0), (4, 255)] {
+            let input = context.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("retained-scope-input"),
+                size: wgpu::Extent3d { width, height: 2, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            context.queue.write_texture(
+                input.as_image_copy(),
+                &[value, value, value, 255].repeat((width * 2) as usize),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(2),
+                },
+                input.size(),
+            );
+            let view = input.create_view(&Default::default());
+            let mut encoder = context.device.create_command_encoder(&Default::default());
+            records.push(
+                runtime
+                    .record(
+                        &context.device,
+                        &context.queue,
+                        &mut encoder,
+                        &view,
+                        width,
+                        2,
+                        request,
+                    )
+                    .expect("independent retained Scope output"),
+            );
+            commands.push(encoder.finish());
+            input_views.push(view);
+        }
+        let submission = context.queue.submit(commands);
+        context
+            .device
+            .poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None })
+            .expect("complete both Scope frames");
+
+        let mut observed_counts = Vec::new();
+        for (record, (samples, bin)) in records.iter().zip([(4, 0), (8, 255)]) {
+            let buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("retained-scope-counts-readback"),
+                size: record.buffer_layout.byte_size(),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = context.device.create_command_encoder(&Default::default());
+            encoder.copy_buffer_to_buffer(record.counts(), 0, &buffer, 0, buffer.size());
+            context.queue.submit([encoder.finish()]);
+            let bytes = map_test_readback(&context.device, &buffer);
+            let counts = bytemuck::cast_slice::<u8, u32>(&bytes).to_vec();
+            for channel in 0..4 {
+                let start = record.buffer_layout.histogram_offset as usize + channel * 256;
+                let histogram = &counts[start..start + 256];
+                assert_eq!(histogram[bin], samples);
+                assert_eq!(histogram.iter().sum::<u32>(), samples);
+            }
+            assert_eq!(
+                &counts[record.buffer_layout.invalid_pixel_count_offset as usize..],
+                &[0, 0]
+            );
+            observed_counts.push(counts);
+        }
+        assert_ne!(observed_counts[0], observed_counts[1]);
+        assert_ne!(
+            read_scope_display(&context.device, &context.queue, &records[0].histogram_view),
+            read_scope_display(&context.device, &context.queue, &records[1].histogram_view),
+        );
+        assert_ne!(
+            read_scope_display(&context.device, &context.queue, &records[0].waveform_view),
+            read_scope_display(&context.device, &context.queue, &records[1].waveform_view),
+        );
+        let first = records.remove(0);
+        let retained_clone = first.clone();
+        let recycled_counts = first.counts().clone();
+        let recycled_view = first.waveform_view.clone();
+        drop(first);
+        // A publication clone still holds the set even if its submit owner ends.
+        let view = &input_views[0];
+        let mut encoder = context.device.create_command_encoder(&Default::default());
+        while runtime.resources.len() < MAX_SCOPE_RESOURCE_SETS {
+            records.push(
+                runtime
+                    .record(
+                        &context.device,
+                        &context.queue,
+                        &mut encoder,
+                        view,
+                        2,
+                        2,
+                        request,
+                    )
+                    .expect("bounded retained frame"),
+            );
+        }
+        assert!(matches!(
+            runtime.record(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                view,
+                2,
+                2,
+                request
+            ),
+            Err(GpuProgramScopesError::RetainedFrameCapacity)
+        ));
+        drop(retained_clone);
+        let reused = runtime
+            .record(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                view,
+                2,
+                2,
+                request,
+            )
+            .expect("released frame set is reusable");
+        assert_eq!(reused.counts(), &recycled_counts);
+        assert_eq!(reused.waveform_view, recycled_view);
+        let submission = context.queue.submit([encoder.finish()]);
+        context
+            .device
+            .poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None })
+            .expect("retire capacity-test commands");
+        assert_eq!(
+            runtime.diagnostics().buffer_allocations,
+            MAX_SCOPE_RESOURCE_SETS as u64
+        );
+        assert_eq!(
+            runtime.diagnostics().texture_allocations,
+            MAX_SCOPE_RESOURCE_SETS as u64 * 3
+        );
     }
 
     #[tokio::test]

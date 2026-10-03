@@ -1854,6 +1854,7 @@ struct AppUiWindowSession {
     pending_viewer_backend_frame: Option<Box<PreviewGpuFrame>>,
     viewer_gpu_deferred_cleanup: WindowViewerGpuDeferredCleanup,
     program_scopes_registered: bool,
+    program_scopes_submission_id: Option<ViewerGpuSubmissionId>,
     program_scopes_refresh_requested: bool,
     program_scopes_analysis_identity: Option<(WaveformMode, ProgramScopeScale, ProgramScopesTap)>,
     viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry,
@@ -1938,6 +1939,19 @@ struct WindowViewerGpuSubmissionOwner {
     program_scopes_analysis_identity: Option<(WaveformMode, ProgramScopeScale, ProgramScopesTap)>,
 }
 
+impl WindowViewerGpuSubmissionOwner {
+    fn publication_artifact(&self) -> WindowViewerGpuArtifact {
+        WindowViewerGpuArtifact {
+            texture_key: self.texture_key.clone(),
+            program_scopes: self.program_scopes.clone(),
+            program_scopes_requested: self.program_scopes_requested,
+            program_scopes_analysis_identity: self.program_scopes_analysis_identity,
+            #[cfg(feature = "validation")]
+            frame_context: self.frame_context.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum WindowViewerGpuDeferredCleanup {
     #[default]
@@ -1948,6 +1962,9 @@ enum WindowViewerGpuDeferredCleanup {
 
 struct WindowViewerGpuArtifact {
     texture_key: ExternalTextureKey,
+    program_scopes: Option<mondrian_renderer::GpuProgramScopesRecord>,
+    program_scopes_requested: bool,
+    program_scopes_analysis_identity: Option<(WaveformMode, ProgramScopeScale, ProgramScopesTap)>,
     #[cfg(feature = "validation")]
     frame_context: AppUiViewerGpuOutputFrameContext,
 }
@@ -6349,6 +6366,7 @@ fn retire_window_viewer_gpu_registration(
 }
 
 fn retire_window_published_gpu_output(session: &mut AppUiWindowSession, host: &AppUiHost) -> bool {
+    unregister_program_scopes_textures(session);
     let outputs = session.viewer_gpu_presentation.publications.drain();
     let mut retired = false;
     for published in outputs.into_iter().flatten() {
@@ -6375,6 +6393,9 @@ fn begin_window_viewer_gpu_quarantine(
         .viewer_gpu_presentation
         .take_published_output_for_submission(quarantine.submission_id)
     {
+        if session.program_scopes_submission_id == Some(published.source_submission_id()) {
+            unregister_program_scopes_textures(session);
+        }
         session
             .frame_renderer
             .unregister_external_texture(published.artifact().texture_key());
@@ -6404,6 +6425,7 @@ fn begin_window_viewer_gpu_quarantine(
 fn publish_completed_window_viewer_gpu_owner(
     session: &mut AppUiWindowSession,
     host: &AppUiHost,
+    device: &wgpu::Device,
     submission_id: ViewerGpuSubmissionId,
     owner: &mut WindowViewerGpuSubmissionOwner,
 ) -> bool {
@@ -6455,14 +6477,11 @@ fn publish_completed_window_viewer_gpu_owner(
             let previous = session.viewer_gpu_presentation.publications.publish_current(
                 submission_id,
                 owner.frame.output_key.clone(),
-                WindowViewerGpuArtifact {
-                    texture_key: owner.texture_key.clone(),
-                    #[cfg(feature = "validation")]
-                    frame_context: owner.frame_context.clone(),
-                },
+                owner.publication_artifact(),
                 output_lease,
             );
             owner.texture_registered = false;
+            register_current_window_program_scopes(session, device);
             if let Some(previous) = previous {
                 session
                     .frame_renderer
@@ -6719,6 +6738,9 @@ fn complete_window_viewer_gpu_submission(
             .viewer_gpu_presentation
             .take_published_output_for_submission(submission_id)
         {
+            if session.program_scopes_submission_id == Some(published.source_submission_id()) {
+                unregister_program_scopes_textures(session);
+            }
             session
                 .frame_renderer
                 .unregister_external_texture(published.artifact().texture_key());
@@ -6747,23 +6769,13 @@ fn complete_window_viewer_gpu_submission(
         owner.frame.is_successor_preparation(),
     ) {
         Ok(PreviewVisualGpuCompletionDisposition::PublishCurrent) => {
-            if let Some(scopes) = owner.program_scopes.as_ref() {
-                if let Err(error) = register_program_scopes_textures(
-                    session,
-                    device,
-                    scopes,
-                    owner.program_scopes_analysis_identity,
-                ) {
-                    unregister_program_scopes_textures(session);
-                    session.program_scopes_refresh_requested = true;
-                    tracing::warn!(%error, "heterogeneous GPU scope registration failed");
-                }
-            } else {
-                unregister_program_scopes_textures(session);
-                session.program_scopes_refresh_requested = owner.program_scopes_requested;
-            }
-            let _ =
-                publish_completed_window_viewer_gpu_owner(session, host, submission_id, &mut owner);
+            let _ = publish_completed_window_viewer_gpu_owner(
+                session,
+                host,
+                device,
+                submission_id,
+                &mut owner,
+            );
         }
         Ok(PreviewVisualGpuCompletionDisposition::PrepareSuccessor) => {
             let _ = retain_completed_window_viewer_gpu_successor(
@@ -6837,11 +6849,7 @@ fn retain_completed_window_viewer_gpu_successor(
     if let Some(previous) = session.viewer_gpu_presentation.publications.publish_prepared(
         submission_id,
         owner.frame.output_key.clone(),
-        WindowViewerGpuArtifact {
-            texture_key: owner.texture_key.clone(),
-            #[cfg(feature = "validation")]
-            frame_context: owner.frame_context.clone(),
-        },
+        owner.publication_artifact(),
         output_lease,
     ) {
         session
@@ -7170,10 +7178,20 @@ fn prepare_viewer_gpu_preview(
             if physical_is_exact
                 && session.viewer_gpu_device_progress.generation_terminal().is_none()
             {
-                let _ = host.present_current_viewer_output(
+                let disposition = host.present_current_viewer_output(
                     candidate,
                     crate::app::preview_runtime::PreviewPresentationCarrier::ExternalGpu,
                 );
+                if matches!(
+                    disposition,
+                    FramePresentationDisposition::Presented(_)
+                        | FramePresentationDisposition::NoDemand
+                ) {
+                    register_current_window_program_scopes(session, device);
+                } else {
+                    unregister_program_scopes_textures(session);
+                    session.program_scopes_refresh_requested = program_scopes_requested;
+                }
             } else {
                 let _ = retire_window_published_gpu_output(session, host);
                 host.clear_external_viewer_frame();
@@ -7186,9 +7204,6 @@ fn prepare_viewer_gpu_preview(
                 None,
             );
             session.viewer_gpu_output_telemetry.record_current_skip();
-            if program_scopes_requested {
-                finish_prepare!();
-            }
             let staged = host
                 .viewer_gpu_successor_intent()
                 .and_then(|intent| session.staged_viewer_gpu_successors.take_exact(intent));
@@ -7893,8 +7908,7 @@ fn prepare_viewer_gpu_preview(
     if heterogeneous_recorded {
         finish_prepare!();
     }
-    register_ordinary_window_program_scopes(session, device, submission_id);
-    publish_ordinary_window_viewer_gpu_submission(session, host, submission_id);
+    publish_ordinary_window_viewer_gpu_submission(session, host, device, submission_id);
     finish_prepare!();
 }
 
@@ -7943,31 +7957,29 @@ fn stage_window_viewer_gpu_lookahead(session: &mut AppUiWindowSession, host: &Ap
     }
 }
 
-fn register_ordinary_window_program_scopes(
-    session: &mut AppUiWindowSession,
-    device: &wgpu::Device,
-    submission_id: ViewerGpuSubmissionId,
-) {
-    let scopes = session
-        .viewer_gpu_submissions
-        .owner_mut(submission_id)
-        .and_then(|owner| owner.program_scopes.take());
+fn register_current_window_program_scopes(session: &mut AppUiWindowSession, device: &wgpu::Device) {
+    let Some(current) = session.viewer_gpu_presentation.published_output() else {
+        unregister_program_scopes_textures(session);
+        return;
+    };
+    let submission_id = current.source_submission_id();
+    if session.program_scopes_submission_id == Some(submission_id) {
+        return;
+    }
+    let artifact = current.artifact();
+    let scopes = artifact.program_scopes.clone();
+    let identity = artifact.program_scopes_analysis_identity;
+    let requested = artifact.program_scopes_requested;
     if let Some(scopes) = scopes {
-        let identity = session
-            .viewer_gpu_submissions
-            .owner(submission_id)
-            .and_then(|owner| owner.program_scopes_analysis_identity);
         if let Err(error) = register_program_scopes_textures(session, device, &scopes, identity) {
             unregister_program_scopes_textures(session);
             session.program_scopes_refresh_requested = true;
-            tracing::warn!(%error, "ordinary GPU Program Output scope registration failed");
+            tracing::warn!(%error, "current GPU Program Output scope registration failed");
+        } else {
+            session.program_scopes_submission_id = Some(submission_id);
         }
     } else {
         unregister_program_scopes_textures(session);
-        let requested = session
-            .viewer_gpu_submissions
-            .owner(submission_id)
-            .is_some_and(|owner| owner.program_scopes_requested);
         session.program_scopes_refresh_requested = requested;
     }
 }
@@ -7975,6 +7987,7 @@ fn register_ordinary_window_program_scopes(
 fn publish_ordinary_window_viewer_gpu_submission(
     session: &mut AppUiWindowSession,
     host: &AppUiHost,
+    device: &wgpu::Device,
     submission_id: ViewerGpuSubmissionId,
 ) {
     if let Some(terminal) = session.viewer_gpu_device_progress.generation_terminal() {
@@ -7993,11 +8006,7 @@ fn publish_ordinary_window_viewer_gpu_submission(
             Some((
                 owner.frame.output_key.clone(),
                 owner.texture_key.clone(),
-                WindowViewerGpuArtifact {
-                    texture_key: owner.texture_key.clone(),
-                    #[cfg(feature = "validation")]
-                    frame_context: owner.frame_context.clone(),
-                },
+                owner.publication_artifact(),
                 owner.presentation,
                 owner.output_lease.take()?,
             ))
@@ -8115,6 +8124,7 @@ fn publish_ordinary_window_viewer_gpu_submission(
                 artifact,
                 output_lease,
             );
+            register_current_window_program_scopes(session, device);
             if let Some(previous) = previous {
                 session
                     .frame_renderer
@@ -8296,6 +8306,7 @@ fn register_program_scopes_textures(
 }
 
 fn unregister_program_scopes_textures(session: &mut AppUiWindowSession) {
+    session.program_scopes_submission_id = None;
     session.program_scopes_analysis_identity = None;
     if !session.program_scopes_registered {
         return;
@@ -8876,6 +8887,7 @@ impl AppUiPreparedWindowSession {
             pending_viewer_backend_frame: None,
             viewer_gpu_deferred_cleanup: WindowViewerGpuDeferredCleanup::None,
             program_scopes_registered: false,
+            program_scopes_submission_id: None,
             program_scopes_refresh_requested: false,
             program_scopes_analysis_identity: None,
             viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry::default(),
