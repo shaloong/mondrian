@@ -437,12 +437,18 @@ impl ViewerGpuDeviceProgressShutdownEvidence {
 #[derive(Clone)]
 pub(crate) struct ViewerGpuDeviceCompletionSignal {
     observed: Arc<AtomicBool>,
+    progress_thread: thread::Thread,
 }
 
 impl ViewerGpuDeviceCompletionSignal {
     /// Publish callback cleanup authority with release ordering.
     pub(crate) fn mark_observed(&self) {
         self.observed.store(true, Ordering::Release);
+        // Queue::submit may fire this callback on another caller thread.
+        // Wake the existing progress owner rather than stranding its level
+        // predicate behind an entire external pacing quantum. This is only
+        // a hint; the owner still performs its post-callback device barrier.
+        self.progress_thread.unpark();
     }
 }
 
@@ -798,13 +804,17 @@ struct ViewerGpuDeviceProgressWorkerPermit<'a, I> {
     health: ViewerGpuDeviceGenerationHealth,
     wake: ViewerGpuDeviceProgressWake,
     callback_observed: Arc<AtomicBool>,
+    progress_thread: thread::Thread,
     slot: ViewerGpuDeviceProgressSlot,
     _worker: PhantomData<&'a ViewerGpuDeviceProgressWorker<I>>,
 }
 
 impl<I> ViewerGpuDeviceProgressWorkerPermit<'_, I> {
     fn completion_signal(&self) -> ViewerGpuDeviceCompletionSignal {
-        ViewerGpuDeviceCompletionSignal { observed: Arc::clone(&self.callback_observed) }
+        ViewerGpuDeviceCompletionSignal {
+            observed: Arc::clone(&self.callback_observed),
+            progress_thread: self.progress_thread.clone(),
+        }
     }
 
     fn commit(self, submission_id: ViewerGpuSubmissionId, submission_index: I) {
@@ -813,6 +823,7 @@ impl<I> ViewerGpuDeviceProgressWorkerPermit<'_, I> {
             health,
             wake,
             callback_observed,
+            progress_thread: _,
             slot,
             _worker: _,
         } = self;
@@ -832,6 +843,7 @@ impl<I> ViewerGpuDeviceProgressWorkerPermit<'_, I> {
             health,
             wake,
             callback_observed: _,
+            progress_thread: _,
             slot,
             _worker: _,
         } = self;
@@ -1058,12 +1070,19 @@ where
         let Some(sender) = self.command_sender.as_ref() else {
             return Err(ViewerGpuDeviceProgressReserveError::OwnerShutdown);
         };
+        let progress_thread = self
+            .join_handle
+            .as_ref()
+            .ok_or(ViewerGpuDeviceProgressReserveError::OwnerShutdown)?
+            .thread()
+            .clone();
         let slot = self.progress_state.reserve_slot(&self.health)?;
         Ok(ViewerGpuDeviceProgressWorkerPermit {
             sender: sender.clone(),
             health: self.health.clone(),
             wake: self.wake.clone(),
             callback_observed: Arc::new(AtomicBool::new(false)),
+            progress_thread,
             slot,
             _worker: PhantomData,
         })
@@ -2213,6 +2232,69 @@ mod tests {
         ));
         assert!(observation_receiver.try_recv().is_err());
         assert!(health.terminal().is_some_and(|terminal| terminal.wgpu_work_is_terminal()));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn external_completion_callback_interrupts_pacing_without_completing_the_next_owner() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let health =
+            ViewerGpuDeviceGenerationHealth::for_test(ViewerGpuDeviceProgressWake::default());
+        let mut worker = ViewerGpuDeviceProgressWorker::spawn(
+            "external-callback-progress-test",
+            ScriptedWait {
+                results: Arc::new(Mutex::new(VecDeque::new())),
+                calls: Arc::clone(&calls),
+            },
+            ViewerGpuDeviceProgressPolicy::new(Duration::from_millis(200)).expect("policy"),
+            health,
+            None,
+        )
+        .expect("spawn progress");
+        let first = worker.reserve_submission().expect("first permit");
+        let first_completion = first.completion_signal();
+        first.commit(test_submission_id(84), 51);
+        let second = worker.reserve_submission().expect("second permit");
+        let second_completion = second.completion_signal();
+        second.commit(test_submission_id(85), 52);
+        wait_for_calls(&calls, 1);
+        thread::sleep(Duration::from_millis(20));
+        first_completion.mark_observed();
+        let first_observation =
+            worker.observation_receiver.recv_timeout(Duration::from_millis(100));
+        let premature_second = worker.observation_receiver.try_recv().ok();
+        // Release both fake owners even when the old implementation times out.
+        second_completion.mark_observed();
+        let mut observations = Vec::new();
+        if let Ok(observation) = &first_observation {
+            observations.push(observation.clone());
+        }
+        if let Some(observation) = &premature_second {
+            observations.push(observation.clone());
+        }
+        while observations.len() < 2 {
+            observations.push(
+                worker
+                    .observation_receiver
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("cleanup"),
+            );
+        }
+        worker.shutdown().expect("consuming shutdown");
+        assert!(
+            first_observation.is_ok(),
+            "a callback must interrupt native owner pacing"
+        );
+        assert!(
+            premature_second.is_none(),
+            "a wake hint cannot complete another submission"
+        );
+        assert!(matches!(observations[0],
+            ViewerGpuDeviceProgressObservation::WaitSatisfied { submission_id, .. }
+                if submission_id == test_submission_id(84)));
+        assert!(matches!(observations[1],
+            ViewerGpuDeviceProgressObservation::WaitSatisfied { submission_id, .. }
+                if submission_id == test_submission_id(85)));
     }
 
     #[test]
