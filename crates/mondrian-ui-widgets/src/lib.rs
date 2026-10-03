@@ -32,6 +32,7 @@ pub mod slider;
 pub mod text_input;
 mod text_metrics;
 pub mod timeline_view;
+mod value_edit;
 pub mod vector_icon;
 pub mod video_scopes_surface;
 pub mod viewer_surface;
@@ -75,7 +76,7 @@ pub use property_panel::{PropertyPanel, PropertyPanelOptions, PropertyRow, Prope
 pub use raster_image::RasterImage;
 pub use scroll::{ScrollView, ScrollViewState};
 pub use segmented_button_group::{SegmentedButtonGroup, SegmentedButtonItem};
-pub use slider::{Slider, SliderEdit};
+pub use slider::Slider;
 pub use text_input::{
     MultilineTextInput, TabBehavior, TextInput, TextInputChangeAction, TextInputCommitAction,
 };
@@ -92,6 +93,7 @@ pub use timeline_view::{
     TimelineTransitionRef, TimelineTransitionResize, TimelineTransitionResizeAction,
     TimelineTrimEdge, TimelineView, TimelineViewState, WaveformDisplay,
 };
+pub use value_edit::ValueEdit;
 pub use vector_icon::{VectorIcon, VectorIconError};
 pub use video_scopes_surface::{
     VideoScopesLayout, VideoScopesSettings, VideoScopesSurface, VideoScopesTextureSet,

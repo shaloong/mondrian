@@ -1644,11 +1644,11 @@ impl AppUiHost {
                         | crate::app::parameter_gesture::ParameterGestureAction::BeginCurve { .. }
                 )
             );
-            let ends_numeric_curve = match &parameter_gesture_action {
+            let ends_parameter_gesture = match &parameter_gesture_action {
                 Some(
                     crate::app::parameter_gesture::ParameterGestureAction::Finish { gesture_id }
                     | crate::app::parameter_gesture::ParameterGestureAction::Cancel { gesture_id },
-                ) => self.app_state.borrow().parameter_gesture_is_numeric_curve(*gesture_id),
+                ) => self.app_state.borrow().parameter_gesture_owns(*gesture_id),
                 _ => false,
             };
             let generation_before = self
@@ -1676,7 +1676,7 @@ impl AppUiHost {
             if lightweight_transport_refresh {
                 self.refresh_transport_intent_without_preview();
             } else if !parameter_gesture
-                || ends_numeric_curve
+                || ends_parameter_gesture
                 || self
                     .app_state
                     .borrow()
@@ -5312,7 +5312,8 @@ mod tests {
             && widget.can_focus()
             && widget
                 .as_any()
-                .is_some_and(|value| value.is::<mondrian_ui_widgets::CurveEditor>())
+                .and_then(|value| value.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+                .is_some_and(|curve| curve.points().len() == 3)
         {
             return Some(widget.id());
         }
@@ -5325,6 +5326,15 @@ mod tests {
 
     #[test]
     fn inspector_curve_capture_cannot_outlive_selection_lock_or_author_generation() {
+        inspector_curve_capture_owner_matrix(false);
+    }
+
+    #[test]
+    fn inspector_structured_curve_capture_cannot_outlive_its_author_owner() {
+        inspector_curve_capture_owner_matrix(true);
+    }
+
+    fn inspector_curve_capture_owner_matrix(structured: bool) {
         use crate::app::product_action::{
             ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
         };
@@ -5348,7 +5358,27 @@ mod tests {
                 .expect("opacity");
             state.selection.selected_clips =
                 vec![crate::app::SelectedClipRef { track_id, clip_id, is_video_track: true }];
-            for ratio in [0.0, 0.5, 1.0] {
+            if structured {
+                let mut effect =
+                    mondrian_effects::instantiate_effect_node(mondrian_effects::EffectType::Curves)
+                        .expect("built-in structured curves");
+                effect
+                    .properties
+                    .set_static_value(
+                        &mondrian_effects::EffectType::Curves.property_path("master"),
+                        mondrian_core::PropertyValue::Curve(
+                            mondrian_core::NormalizedCurve::new(vec![
+                                mondrian_core::NormalizedCurvePoint::new(0.0, 0.0),
+                                mondrian_core::NormalizedCurvePoint::new(0.5, 0.5),
+                                mondrian_core::NormalizedCurvePoint::new(1.0, 1.0),
+                            ])
+                            .expect("three-point transfer curve"),
+                        ),
+                    )
+                    .expect("fixture transfer curve");
+                let mut sequence = state.active_sequence().expect("fixture Sequence").clone();
+                sequence.find_clip_mut(clip_id).expect("fixture Clip").add_effect_node(effect);
+                state.test_set_sequence(Some(sequence));
                 state
                     .dispatch_action(clip_edit_numeric_curve_action(
                         ClipEditNumericCurvePayload {
@@ -5357,13 +5387,32 @@ mod tests {
                             edit: ClipCurveEditPayload::Upsert {
                                 keyframe_id: None,
                                 point: ClipNormalizedCurvePointPayload {
-                                    time_ratio: ratio,
-                                    value_ratio: ratio,
+                                    time_ratio: 0.25,
+                                    value_ratio: 0.8,
                                 },
                             },
                         },
                     ))
-                    .expect("fixture key");
+                    .expect("fixture original Redo branch");
+                assert!(state.undo_timeline().expect("retain original Redo"));
+            } else {
+                for ratio in [0.0, 0.5, 1.0] {
+                    state
+                        .dispatch_action(clip_edit_numeric_curve_action(
+                            ClipEditNumericCurvePayload {
+                                clip_id,
+                                parameter: parameter.clone(),
+                                edit: ClipCurveEditPayload::Upsert {
+                                    keyframe_id: None,
+                                    point: ClipNormalizedCurvePointPayload {
+                                        time_ratio: ratio,
+                                        value_ratio: ratio,
+                                    },
+                                },
+                            },
+                        ))
+                        .expect("fixture key");
+                }
             }
             let mut host = AppUiHost::new_with_preferences_path(
                 state,
@@ -5398,6 +5447,12 @@ mod tests {
             let original = host.app_state().active_sequence().expect("origin").clone();
             let original_history =
                 host.app_state().authoring_history().expect("history").diagnostics();
+            if structured {
+                assert_eq!(
+                    original_history.redo_entries, 1,
+                    "fixture must retain an original Redo branch"
+                );
+            }
             if invalidation == 6 {
                 pending.push(Action::DeselectAll);
             }
@@ -5405,6 +5460,10 @@ mod tests {
                 UiEvent::MouseDown {
                     position: point,
                     button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::MouseMove {
+                    position: Point::new(point.x + 6.0, point.y - 6.0),
                     modifiers: Modifiers::none(),
                 },
                 UiEvent::MouseMove {
@@ -5444,12 +5503,17 @@ mod tests {
                 continue;
             }
             assert_eq!(router.captured(), Some(curve_id));
-            assert!(
+            assert_eq!(
                 host.app_state()
                     .active_sequence()
                     .expect("pending")
                     .author_state_eq_ignoring_revision(&original),
-                "curve remains a local draft before release"
+                !structured,
+                "numeric keys remain local; transfer curves retain live output"
+            );
+            assert!(
+                host.app_state().parameter_gesture_is_current(),
+                "captured curve must hold an authoritative owner lease"
             );
             assert!(
                 WidgetTreeView::new(host.active_root_mut()).get(curve_id).is_some(),

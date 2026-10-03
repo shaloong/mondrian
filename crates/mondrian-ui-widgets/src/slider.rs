@@ -4,6 +4,7 @@
 
 mod model;
 
+use crate::ValueEdit;
 use model::{SliderGeometry, SliderModel};
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
@@ -18,23 +19,8 @@ use std::cell::Cell;
 /// Adapter that maps the current slider value to an editor [`Action`].
 pub type SliderChangeAction = dyn Fn(f32) -> Option<Action>;
 
-/// Explicit boundaries of a user edit; keyboard changes are independent edits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SliderEdit {
-    /// One keyboard or other independent value change.
-    Single,
-    /// First pointer value, including a pointer-down that leaves the value unchanged.
-    Begin(mondrian_core::AuthoringGestureId),
-    /// A changed value in the same pointer interaction.
-    Update(mondrian_core::AuthoringGestureId),
-    /// Pointer release, focus loss or disabled interaction accepts the latest value.
-    Finish(mondrian_core::AuthoringGestureId),
-    /// Escape cancels the interaction; author adapters restore through their transaction owner.
-    Cancel(mondrian_core::AuthoringGestureId),
-}
-
 /// Adapter for value changes and explicit pointer interaction boundaries.
-pub type SliderEditAction = dyn Fn(SliderEdit, f32) -> Option<Action>;
+pub type SliderEditAction = dyn Fn(ValueEdit, f32) -> Option<Action>;
 
 /// Slider Widget —— 拖拽滑块控制数值
 pub struct Slider {
@@ -136,7 +122,7 @@ impl Slider {
     /// emitted once on release/focus loss. This replaces the value-only callback.
     pub fn on_edit<F, R>(mut self, action: F) -> Self
     where
-        F: Fn(SliderEdit, f32) -> R + 'static,
+        F: Fn(ValueEdit, f32) -> R + 'static,
         R: Into<Option<Action>>,
     {
         self.on_change = None;
@@ -207,7 +193,7 @@ impl Slider {
     fn dispatch_change(&self, ctx: &mut EventContext) {
         if self.on_edit.is_some() {
             self.dispatch_edit(
-                self.gesture.map_or(SliderEdit::Single, SliderEdit::Update),
+                self.gesture.map_or(ValueEdit::Single, ValueEdit::Update),
                 ctx,
             );
             return;
@@ -219,7 +205,7 @@ impl Slider {
         }
     }
 
-    fn dispatch_edit(&self, phase: SliderEdit, ctx: &mut EventContext) {
+    fn dispatch_edit(&self, phase: ValueEdit, ctx: &mut EventContext) {
         if let Some(callback) = &self.on_edit
             && let Some(action) = callback(phase, self.value())
         {
@@ -229,7 +215,7 @@ impl Slider {
 
     fn finish_edit(&mut self, ctx: &mut EventContext) {
         if let Some(gesture) = self.gesture.take() {
-            self.dispatch_edit(SliderEdit::Finish(gesture), ctx);
+            self.dispatch_edit(ValueEdit::Finish(gesture), ctx);
         }
         self.drag_start = None;
     }
@@ -237,7 +223,7 @@ impl Slider {
     fn cancel_edit(&mut self, ctx: &mut EventContext) {
         let changed = self.drag_start.take().is_some_and(|origin| self.model.restore_value(origin));
         if let Some(gesture) = self.gesture.take() {
-            self.dispatch_edit(SliderEdit::Cancel(gesture), ctx);
+            self.dispatch_edit(ValueEdit::Cancel(gesture), ctx);
         } else if changed {
             self.dispatch_change(ctx);
         }
@@ -305,7 +291,7 @@ impl Widget for Slider {
                     self.gesture = Some(gesture);
                     let ratio = self.geometry.get().ratio_at_position(self.bounds, *position);
                     self.set_value(self.model.value_at_ratio(ratio));
-                    self.dispatch_edit(SliderEdit::Begin(gesture), ctx);
+                    self.dispatch_edit(ValueEdit::Begin(gesture), ctx);
                     ctx.request_repaint();
                 } else {
                     self.drag_start = Some(self.value());
@@ -681,11 +667,11 @@ mod tests {
         }
         let phases = phases.borrow();
         assert_eq!(phases.len(), 3);
-        let SliderEdit::Begin(id) = phases[0].0 else {
+        let ValueEdit::Begin(id) = phases[0].0 else {
             panic!("begin");
         };
-        assert_eq!(phases[1].0, SliderEdit::Update(id));
-        assert_eq!(phases[2], (SliderEdit::Cancel(id), 0.23));
+        assert_eq!(phases[1].0, ValueEdit::Update(id));
+        assert_eq!(phases[2], (ValueEdit::Cancel(id), 0.23));
     }
 
     #[test]
@@ -756,10 +742,10 @@ mod tests {
         }
         let phases = phases.borrow();
         assert_eq!(phases.len(), 6);
-        let SliderEdit::Begin(first) = phases[0].0 else {
+        let ValueEdit::Begin(first) = phases[0].0 else {
             panic!("begin");
         };
-        let SliderEdit::Begin(second) = phases[3].0 else {
+        let ValueEdit::Begin(second) = phases[3].0 else {
             panic!("fresh begin");
         };
         assert_ne!(first, second);
@@ -767,10 +753,10 @@ mod tests {
             phases[0].1, 0.0,
             "unchanged pointer down still opens a gesture"
         );
-        assert_eq!(phases[1].0, SliderEdit::Update(first));
-        assert_eq!(phases[2].0, SliderEdit::Finish(first));
-        assert_eq!(phases[4].0, SliderEdit::Update(second));
-        assert_eq!(phases[5].0, SliderEdit::Finish(second));
+        assert_eq!(phases[1].0, ValueEdit::Update(first));
+        assert_eq!(phases[2].0, ValueEdit::Finish(first));
+        assert_eq!(phases[4].0, ValueEdit::Update(second));
+        assert_eq!(phases[5].0, ValueEdit::Finish(second));
     }
 
     #[test]

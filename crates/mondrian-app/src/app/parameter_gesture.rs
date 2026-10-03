@@ -321,11 +321,9 @@ impl AppState {
         })
     }
 
-    /// Whether one matching pointer identity owns a local numeric curve draft.
-    pub(crate) fn parameter_gesture_is_numeric_curve(&self, id: AuthoringGestureId) -> bool {
-        self.active_parameter_gesture.as_ref().is_some_and(|active| {
-            active.id == id && active.target.kind == ParameterGestureKind::NumericCurve
-        })
+    /// Whether one matching pointer identity owns the active author interaction.
+    pub(crate) fn parameter_gesture_owns(&self, id: AuthoringGestureId) -> bool {
+        self.active_parameter_gesture.as_ref().is_some_and(|active| active.id == id)
     }
 
     /// Seal the active interaction before discarding its UI owner identity.

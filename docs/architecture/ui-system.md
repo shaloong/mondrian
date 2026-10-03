@@ -3011,7 +3011,7 @@ commands in UI selection policy, and does not introduce a second keyframe model.
 An identical numeric curve update inside a valid gesture is a no-op rather than
 an edit failure: it retains the live interaction and any preceding effective
 update. Ordinary independent no-op product commands keep their explicit failure
-contract. Finish/Cancel of a matching numeric curve draft refreshes its canonical
+contract. Finish/Cancel of any matching parameter interaction refreshes its canonical
 model even if frame/value lowering yielded no author change, so local normalized
 points cannot remain as misleading unsaved curve geometry. No-op updates do not
 advance author generations or publish author invalidations.
@@ -3090,3 +3090,30 @@ from their display strings. An untouched draft preserves foreign-platform or
 non-Unicode intent exactly. New text is a local path; inspection requires explicit
 local-path admission and cannot reinterpret a foreign path through the current
 working directory.
+
+### Live structured transfer curves
+
+`ValueEdit` is the shared typed Single/Begin/Update/Finish/Cancel lifecycle for
+Slider and complete-value CurveEditor callbacks. It replaces the slider-specific
+public enum; no compatibility alias remains. `CurveEditor::on_value_edit` replaces
+other callbacks and preserves live complete-value updates, while `on_gesture`
+continues to defer numeric keyframe edits until release. The generic widget does
+not interpret authoring schemas or execute Undo.
+
+Live curve Begin precedes insertion and carries the exact original points.
+Subsequent insertion, movement and captured keyboard edits share one typed
+identity. The Inspector maps complete transfer-curve values through the existing
+Clip/Effect/Mask write intents and canonical AuthoringSession gesture journal.
+Live author generations update Viewer output without rebuilding captured widgets;
+acceptance retains one reversible command, and cancellation restores author values
+and the original Redo branch through the Session. Selection changes, actual locks
+and intervening author generations revoke stale owners before refresh deferral.
+
+The widget retains original local points and point policies only for cancellation
+of its own live interaction. Escape, disabling or deletion of an uncommitted
+inserted point cancels once without publishing a separate restored-value edit.
+Release/focus loss accepts once. A new pointer interaction accepts the previous
+one before opening a fresh identity. All matching terminal parameter boundaries
+refresh canonical controls, including unchanged or rejected local values; late
+pointer release/focus loss cannot commit a cancelled edit. Existing numeric curve
+and ordinary slider behavior is qualified alongside the structured curve matrix.

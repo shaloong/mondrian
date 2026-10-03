@@ -1923,13 +1923,13 @@ where
     let slider_action = Rc::clone(&action);
     let author_interaction = std::cell::Cell::new(false);
     slider = slider.on_edit(move |phase, ratio| {
-        use mondrian_ui_widgets::SliderEdit;
+        use mondrian_ui_widgets::ValueEdit;
         if author_interaction.get() {
             let boundary = match phase {
-                SliderEdit::Finish(gesture_id) => {
+                ValueEdit::Finish(gesture_id) => {
                     Some(ParameterGestureAction::Finish { gesture_id })
                 }
-                SliderEdit::Cancel(gesture_id) => {
+                ValueEdit::Cancel(gesture_id) => {
                     Some(ParameterGestureAction::Cancel { gesture_id })
                 }
                 _ => None,
@@ -1939,31 +1939,31 @@ where
                 return Some(boundary.action());
             }
         }
-        let action = slider_action(if matches!(phase, SliderEdit::Cancel(_)) {
+        let action = slider_action(if matches!(phase, ValueEdit::Cancel(_)) {
             value
         } else {
             T::from_ratio(ratio, soft_min, soft_max, step)
         });
         let Some(edit) = action.as_ref().and_then(ParameterGestureEdit::from_action) else {
-            return if matches!(phase, SliderEdit::Finish(_)) {
+            return if matches!(phase, ValueEdit::Finish(_)) {
                 None
             } else {
                 action
             };
         };
         match phase {
-            SliderEdit::Single => action,
-            SliderEdit::Begin(gesture_id) => {
+            ValueEdit::Single => action,
+            ValueEdit::Begin(gesture_id) => {
                 author_interaction.set(true);
                 Some(ParameterGestureAction::Begin { gesture_id, edit }.action())
             }
-            SliderEdit::Update(gesture_id) => {
+            ValueEdit::Update(gesture_id) => {
                 Some(ParameterGestureAction::Update { gesture_id, edit }.action())
             }
-            SliderEdit::Finish(gesture_id) => {
+            ValueEdit::Finish(gesture_id) => {
                 Some(ParameterGestureAction::Finish { gesture_id }.action())
             }
-            SliderEdit::Cancel(gesture_id) => {
+            ValueEdit::Cancel(gesture_id) => {
                 Some(ParameterGestureAction::Cancel { gesture_id }.action())
             }
         }
@@ -2957,20 +2957,47 @@ pub(super) fn inspector_property_value_widget(
                 curve.points().iter().map(|point| CurvePoint::new(point.x, point.y)).collect();
             let selected_clip = selection;
             Box::new(
-                CurveEditor::with_points(points).enabled(can_edit).on_change(move |points| {
-                    let curve = NormalizedCurve::new(
-                        points
-                            .iter()
-                            .map(|point| NormalizedCurvePoint::new(point.x, point.y))
-                            .collect(),
-                    )
-                    .ok()?;
-                    inspector_property_action(
-                        selected_clip,
-                        target.clone(),
-                        PropertyValue::Curve(curve),
-                    )
-                }),
+                CurveEditor::with_points(points).enabled(can_edit).on_value_edit(
+                    move |phase, points| {
+                        use mondrian_ui_widgets::ValueEdit;
+                        match phase {
+                            ValueEdit::Finish(gesture_id) => {
+                                return Some(
+                                    ParameterGestureAction::Finish { gesture_id }.action(),
+                                );
+                            }
+                            ValueEdit::Cancel(gesture_id) => {
+                                return Some(
+                                    ParameterGestureAction::Cancel { gesture_id }.action(),
+                                );
+                            }
+                            _ => {}
+                        }
+                        let curve = NormalizedCurve::new(
+                            points
+                                .iter()
+                                .map(|point| NormalizedCurvePoint::new(point.x, point.y))
+                                .collect(),
+                        )
+                        .ok()?;
+                        let action = inspector_property_action(
+                            selected_clip,
+                            target.clone(),
+                            PropertyValue::Curve(curve),
+                        )?;
+                        let edit = ParameterGestureEdit::from_action(&action)?;
+                        Some(match phase {
+                            ValueEdit::Single => action,
+                            ValueEdit::Begin(gesture_id) => {
+                                ParameterGestureAction::Begin { gesture_id, edit }.action()
+                            }
+                            ValueEdit::Update(gesture_id) => {
+                                ParameterGestureAction::Update { gesture_id, edit }.action()
+                            }
+                            ValueEdit::Finish(_) | ValueEdit::Cancel(_) => return None,
+                        })
+                    },
+                ),
             )
         }
         PropertyValue::QualifierSamples(samples) => {

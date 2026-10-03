@@ -6023,15 +6023,37 @@ fn inspector_effect_curve_editor_dispatches_structured_curve_value() {
         EventResult::Handled
     );
 
+    use crate::app::parameter_gesture::{ParameterGestureAction, ParameterGestureEdit};
     let recorded = actions.borrow();
-    assert_eq!(recorded.len(), 1);
-    let Action::Custom { namespace, name, payload } = &recorded[0] else {
-        panic!("expected inspector curve action, got {:?}", recorded[0]);
+    assert_eq!(
+        recorded.len(),
+        2,
+        "insertion starts an author lease before changing values"
+    );
+    let Some(ParameterGestureAction::Begin {
+        gesture_id,
+        edit: ParameterGestureEdit::Effect(begin),
+    }) = ParameterGestureAction::decode(&recorded[0]).expect("typed Begin")
+    else {
+        panic!("expected initial effect value author lease");
     };
-    assert_eq!(namespace, VISUAL_EFFECT_NAMESPACE);
-    assert_eq!(name, VISUAL_EFFECT_SET_PARAMETER_VALUE);
-    let payload: VisualEffectSetParameterValuePayload =
-        serde_json::from_value(payload.clone()).expect("curve property payload");
+    assert_eq!(begin.clip_id, selection.clip_id);
+    assert_eq!(begin.effect_id, effect_id);
+    assert_eq!(
+        begin.write,
+        ParameterValueWrite::Value {
+            parameter: property.address.clone(),
+            value: property.value.clone(),
+        }
+    );
+    let Some(ParameterGestureAction::Update {
+        gesture_id: update_id,
+        edit: ParameterGestureEdit::Effect(payload),
+    }) = ParameterGestureAction::decode(&recorded[1]).expect("typed Update")
+    else {
+        panic!("expected complete live curve value");
+    };
+    assert_eq!(update_id, gesture_id);
     let ParameterValueWrite::Value { parameter, value } = payload.write else {
         panic!("expected complete property write");
     };
@@ -6045,6 +6067,20 @@ fn inspector_effect_curve_editor_dispatches_structured_curve_value() {
     assert_eq!(curve.points()[0], NormalizedCurvePoint::new(0.0, 0.0));
     assert_eq!(curve.points()[2], NormalizedCurvePoint::new(1.0, 1.0));
     assert!(curve.points()[1].x > 0.4 && curve.points()[1].x < 0.6);
+    drop(recorded);
+    widget.event(
+        &UiEvent::MouseUp {
+            position: Point::new(110.0, 75.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        &mut ctx,
+    );
+    assert_eq!(actions.borrow().len(), 3);
+    assert!(matches!(
+        ParameterGestureAction::decode(&actions.borrow()[2]).expect("typed Finish"),
+        Some(ParameterGestureAction::Finish { gesture_id: finish_id }) if finish_id == gesture_id
+    ));
 }
 
 #[test]

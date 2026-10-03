@@ -16,6 +16,7 @@ use mondrian_ui_theme::Theme;
 use crate::context_menu::ContextMenu;
 use crate::menu::MenuItem;
 use crate::paint::{color_with_alpha, paint_focus_ring};
+use crate::ValueEdit;
 
 const DEFAULT_WIDTH: f32 = 220.0;
 const DEFAULT_HEIGHT: f32 = 104.0;
@@ -136,6 +137,9 @@ pub enum CurveGestureEvent {
 /// Adapter for explicit local curve draft ownership and committed edits.
 pub type CurveGestureAction = dyn Fn(CurveGestureEvent) -> Option<Action>;
 
+/// Adapter for complete live curve values and their authoring boundaries.
+pub type CurveValueEditAction = dyn Fn(ValueEdit, &[CurvePoint]) -> Option<Action>;
+
 /// Interactive normalized curve editor.
 pub struct CurveEditor {
     id: WidgetId,
@@ -146,6 +150,7 @@ pub struct CurveEditor {
     selected: Option<usize>,
     dragging: Option<usize>,
     drag_origin: Option<CurvePoint>,
+    drag_value_origin: Option<(Vec<CurvePoint>, Vec<CurvePointPolicy>)>,
     drag_inserted: bool,
     grid_columns: usize,
     grid_rows: usize,
@@ -156,6 +161,7 @@ pub struct CurveEditor {
     on_change: Option<Box<CurveChangeAction>>,
     on_edit: Option<Box<CurveEditAction>>,
     on_gesture: Option<Box<CurveGestureAction>>,
+    on_value_edit: Option<Box<CurveValueEditAction>>,
     gesture: Option<mondrian_core::AuthoringGestureId>,
     point_context_menus: Vec<Option<Vec<MenuItem>>>,
     context_menu: Option<ContextMenu>,
@@ -183,6 +189,7 @@ impl CurveEditor {
             selected: None,
             dragging: None,
             drag_origin: None,
+            drag_value_origin: None,
             drag_inserted: false,
             grid_columns: 4,
             grid_rows: 3,
@@ -193,6 +200,7 @@ impl CurveEditor {
             on_change: None,
             on_edit: None,
             on_gesture: None,
+            on_value_edit: None,
             gesture: None,
             point_context_menus: Vec::new(),
             context_menu: None,
@@ -236,6 +244,7 @@ impl CurveEditor {
         R: Into<Option<Action>>,
     {
         self.on_gesture = None;
+        self.on_value_edit = None;
         self.on_change = Some(Box::new(move |points| action(points).into()));
         self
     }
@@ -251,6 +260,7 @@ impl CurveEditor {
         R: Into<Option<Action>>,
     {
         self.on_gesture = None;
+        self.on_value_edit = None;
         self.on_edit = Some(Box::new(move |edit| action(edit).into()));
         self
     }
@@ -266,7 +276,24 @@ impl CurveEditor {
     {
         self.on_edit = None;
         self.on_change = None;
+        self.on_value_edit = None;
         self.on_gesture = Some(Box::new(move |event| action(event).into()));
+        self
+    }
+
+    /// Dispatch complete live values inside one explicit pointer edit.
+    /// Begin precedes insertion or movement; each update retains its identity.
+    /// Release and focus loss accept, while Escape or disabling cancels. Keyboard
+    /// changes without capture are independent edits. Replaces other callbacks.
+    pub fn on_value_edit<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(ValueEdit, &[CurvePoint]) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_change = None;
+        self.on_edit = None;
+        self.on_gesture = None;
+        self.on_value_edit = Some(Box::new(move |phase, points| action(phase, points).into()));
         self
     }
 
@@ -406,6 +433,14 @@ impl CurveEditor {
     }
 
     fn dispatch_change(&self, ctx: &mut EventContext) {
+        if let Some(action) = &self.on_value_edit
+            && let Some(action) = action(
+                self.gesture.map_or(ValueEdit::Single, ValueEdit::Update),
+                &self.points,
+            )
+        {
+            (ctx.dispatch)(action);
+        }
         if let Some(action) = &self.on_change
             && let Some(action) = action(&self.points)
         {
@@ -423,6 +458,19 @@ impl CurveEditor {
 
     fn end_gesture(&mut self, cancel: bool, ctx: &mut EventContext) {
         if let Some(id) = self.gesture.take() {
+            if let Some(action) = &self.on_value_edit
+                && let Some(action) = action(
+                    if cancel {
+                        ValueEdit::Cancel(id)
+                    } else {
+                        ValueEdit::Finish(id)
+                    },
+                    &self.points,
+                )
+            {
+                (ctx.dispatch)(action);
+            }
+            self.drag_value_origin = None;
             self.dispatch_gesture(
                 if cancel {
                     CurveGestureEvent::Cancel(id)
@@ -446,8 +494,30 @@ impl CurveEditor {
         }
     }
 
+    fn begin_value_gesture(&mut self, ctx: &mut EventContext) {
+        if self.on_value_edit.is_none() {
+            return;
+        }
+        self.commit_drag_edit(ctx);
+        self.end_gesture(false, ctx);
+        self.drag_value_origin = Some((self.points.clone(), self.point_policies.clone()));
+        let id = mondrian_core::AuthoringGestureId::new();
+        self.gesture = Some(id);
+        if let Some(action) = &self.on_value_edit
+            && let Some(action) = action(ValueEdit::Begin(id), &self.points)
+        {
+            (ctx.dispatch)(action);
+        }
+    }
+
     fn begin_drag(&mut self, index: usize, inserted: bool, ctx: &mut EventContext) {
-        self.end_gesture(true, ctx);
+        if self.on_value_edit.is_some() {
+            if !inserted {
+                self.begin_value_gesture(ctx);
+            }
+        } else {
+            self.end_gesture(true, ctx);
+        }
         if self.on_gesture.is_some() {
             let id = mondrian_core::AuthoringGestureId::new();
             self.gesture = Some(id);
@@ -481,6 +551,15 @@ impl CurveEditor {
         let Some(index) = self.dragging.take() else {
             return false;
         };
+        if let Some((points, policies)) = self.drag_value_origin.take() {
+            let changed = self.points != points;
+            self.points = points;
+            self.point_policies = policies;
+            self.drag_origin = None;
+            self.drag_inserted = false;
+            self.selected = self.selected.filter(|index| *index < self.points.len());
+            return changed;
+        }
         let changed = if self.drag_inserted {
             if index < self.points.len() {
                 self.points.remove(index);
@@ -550,6 +629,7 @@ impl CurveEditor {
         ctx: &mut EventContext,
     ) -> Option<usize> {
         let (index, point) = self.insertion_at(position)?;
+        self.begin_value_gesture(ctx);
         self.points.insert(index, point);
         self.point_policies.insert(index, CurvePointPolicy::editable());
         self.selected = Some(index);
@@ -570,7 +650,9 @@ impl CurveEditor {
             self.cancel_drag_state();
             self.selected = None;
             self.end_gesture(true, ctx);
-            self.dispatch_change(ctx);
+            if self.on_value_edit.is_none() {
+                self.dispatch_change(ctx);
+            }
             ctx.release_pointer_capture(self.id);
             ctx.request_repaint();
             return true;
@@ -717,7 +799,7 @@ impl Widget for CurveEditor {
                 let changed = self.cancel_drag_state();
                 self.end_gesture(true, ctx);
                 self.selected = None;
-                if changed {
+                if changed && self.on_value_edit.is_none() {
                     self.dispatch_change(ctx);
                 }
                 if was_dragging {
@@ -1202,6 +1284,113 @@ mod tests {
                 point: inserted,
             })]
         );
+    }
+
+    #[test]
+    fn live_curve_value_edits_keep_insertion_updates_and_termination_in_one_identity() {
+        for inserted in [false, true] {
+            for terminal in 0..5 {
+                let original = if inserted {
+                    vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)]
+                } else {
+                    vec![
+                        CurvePoint::new(0.0, 0.0),
+                        CurvePoint::new(0.5, 0.23),
+                        CurvePoint::new(1.0, 1.0),
+                    ]
+                };
+                let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+                let recorded = std::rc::Rc::clone(&events);
+                let mut editor = CurveEditor::with_points(original.clone()).on_value_edit(
+                    move |phase, points| {
+                        recorded.borrow_mut().push((phase, points.to_vec()));
+                        None::<Action>
+                    },
+                );
+                editor.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+                let mut focus = DummyFocus;
+                let mut shortcut = DummyShortcut;
+                let mut tooltip = DummyTooltip;
+                let dispatch = |_: Action| {};
+                let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+                let start = editor.to_screen(if inserted {
+                    CurvePoint::new(0.5, 0.5)
+                } else {
+                    original[1]
+                });
+                editor.event(
+                    &UiEvent::MouseDown {
+                        position: start,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                );
+                let ValueEdit::Begin(id) = events.borrow()[0].0 else {
+                    panic!("live pointer edit starts before the first mutation");
+                };
+                assert_eq!(events.borrow()[0].1, original);
+                let moved = editor.to_screen(CurvePoint::new(0.6, 0.7));
+                editor.event(
+                    &UiEvent::MouseMove { position: moved, modifiers: Modifiers::none() },
+                    &mut ctx,
+                );
+                assert_ne!(editor.points(), original);
+                assert_eq!(
+                    events.borrow().last().expect("live update").1,
+                    editor.points()
+                );
+                assert!(events.borrow()[1..]
+                    .iter()
+                    .all(|(phase, _)| *phase == ValueEdit::Update(id)));
+                if terminal == 3 {
+                    editor.set_enabled(false);
+                }
+                let event = match terminal {
+                    1 => UiEvent::FocusLost,
+                    2 => UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                    3 => UiEvent::MouseMove { position: moved, modifiers: Modifiers::none() },
+                    4 => UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
+                    _ => UiEvent::MouseUp {
+                        position: moved,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                };
+                editor.event(&event, &mut ctx);
+                let cancelled = terminal == 2 || terminal == 3 || (terminal == 4 && inserted);
+                assert_eq!(
+                    events.borrow().last().expect("terminal").0,
+                    if cancelled {
+                        ValueEdit::Cancel(id)
+                    } else {
+                        ValueEdit::Finish(id)
+                    }
+                );
+                if cancelled {
+                    assert_eq!(
+                        editor.points(),
+                        original,
+                        "cancel restores exact pre-insertion/pre-move points"
+                    );
+                }
+                let count = events.borrow().len();
+                editor.event(&UiEvent::FocusLost, &mut ctx);
+                editor.event(
+                    &UiEvent::MouseUp {
+                        position: moved,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                );
+                assert_eq!(
+                    events.borrow().len(),
+                    count,
+                    "late terminal input cannot publish an independent edit"
+                );
+            }
+        }
     }
 
     #[test]
