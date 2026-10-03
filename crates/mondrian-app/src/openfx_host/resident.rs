@@ -625,18 +625,11 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
                     .values()
                     .zip(&strings)
                     .map(|(value, (name, text))| {
-                        let (kind, number) = match value {
-                            OpenFxParameterValue::Double(value) => (1, *value),
-                            OpenFxParameterValue::Boolean(value) => (2, f64::from(*value as u8)),
-                            OpenFxParameterValue::Integer(value) => (3, f64::from(*value)),
-                            OpenFxParameterValue::Choice(value) => (4, f64::from(*value)),
-                            OpenFxParameterValue::StrChoice(_) => (5, 0.0),
-                            OpenFxParameterValue::String(_) => (6, 0.0),
-                        };
+                        let (kind, channels) = value.native_fields();
                         NativeParameter {
                             name: name.as_ptr(),
                             kind,
-                            value: [number, 0.0, 0.0, 0.0],
+                            value: channels,
                             string_value: text
                                 .as_ref()
                                 .map_or(std::ptr::null(), |text| text.as_ptr()),

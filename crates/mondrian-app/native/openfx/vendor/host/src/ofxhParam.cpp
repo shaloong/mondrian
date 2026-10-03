@@ -418,6 +418,7 @@ namespace OFX {
         }
 
         Property::PropSpec allNumeric[] = {
+          { kOfxParamInterpType, Property::eString, 1, false, kOfxParamInterpTypeLinear },
           { kOfxParamPropDisplayMin, valueType, dim, false, isColourParam(type) ? "0" : (valueType == Property::eDouble ? dbl_minstr : int_minstr).c_str() },
           { kOfxParamPropDisplayMax, valueType, dim, false, isColourParam(type) ? "1" : (valueType == Property::eDouble ? dbl_maxstr : int_maxstr).c_str() },
           { kOfxParamPropMin, valueType, dim, false, (valueType == Property::eDouble ? dbl_minstr : int_minstr).c_str() },
@@ -426,15 +427,6 @@ namespace OFX {
         };
 
         _properties.addProperties(allNumeric);
-
-        // OFX scalar numeric controls declare the default author interpolation.
-        if (dim == 1 && (isDoubleParam(type) || isIntParam(type))) {
-          static const Property::PropSpec scalarInterpolation[] = {
-            { kOfxParamInterpType, Property::eString, 1, false, kOfxParamInterpTypeLinear },
-            Property::propSpecEnd
-          };
-          _properties.addProperties(scalarInterpolation);
-        }
 
         /// if any double or a colour
         if (valueType == Property::eDouble) {

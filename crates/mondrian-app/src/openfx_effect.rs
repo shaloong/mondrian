@@ -23,8 +23,8 @@ use sha2::{Digest, Sha256};
 
 use crate::openfx_adapter::OpenFxBinaryInspection;
 use crate::openfx_host::{
-    describe_openfx_filter, OpenFxDoubleType, OpenFxFilterDescription, OpenFxFilterSession,
-    OpenFxFloatFrame, OpenFxHostError, OpenFxParameterValue, OpenFxRenderTiming, OpenFxStringMode,
+    describe_openfx_filter, OpenFxFilterDescription, OpenFxFilterSession, OpenFxFloatFrame,
+    OpenFxHostError, OpenFxParameterValue, OpenFxRenderTiming, OpenFxStringMode,
     OPENFX_MAX_STRING_BYTES,
 };
 
@@ -232,6 +232,13 @@ fn build_definition(
             let path = stable_key("openfx.control.", parameter.name.as_bytes());
             let default_value = match parameter.default_value.clone() {
                 OpenFxParameterValue::Double(value) => PropertyValue::Double(value),
+                OpenFxParameterValue::Double2(value) => PropertyValue::DoubleVec2(value),
+                OpenFxParameterValue::Double3(value) => PropertyValue::DoubleVec3(value),
+                OpenFxParameterValue::Rgb(value) => PropertyValue::DoubleRgb(value),
+                OpenFxParameterValue::Rgba(value) => PropertyValue::DoubleColor(value),
+                OpenFxParameterValue::Integer2(value) => PropertyValue::IntVec2(value),
+                OpenFxParameterValue::Integer3(value) => PropertyValue::IntVec3(value),
+
                 OpenFxParameterValue::Boolean(value) => PropertyValue::Bool(value),
                 OpenFxParameterValue::Integer(value) => PropertyValue::Int(i64::from(value)),
                 OpenFxParameterValue::Choice(value) => PropertyValue::Enum(value.to_string()),
@@ -311,7 +318,12 @@ fn build_definition(
                         .collect(),
                 );
             }
-            if matches!(parameter.default_value, OpenFxParameterValue::Integer(_)) {
+            if matches!(
+                parameter.default_value,
+                OpenFxParameterValue::Integer(_)
+                    | OpenFxParameterValue::Integer2(_)
+                    | OpenFxParameterValue::Integer3(_)
+            ) {
                 descriptor.schema.allowed_interpolations = vec![
                     mondrian_core::automation::ParameterInterpolation::Hold,
                     mondrian_core::automation::ParameterInterpolation::Linear,
@@ -329,51 +341,34 @@ fn build_definition(
             descriptor.schema.allowed_interpolations.insert(0, preferred);
             descriptor.ui_metadata.display_order = Some(index as u32);
             descriptor.ui_metadata.group_name = Some("OpenFX".to_owned());
-            if matches!(
-                parameter.default_value,
-                OpenFxParameterValue::Double(_) | OpenFxParameterValue::Integer(_)
-            ) {
-                let (Some(min), Some(max), Some(display_min), Some(display_max)) = (
-                    parameter.minimum,
-                    parameter.maximum,
-                    parameter.display_minimum,
-                    parameter.display_maximum,
-                ) else {
+            if let Some((arity, integer)) = parameter.default_value.numeric_layout() {
+                if parameter.numeric_channels.len() != arity {
                     return Err(OpenFxEffectRegistrationError::Schema(format!(
-                        "parameter `{}` has incomplete numeric bounds",
+                        "parameter `{}` has incomplete numeric component bounds",
                         parameter.name
                     )));
-                };
-                let hard_range = ParameterNumericRange::new(min, max)
+                }
+                let numeric = parameter
+                    .numeric_channels
+                    .iter()
+                    .map(|channel| {
+                        let hard_range =
+                            ParameterNumericRange::new(channel.minimum, channel.maximum)?;
+                        let soft_range = ParameterNumericRange::new(
+                            channel.display_minimum.max(channel.minimum),
+                            channel.display_maximum.min(channel.maximum),
+                        )?;
+                        ParameterNumericContract::new(
+                            hard_range,
+                            soft_range,
+                            integer.then_some(1.0),
+                            ParameterInvalidValuePolicy::Reject,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
                     .map_err(|error| OpenFxEffectRegistrationError::Schema(error.to_string()))?;
-                let soft_range =
-                    ParameterNumericRange::new(display_min.max(min), display_max.min(max))
-                        .map_err(|error| {
-                            OpenFxEffectRegistrationError::Schema(error.to_string())
-                        })?;
-                let numeric = ParameterNumericContract::new(
-                    hard_range,
-                    soft_range,
-                    matches!(parameter.default_value, OpenFxParameterValue::Integer(_))
-                        .then_some(1.0),
-                    ParameterInvalidValuePolicy::Reject,
-                )
-                .map_err(|error| OpenFxEffectRegistrationError::Schema(error.to_string()))?;
-                let unit = match parameter.double_type {
-                    Some(OpenFxDoubleType::Plain | OpenFxDoubleType::Scale) => {
-                        ParameterUnit::Unitless
-                    }
-                    None if matches!(parameter.default_value, OpenFxParameterValue::Integer(_)) => {
-                        ParameterUnit::Unitless
-                    }
-                    None => {
-                        return Err(OpenFxEffectRegistrationError::Schema(format!(
-                            "parameter `{}` has no Double interpretation",
-                            parameter.name
-                        )));
-                    }
-                };
-                descriptor = descriptor.with_numeric_contract(unit, numeric);
+                descriptor =
+                    descriptor.with_channel_numeric_contracts(ParameterUnit::Unitless, numeric);
             }
             descriptor.validate().map_err(|error| {
                 OpenFxEffectRegistrationError::Schema(format!(
@@ -422,6 +417,32 @@ fn build_definition(
                         match effect.evaluate_parameter(parameter_id, context.time) {
                             Some(PropertyValue::Double(value)) if value.is_finite() => {
                                 OpenFxParameterValue::Double(value)
+                            }
+                            Some(PropertyValue::DoubleVec2(value))
+                                if value.iter().all(|value| value.is_finite()) =>
+                            {
+                                OpenFxParameterValue::Double2(value)
+                            }
+                            Some(PropertyValue::DoubleVec3(value))
+                                if value.iter().all(|value| value.is_finite()) =>
+                            {
+                                OpenFxParameterValue::Double3(value)
+                            }
+                            Some(PropertyValue::DoubleRgb(value))
+                                if value.iter().all(|value| value.is_finite()) =>
+                            {
+                                OpenFxParameterValue::Rgb(value)
+                            }
+                            Some(PropertyValue::DoubleColor(value))
+                                if value.iter().all(|value| value.is_finite()) =>
+                            {
+                                OpenFxParameterValue::Rgba(value)
+                            }
+                            Some(PropertyValue::IntVec2(value)) => {
+                                OpenFxParameterValue::Integer2(value)
+                            }
+                            Some(PropertyValue::IntVec3(value)) => {
+                                OpenFxParameterValue::Integer3(value)
                             }
                             Some(PropertyValue::Enum(key))
                                 if matches!(
@@ -576,12 +597,143 @@ fn effect_type_for_filter(
 mod tests {
     use super::*;
     use crate::openfx_adapter::OpenFxPluginDescriptor;
+    use crate::openfx_host::OpenFxDoubleType;
     use mondrian_core::{
         Rational, SampleAspectRatio, TimelineTime, TimelineTimeRange, WorkingColorSpace,
     };
     use mondrian_effects::{
         instantiate_effect_node, EffectFrameContext, LutPreparationCache, PreparedEffectProgram,
     };
+
+    #[test]
+    fn compound_definition_binds_precise_types_and_complete_component_contracts() {
+        use crate::openfx_host::{OpenFxNumericChannel, OpenFxParameterDescription};
+        let identifier = "test.mondrian.openfx.compound.bridge";
+        let inspection = OpenFxBinaryInspection {
+            binary_path: PathBuf::from("C:/selected/Compound.ofx"),
+            binary_sha256: "c".repeat(64),
+            plugins: vec![OpenFxPluginDescriptor {
+                identifier: identifier.into(),
+                api_version: 1,
+                version_major: 1,
+                version_minor: 0,
+            }],
+        };
+        let cases = [
+            (
+                OpenFxParameterValue::Double2([0.12500000000000003, 0.75]),
+                PropertyValue::DoubleVec2([0.12500000000000003, 0.75]),
+            ),
+            (
+                OpenFxParameterValue::Double3([-0.5000000000000001, 0.0, 0.75]),
+                PropertyValue::DoubleVec3([-0.5000000000000001, 0.0, 0.75]),
+            ),
+            (
+                OpenFxParameterValue::Rgb([0.10000000000000002, 0.2, 0.3]),
+                PropertyValue::DoubleRgb([0.10000000000000002, 0.2, 0.3]),
+            ),
+            (
+                OpenFxParameterValue::Rgba([0.12500000000000003, 0.25, 0.5, 0.75]),
+                PropertyValue::DoubleColor([0.12500000000000003, 0.25, 0.5, 0.75]),
+            ),
+            (
+                OpenFxParameterValue::Integer2([i32::MIN, i32::MAX]),
+                PropertyValue::IntVec2([i32::MIN, i32::MAX]),
+            ),
+            (
+                OpenFxParameterValue::Integer3([i32::MIN, 0, i32::MAX]),
+                PropertyValue::IntVec3([i32::MIN, 0, i32::MAX]),
+            ),
+        ];
+        let description = OpenFxFilterDescription {
+            identifier: identifier.into(),
+            label: "Compound".into(),
+            parameters: cases
+                .iter()
+                .enumerate()
+                .map(|(index, (value, _))| {
+                    let (arity, integer) = value.numeric_layout().expect("numeric tuple");
+                    OpenFxParameterDescription {
+                        name: format!("tuple{index}"),
+                        label: format!("Tuple {index}"),
+                        hint: String::new(),
+                        default_value: value.clone(),
+                        choices: Vec::new(),
+                        preferred_interpolation:
+                            mondrian_core::automation::ParameterInterpolation::Linear,
+                        double_type: (index < 2).then_some(OpenFxDoubleType::Plain),
+                        string_mode: None,
+                        numeric_channels: (0..arity)
+                            .map(|channel| OpenFxNumericChannel {
+                                minimum: if integer {
+                                    f64::from(i32::MIN)
+                                } else {
+                                    -(channel as f64 + 1.0)
+                                },
+                                maximum: if integer {
+                                    f64::from(i32::MAX)
+                                } else {
+                                    channel as f64 + 1.0
+                                },
+                                display_minimum: -1.0,
+                                display_maximum: 1.0,
+                            })
+                            .collect(),
+                        can_animate: true,
+                        secret: false,
+                        enabled: true,
+                    }
+                })
+                .collect(),
+        };
+        let effect_type = effect_type_for_filter(&inspection, identifier).expect("identity");
+        let definition = build_definition(
+            Path::new("C:/selected/mondrian.exe"),
+            &inspection,
+            description,
+            &effect_type,
+        )
+        .expect("compound definition");
+        register_effect_definition(definition).expect("register");
+        let mut effect = instantiate_effect_node(effect_type).expect("instance");
+        assert_eq!(effect.properties.iter().count(), 6);
+        for (index, (_, expected)) in cases.iter().enumerate() {
+            let property = effect
+                .properties
+                .iter()
+                .find(|(_, property)| property.descriptor.display_name == format!("Tuple {index}"))
+                .expect("bound property");
+            let parameter_id = property.1.descriptor.parameter_id().clone();
+            assert_eq!(
+                effect.evaluate_parameter(&parameter_id, TimelineTime::ZERO),
+                Some(expected.clone())
+            );
+            assert_eq!(
+                property.1.descriptor.schema.numeric.as_ref().expect("numeric contracts").len(),
+                expected.channel_count()
+            );
+            assert_eq!(
+                property.1.descriptor.schema.allowed_interpolations[0],
+                mondrian_core::automation::ParameterInterpolation::Linear
+            );
+            let mut channels = expected.to_channel_values();
+            let last = channels.len() - 1;
+            channels[last] = 0.0;
+            let edited =
+                PropertyValue::from_channel_values(expected.value_type(), &channels, expected);
+            effect
+                .set_static_value_by_parameter(&parameter_id, edited.clone())
+                .expect("author last component");
+            assert_eq!(
+                effect.evaluate_parameter(&parameter_id, TimelineTime::ZERO),
+                Some(edited)
+            );
+        }
+        let restored: mondrian_effects::EffectNode =
+            serde_json::from_slice(&serde_json::to_vec(&effect).expect("serialize author node"))
+                .expect("restore author node");
+        assert_eq!(restored.properties, effect.properties);
+    }
 
     #[test]
     fn native_factory_sizes_controlled_frames_before_loading_a_binary() {
@@ -645,10 +797,12 @@ mod tests {
                         mondrian_core::automation::ParameterInterpolation::Linear,
                     double_type: Some(OpenFxDoubleType::Scale),
                     string_mode: None,
-                    minimum: Some(0.0),
-                    maximum: Some(2.0),
-                    display_minimum: Some(0.0),
-                    display_maximum: Some(2.0),
+                    numeric_channels: vec![crate::openfx_host::OpenFxNumericChannel {
+                        minimum: 0.0,
+                        maximum: 2.0,
+                        display_minimum: 0.0,
+                        display_maximum: 2.0,
+                    }],
                     can_animate: true,
                     secret: false,
                     enabled: true,
@@ -663,10 +817,7 @@ mod tests {
                         mondrian_core::automation::ParameterInterpolation::Hold,
                     double_type: None,
                     string_mode: None,
-                    minimum: None,
-                    maximum: None,
-                    display_minimum: None,
-                    display_maximum: None,
+                    numeric_channels: Vec::new(),
                     can_animate: false,
                     secret: true,
                     enabled: true,

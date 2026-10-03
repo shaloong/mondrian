@@ -705,7 +705,19 @@ precision, asymmetric bounds, int32 extremes, static-time reads, atomic rejected
 setters and floating derivative/integral output preservation. Raw native frame
 qualification additionally checks malformed whole snapshots preserve output and
 permit a subsequent valid request; existing failing-plugin tests require failed
-instances to remain retired. This is execution foundation only: public typed
-compound descriptions, exact canonical author tuple types, Inspector binding,
-Undo/archive/compiled-graph output, spatial/time/color interpretation and the
-vendor matrix remain separate outstanding qualification work.
+instances to remain retired. Public compound descriptions now preserve all six
+SDK shapes and complete ordered component bounds. Numeric metadata validates
+arity, finite bounds, signed int32 integer ranges, default admission and the
+slider intersection with each hard range. Discrete controls carry no numeric
+channels. There are no duplicated scalar bounds or compatibility aliases.
+All numeric SDK descriptors declare their preferred interpolation, including
+compound and color controls. The effect adapter binds exact DoubleVec2/3,
+DoubleRgb/Color and IntVec2/3 author values and lowers evaluated tuples to fixed
+four-slot native packets without Float32 parameter narrowing. Integer tuples
+admit the declared numeric interpolation with integral component steps.
+
+Exact Inspector transactions and durable project tuple roundtrips are covered
+by the authoring foundation. Real authored compound pixel output, historical
+curve access, spatial/time/color interpretation and the vendor matrix remain
+separate outstanding qualification work; SDK default execution alone does not
+qualify complete format support.

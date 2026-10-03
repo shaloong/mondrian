@@ -40,6 +40,18 @@ const MAX_PARAMETER_STRING_BYTES: usize = MAX_WORKER_REQUEST_BYTES / 2;
 pub enum OpenFxParameterValue {
     /// A finite OFX Double parameter value.
     Double(f64),
+    /// Exact ordered SDK components of an OFX Double2 parameter.
+    Double2([f64; 2]),
+    /// Exact ordered SDK components of an OFX Double3 parameter.
+    Double3([f64; 3]),
+    /// Exact ordered SDK components of an OFX Rgb parameter.
+    Rgb([f64; 3]),
+    /// Exact ordered SDK components of an OFX Rgba parameter.
+    Rgba([f64; 4]),
+    /// Exact ordered SDK components of an OFX Integer2 parameter.
+    Integer2([i32; 2]),
+    /// Exact ordered SDK components of an OFX Integer3 parameter.
+    Integer3([i32; 3]),
     /// An OFX Boolean parameter value.
     Boolean(bool),
     /// An exact signed 32-bit OFX Integer parameter value.
@@ -50,6 +62,51 @@ pub enum OpenFxParameterValue {
     StrChoice(String),
     /// Exact UTF-8 contents of an OFX String control, including empty values.
     String(String),
+}
+
+impl OpenFxParameterValue {
+    fn native_fields(&self) -> (c_int, [f64; 4]) {
+        match self {
+            Self::Double(value) => (1, [*value, 0.0, 0.0, 0.0]),
+            Self::Boolean(value) => (2, [f64::from(*value as u8), 0.0, 0.0, 0.0]),
+            Self::Integer(value) => (3, [f64::from(*value), 0.0, 0.0, 0.0]),
+            Self::Choice(value) => (4, [f64::from(*value), 0.0, 0.0, 0.0]),
+            Self::StrChoice(_) => (5, [0.0; 4]),
+            Self::String(_) => (6, [0.0; 4]),
+            Self::Double2([x, y]) => (7, [*x, *y, 0.0, 0.0]),
+            Self::Double3([x, y, z]) => (8, [*x, *y, *z, 0.0]),
+            Self::Rgb([r, g, b]) => (9, [*r, *g, *b, 0.0]),
+            Self::Rgba(value) => (10, *value),
+            Self::Integer2([x, y]) => (11, [f64::from(*x), f64::from(*y), 0.0, 0.0]),
+            Self::Integer3([x, y, z]) => (12, [f64::from(*x), f64::from(*y), f64::from(*z), 0.0]),
+        }
+    }
+
+    pub(super) fn numeric_layout(&self) -> Option<(usize, bool)> {
+        match self {
+            Self::Double(_) => Some((1, false)),
+            Self::Integer(_) => Some((1, true)),
+            Self::Double2(_) => Some((2, false)),
+            Self::Double3(_) | Self::Rgb(_) => Some((3, false)),
+            Self::Rgba(_) => Some((4, false)),
+            Self::Integer2(_) => Some((2, true)),
+            Self::Integer3(_) => Some((3, true)),
+            Self::Boolean(_) | Self::Choice(_) | Self::StrChoice(_) | Self::String(_) => None,
+        }
+    }
+}
+
+/// Numeric bounds for one component, in the SDK's original component order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpenFxNumericChannel {
+    /// Lowest accepted component value.
+    pub minimum: f64,
+    /// Highest accepted component value.
+    pub maximum: f64,
+    /// Suggested slider lower bound.
+    pub display_minimum: f64,
+    /// Suggested slider upper bound.
+    pub display_maximum: f64,
 }
 
 /// Native presentation and path intent declared by the SDK String descriptor.
@@ -144,14 +201,8 @@ pub struct OpenFxParameterDescription {
     pub double_type: Option<OpenFxDoubleType>,
     /// Required for String parameters and absent for every other kind.
     pub string_mode: Option<OpenFxStringMode>,
-    /// Lowest accepted numeric value, when this is a numeric parameter.
-    pub minimum: Option<f64>,
-    /// Highest accepted numeric value, when this is a numeric parameter.
-    pub maximum: Option<f64>,
-    /// Suggested slider lower bound, when this is a numeric parameter.
-    pub display_minimum: Option<f64>,
-    /// Suggested slider upper bound, when this is a numeric parameter.
-    pub display_maximum: Option<f64>,
+    /// Complete ordered numeric component bounds; empty for discrete controls.
+    pub numeric_channels: Vec<OpenFxNumericChannel>,
     /// Whether this parameter permits authored animation.
     pub can_animate: bool,
     /// Whether the plugin marks this parameter hidden.
@@ -661,82 +712,71 @@ unsafe fn decode_native_parameter(
         }
         Vec::new()
     };
-    let (default_value, double_type, minimum, maximum, display_minimum, display_maximum) =
-        match raw.kind {
-            1 => (
-                OpenFxParameterValue::Double(raw.default_value[0]),
-                Some(match raw.double_type {
-                    0 => OpenFxDoubleType::Plain,
-                    1 => OpenFxDoubleType::Scale,
-                    _ => return Err("unsupported OpenFX Double interpretation".to_owned()),
-                }),
-                Some(raw.minimum[0]),
-                Some(raw.maximum[0]),
-                Some(raw.display_minimum[0]),
-                Some(raw.display_maximum[0]),
-            ),
-            2 if raw.double_type == -1
-                && (raw.default_value[0] == 0.0 || raw.default_value[0] == 1.0) =>
-            {
-                (
-                    OpenFxParameterValue::Boolean(raw.default_value[0] == 1.0),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
+    let double_type = match raw.kind {
+        1 | 7 | 8 => Some(match raw.double_type {
+            0 => OpenFxDoubleType::Plain,
+            1 => OpenFxDoubleType::Scale,
+            _ => return Err("unsupported OpenFX Double interpretation".to_owned()),
+        }),
+        _ if raw.double_type == -1 => None,
+        _ => return Err("non-Double parameter has Double metadata".to_owned()),
+    };
+    let integer = |index: usize| {
+        checked_openfx_integer(raw.default_value[index])
+            .ok_or_else(|| "invalid OpenFX Integer default".to_owned())
+    };
+    let default_value = match raw.kind {
+        1 => OpenFxParameterValue::Double(raw.default_value[0]),
+        2 if raw.default_value[0] == 0.0 || raw.default_value[0] == 1.0 => {
+            OpenFxParameterValue::Boolean(raw.default_value[0] == 1.0)
+        }
+        3 => OpenFxParameterValue::Integer(integer(0)?),
+        4 => OpenFxParameterValue::Choice(integer(0)?),
+        5 | 6 => {
+            // SAFETY: Native storage remains borrowed and live throughout this callback.
+            let text = unsafe {
+                copy_native_text(
+                    raw.string_default,
+                    raw.string_default_length,
+                    if raw.kind == 5 {
+                        256
+                    } else {
+                        OPENFX_MAX_STRING_BYTES
+                    },
+                )?
+            };
+            if raw.kind == 5 {
+                OpenFxParameterValue::StrChoice(text)
+            } else {
+                OpenFxParameterValue::String(text)
             }
-            3 if raw.double_type == -1 => (
-                OpenFxParameterValue::Integer(
-                    checked_openfx_integer(raw.default_value[0])
-                        .ok_or("invalid OpenFX Integer default")?,
-                ),
-                None,
-                Some(raw.minimum[0]),
-                Some(raw.maximum[0]),
-                Some(raw.display_minimum[0]),
-                Some(raw.display_maximum[0]),
-            ),
-            4 if raw.double_type == -1 => (
-                OpenFxParameterValue::Choice(
-                    checked_openfx_integer(raw.default_value[0])
-                        .ok_or("invalid OpenFX Choice default")?,
-                ),
-                None,
-                None,
-                None,
-                None,
-                None,
-            ),
-            5 if raw.double_type == -1 => (
-                // SAFETY: The matched host borrows the default string for this callback.
-                OpenFxParameterValue::StrChoice(unsafe {
-                    copy_native_text(raw.string_default, raw.string_default_length, 256)?
-                }),
-                None,
-                None,
-                None,
-                None,
-                None,
-            ),
-            6 if raw.double_type == -1 => (
-                // SAFETY: The matched host borrows this bounded default for the callback.
-                OpenFxParameterValue::String(unsafe {
-                    copy_native_text(
-                        raw.string_default,
-                        raw.string_default_length,
-                        OPENFX_MAX_STRING_BYTES,
-                    )?
-                }),
-                None,
-                None,
-                None,
-                None,
-                None,
-            ),
-            _ => return Err("unsupported OpenFX parameter kind or default".to_owned()),
-        };
+        }
+        7 => OpenFxParameterValue::Double2([raw.default_value[0], raw.default_value[1]]),
+        8 => OpenFxParameterValue::Double3([
+            raw.default_value[0],
+            raw.default_value[1],
+            raw.default_value[2],
+        ]),
+        9 => OpenFxParameterValue::Rgb([
+            raw.default_value[0],
+            raw.default_value[1],
+            raw.default_value[2],
+        ]),
+        10 => OpenFxParameterValue::Rgba(raw.default_value),
+        11 => OpenFxParameterValue::Integer2([integer(0)?, integer(1)?]),
+        12 => OpenFxParameterValue::Integer3([integer(0)?, integer(1)?, integer(2)?]),
+        _ => return Err("unsupported OpenFX parameter kind or default".to_owned()),
+    };
+    let numeric_channels = default_value.numeric_layout().map_or_else(Vec::new, |(arity, _)| {
+        (0..arity)
+            .map(|index| OpenFxNumericChannel {
+                minimum: raw.minimum[index],
+                maximum: raw.maximum[index],
+                display_minimum: raw.display_minimum[index],
+                display_maximum: raw.display_maximum[index],
+            })
+            .collect()
+    });
     let flag = |value| match value {
         0 => Ok(false),
         1 => Ok(true),
@@ -777,10 +817,7 @@ unsafe fn decode_native_parameter(
         },
         double_type,
         string_mode,
-        minimum,
-        maximum,
-        display_minimum,
-        display_maximum,
+        numeric_channels,
         can_animate: flag(raw.can_animate)?,
         secret: flag(raw.secret)?,
         enabled: flag(raw.enabled)?,
@@ -907,8 +944,8 @@ fn validate_parameters(
         {
             return Err(invalid("OpenFX parameter name is invalid"));
         }
-        if let OpenFxParameterValue::Double(value) = value
-            && !value.is_finite()
+        if let Some((arity, _)) = value.numeric_layout()
+            && value.native_fields().1[..arity].iter().any(|value| !value.is_finite())
         {
             return Err(invalid("OpenFX parameter value must be finite"));
         }
@@ -1040,10 +1077,7 @@ fn validate_description(
                     || parameter.preferred_interpolation
                         != mondrian_core::automation::ParameterInterpolation::Hold
                     || parameter.double_type.is_some()
-                    || parameter.minimum.is_some()
-                    || parameter.maximum.is_some()
-                    || parameter.display_minimum.is_some()
-                    || parameter.display_maximum.is_some()
+                    || !parameter.numeric_channels.is_empty()
                     || parameter.choices.iter().enumerate().any(|(index, option)| {
                         option.key.trim().is_empty()
                             || option.key.len() > 256
@@ -1068,68 +1102,50 @@ fn validate_description(
                 if parameter.preferred_interpolation
                     != mondrian_core::automation::ParameterInterpolation::Hold
                     || parameter.double_type.is_some()
-                    || parameter.minimum.is_some()
-                    || parameter.maximum.is_some()
-                    || parameter.display_minimum.is_some()
-                    || parameter.display_maximum.is_some()
+                    || !parameter.numeric_channels.is_empty()
                 {
                     return Err(invalid(
                         "OpenFX discrete parameter has invalid interpolation or numeric bounds",
                     ));
                 }
             }
-            OpenFxParameterValue::Integer(value) => {
-                let bounds = [
-                    parameter.minimum,
-                    parameter.maximum,
-                    parameter.display_minimum,
-                    parameter.display_maximum,
-                ];
-                if parameter.double_type.is_some()
-                    || bounds.iter().any(|bound| bound.and_then(checked_openfx_integer).is_none())
+            value => {
+                let (arity, integer) =
+                    value.numeric_layout().ok_or_else(|| invalid("expected numeric parameter"))?;
+                let needs_semantic = matches!(
+                    value,
+                    OpenFxParameterValue::Double(_)
+                        | OpenFxParameterValue::Double2(_)
+                        | OpenFxParameterValue::Double3(_)
+                );
+                if parameter.double_type.is_some() != needs_semantic
+                    || parameter.numeric_channels.len() != arity
                 {
                     return Err(invalid(
-                        "OpenFX Integer parameter has invalid numeric bounds",
+                        "OpenFX numeric metadata does not match its value shape",
                     ));
                 }
-                let [Some(min), Some(max), Some(display_min), Some(display_max)] = bounds else {
-                    return Err(invalid(
-                        "OpenFX Integer parameter is missing numeric bounds",
-                    ));
-                };
-                if min > max
-                    || display_min > display_max
-                    || f64::from(*value) < min
-                    || f64::from(*value) > max
-                {
-                    return Err(invalid(
-                        "OpenFX Integer parameter default or range is invalid",
-                    ));
-                }
-            }
-            OpenFxParameterValue::Double(value) => {
-                if parameter.double_type.is_none() {
-                    return Err(invalid("OpenFX Double parameter lacks a semantic type"));
-                }
-                let (Some(minimum), Some(maximum), Some(display_minimum), Some(display_maximum)) = (
-                    parameter.minimum,
-                    parameter.maximum,
-                    parameter.display_minimum,
-                    parameter.display_maximum,
-                ) else {
-                    return Err(invalid("OpenFX Double parameter is missing numeric bounds"));
-                };
-                if !value.is_finite()
-                    || !minimum.is_finite()
-                    || !maximum.is_finite()
-                    || !display_minimum.is_finite()
-                    || !display_maximum.is_finite()
-                    || minimum > maximum
-                    || display_minimum > display_maximum
-                {
-                    return Err(invalid(
-                        "OpenFX Double parameter has invalid numeric bounds",
-                    ));
+                let defaults = value.native_fields().1;
+                for (index, channel) in parameter.numeric_channels.iter().enumerate() {
+                    let bounds = [
+                        channel.minimum,
+                        channel.maximum,
+                        channel.display_minimum,
+                        channel.display_maximum,
+                    ];
+                    if bounds.iter().any(|bound| {
+                        !bound.is_finite() || (integer && checked_openfx_integer(*bound).is_none())
+                    }) || channel.minimum > channel.maximum
+                        || channel.display_minimum > channel.display_maximum
+                        || channel.display_minimum.max(channel.minimum)
+                            > channel.display_maximum.min(channel.maximum)
+                        || defaults[index] < channel.minimum
+                        || defaults[index] > channel.maximum
+                    {
+                        return Err(invalid(
+                            "OpenFX numeric component default or range is invalid",
+                        ));
+                    }
                 }
             }
         }
@@ -1176,6 +1192,86 @@ mod shared_frame_tests {
     use super::*;
 
     #[test]
+    fn compound_descriptors_preserve_shapes_and_reject_invalid_sibling_channels() {
+        let values = [
+            OpenFxParameterValue::Double2([0.12500000000000003, 0.75]),
+            OpenFxParameterValue::Double3([-0.5000000000000001, 0.0, 0.75]),
+            OpenFxParameterValue::Rgb([0.10000000000000002, 0.2, 0.3]),
+            OpenFxParameterValue::Rgba([0.12500000000000003, 0.25, 0.5, 0.75]),
+            OpenFxParameterValue::Integer2([i32::MIN, i32::MAX]),
+            OpenFxParameterValue::Integer3([i32::MIN, 0, i32::MAX]),
+        ];
+        for (index, value) in values.into_iter().enumerate() {
+            let (arity, integer) = value.numeric_layout().expect("numeric shape");
+            assert_eq!(value.native_fields().0, index as c_int + 7);
+            assert_eq!(
+                serde_json::from_str::<OpenFxParameterValue>(
+                    &serde_json::to_string(&value).expect("serialize")
+                )
+                .expect("deserialize"),
+                value
+            );
+            let mut description = OpenFxFilterDescription {
+                identifier: "test.compound".into(),
+                label: "Compound".into(),
+                parameters: vec![OpenFxParameterDescription {
+                    name: "compound".into(),
+                    label: "Compound".into(),
+                    hint: String::new(),
+                    double_type: matches!(
+                        value,
+                        OpenFxParameterValue::Double2(_) | OpenFxParameterValue::Double3(_)
+                    )
+                    .then_some(OpenFxDoubleType::Plain),
+                    default_value: value,
+                    choices: Vec::new(),
+                    preferred_interpolation:
+                        mondrian_core::automation::ParameterInterpolation::Linear,
+                    string_mode: None,
+                    numeric_channels: (0..arity)
+                        .map(|channel| OpenFxNumericChannel {
+                            minimum: if integer {
+                                f64::from(i32::MIN)
+                            } else {
+                                -(channel as f64 + 1.0)
+                            },
+                            maximum: if integer {
+                                f64::from(i32::MAX)
+                            } else {
+                                channel as f64 + 1.0
+                            },
+                            display_minimum: if integer { f64::from(i32::MIN) } else { -1.0 },
+                            display_maximum: if integer { f64::from(i32::MAX) } else { 1.0 },
+                        })
+                        .collect(),
+                    can_animate: false,
+                    secret: false,
+                    enabled: true,
+                }],
+            };
+            assert!(validate_description(&description, "test.compound").is_ok());
+            let original = description.clone();
+            description.parameters[0].numeric_channels.pop();
+            assert!(validate_description(&description, "test.compound").is_err());
+            description = original.clone();
+            description.parameters[0].numeric_channels[arity - 1].maximum = 0.0;
+            assert!(validate_description(&description, "test.compound").is_err());
+            description = original.clone();
+            description.parameters[0].numeric_channels[arity - 1].display_minimum = f64::NAN;
+            assert!(validate_description(&description, "test.compound").is_err());
+            description = original;
+            description.parameters[0].numeric_channels[arity - 1].minimum =
+                if integer { -1.5 } else { 2.0 };
+            assert!(validate_description(&description, "test.compound").is_err());
+        }
+        let invalid = BTreeMap::from([(
+            "point".into(),
+            OpenFxParameterValue::Double3([0.0, f64::NAN, 0.0]),
+        )]);
+        assert!(validate_parameters(&invalid).is_err());
+    }
+
+    #[test]
     fn integer_descriptor_rejects_fractional_nonfinite_and_out_of_range_bounds() {
         for value in [f64::from(i32::MIN), -1.0, 0.0, f64::from(i32::MAX)] {
             assert_eq!(checked_openfx_integer(value).map(f64::from), Some(value));
@@ -1201,10 +1297,12 @@ mod shared_frame_tests {
                 preferred_interpolation: mondrian_core::automation::ParameterInterpolation::Linear,
                 double_type: None,
                 string_mode: None,
-                minimum: Some(0.0),
-                maximum: Some(9.0),
-                display_minimum: Some(0.0),
-                display_maximum: Some(9.0),
+                numeric_channels: vec![OpenFxNumericChannel {
+                    minimum: 0.0,
+                    maximum: 9.0,
+                    display_minimum: 0.0,
+                    display_maximum: 9.0,
+                }],
                 can_animate: true,
                 secret: false,
                 enabled: true,
@@ -1219,7 +1317,14 @@ mod shared_frame_tests {
             Some(3.0),
             Some(10.0),
         ] {
-            description.parameters[0].minimum = bound;
+            description.parameters[0].numeric_channels = bound.map_or_else(Vec::new, |minimum| {
+                vec![OpenFxNumericChannel {
+                    minimum,
+                    maximum: 9.0,
+                    display_minimum: 0.0,
+                    display_maximum: 9.0,
+                }]
+            });
             assert!(validate_description(&description, "test.integer").is_err());
         }
     }
@@ -1248,10 +1353,7 @@ mod shared_frame_tests {
                 preferred_interpolation: mondrian_core::automation::ParameterInterpolation::Hold,
                 double_type: None,
                 string_mode: None,
-                minimum: None,
-                maximum: None,
-                display_minimum: None,
-                display_maximum: None,
+                numeric_channels: Vec::new(),
                 can_animate: false,
                 secret: false,
                 enabled: true,
@@ -1288,7 +1390,14 @@ mod shared_frame_tests {
             let parameter = &mut invalid.parameters[0];
             match scenario {
                 0 => parameter.string_mode = None,
-                1 => parameter.minimum = Some(0.0),
+                1 => {
+                    parameter.numeric_channels = vec![OpenFxNumericChannel {
+                        minimum: 0.0,
+                        maximum: 1.0,
+                        display_minimum: 0.0,
+                        display_maximum: 1.0,
+                    }]
+                }
                 2 => parameter.double_type = Some(OpenFxDoubleType::Plain),
                 3 => parameter.default_value = OpenFxParameterValue::String("a\0b".into()),
                 4 => {
@@ -1353,7 +1462,14 @@ mod shared_frame_tests {
                 2 => parameter.choices[1].display_rank = None,
                 3 => parameter.choices[1].label = " \t".into(),
                 4 => parameter.choices[1].label = "bad\0label".into(),
-                5 => parameter.minimum = Some(0.0),
+                5 => {
+                    parameter.numeric_channels = vec![OpenFxNumericChannel {
+                        minimum: 0.0,
+                        maximum: 1.0,
+                        display_minimum: 0.0,
+                        display_maximum: 1.0,
+                    }]
+                }
                 6 => {
                     parameter.preferred_interpolation =
                         mondrian_core::automation::ParameterInterpolation::Linear
@@ -1471,6 +1587,16 @@ mod shared_frame_tests {
             .ancestors()
             .find(|path| path.extension().is_some_and(|extension| extension == "bundle"))
             .expect("probe bundle");
+        let described = describe_in_worker(&DescribeRequest {
+            binary_path: path.clone(),
+            bundle_path: bundle.to_path_buf(),
+            binary_sha256: sha256_file(&path).expect("fixture identity"),
+            plugin_identifier: "uk.co.thefoundry.BasicGainPlugin".into(),
+        })
+        .expect("actual SDK compound description");
+        let DescribeResponse::Success { description } = described else {
+            panic!("all six SDK compound descriptions must be admitted");
+        };
         let binary = native_string(&path).expect("native binary");
         let bundle = native_string(bundle).expect("native bundle");
         let identifier = CString::new("uk.co.thefoundry.BasicGainPlugin").expect("identifier");
@@ -1534,12 +1660,35 @@ mod shared_frame_tests {
         let parameters = specs
             .iter()
             .zip(&names)
-            .map(|((_, kind, value), name)| NativeParameter {
-                name: name.as_ptr(),
-                kind: *kind,
-                value: *value,
-                string_value: std::ptr::null(),
-                string_length: 0,
+            .map(|((key, kind, value), name)| {
+                let parameter = description
+                    .parameters
+                    .iter()
+                    .find(|parameter| parameter.name == *key)
+                    .expect("declared tuple");
+                let (native_kind, native_value) = parameter.default_value.native_fields();
+                assert_eq!(native_kind, *kind);
+                assert_eq!(
+                    native_value, *value,
+                    "description must preserve exact SDK defaults"
+                );
+                let (arity, _) = parameter.default_value.numeric_layout().expect("numeric tuple");
+                assert_eq!(parameter.numeric_channels.len(), arity);
+                assert_eq!(
+                    parameter.preferred_interpolation,
+                    mondrian_core::automation::ParameterInterpolation::Linear
+                );
+                assert!(
+                    parameter.numeric_channels.windows(2).all(|pair| pair[0] != pair[1]),
+                    "asymmetric component bounds must remain distinct"
+                );
+                NativeParameter {
+                    name: name.as_ptr(),
+                    kind: native_kind,
+                    value: native_value,
+                    string_value: std::ptr::null(),
+                    string_length: 0,
+                }
             })
             .collect::<Vec<_>>();
         let mut session =

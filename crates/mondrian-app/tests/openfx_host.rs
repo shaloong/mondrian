@@ -239,8 +239,9 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
         .expect("overall gain control");
     assert_eq!(scale.default_value, OpenFxParameterValue::Double(1.0));
     assert_eq!(scale.double_type, Some(OpenFxDoubleType::Scale));
-    assert_eq!(scale.minimum, Some(0.0));
-    assert_eq!(scale.display_maximum, Some(100.0));
+    assert_eq!(scale.numeric_channels.len(), 1);
+    assert_eq!(scale.numeric_channels[0].minimum, 0.0);
+    assert_eq!(scale.numeric_channels[0].display_maximum, 100.0);
     let switch = description
         .parameters
         .iter()
@@ -1147,8 +1148,9 @@ fn integer_filter_preserves_typed_authoring_and_native_pixels() {
         describe_openfx_filter(product_executable(), &inspection, identifier).expect("describe");
     let count = description.parameters.iter().find(|p| p.name == "count").expect("integer");
     assert_eq!(count.default_value, OpenFxParameterValue::Integer(2));
-    assert_eq!(count.minimum, Some(0.0));
-    assert_eq!(count.maximum, Some(9.0));
+    assert_eq!(count.numeric_channels.len(), 1);
+    assert_eq!(count.numeric_channels[0].minimum, 0.0);
+    assert_eq!(count.numeric_channels[0].maximum, 9.0);
     assert!(count.can_animate);
     let input = OpenFxFloatFrame {
         width: 2,
