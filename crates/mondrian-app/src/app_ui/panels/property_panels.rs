@@ -2709,7 +2709,19 @@ pub(super) fn inspector_property_row(
         } else {
             value
         };
-    let row = PropertyRow::new(property.label.clone(), value);
+    let label = if let PropertyValue::Curve(curve) = &property.value {
+        let mut args = fluent_bundle::FluentArgs::new();
+        args.set("label", property.label.as_str());
+        args.set("count", curve.points().len() as i64);
+        args.set(
+            "maximum",
+            mondrian_core::automation::MAX_NORMALIZED_CURVE_POINTS as i64,
+        );
+        localizer.format("curve-point-count-label", Some(&args))
+    } else {
+        property.label.clone()
+    };
+    let row = PropertyRow::new(label, value);
     let height = if matches!(&target, InspectorPropertyTarget::Clip { .. })
         && property.path == mondrian_core::BasicTitle::TEXT_PATH
     {
@@ -2967,8 +2979,12 @@ pub(super) fn inspector_property_value_widget(
                 curve.points().iter().map(|point| CurvePoint::new(point.x, point.y)).collect();
             let selected_clip = selection;
             Box::new(
-                CurveEditor::with_points(points).enabled(can_edit).on_value_edit(
-                    move |phase, points| {
+                CurveEditor::with_points(points)
+                    .with_point_insertion_limit(
+                        mondrian_core::automation::MAX_NORMALIZED_CURVE_POINTS,
+                    )
+                    .enabled(can_edit)
+                    .on_value_edit(move |phase, points| {
                         use mondrian_ui_widgets::ValueEdit;
                         match phase {
                             ValueEdit::Finish(gesture_id) => {
@@ -3006,8 +3022,7 @@ pub(super) fn inspector_property_value_widget(
                             }
                             ValueEdit::Finish(_) | ValueEdit::Cancel(_) => return None,
                         })
-                    },
-                ),
+                    }),
             )
         }
         PropertyValue::QualifierSamples(samples) => {

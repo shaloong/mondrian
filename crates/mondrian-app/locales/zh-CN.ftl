@@ -1377,3 +1377,4 @@ resource-path-unavailable = 无法检查此路径，请确认其可用性及访�
 
 resource-path-owner-required = 请先打开或保存项目，再输入相对资源路径。
 resource-path-ambiguous = 请输入完整路径或相对于项目目录的路径；驱动器相对路径无法确定位置。
+curve-point-count-label = { $label }（{ $count }/{ $maximum }）

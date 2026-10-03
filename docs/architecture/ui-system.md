@@ -3145,3 +3145,7 @@ R/G/B/A labels. Typed text editing, one-command Undo/Redo and Escape cancellatio
 are exercised through actual Inspector widgets and the canonical App author
 boundary for all six compound families. Precision-preserving color picker and
 OpenFX descriptor/temporal/color binding remain outstanding product work.
+
+### Transfer curve insertion capacity
+
+CurveEditor accepts an optional user insertion limit without truncating supplied points. Structured normalized transfer curves configure the canonical 32-point limit; ordinary keyframe curves retain unrestricted insertion. Empty-plot clicks at capacity are rejected before a value gesture or pointer capture starts, preserving draft state and Undo/Redo history. Existing points remain editable and deleting an interior point frees capacity. Inspector captions show localized current and maximum point counts.

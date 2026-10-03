@@ -145,6 +145,7 @@ pub struct CurveEditor {
     id: WidgetId,
     bounds: Rect,
     points: Vec<CurvePoint>,
+    point_insertion_limit: Option<usize>,
     point_policies: Vec<CurvePointPolicy>,
     display_points: Option<Vec<CurvePoint>>,
     selected: Option<usize>,
@@ -184,6 +185,7 @@ impl CurveEditor {
             id: WidgetId::new(),
             bounds: Rect::ZERO,
             points: Vec::new(),
+            point_insertion_limit: None,
             point_policies: Vec::new(),
             display_points: None,
             selected: None,
@@ -207,6 +209,16 @@ impl CurveEditor {
         };
         editor.set_points(points);
         editor
+    }
+
+    /// Limit the total point count admitted by user insertion.
+    ///
+    /// Existing and programmatically supplied points are retained. Moving and
+    /// deleting points remain available at the limit. Zero prevents insertion;
+    /// the default editor has no insertion limit.
+    pub fn with_point_insertion_limit(mut self, maximum: usize) -> Self {
+        self.point_insertion_limit = Some(maximum);
+        self
     }
 
     /// Override the interaction policy for each point.
@@ -758,6 +770,9 @@ impl Widget for CurveEditor {
                     ctx.request_pointer_capture(self.id);
                     return EventResult::Handled;
                 }
+                if self.point_insertion_limit.is_some_and(|maximum| self.points.len() >= maximum) {
+                    return EventResult::Handled;
+                }
                 if let Some(index) = self.insert_point_from_input(*position, ctx) {
                     self.begin_drag(index, true, ctx);
                     ctx.request_pointer_capture(self.id);
@@ -1096,6 +1111,85 @@ mod tests {
         );
 
         assert_eq!(editor.points().len(), 2);
+    }
+
+    #[test]
+    fn insertion_limit_preserves_editing_and_deletion_frees_capacity() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let original = vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ];
+        let mut editor = CurveEditor::with_points(original.clone())
+            .with_point_insertion_limit(3)
+            .on_change(curve_action);
+        editor.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+        editor.select(Some(1));
+        let empty = editor.to_screen(CurvePoint::new(0.25, 0.75));
+        editor.event(
+            &UiEvent::MouseDown {
+                position: empty,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(editor.points(), original);
+        assert_eq!(editor.selected_index(), Some(1));
+        assert!(!editor.has_active_pointer_interaction());
+        assert!(ctx.requests.pointer_capture.is_none());
+        assert!(actions.borrow().is_empty());
+
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert!(editor.points()[1].y > 0.5);
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(editor.points().len(), 2);
+        editor.event(
+            &UiEvent::MouseDown {
+                position: empty,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(editor.points().len(), 3);
+        assert!(editor.has_active_pointer_interaction());
+        assert!(ctx.requests.pointer_capture.is_some());
+        assert!(!actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn insertion_limit_retains_supplied_points_and_default_is_unlimited() {
+        let points: Vec<_> = (0..32)
+            .map(|index| CurvePoint::new(index as f32 / 31.0, index as f32 / 31.0))
+            .collect();
+        let limited = CurveEditor::with_points(points.clone()).with_point_insertion_limit(0);
+        assert_eq!(limited.points(), points);
+        let mut editor = CurveEditor::with_points(points);
+        editor.layout(Rect::new(0.0, 0.0, 400.0, 200.0));
+        let empty = editor.to_screen(CurvePoint::new(0.49, 0.75));
+        editor.event(
+            &UiEvent::MouseDown {
+                position: empty,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut event_ctx(),
+        );
+        assert_eq!(editor.points().len(), 33);
+        assert!(editor.has_active_pointer_interaction());
     }
 
     #[test]

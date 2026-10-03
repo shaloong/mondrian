@@ -5303,9 +5303,10 @@ mod tests {
         }
     }
 
-    fn inspector_numeric_curve(
+    fn inspector_curve_with_point_count(
         widget: &dyn Widget,
         in_inspector: bool,
+        point_count: usize,
     ) -> Option<mondrian_ui_core::WidgetId> {
         let in_inspector = in_inspector || widget.panel_kind() == Some(PanelKind::Inspector);
         if in_inspector
@@ -5313,15 +5314,152 @@ mod tests {
             && widget
                 .as_any()
                 .and_then(|value| value.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
-                .is_some_and(|curve| curve.points().len() == 3)
+                .is_some_and(|curve| curve.points().len() == point_count)
         {
             return Some(widget.id());
         }
         (0..widget.child_count()).find_map(|index| {
-            widget
-                .child(index)
-                .and_then(|child| inspector_numeric_curve(child, in_inspector))
+            widget.child(index).and_then(|child| {
+                inspector_curve_with_point_count(child, in_inspector, point_count)
+            })
         })
+    }
+
+    #[test]
+    fn full_transfer_curve_rejects_insertion_without_capture_or_history_changes() {
+        use crate::app::product_action::{
+            ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
+        };
+        use crate::app::ui_actions::clip_edit_numeric_curve_action;
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1600.0);
+        let mut state = workspace_app_state_with_timed_solid();
+        let sequence = state.active_sequence().expect("sequence");
+        let track_id = sequence.video_tracks[0].id;
+        let clip_id = sequence.video_tracks[0].clips[0].id;
+        let opacity = sequence.video_tracks[0].clips[0]
+            .intrinsic_parameter_bag()
+            .address_for_path(mondrian_timeline::clip::Transform2D::OPACITY_PATH)
+            .expect("opacity");
+        state.selection.selected_clips =
+            vec![crate::app::SelectedClipRef { track_id, clip_id, is_video_track: true }];
+        let point_count = mondrian_core::automation::MAX_NORMALIZED_CURVE_POINTS;
+        let points = (0..point_count)
+            .map(|index| {
+                let coordinate = index as f32 / (point_count - 1) as f32;
+                mondrian_core::NormalizedCurvePoint::new(coordinate, coordinate)
+            })
+            .collect();
+        let mut effect =
+            mondrian_effects::instantiate_effect_node(mondrian_effects::EffectType::Curves)
+                .expect("curves");
+        effect
+            .properties
+            .set_static_value(
+                &mondrian_effects::EffectType::Curves.property_path("master"),
+                mondrian_core::PropertyValue::Curve(
+                    mondrian_core::NormalizedCurve::new(points).expect("full valid curve"),
+                ),
+            )
+            .expect("fixture master curve");
+        let mut sequence = state.active_sequence().expect("fixture sequence").clone();
+        sequence.find_clip_mut(clip_id).expect("clip").add_effect_node(effect);
+        state.test_set_sequence(Some(sequence));
+        state
+            .dispatch_action(clip_edit_numeric_curve_action(
+                ClipEditNumericCurvePayload {
+                    clip_id,
+                    parameter: opacity,
+                    edit: ClipCurveEditPayload::Upsert {
+                        keyframe_id: None,
+                        point: ClipNormalizedCurvePointPayload {
+                            time_ratio: 0.25,
+                            value_ratio: 0.8,
+                        },
+                    },
+                },
+            ))
+            .expect("create redo branch");
+        assert!(state.undo_timeline().expect("retain original redo"));
+        let original = state.active_sequence().expect("original sequence").clone();
+        let history = state.authoring_history().expect("history").diagnostics();
+        assert_eq!(history.redo_entries, 1);
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("full-transfer-curve"),
+        );
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let curve_id = inspector_curve_with_point_count(host.active_root(), false, point_count)
+            .expect("full curve in actual inspector");
+        let point = {
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let curve = tree.get(curve_id).expect("curve");
+            let mut min = Point::new(f32::MAX, f32::MAX);
+            let mut max = Point::new(0.0, 0.0);
+            for y in (0..1600).step_by(2) {
+                for x in (0..1280).step_by(2) {
+                    let point = Point::new(x as f32, y as f32);
+                    if curve.hit_test(point) {
+                        min.x = min.x.min(point.x);
+                        min.y = min.y.min(point.y);
+                        max.x = max.x.max(point.x);
+                        max.y = max.y.max(point.y);
+                    }
+                }
+            }
+            assert!(min.x < max.x && min.y < max.y);
+            Point::new(
+                min.x + (max.x - min.x) * 0.49,
+                min.y + (max.y - min.y) * 0.25,
+            )
+        };
+        let pending = PendingUiActions::default();
+        let dispatch = |action| pending.push(action);
+        let mut router = EventRouter::new(host.active_root().id());
+        for event in [
+            UiEvent::MouseDown {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseMove {
+                position: Point::new(point.x + 4.0, point.y + 4.0),
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseUp {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            router.route(
+                event,
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &dispatch,
+            );
+            assert!(
+                router.captured().is_none(),
+                "a rejected full-curve insertion must not begin pointer capture"
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            assert!(!host.app_state().parameter_gesture_is_current());
+            assert_eq!(
+                host.app_state().authoring_history().expect("history").diagnostics(),
+                history
+            );
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("sequence")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(
+                inspector_curve_with_point_count(host.active_root(), false, point_count).is_some(),
+                "rejection must not leave an uncommitted visible extra point"
+            );
+        }
     }
 
     #[test]
@@ -5420,8 +5558,8 @@ mod tests {
                 temp_preferences_path("curve-owner"),
             );
             TreeWalker::layout(host.active_root_mut(), bounds);
-            let curve_id =
-                inspector_numeric_curve(host.active_root(), false).expect("numeric curve");
+            let curve_id = inspector_curve_with_point_count(host.active_root(), false, 3)
+                .expect("numeric curve");
             let point = {
                 let tree = WidgetTreeView::new(host.active_root_mut());
                 let curve = tree.get(curve_id).expect("curve");

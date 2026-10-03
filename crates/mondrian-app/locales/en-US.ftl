@@ -1442,3 +1442,4 @@ resource-path-unavailable = This path cannot be checked. Verify its availability
 
 resource-path-owner-required = Open or save a project before entering a relative resource path.
 resource-path-ambiguous = Enter a full path or a path relative to the project directory; drive-relative paths are ambiguous.
+curve-point-count-label = { $label } ({ $count }/{ $maximum })
