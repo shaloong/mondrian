@@ -1597,6 +1597,16 @@ mod shared_frame_tests {
         let DescribeResponse::Success { description } = described else {
             panic!("all six SDK compound descriptions must be admitted");
         };
+        let scale = description
+            .parameters
+            .iter()
+            .find(|parameter| parameter.name == "scale")
+            .expect("official gain with SDK default upper limit");
+        assert_eq!(
+            scale.numeric_channels[0].maximum,
+            f64::MAX,
+            "SDK default limits must preserve the complete Double domain"
+        );
         let binary = native_string(&path).expect("native binary");
         let bundle = native_string(bundle).expect("native bundle");
         let identifier = CString::new("uk.co.thefoundry.BasicGainPlugin").expect("identifier");

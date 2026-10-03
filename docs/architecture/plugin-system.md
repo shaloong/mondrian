@@ -716,6 +716,14 @@ DoubleRgb/Color and IntVec2/3 author values and lowers evaluated tuples to fixed
 four-slot native packets without Float32 parameter narrowing. Integer tuples
 admit the declared numeric interpolation with integral component steps.
 
+SDK default numeric limits are constructed as typed Double/Int properties,
+including their reset values and every declared component. They never pass
+through formatted text or numeric locale parsing: Double hard limits retain
+the exact IEEE maximum, integer limits retain the signed int32 domain, and
+color display defaults remain 0..1. Description qualification asserts the
+official Gain example's otherwise unspecified maximum equals the complete
+Double limit. This also removes a mutable global string-initialization cache.
+
 Exact Inspector transactions and durable project tuple roundtrips are covered
 by the authoring foundation. The owned `compound_author` SDK wrapper additionally
 qualifies all six non-animatable tuple shapes through the rebuilt ordinary

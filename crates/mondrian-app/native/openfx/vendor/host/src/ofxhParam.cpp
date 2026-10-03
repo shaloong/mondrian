@@ -19,6 +19,7 @@
 #include <assert.h>
 #include <float.h>
 #include <limits.h>
+#include <memory>
 #include <stdarg.h>
 
 namespace OFX {
@@ -400,33 +401,32 @@ namespace OFX {
       /// add standard properties to a value holding param
       void Descriptor::addNumericParamProps(const std::string &type, Property::TypeEnum valueType, int dim)
       {
-        static std::string dbl_minstr, dbl_maxstr, int_minstr, int_maxstr;
-        static bool doneOne = false;
-
-        if(!doneOne) {
-          std::ostringstream dbl_min, dbl_max, int_min, int_max;
-          doneOne = true;
-          dbl_min << -DBL_MAX; // not a bug, @see kOfxParamPropDisplayMin
-          dbl_max << DBL_MAX;
-          int_min << INT_MIN;
-          int_max << INT_MAX;
-
-          dbl_minstr = dbl_min.str();
-          dbl_maxstr = dbl_max.str();
-          int_minstr = int_min.str();
-          int_maxstr = int_max.str();
+        // Construct typed defaults directly: text formatting must not narrow the
+        // SDK numeric domain or depend on the process numeric locale.
+        const char* names[] = {kOfxParamPropDisplayMin, kOfxParamPropDisplayMax,
+                               kOfxParamPropMin, kOfxParamPropMax};
+        if (valueType == Property::eDouble) {
+          const double defaults[] = {isColourParam(type) ? 0.0 : -DBL_MAX,
+                                     isColourParam(type) ? 1.0 : DBL_MAX,
+                                     -DBL_MAX, DBL_MAX};
+          for (int index = 0; index < 4; ++index) {
+            auto property = std::make_unique<Property::Double>(names[index], dim, false, defaults[index]);
+            _properties.addProperty(property.get());
+            property.release();
+          }
+        } else {
+          const int defaults[] = {INT_MIN, INT_MAX, INT_MIN, INT_MAX};
+          for (int index = 0; index < 4; ++index) {
+            auto property = std::make_unique<Property::Int>(names[index], dim, false, defaults[index]);
+            _properties.addProperty(property.get());
+            property.release();
+          }
         }
-
-        Property::PropSpec allNumeric[] = {
+        static const Property::PropSpec interpolation[] = {
           { kOfxParamInterpType, Property::eString, 1, false, kOfxParamInterpTypeLinear },
-          { kOfxParamPropDisplayMin, valueType, dim, false, isColourParam(type) ? "0" : (valueType == Property::eDouble ? dbl_minstr : int_minstr).c_str() },
-          { kOfxParamPropDisplayMax, valueType, dim, false, isColourParam(type) ? "1" : (valueType == Property::eDouble ? dbl_maxstr : int_maxstr).c_str() },
-          { kOfxParamPropMin, valueType, dim, false, (valueType == Property::eDouble ? dbl_minstr : int_minstr).c_str() },
-          { kOfxParamPropMax, valueType, dim, false, (valueType == Property::eDouble ? dbl_maxstr : int_maxstr).c_str() },
           Property::propSpecEnd
         };
-
-        _properties.addProperties(allNumeric);
+        _properties.addProperties(interpolation);
 
         /// if any double or a colour
         if (valueType == Property::eDouble) {
