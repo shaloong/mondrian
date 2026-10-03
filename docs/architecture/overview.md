@@ -466,3 +466,17 @@ unpaired UTF-16 filename units without UTF-8 conversion. Absolute references
 retain their exact representation. Actual long-path file reads cover backslash
 and forward-slash relative input with parent components. See
 [standard path join semantics](https://doc.rust-lang.org/std/path/struct.PathBuf.html#method.push).
+
+### Native resource path authority
+
+Core `NativePath` retains local `OsString` storage and serializes explicit Windows
+UTF-16 units or Unix bytes. A foreign path preserves its original platform and
+can be displayed or rebound by metadata identity, but cannot cross a local
+filesystem execution seam without explicit relinking. Display replacement
+characters never become persistence, lookup, or SDK input.
+
+Resource reference identity compares exact native spelling, including dotted
+components and separator spellings. Local `OsString` storage borrows a `Path`
+or transfers its existing buffer into `PathBuf` at the execution seam without
+copying filename units. Package inventory copies one canonical file while
+retaining every exact source coordinate for foreign-platform rebinding.

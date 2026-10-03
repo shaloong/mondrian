@@ -1141,7 +1141,7 @@ pub(super) fn execute_visual_stage(
             lut_effect_id,
             "path",
             PropertyValue::Resource(ParameterResourceReference::ExternalFile {
-                path: lut_path.clone(),
+                path: lut_path.clone().into(),
             }),
             "bind-lut-resource",
         )?,
@@ -1701,7 +1701,7 @@ pub(super) fn execute_visual_stage(
         EffectType::Lut3D,
         "path",
         PropertyValue::Resource(ParameterResourceReference::ExternalFile {
-            path: lut_path.clone(),
+            path: lut_path.clone().into(),
         }),
     )?;
     assert_effect_parameter(

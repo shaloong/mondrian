@@ -148,7 +148,14 @@ fn grade_graph_relative_resources_bind_once_and_survive_undo_and_reopen() {
     let mut graph = original.clone();
     let mut effect = mondrian_effects::instantiate_effect_node(EffectType::Lut3D).expect("LUT");
     let path_id = EffectType::Lut3D.parameter_id("path").expect("path identity");
-    let relative = PathBuf::from("resources").join("调色.cube");
+    let mut filename = std::ffi::OsString::from("调色");
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        filename.push(std::ffi::OsString::from_wide(&[0xd800]));
+    }
+    filename.push(".cube");
+    let relative = PathBuf::from("resources").join(filename);
     let absolute = fixture.0.join(&relative);
     std::fs::create_dir_all(absolute.parent().expect("resource directory")).expect("directory");
     std::fs::write(
@@ -165,7 +172,9 @@ fn grade_graph_relative_resources_bind_once_and_survive_undo_and_reopen() {
     effect
         .set_static_value_by_parameter(
             &path_id,
-            PropertyValue::Resource(ParameterResourceReference::ExternalFile { path: relative }),
+            PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+                path: relative.into(),
+            }),
         )
         .expect("relative input");
     let node_id = GradeGraphNodeId::new();
@@ -196,7 +205,7 @@ fn grade_graph_relative_resources_bind_once_and_survive_undo_and_reopen() {
     assert_eq!(
         effect.evaluate_parameter(&path_id, mondrian_core::TimelineTime::ZERO),
         Some(PropertyValue::Resource(
-            ParameterResourceReference::ExternalFile { path: absolute.clone() }
+            ParameterResourceReference::ExternalFile { path: absolute.clone().into() }
         ))
     );
     assert_eq!(
@@ -288,7 +297,7 @@ fn grade_graph_relative_resources_bind_once_and_survive_undo_and_reopen() {
             .set_static_value_by_parameter(
                 &path_id,
                 PropertyValue::Resource(ParameterResourceReference::ExternalFile {
-                    path: PathBuf::from("D:ambiguous.cube"),
+                    path: PathBuf::from("D:ambiguous.cube").into(),
                 }),
             )
             .expect("schema accepts native path input");
@@ -326,7 +335,69 @@ fn grade_graph_relative_resources_bind_once_and_survive_undo_and_reopen() {
         pixels,
         "reopened graph produces the same real LUT pixels"
     );
+    #[cfg(windows)]
+    let foreign = mondrian_core::NativePath::from_unix_bytes(vec![47, 0xff, 46, 99, 117, 98, 101]);
+    #[cfg(not(windows))]
+    let foreign = mondrian_core::NativePath::from_windows_units(vec![
+        67, 58, 92, 0xd800, 46, 99, 117, 98, 101,
+    ]);
+    assert!(foreign.native_path().is_err());
+    let mut foreign_graph = committed.clone();
+    let GradeGraphNodeKind::Effect { effect, .. } = &mut foreign_graph.nodes[1].kind else {
+        panic!("LUT");
+    };
+    effect
+        .set_static_value_by_parameter(
+            &path_id,
+            PropertyValue::Resource(ParameterResourceReference::ExternalFile { path: foreign }),
+        )
+        .expect("foreign author intent");
+    dispatch_product(&mut state, replace(foreign_graph.clone()))
+        .expect("preserve foreign reference");
+    #[cfg(windows)]
+    let relative_foreign = mondrian_core::NativePath::from_unix_bytes(b"relative.cube".to_vec());
+    #[cfg(not(windows))]
+    let relative_foreign =
+        mondrian_core::NativePath::from_windows_units("relative.cube".encode_utf16().collect());
+    let mut rejected = foreign_graph.clone();
+    let GradeGraphNodeKind::Effect { effect, .. } = &mut rejected.nodes[1].kind else {
+        panic!("LUT");
+    };
+    effect
+        .set_static_value_by_parameter(
+            &path_id,
+            PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+                path: relative_foreign,
+            }),
+        )
+        .expect("relative foreign schema");
+    let generation = state.project_author_generation();
+    let diagnostics = state.authoring_history().expect("History").diagnostics();
+    assert!(dispatch_product(&mut state, replace(rejected)).is_err());
+    assert_eq!(state.project_author_generation(), generation);
+    assert_eq!(
+        state.authoring_history().expect("History").diagnostics(),
+        diagnostics
+    );
+    let save = state.request_project_save().expect("save foreign reference");
+    state.wait_for_persistence_request(save).expect("durable foreign save");
     state.close_project().expect("release Project");
+    let mut reopened = AppState::new();
+    reopened
+        .open_project_file(fixture.project_file())
+        .expect("fresh owner foreign reopen");
+    assert_eq!(
+        reopened
+            .active_sequence()
+            .expect("Sequence")
+            .grade_definition(definition_id)
+            .expect("Grade")
+            .active()
+            .expect("version")
+            .graph,
+        foreign_graph
+    );
+    reopened.close_project().expect("release foreign Project");
 }
 
 #[test]

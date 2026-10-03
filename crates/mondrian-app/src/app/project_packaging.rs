@@ -18,7 +18,9 @@ use mondrian_core::automation::{
     ParameterResourceReference, PropertyBag, PropertyHost, PropertyMutation, PropertyValue,
 };
 use mondrian_core::grade_graph::GradeGraphNodeKind;
-use mondrian_core::{AssetId, AssetSource, ColorEngine, OcioConfigSource, ProjectColorEnvironment};
+use mondrian_core::{
+    AssetId, AssetSource, ColorEngine, NativePath, OcioConfigSource, ProjectColorEnvironment,
+};
 use mondrian_editor_state::AuthoringSnapshot;
 use mondrian_project::ProjectDocument;
 use mondrian_project::{
@@ -74,7 +76,7 @@ pub struct PortableDependencyFile {
     /// Stable author identities referring to this file.
     pub owners: Vec<String>,
     /// Exact persisted spellings that refer to this canonical source file.
-    pub source_paths: Vec<PathBuf>,
+    pub source_paths: Vec<NativePath>,
     /// Required package placement for a path-resolved dependency, if any.
     pub bundled_path: Option<PathBuf>,
 }
@@ -84,8 +86,8 @@ pub struct PortableDependencyFile {
 pub struct PortablePackageFile {
     /// Safe path relative to the package root.
     pub bundled_path: PathBuf,
-    /// Paths to replace when opening the package on another machine.
-    pub source_paths: Vec<PathBuf>,
+    /// Exact platform-owned paths to replace when opening on another machine.
+    pub source_paths: Vec<NativePath>,
     /// Complete SHA-256 digest of the copied file.
     pub sha256: String,
     /// Number of copied bytes.
@@ -447,7 +449,7 @@ fn export_snapshot_package_with_progress(
     drop(database_snapshot);
     let (project_sha256, _) = hash_reader_with_cancel(&mut fs::File::open(&archive_path)?, cancel)?;
     let manifest = PortablePackageManifest {
-        version: 1,
+        version: 2,
         project_id: snapshot.document.project_id,
         project_sha256,
         files: package_files,
@@ -502,7 +504,7 @@ pub fn verify_portable_project_package(root: &Path) -> anyhow::Result<PortablePa
     );
     let manifest: PortablePackageManifest = serde_json::from_slice(&manifest_bytes)?;
     anyhow::ensure!(
-        manifest.version == 1,
+        manifest.version == 2,
         "unsupported portable package version {}",
         manifest.version
     );
@@ -532,7 +534,9 @@ pub fn verify_portable_project_package(root: &Path) -> anyhow::Result<PortablePa
         );
         for source in &file.source_paths {
             anyhow::ensure!(
-                source.is_absolute() && source_paths.insert(source.clone()),
+                source.is_absolute()
+                    && !source.contains_nul()
+                    && source_paths.insert(source.clone()),
                 "invalid or duplicate source reference: {}",
                 source.display()
             );
@@ -587,7 +591,7 @@ fn reject_link_or_non_file(path: &Path) -> anyhow::Result<()> {
 pub(super) fn package_source_bindings(
     root: &Path,
     manifest: &PortablePackageManifest,
-) -> anyhow::Result<BTreeMap<PathBuf, PathBuf>> {
+) -> anyhow::Result<BTreeMap<NativePath, PathBuf>> {
     let root = fs::canonicalize(root)?;
     let mut bindings = BTreeMap::new();
     for file in &manifest.files {
@@ -602,9 +606,28 @@ pub(super) fn package_source_bindings(
     Ok(bindings)
 }
 
+/// Project media and OCIO use exact UTF-8 source coordinates. Resource-only
+/// native paths remain in the manifest but never enter this text boundary.
+pub(super) fn utf8_package_source_bindings(
+    bindings: &BTreeMap<NativePath, PathBuf>,
+) -> anyhow::Result<Vec<(String, PathBuf)>> {
+    let mut seen = BTreeSet::new();
+    let mut result = Vec::new();
+    for (source, target) in bindings {
+        if let Some(text) = source.utf8_text() {
+            anyhow::ensure!(
+                seen.insert(text.to_string()),
+                "ambiguous cross-platform package source"
+            );
+            result.push((text.into_owned(), target.clone()));
+        }
+    }
+    Ok(result)
+}
+
 pub(super) fn ensure_package_asset_sources_rebound(
     library: &AssetLibrary,
-    bindings: &BTreeMap<PathBuf, PathBuf>,
+    bindings: &BTreeMap<NativePath, PathBuf>,
 ) -> anyhow::Result<()> {
     let bundled_sources = bindings.values().collect::<BTreeSet<_>>();
     for asset in library.list_assets()? {
@@ -626,7 +649,7 @@ pub(super) fn ensure_package_asset_sources_rebound(
 
 pub(super) fn rebind_document_resources(
     document: &mut ProjectDocument,
-    bindings: &BTreeMap<PathBuf, PathBuf>,
+    bindings: &BTreeMap<NativePath, PathBuf>,
 ) -> anyhow::Result<()> {
     for sequence in &mut document.sequences.sequences {
         for track in sequence.video_tracks.iter_mut().chain(sequence.audio_tracks.iter_mut()) {
@@ -655,12 +678,17 @@ pub(super) fn rebind_document_resources(
     if let ColorEngine::CustomOcio { identity } = document.color_environment.engine()
         && let OcioConfigSource::Path { path } = identity.source()
     {
-        let bundled = bindings.get(path).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Custom OCIO config is absent from portable manifest: {}",
-                path.display()
-            )
-        })?;
+        let text = path.to_str().context("OCIO source requires exact UTF-8")?;
+        let source_bindings = utf8_package_source_bindings(bindings)?;
+        let bundled = source_bindings
+            .iter()
+            .find_map(|(source, target)| (source == text).then_some(target))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Custom OCIO config is absent from portable manifest: {}",
+                    path.display()
+                )
+            })?;
         let relocated = ColorEngine::CustomOcio {
             identity: Box::new(
                 identity
@@ -712,7 +740,7 @@ fn validate_relocated_ocio(
 
 fn rebind_property_bag(
     bag: &mut PropertyBag,
-    bindings: &BTreeMap<PathBuf, PathBuf>,
+    bindings: &BTreeMap<NativePath, PathBuf>,
 ) -> anyhow::Result<()> {
     let mut mutations = Vec::new();
     for (path, property) in bag.iter() {
@@ -740,7 +768,7 @@ fn rebind_property_bag(
 
 fn relocated_resource_value(
     value: &PropertyValue,
-    bindings: &BTreeMap<PathBuf, PathBuf>,
+    bindings: &BTreeMap<NativePath, PathBuf>,
 ) -> anyhow::Result<Option<PropertyValue>> {
     let PropertyValue::Resource(ParameterResourceReference::ExternalFile { path }) = value else {
         return Ok(None);
@@ -752,13 +780,13 @@ fn relocated_resource_value(
         )
     })?;
     Ok(Some(PropertyValue::Resource(
-        ParameterResourceReference::ExternalFile { path: bundled.clone() },
+        ParameterResourceReference::ExternalFile { path: bundled.clone().into() },
     )))
 }
 
 fn ensure_no_old_references(
     bag: &PropertyBag,
-    bindings: &BTreeMap<PathBuf, PathBuf>,
+    bindings: &BTreeMap<NativePath, PathBuf>,
 ) -> anyhow::Result<()> {
     for (_, property) in bag.iter() {
         for value in std::iter::once(property.static_value().clone()).chain(
@@ -846,7 +874,7 @@ struct DependencyCollector<'a> {
 struct CollectedDependencyFile {
     size_bytes: u64,
     owners: BTreeSet<String>,
-    source_paths: BTreeSet<PathBuf>,
+    source_paths: BTreeSet<NativePath>,
     bundled_path: Option<PathBuf>,
 }
 
@@ -974,7 +1002,10 @@ impl<'a> DependencyCollector<'a> {
     fn add_value(&mut self, value: &PropertyValue, owner: &str) -> anyhow::Result<()> {
         match value {
             PropertyValue::Resource(ParameterResourceReference::ExternalFile { path }) => {
-                self.add_file(owner.to_owned(), path);
+                match path.native_path() {
+                    Ok(path) => self.add_file(owner.to_owned(), path),
+                    Err(error) => self.issue(owner, error.to_string()),
+                }
             }
             PropertyValue::Resource(ParameterResourceReference::ProjectAsset { asset_id }) => {
                 self.add_asset(*asset_id)?;
@@ -1032,7 +1063,7 @@ impl<'a> DependencyCollector<'a> {
             bundled_path: None,
         });
         entry.owners.insert(owner);
-        entry.source_paths.insert(path.to_path_buf());
+        entry.source_paths.insert(path.to_path_buf().into());
     }
 
     fn add_file_at(&mut self, owner: String, path: &Path, bundled_path: PathBuf) {
@@ -1133,7 +1164,9 @@ mod tests {
         effect
             .apply_property_mutation(PropertyMutation::SetStaticValue {
                 path: resource_path,
-                value: PropertyValue::Resource(ParameterResourceReference::ExternalFile { path }),
+                value: PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+                    path: path.into(),
+                }),
             })
             .expect("bind LUT");
         let processing_space_id =
@@ -1456,6 +1489,76 @@ colorspaces:
     }
 
     #[test]
+    fn foreign_resource_binding_matches_metadata_without_source_filesystem_access() {
+        #[cfg(windows)]
+        let source = NativePath::from_unix_bytes(b"/studio/look.cube".to_vec());
+        #[cfg(not(windows))]
+        let source =
+            NativePath::from_windows_units(r"C:\studio\look.cube".encode_utf16().collect());
+        assert!(source.native_path().is_err());
+        let root = tempfile::tempdir().expect("root");
+        let target = root.path().join("bundled.cube");
+        let bindings = BTreeMap::from([(source.clone(), target.clone())]);
+        let value =
+            PropertyValue::Resource(ParameterResourceReference::ExternalFile { path: source });
+        assert_eq!(
+            relocated_resource_value(&value, &bindings).expect("metadata rebind"),
+            Some(PropertyValue::Resource(
+                ParameterResourceReference::ExternalFile { path: target.into() }
+            ))
+        );
+        let unix = NativePath::from_unix_bytes(b"/same.cube".to_vec());
+        let windows = NativePath::from_windows_units("/same.cube".encode_utf16().collect());
+        let ambiguous = BTreeMap::from([
+            (unix, root.path().join("a")),
+            (windows, root.path().join("b")),
+        ]);
+        assert!(utf8_package_source_bindings(&ambiguous).is_err());
+    }
+
+    #[test]
+    fn source_alias_inventory_retains_every_coordinate_for_foreign_rebinding() {
+        let root = tempfile::tempdir().expect("root");
+        let library = AssetLibrary::open(root.path().join("library")).expect("library");
+        fs::create_dir(root.path().join("looks")).expect("resource directory");
+        let plain = root.path().join("looks").join("look.cube");
+        let dotted = root.path().join("looks").join(".").join("look.cube");
+        fs::write(&plain, RED_INVERT_CUBE_2).expect("LUT");
+        let mut document = document_with_lut(&library, plain.clone(), true);
+        document.sequences.sequences[0].video_tracks[0].clips[0].effects[0]
+            .set_static_value_by_parameter(
+                &EffectType::Lut3D.parameter_id("path").expect("id"),
+                PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+                    path: dotted.clone().into(),
+                }),
+            )
+            .expect("retain alternate source spelling");
+        let inventory = collect_project_dependencies(&document, &library).expect("inventory");
+        assert!(inventory.is_complete());
+        assert_eq!(inventory.files.len(), 1, "copy one canonical file");
+        let expected = BTreeSet::from([NativePath::from(plain), NativePath::from(dotted)]);
+        assert_eq!(
+            inventory.files[0].source_paths.iter().cloned().collect::<BTreeSet<_>>(),
+            expected
+        );
+        let session = AuthoringSession::new_unsaved(
+            document,
+            root.path().join("project.mdp"),
+            root.path().join("runtime"),
+            library,
+        )
+        .expect("session");
+        let package = root.path().join("portable.mdpkg");
+        export_snapshot_package(session.snapshot().expect("snapshot"), &package).expect("package");
+        let manifest = verify_portable_project_package(&package).expect("verify package");
+        assert_eq!(manifest.files.len(), 1);
+        assert_eq!(
+            manifest.files[0].source_paths.iter().cloned().collect::<BTreeSet<_>>(),
+            expected
+        );
+    }
+
+    #[test]
     fn inventory_collects_clip_and_inactive_grade_lut_once() {
         let root = tempfile::tempdir().expect("root");
         let library = AssetLibrary::open(root.path().join("library")).expect("library");
@@ -1507,7 +1610,14 @@ colorspaces:
     fn package_survives_source_removal_and_detects_tampering() {
         let root = tempfile::tempdir().expect("root");
         let library = AssetLibrary::open(root.path().join("library")).expect("library");
-        let lut = root.path().join("look.cube");
+        let mut filename = std::ffi::OsString::from("look");
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            filename.push(std::ffi::OsString::from_wide(&[0xd800]));
+        }
+        filename.push(".cube");
+        let lut = root.path().join(filename);
         fs::write(&lut, RED_INVERT_CUBE_2).expect("LUT fixture");
         let document = document_with_lut(&library, lut.clone(), true);
         let expected = sample_document_lut(&document);
@@ -1542,7 +1652,7 @@ colorspaces:
         let manifest = verify_portable_project_package(&moved).expect("complete package");
         assert_eq!(fs::read_dir(&moved).expect("package entries").count(), 3);
         assert_eq!(manifest.files.len(), 1);
-        assert_eq!(manifest.files[0].source_paths, vec![lut]);
+        assert_eq!(manifest.files[0].source_paths, vec![lut.into()]);
         assert!(export_snapshot_package(session.snapshot().expect("snapshot"), &package).is_err());
 
         fs::write(moved.with_extension("mdp"), b"existing project").expect("occupied sibling");
@@ -1810,7 +1920,7 @@ colorspaces:
         let packaged = manifest
             .files
             .iter()
-            .find(|file| file.source_paths.contains(&stored_source))
+            .find(|file| file.source_paths.contains(&stored_source.clone().into()))
             .map(|file| moved.join(&file.bundled_path))
             .expect("media binding");
 
@@ -1842,7 +1952,9 @@ colorspaces:
         drop(imported);
 
         let mut omitted = manifest;
-        omitted.files.retain(|file| !file.source_paths.contains(&stored_source));
+        omitted
+            .files
+            .retain(|file| !file.source_paths.contains(&stored_source.clone().into()));
         fs::write(
             moved.join("manifest.json"),
             serde_json::to_vec(&omitted).expect("encode tampered manifest"),
@@ -1941,7 +2053,7 @@ colorspaces:
         let bundled = manifest
             .files
             .iter()
-            .find(|file| file.source_paths.contains(&stored_source))
+            .find(|file| file.source_paths.contains(&stored_source.clone().into()))
             .map(|file| {
                 mondrian_assets::canonical_native_path(&moved.join(&file.bundled_path))
                     .expect("bundled video")

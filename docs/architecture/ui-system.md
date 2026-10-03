@@ -3082,3 +3082,11 @@ The supervised inspection and eventual author action use the same bound path.
 Untouched references remain no-ops; equivalent resolved references also close
 without inspection or history. Missing targets are not created. This author input
 contract does not claim a resolution base for arbitrary native plugin defaults.
+
+### Native resource drafts
+
+Resource drafts retain `NativePath` rather than reconstructing file selections
+from their display strings. An untouched draft preserves foreign-platform or
+non-Unicode intent exactly. New text is a local path; inspection requires explicit
+local-path admission and cannot reinterpret a foreign path through the current
+working directory.

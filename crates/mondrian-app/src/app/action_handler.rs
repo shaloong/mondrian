@@ -2551,7 +2551,7 @@ mod tests {
                 mondrian_core::automation::ParameterResourceReference::Unbound => {
                     PropertyValue::Resource(
                         mondrian_core::automation::ParameterResourceReference::ExternalFile {
-                            path: std::path::PathBuf::from("test-resource.cube"),
+                            path: std::path::PathBuf::from("test-resource.cube").into(),
                         },
                     )
                 }

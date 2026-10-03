@@ -1243,13 +1243,17 @@ impl AppUiAppRoot {
                             contract.selection != mondrian_core::ResourcePathSelection::Reference
                         })
                 {
+                    let path = path
+                        .native_path()
+                        .map_err(|error| mondrian_core::MondrianError::WorkflowStepFailed {
+                            step_id: "resource_inspection".into(),
+                            reason: error.to_string(),
+                        })?
+                        .to_path_buf();
                     let ticket = crate::resource_inspection::InspectionTicket::new();
                     dialog.begin_inspection(ticket);
                     return Ok(ResourceActionOutcome::Inspect(
-                        crate::app_ui::resource_dialog::ResourceInspectionRequest {
-                            ticket,
-                            path: path.clone(),
-                        },
+                        crate::app_ui::resource_dialog::ResourceInspectionRequest { ticket, path },
                     ));
                 }
                 if let mondrian_core::ParameterResourceReference::ProjectAsset { asset_id } = value
@@ -5703,7 +5707,9 @@ mod tests {
             .clone();
         assert_eq!(
             property,
-            PropertyValue::Resource(ParameterResourceReference::ExternalFile { path: expected }),
+            PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+                path: expected.into()
+            }),
             "saved author value must refer to the same inspected resource",
         );
         state.dispatch_action(Action::Undo).expect("Undo");
@@ -5728,7 +5734,7 @@ mod tests {
                 mondrian_core::automation::ParameterValueWrite::Value {
                     parameter,
                     value: PropertyValue::Resource(ParameterResourceReference::ExternalFile {
-                        path: direct_relative.clone(),
+                        path: direct_relative.clone().into(),
                     }),
                 }
             }))
@@ -5742,7 +5748,7 @@ mod tests {
                 .expect("direct resource")
                 .value,
             PropertyValue::Resource(ParameterResourceReference::ExternalFile {
-                path: project_directory.join(direct_relative),
+                path: project_directory.join(direct_relative).into(),
             }),
         );
     }
@@ -6430,7 +6436,7 @@ mod tests {
                 .draft
                 .value()
                 .expect("selected"),
-            ParameterResourceReference::ExternalFile { path: existing.clone() }
+            ParameterResourceReference::ExternalFile { path: existing.clone().into() }
         );
         assert!(route(
             &mut root,
@@ -6511,7 +6517,7 @@ mod tests {
                 .clone()
         };
         let bound = PropertyValue::Resource(ParameterResourceReference::ExternalFile {
-            path: destination.clone(),
+            path: destination.clone().into(),
         });
         assert_eq!(resource(&state), bound);
         assert!(state.undo_timeline().expect("undo"));
@@ -6533,7 +6539,7 @@ mod tests {
                 .map(|(_, p)| match p.static_value() {
                     PropertyValue::Text(text) => text.len(),
                     PropertyValue::Resource(ParameterResourceReference::ExternalFile { path }) => {
-                        path.to_str().expect("UTF-8").len()
+                        path.utf8_text().expect("UTF-8").len()
                     }
                     _ => 0,
                 })
@@ -6914,7 +6920,7 @@ mod tests {
                 .clone()
         };
         let bound = PropertyValue::Resource(ParameterResourceReference::ExternalFile {
-            path: cube.clone(),
+            path: cube.clone().into(),
         });
         assert_eq!(resource(&state), bound);
         assert!(state.undo_timeline().expect("undo binding"));

@@ -242,7 +242,9 @@ fn build_definition(
                     ) => PropertyValue::Resource(if text.is_empty() {
                         ParameterResourceReference::Unbound
                     } else {
-                        ParameterResourceReference::ExternalFile { path: PathBuf::from(text) }
+                        ParameterResourceReference::ExternalFile {
+                            path: PathBuf::from(text).into(),
+                        }
                     }),
                     _ => PropertyValue::Text(text),
                 },
@@ -458,15 +460,20 @@ fn build_definition(
                             {
                                 let text = match reference {
                                     ParameterResourceReference::Unbound => String::new(),
-                                    ParameterResourceReference::ExternalFile { path } => path
-                                        .to_str()
-                                        .ok_or_else(|| {
-                                            invalid(format!(
-                                                "parameter `{}` requires a UTF-8 path",
-                                                parameter.name
-                                            ))
-                                        })?
-                                        .to_owned(),
+                                    ParameterResourceReference::ExternalFile { path }
+                                        if path.is_absolute() =>
+                                    {
+                                        path.into_native_path()
+                                            .map_err(|error| invalid(error.to_string()))?
+                                            .to_str()
+                                            .ok_or_else(|| {
+                                                invalid(format!(
+                                                    "parameter `{}` requires a UTF-8 path",
+                                                    parameter.name
+                                                ))
+                                            })?
+                                            .to_owned()
+                                    }
                                     _ => {
                                         return Err(invalid(format!(
                                             "parameter `{}` requires an external path",

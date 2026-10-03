@@ -710,7 +710,7 @@ through a bounded reader directly into its typed Manifest or
 The value-based registry remains the explicit seam for future migrations
 without imposing its peak-memory cost on current Projects.
 
-Document schema v27 is the sole accepted Alpha author schema. It persists the
+Document schema v28 is the sole accepted Alpha author schema. It persists the
 Project-owned color environment and future-Sequence template, exact rational
 `TimelineTime`, canonical signal layouts and channel mappings, typed Routes and
 processor schemas, canonical proxy membership, closed `ClipContent`,
@@ -720,11 +720,10 @@ Title properties, a Clip-local visual author origin, closed Sequence `color`
 and `delivery` structures, and one tagged `ClipSourceTimeMap` whose constant
 variant persists exact origin, signed scale, and covering/strict-predecessor
 sampling boundary while deriving its terminal boundary from duration. Schema
-v27 additionally persists explicit Sequence-owned Dynamic HDR state (`Omit`
+v28 additionally persists explicit Sequence-owned Dynamic HDR state (`Omit`
 plus an empty Program catalog by default), bounded format-specific analyzed
 Program/Shot payloads, immutable analysis provenance, and strong Remake
-references. The 26-to-27 migration inserts that explicit empty state;
-deserialization does not use a hidden serde default. Schema v27 also persists
+references. Deserialization does not use a hidden serde default. Schema v28 also persists
 each media Clip's optional bounded editorial-source identity (reel,
 exact SMPTE source reference, and foreign item key) inside
 `MediaInterpretation`; it never promotes those interchange facts into Asset or
@@ -763,3 +762,23 @@ accepts the pending interaction atomically and invalidates its lease. Failed
 preparation, budget admission or validation leaves author state and both history
 ledgers unchanged. Disabled or insufficient Undo retention does not disable
 cancellation: pending origin admission has its own explicit byte budget.
+
+### Schema 28 and portable package version 2
+
+Schema 28 persists external processor resources as platform-tagged native units.
+The Alpha document registry has no earlier-schema migration steps or plain-string
+resource aliases. Non-Unicode native filenames survive save/reopen exactly.
+Portable package version 2 uses the same representation for original source
+bindings; only the copied destination is a local safe relative package path.
+Resource rebinding matches original metadata without opening the original path.
+Media Library source coordinates and OCIO source metadata remain exact UTF-8;
+their boundary rejects ambiguous cross-platform text coordinates and excludes
+resource-only paths which have no exact Unicode representation. The Library
+transaction accepts source strings directly and opens only verified local
+bundled targets, preserving Asset identity and refreshing file fingerprints.
+
+Resource reference identity compares exact native spelling, including dotted
+components and separator spellings. Local `OsString` storage borrows a `Path`
+or transfers its existing buffer into `PathBuf` at the execution seam without
+copying filename units. Package inventory copies one canonical file while
+retaining every exact source coordinate for foreign-platform rebinding.

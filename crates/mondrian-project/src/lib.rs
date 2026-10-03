@@ -30,12 +30,12 @@ use std::sync::Arc;
 
 mod migration;
 
-use migration::{JsonMigrationRegistry, JsonMigrationStep};
+use migration::JsonMigrationRegistry;
 
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 27;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 28;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 6;
 
@@ -332,34 +332,9 @@ const DOCUMENT_MIGRATIONS: JsonMigrationRegistry = JsonMigrationRegistry::new(
     "project document",
     "schema_version",
     PROJECT_DOCUMENT_SCHEMA_VERSION,
-    &[JsonMigrationStep {
-        from: 26,
-        to: 27,
-        migrate: migrate_project_document_26_to_27,
-    }],
+    &[],
 );
 const REQUIRED_ARCHIVE_ENTRIES: [&str; 3] = [MANIFEST_ENTRY, PROJECT_ENTRY, LIBRARY_ENTRY];
-
-fn migrate_project_document_26_to_27(
-    mut value: serde_json::Value,
-) -> anyhow::Result<serde_json::Value> {
-    let sequences = value
-        .get_mut("sequences")
-        .and_then(|collection| collection.get_mut("sequences"))
-        .and_then(serde_json::Value::as_array_mut)
-        .context("schema 26 document has no Sequence array")?;
-    for sequence in sequences {
-        let sequence = sequence.as_object_mut().context("schema 26 Sequence is not an object")?;
-        sequence.entry("dynamic_hdr").or_insert_with(|| {
-            serde_json::json!({
-                "delivery_intent": { "intent": "omit" },
-                "programs": []
-            })
-        });
-    }
-    value["schema_version"] = serde_json::json!(27);
-    Ok(value)
-}
 
 /// Admission limits for opening one untrusted `.mdp` archive.
 ///
@@ -3368,7 +3343,7 @@ mod tests {
     #[test]
     fn older_schemas_are_rejected_without_an_alpha_compatibility_migration() {
         let mut legacy = serde_json::to_value(test_document()).expect("serialize document");
-        for version in [5, 6, 10, 14, 17] {
+        for version in [5, 6, 10, 14, 17, 26, 27] {
             legacy["schema_version"] = serde_json::json!(version);
             let err = DOCUMENT_MIGRATIONS
                 .migrate(legacy.clone())
@@ -3378,27 +3353,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_26_migrates_explicit_empty_dynamic_hdr_author_state() {
-        let mut legacy = serde_json::to_value(test_document()).expect("serialize document");
-        legacy["schema_version"] = serde_json::json!(26);
-        for sequence in legacy["sequences"]["sequences"].as_array_mut().expect("Sequence array") {
-            sequence.as_object_mut().expect("Sequence object").remove("dynamic_hdr");
-        }
-
-        let migrated = DOCUMENT_MIGRATIONS.migrate(legacy).expect("migrate 26 to 27");
-        assert_eq!(migrated["schema_version"], serde_json::json!(27));
-        let document: ProjectDocument =
-            serde_json::from_value(migrated).expect("decode migrated document");
-        assert!(document
-            .sequences
-            .sequences
-            .iter()
-            .all(|sequence| sequence.dynamic_hdr
-                == mondrian_timeline::DynamicHdrAuthorState::default()));
-    }
-
-    #[test]
-    fn archive_load_reports_the_pre_migration_document_schema() {
+    fn archive_load_rejects_older_document_before_publishing_runtime() {
         let root = unique_temp_dir("source-document-schema");
         let archive_path = root.join("schema-26.mdp");
         let runtime = root.join("runtime");
@@ -3419,20 +3374,13 @@ mod tests {
             ],
         );
 
-        let loaded =
-            load_project_archive(&archive_path, &runtime).expect("migrate schema-26 archive");
-        assert_eq!(loaded.source_document_schema_version, 26);
-        assert_eq!(
-            loaded.document.schema_version,
-            PROJECT_DOCUMENT_SCHEMA_VERSION
+        let error = load_project_archive(&archive_path, &runtime)
+            .expect_err("alpha schemas have no compatibility adapter");
+        assert!(error.to_string().contains("missing project document migration"));
+        assert!(
+            !runtime.exists(),
+            "rejected input cannot publish a runtime library"
         );
-        assert!(loaded
-            .document
-            .sequences
-            .sequences
-            .iter()
-            .all(|sequence| sequence.dynamic_hdr
-                == mondrian_timeline::DynamicHdrAuthorState::default()));
 
         let _ = fs::remove_dir_all(root);
     }

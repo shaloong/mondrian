@@ -1548,7 +1548,7 @@ mod tests {
             .set_static_value_by_parameter(
                 &path_id,
                 PropertyValue::Resource(ParameterResourceReference::ExternalFile {
-                    path: path.to_path_buf(),
+                    path: path.to_path_buf().into(),
                 }),
             )
             .expect("bind LUT path");

@@ -1275,3 +1275,12 @@ selections with Existing policy require a matching existing object; ExistingOrNe
 also admits an absent target. Untouched unavailable references remain no-ops.
 The schema has one canonical representation, without the former flat path_kind
 field or compatibility conversion. Resource cache impact remains mandatory.
+
+### Native resource execution
+
+Builtin LUT preparation consumes the evaluated `NativePath` into an owned local
+`PathBuf` without another filename-buffer clone. Foreign-platform references and
+ownerless relative references return author-edit resource-unavailable evidence
+before filesystem access. OpenFX filename parameters additionally require exact
+UTF-8 according to the declared SDK contract. Preview and export retain the same
+compiled graph and prepared resource interpretation.

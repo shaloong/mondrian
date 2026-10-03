@@ -556,22 +556,23 @@ fn project_static_grade(
                 let intensity_id = parameter_id("intensity")?;
                 let uri = match effect.evaluate_resource_parameter(&path_id, TimelineTime::ZERO) {
                     Some(ParameterResourceReference::ExternalFile { path }) => {
-                        path.to_string_lossy().into_owned()
+                        path.utf8_text().map(|text| text.into_owned())
                     }
-                    Some(ParameterResourceReference::Uri { uri }) => uri,
-                    _ => {
-                        findings.push(owner_finding(
-                            "LUT_REFERENCE_UNRESOLVED",
-                            InterchangeFindingSeverity::Blocker,
-                            InterchangeDisposition::Unsupported,
-                            "color.lut",
-                            sequence,
-                            Some(track_id),
-                            Some(clip.id),
-                            None,
-                        ));
-                        return Ok(None);
-                    }
+                    Some(ParameterResourceReference::Uri { uri }) => Some(uri),
+                    _ => None,
+                };
+                let Some(uri) = uri else {
+                    findings.push(owner_finding(
+                        "LUT_REFERENCE_UNRESOLVED",
+                        InterchangeFindingSeverity::Blocker,
+                        InterchangeDisposition::Unsupported,
+                        "color.lut",
+                        sequence,
+                        Some(track_id),
+                        Some(clip.id),
+                        None,
+                    ));
+                    return Ok(None);
                 };
                 let digest = effect
                     .params

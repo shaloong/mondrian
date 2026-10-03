@@ -205,7 +205,7 @@ pub(crate) struct ResourceDraft {
     pub(crate) original: ParameterResourceReference,
     pub(crate) schema: ParameterSchema,
     kind: ResourceKind,
-    file: Option<PathBuf>,
+    file: Option<mondrian_core::NativePath>,
     uri: String,
     asset: Option<AssetId>,
     search: String,
@@ -371,7 +371,7 @@ impl ResourceDraft {
             ResourceUpdate::Kind(_) => {}
             ResourceUpdate::Text(text) => match self.kind {
                 ResourceKind::ExternalFile => {
-                    self.file = (!text.is_empty()).then(|| PathBuf::from(text))
+                    self.file = (!text.is_empty()).then(|| PathBuf::from(text).into())
                 }
                 ResourceKind::Uri => self.uri = text,
                 _ => {}
@@ -386,7 +386,7 @@ impl ResourceDraft {
             ResourceKind::ExternalFile => self
                 .file
                 .as_ref()
-                .filter(|path| !path.as_os_str().is_empty())
+                .filter(|path| !path.is_empty())
                 .map(|path| ParameterResourceReference::ExternalFile { path: path.clone() })
                 .ok_or("resource-path-required"),
             ResourceKind::ProjectAsset => self
@@ -660,7 +660,7 @@ impl ResourceDialog {
     }
     pub(crate) fn selected_path(&mut self, path: PathBuf) {
         self.clear_inspection();
-        self.draft.file = Some(path);
+        self.draft.file = Some(path.into());
         self.error_key = None;
         self.rebuild_controls(true);
         self.error.set_text(String::new());
@@ -884,7 +884,8 @@ mod tests {
     #[test]
     fn relative_confirmation_checks_resolved_limits_and_equivalent_noops() {
         let owner = std::env::temp_dir();
-        let original = ParameterResourceReference::ExternalFile { path: owner.join("same.cube") };
+        let original =
+            ParameterResourceReference::ExternalFile { path: owner.join("same.cube").into() };
         let mut input = draft(original);
         input.update(ResourceUpdate::Text("same.cube".into()));
         assert_eq!(
@@ -930,7 +931,10 @@ mod tests {
             if let Some(ParameterResourceReference::ExternalFile { path }) = &value {
                 let contract =
                     draft.schema.resource.as_ref().expect("resource").path.expect("path");
-                crate::resource_inspection::inspect_local_path(path).validate(contract)?;
+                crate::resource_inspection::inspect_local_path(
+                    path.native_path().expect("local draft"),
+                )
+                .validate(contract)?;
             }
             Ok(value)
         };
@@ -965,7 +969,7 @@ mod tests {
         assert_eq!(
             checked(&input),
             Ok(Some(ParameterResourceReference::ExternalFile {
-                path: file.clone()
+                path: file.clone().into()
             }))
         );
         input
@@ -1002,7 +1006,7 @@ mod tests {
             directory.to_str().expect("UTF-8").to_owned(),
         ));
         assert!(checked(&input).is_ok());
-        let mut original = draft(ParameterResourceReference::ExternalFile { path: missing });
+        let mut original = draft(ParameterResourceReference::ExternalFile { path: missing.into() });
         original.schema.resource = Some(mondrian_core::ParameterResourceContract::external_path(
             ResourcePathKind::File,
             ResourcePathSelection::Existing,
@@ -1153,7 +1157,7 @@ mod tests {
         for reference in [
             ParameterResourceReference::Unbound,
             ParameterResourceReference::ExternalFile {
-                path: PathBuf::from("Unicode 文件 path with spaces.cube"),
+                path: PathBuf::from("Unicode 文件 path with spaces.cube").into(),
             },
             ParameterResourceReference::Uri {
                 uri: "https://example.test/文件?x=%20".to_owned()
@@ -1176,6 +1180,25 @@ mod tests {
             draft(ParameterResourceReference::Unbound).id,
             draft(ParameterResourceReference::Unbound).id
         );
+    }
+
+    #[test]
+    fn foreign_resource_draft_retains_native_units_and_unchanged_confirmation_is_noop() {
+        #[cfg(windows)]
+        let path = mondrian_core::NativePath::from_unix_bytes(vec![47, 0xff, 46, 99, 117, 98, 101]);
+        #[cfg(not(windows))]
+        let path = mondrian_core::NativePath::from_windows_units(vec![
+            67, 58, 92, 0xd800, 46, 99, 117, 98, 101,
+        ]);
+        assert!(path.native_path().is_err());
+        let reference = ParameterResourceReference::ExternalFile { path };
+        let mut input = draft(reference.clone());
+        assert_eq!(input.value().expect("exact intent"), reference);
+        assert_eq!(input.confirmed_value(), Ok(None));
+        input.update(ResourceUpdate::Kind(ResourceKind::Unbound));
+        input.update(ResourceUpdate::Kind(ResourceKind::ExternalFile));
+        assert_eq!(input.value().expect("restored exact intent"), reference);
+        assert_eq!(input.confirmed_value(), Ok(None));
     }
 
     #[test]

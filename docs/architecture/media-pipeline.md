@@ -4244,3 +4244,11 @@ size and offset assertions cover both layouts. AVFrame/AVBufferRef ownership
 continues to retain resources and fences; no native GPU import is bypassed.
 A mismatched offset would read a Win32 completion event as an ID3D12Fence,
 so decode and encode must never declare independent copies of this ABI.
+
+### Verified package source coordinate boundary
+
+Asset Library portable-package rebinding accepts exact UTF-8 source coordinates
+as strings, not fabricated local paths. The App projects only lossless Unicode
+manifest coordinates and rejects collisions between platform namespaces. Only
+the verified bundled target is canonicalized and opened; replacement occurs in
+the private Library transaction without changing Asset IDs or probe facts.

@@ -2986,7 +2986,7 @@ mod tests {
             .set_static_value_by_parameter(
                 &path_id,
                 PropertyValue::Resource(ParameterResourceReference::ExternalFile {
-                    path: missing_path,
+                    path: missing_path.into(),
                 }),
             )
             .expect("set missing LUT path");
@@ -3035,7 +3035,7 @@ mod tests {
                 .set_static_value_by_parameter(
                     &path_id,
                     PropertyValue::Resource(ParameterResourceReference::ExternalFile {
-                        path: path.clone(),
+                        path: path.clone().into(),
                     }),
                 )
                 .expect("set LUT path");

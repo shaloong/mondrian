@@ -130,7 +130,9 @@ mod tests {
             PropertyDescriptor::new(
                 "path",
                 "Path",
-                PropertyValue::Resource(ParameterResourceReference::ExternalFile { path }),
+                PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+                    path: path.into(),
+                }),
             )
             .with_parameter_id(kind.parameter_id("path").expect("parameter"))
             .with_resource_contract(contract),
@@ -174,7 +176,7 @@ mod tests {
             let history = state.authoring_history().expect("history").diagnostics().undo_entries;
             let id = state.add_effect_to_clip(clip_id, kind.clone()).expect("add Clip effect");
             let bound = Some(PropertyValue::Resource(
-                ParameterResourceReference::ExternalFile { path: directory.join(&relative) },
+                ParameterResourceReference::ExternalFile { path: directory.join(&relative).into() },
             ));
             let clip_resource = |state: &AppState| {
                 state

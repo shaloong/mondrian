@@ -1835,3 +1835,10 @@ owner's CPU working-set grant, which the worker installs instead of retaining
 an unbounded default. CPU adaptation of cached working frames retains the same
 conservative complete estimate and existing cache residency contracts.
 CPU child and root limits, retained-scratch limits, and GPU budgets are unchanged.
+
+### Resource path execution admission
+
+Prepared visual programs continue to consume the shared compiled effect graph.
+Native resource paths are resolved by effect preparation; a foreign-platform or
+ownerless LUT reports unavailable author intent before local filesystem access.
+The renderer adds no second resource interpretation or fallback.

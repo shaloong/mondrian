@@ -11,10 +11,9 @@ use crate::{
 };
 use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-};
+use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::path::PathBuf;
 
 /// 面向 UI/命令层的插值意图。
 ///
@@ -552,20 +551,17 @@ impl ParameterResourceContract {
             ParameterResourceReference::Unbound => true,
             ParameterResourceReference::ExternalFile { path } => {
                 self.allowed_kinds.contains(&ParameterResourceKind::ExternalFile)
-                    && !path.as_os_str().is_empty()
-                    && !path.as_os_str().as_encoded_bytes().contains(&0)
-                    && self
-                        .path
-                        .and_then(|contract| contract.max_utf8_bytes)
-                        .is_none_or(|limit| path.to_str().is_some_and(|text| text.len() <= limit))
+                    && !path.is_empty()
+                    && !path.contains_nul()
+                    && self.path.and_then(|contract| contract.max_utf8_bytes).is_none_or(|limit| {
+                        path.utf8_text().is_some_and(|text| text.len() <= limit)
+                    })
                     && (self.file_extensions.is_empty()
-                        || path.extension().and_then(|extension| extension.to_str()).is_some_and(
-                            |extension| {
-                                self.file_extensions
-                                    .iter()
-                                    .any(|allowed| extension.eq_ignore_ascii_case(allowed))
-                            },
-                        ))
+                        || path.extension_utf8().is_some_and(|extension| {
+                            self.file_extensions
+                                .iter()
+                                .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+                        }))
             }
             ParameterResourceReference::ProjectAsset { .. } => {
                 self.allowed_kinds.contains(&ParameterResourceKind::ProjectAsset)
@@ -583,7 +579,7 @@ impl ParameterResourceContract {
 pub enum ParameterResourceReference {
     Unbound,
     ProjectAsset { asset_id: AssetId },
-    ExternalFile { path: PathBuf },
+    ExternalFile { path: crate::NativePath },
     Uri { uri: String },
 }
 
@@ -599,6 +595,9 @@ pub enum ParameterResourcePathError {
     /// A drive-relative path cannot be resolved using the supplied directory.
     #[error("external resource path remains relative after owner binding")]
     AmbiguousPath,
+    /// A foreign platform's path must be preserved or explicitly relinked.
+    #[error(transparent)]
+    ForeignPlatform(#[from] crate::ForeignNativePathError),
 }
 
 impl ParameterResourceReference {
@@ -615,20 +614,21 @@ impl ParameterResourceReference {
         let Self::ExternalFile { path } = self else {
             return Ok(());
         };
-        if path.as_os_str().is_empty() {
+        let native = path.native_path()?;
+        if native.as_os_str().is_empty() {
             return Err(ParameterResourcePathError::EmptyPath);
         }
-        if path.is_absolute() {
+        if native.is_absolute() {
             return Ok(());
         }
         if !owner_directory.is_absolute() {
             return Err(ParameterResourcePathError::InvalidOwner);
         }
-        let resolved = owner_directory.join(&*path);
+        let resolved = owner_directory.join(native);
         if !resolved.is_absolute() {
             return Err(ParameterResourcePathError::AmbiguousPath);
         }
-        *path = resolved;
+        *path = resolved.into();
         Ok(())
     }
 }
@@ -4899,7 +4899,7 @@ mod tests {
                     serde_json::from_slice(&json).expect("restore");
                 assert_eq!(restored, contract);
                 assert!(contract.admits(&ParameterResourceReference::ExternalFile {
-                    path: PathBuf::from("unavailable/输入🙂.cube")
+                    path: PathBuf::from("unavailable/输入🙂.cube").into()
                 }));
                 let schema = ParameterSchema::v1(
                     ParameterId::new_static("test.external_path"),
@@ -4926,10 +4926,11 @@ mod tests {
             6,
         );
         contract.validate().expect("UTF-8 path contract");
-        assert!(contract
-            .admits(&ParameterResourceReference::ExternalFile { path: PathBuf::from("汉字") }));
+        assert!(contract.admits(&ParameterResourceReference::ExternalFile {
+            path: PathBuf::from("汉字").into()
+        }));
         assert!(!contract.admits(&ParameterResourceReference::ExternalFile {
-            path: PathBuf::from("汉字🙂")
+            path: PathBuf::from("汉字🙂").into()
         }));
         assert!(contract.admits(&ParameterResourceReference::Unbound));
         assert!(ParameterResourceContract::external_utf8_path(
@@ -4943,7 +4944,7 @@ mod tests {
         {
             use std::os::windows::ffi::OsStringExt;
             let reference = ParameterResourceReference::ExternalFile {
-                path: PathBuf::from(std::ffi::OsString::from_wide(&[0xd800])),
+                path: PathBuf::from(std::ffi::OsString::from_wide(&[0xd800])).into(),
             };
             assert!(!contract.admits(&reference));
             assert!(ParameterResourceContract::external_file(Vec::new()).admits(&reference));
@@ -4952,7 +4953,7 @@ mod tests {
         {
             use std::os::unix::ffi::OsStringExt;
             let reference = ParameterResourceReference::ExternalFile {
-                path: PathBuf::from(std::ffi::OsString::from_vec(vec![0xff])),
+                path: PathBuf::from(std::ffi::OsString::from_vec(vec![0xff])).into(),
             };
             assert!(!contract.admits(&reference));
             assert!(ParameterResourceContract::external_file(Vec::new()).admits(&reference));
@@ -4972,16 +4973,18 @@ mod tests {
         descriptor.validate().expect("resource schema");
         let mut property = AnimatedProperty::from_descriptor(descriptor);
         let accepted = PropertyValue::Resource(ParameterResourceReference::ExternalFile {
-            path: PathBuf::from("missing Unicode 文件.CUBE"),
+            path: PathBuf::from("missing Unicode 文件.CUBE").into(),
         });
         property.set_static_value(accepted.clone()).expect("offline author intent");
         let before = property.clone();
         for reference in [
             ParameterResourceReference::ProjectAsset { asset_id: AssetId::new() },
             ParameterResourceReference::Uri { uri: "https://example.test/lut.cube".to_owned() },
-            ParameterResourceReference::ExternalFile { path: PathBuf::from("wrong.txt") },
-            ParameterResourceReference::ExternalFile { path: PathBuf::new() },
-            ParameterResourceReference::ExternalFile { path: PathBuf::from("invalid\0.cube") },
+            ParameterResourceReference::ExternalFile { path: PathBuf::from("wrong.txt").into() },
+            ParameterResourceReference::ExternalFile { path: PathBuf::new().into() },
+            ParameterResourceReference::ExternalFile {
+                path: PathBuf::from("invalid\0.cube").into(),
+            },
         ] {
             assert!(property.set_static_value(PropertyValue::Resource(reference)).is_err());
             assert_eq!(
@@ -6491,11 +6494,12 @@ mod resource_path_owner_tests {
     #[test]
     fn relative_resource_binding_preserves_native_path_and_nonexistent_intent() {
         let relative = PathBuf::from("missing").join("..").join("resource.cube");
-        let mut reference = ParameterResourceReference::ExternalFile { path: relative.clone() };
+        let mut reference =
+            ParameterResourceReference::ExternalFile { path: relative.clone().into() };
         reference.resolve_external_path(&owner()).expect("explicit owner");
         assert_eq!(
             reference,
-            ParameterResourceReference::ExternalFile { path: owner().join(relative) }
+            ParameterResourceReference::ExternalFile { path: owner().join(relative).into() }
         );
         let bound = reference.clone();
         reference
@@ -6506,7 +6510,7 @@ mod resource_path_owner_tests {
     #[test]
     fn invalid_resource_binding_leaves_author_intent_unchanged() {
         for path in [PathBuf::new(), PathBuf::from("resource.cube")] {
-            let mut reference = ParameterResourceReference::ExternalFile { path };
+            let mut reference = ParameterResourceReference::ExternalFile { path: path.into() };
             let original = reference.clone();
             assert!(reference
                 .resolve_external_path(std::path::Path::new("relative-owner"))
@@ -6519,11 +6523,11 @@ mod resource_path_owner_tests {
     fn relative_resource_binding_preserves_non_unicode_path_bytes() {
         use std::os::unix::ffi::OsStringExt;
         let path = PathBuf::from(std::ffi::OsString::from_vec(vec![b'l', 0xff, b't']));
-        let mut reference = ParameterResourceReference::ExternalFile { path: path.clone() };
+        let mut reference = ParameterResourceReference::ExternalFile { path: path.clone().into() };
         reference.resolve_external_path(&owner()).expect("native path binding");
         assert_eq!(
             reference,
-            ParameterResourceReference::ExternalFile { path: owner().join(path) }
+            ParameterResourceReference::ExternalFile { path: owner().join(path).into() }
         );
     }
 
@@ -6541,13 +6545,14 @@ mod resource_path_owner_tests {
         assert!(owner.as_os_str().len() > 260, "exercise a real long path");
         for path in [r"child\..\resource.cube", "child/../resource.cube"] {
             let mut reference =
-                ParameterResourceReference::ExternalFile { path: PathBuf::from(path) };
+                ParameterResourceReference::ExternalFile { path: PathBuf::from(path).into() };
             reference.resolve_external_path(&owner).expect("long resource binding");
             let ParameterResourceReference::ExternalFile { path } = reference else {
                 panic!("external path");
             };
             assert_eq!(
-                std::fs::read(path).expect("resolved native file"),
+                std::fs::read(path.native_path().expect("local path"))
+                    .expect("resolved native file"),
                 b"owned resource"
             );
         }
@@ -6562,11 +6567,12 @@ mod resource_path_owner_tests {
             0xd800,
             b't' as u16,
         ]));
-        let mut reference = ParameterResourceReference::ExternalFile { path: path.clone() };
+        let mut reference = ParameterResourceReference::ExternalFile { path: path.clone().into() };
         reference.resolve_external_path(&owner()).expect("native path binding");
         let ParameterResourceReference::ExternalFile { path: resolved } = reference else {
             panic!("external path");
         };
+        let resolved = resolved.native_path().expect("local native path");
         assert_eq!(
             resolved.strip_prefix(owner()).expect("explicit owner").as_os_str(),
             path.as_os_str()
@@ -6576,9 +6582,33 @@ mod resource_path_owner_tests {
 
     #[cfg(windows)]
     #[test]
+    fn native_resource_path_survives_json_persistence_without_unicode_loss() {
+        use std::os::windows::ffi::OsStringExt;
+        let reference = ParameterResourceReference::ExternalFile {
+            path: PathBuf::from(std::ffi::OsString::from_wide(&[
+                b'C' as u16,
+                b':' as u16,
+                b'\\' as u16,
+                0xd800,
+                b'.' as u16,
+                b'c' as u16,
+                b'u' as u16,
+                b'b' as u16,
+                b'e' as u16,
+            ]))
+            .into(),
+        };
+        let bytes = serde_json::to_vec(&reference).expect("persist admitted native resource");
+        let decoded: ParameterResourceReference =
+            serde_json::from_slice(&bytes).expect("restore native resource");
+        assert_eq!(decoded, reference);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn absolute_unc_resource_retains_its_identity() {
         let mut reference = ParameterResourceReference::ExternalFile {
-            path: PathBuf::from(r"\\server\share\resource.cube"),
+            path: PathBuf::from(r"\\server\share\resource.cube").into(),
         };
         let original = reference.clone();
         reference.resolve_external_path(&owner()).expect("UNC resource");
@@ -6588,20 +6618,24 @@ mod resource_path_owner_tests {
     #[cfg(windows)]
     #[test]
     fn drive_relative_resource_never_uses_process_drive_directories() {
-        let mut reference =
-            ParameterResourceReference::ExternalFile { path: PathBuf::from(r"D:resource.cube") };
+        let mut reference = ParameterResourceReference::ExternalFile {
+            path: PathBuf::from(r"D:resource.cube").into(),
+        };
         let original = reference.clone();
         assert_eq!(
             reference.resolve_external_path(&owner()),
             Err(ParameterResourcePathError::AmbiguousPath)
         );
         assert_eq!(reference, original);
-        let mut rooted =
-            ParameterResourceReference::ExternalFile { path: PathBuf::from(r"\resource.cube") };
+        let mut rooted = ParameterResourceReference::ExternalFile {
+            path: PathBuf::from(r"\resource.cube").into(),
+        };
         rooted.resolve_external_path(&owner()).expect("explicit owner drive");
         assert_eq!(
             rooted,
-            ParameterResourceReference::ExternalFile { path: PathBuf::from(r"C:\resource.cube") }
+            ParameterResourceReference::ExternalFile {
+                path: PathBuf::from(r"C:\resource.cube").into()
+            }
         );
     }
 }

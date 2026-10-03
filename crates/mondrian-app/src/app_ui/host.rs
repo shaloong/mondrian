@@ -5167,7 +5167,7 @@ mod tests {
                     &EffectType::Lut3D.parameter_id("path").expect("path"),
                     mondrian_core::PropertyValue::Resource(
                         mondrian_core::ParameterResourceReference::ExternalFile {
-                            path: std::path::PathBuf::from("original.cube"),
+                            path: std::path::PathBuf::from("original.cube").into(),
                         },
                     ),
                 )

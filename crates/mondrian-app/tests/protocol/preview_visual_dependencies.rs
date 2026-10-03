@@ -200,7 +200,7 @@ fn lut_effect(path: std::path::PathBuf) -> EffectNode {
     .expect("set processing space");
     lut.set_static_value_by_parameter(
         &path_id,
-        PropertyValue::Resource(ParameterResourceReference::ExternalFile { path }),
+        PropertyValue::Resource(ParameterResourceReference::ExternalFile { path: path.into() }),
     )
     .expect("bind LUT");
     lut

@@ -2837,6 +2837,24 @@ fn builtin_graph_preparer_for(effect_type: &EffectType) -> Option<EffectGraphPre
                 reason: "resource is not bound to an external LUT file".to_string(),
             });
         };
+        let path = path.into_native_path().map_err(|error| {
+            EffectGraphBuildError::ResourceUnavailable {
+                effect_key: effect.effect_type.key(),
+                effect_id: effect.id,
+                parameter_id: path_id.clone(),
+                recovery: EffectResourceRecovery::AuthorEdit,
+                reason: error.to_string(),
+            }
+        })?;
+        if !path.is_absolute() {
+            return Err(EffectGraphBuildError::ResourceUnavailable {
+                effect_key: effect.effect_type.key(),
+                effect_id: effect.id,
+                parameter_id: path_id.clone(),
+                recovery: EffectResourceRecovery::AuthorEdit,
+                reason: "LUT resource has no absolute Project directory owner".into(),
+            });
+        }
         let prepared_lut = resources.prepare_cube_lut(&path).map_err(|error| {
             EffectGraphBuildError::ResourceUnavailable {
                 effect_key: effect.effect_type.key(),
@@ -4474,6 +4492,41 @@ mod tests {
     }
 
     #[test]
+    fn foreign_and_ownerless_lut_paths_require_author_repair() {
+        #[cfg(windows)]
+        let foreign = mondrian_core::NativePath::from_unix_bytes(b"/studio/look.cube".to_vec());
+        #[cfg(not(windows))]
+        let foreign = mondrian_core::NativePath::from_windows_units(
+            r"C:\studio\look.cube".encode_utf16().collect(),
+        );
+        for path in [foreign, std::path::PathBuf::from("relative.cube").into()] {
+            let mut effect = EffectNode::with_defaults(EffectType::Lut3D);
+            effect
+                .set_static_value_by_parameter(
+                    &EffectType::Lut3D.parameter_id("processing_space").expect("id"),
+                    PropertyValue::Enum("scene_linear".into()),
+                )
+                .expect("space");
+            effect
+                .set_static_value_by_parameter(
+                    &EffectType::Lut3D.parameter_id("path").expect("id"),
+                    PropertyValue::Resource(ParameterResourceReference::ExternalFile { path }),
+                )
+                .expect("preserve author intent");
+            let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect_err("must not open local CWD");
+            assert!(matches!(
+                error,
+                EffectGraphBuildError::ResourceUnavailable {
+                    recovery: EffectResourceRecovery::AuthorEdit,
+                    ..
+                }
+            ));
+            assert!(!error.dependency_refresh_retryable());
+        }
+    }
+
+    #[test]
     fn bound_missing_lut_is_retryable_external_dependency_failure() {
         let mut effect = EffectNode::with_defaults(EffectType::Lut3D);
         let processing_space_id = EffectType::Lut3D
@@ -4491,7 +4544,9 @@ mod tests {
         effect
             .set_static_value_by_parameter(
                 &path_id,
-                PropertyValue::Resource(ParameterResourceReference::ExternalFile { path }),
+                PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+                    path: path.into(),
+                }),
             )
             .expect("bind missing LUT path");
 
@@ -4630,7 +4685,7 @@ mod tests {
             .set_static_value_by_parameter(
                 &path_id,
                 PropertyValue::Resource(ParameterResourceReference::ExternalFile {
-                    path: path.clone(),
+                    path: path.clone().into(),
                 }),
             )
             .expect("set lut path");
