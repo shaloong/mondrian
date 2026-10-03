@@ -4692,10 +4692,14 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         next_wake,
                     ));
                 }
-                if let Some(delay) = host.playback_next_wake_delay() {
+                if let Some(deadline) = host.playback_next_wake_deadline() {
                     elwt.set_control_flow(control_flow_wake_no_later_than(
                         elwt.control_flow(),
-                        Instant::now() + app_ui_interactive_playback_wake_delay(&host, delay),
+                        app_ui_interactive_playback_wake_deadline(
+                            deadline,
+                            Instant::now(),
+                            host.is_playback_frame_pending(),
+                        ),
                     ));
                 }
                 if session.pending_initial_redraw {
@@ -6303,11 +6307,16 @@ fn viewer_runtime_image_sha256() -> Option<String> {
         .clone()
 }
 
-fn app_ui_interactive_playback_wake_delay(host: &AppUiHost, delay: Duration) -> Duration {
-    if host.is_playback_frame_pending() {
-        delay.min(APP_UI_BUFFERING_INTERACTIVE_WAKE_DELAY)
+fn app_ui_interactive_playback_wake_deadline(
+    deadline: Instant,
+    now: Instant,
+    frame_pending: bool,
+) -> Instant {
+    if frame_pending {
+        now.checked_add(APP_UI_BUFFERING_INTERACTIVE_WAKE_DELAY)
+            .map_or(deadline, |interactive| deadline.min(interactive))
     } else {
-        delay
+        deadline
     }
 }
 
@@ -9897,6 +9906,31 @@ mod tests {
         assert!(panic.is_err());
         assert!(!pending.load(Ordering::Acquire));
         assert!(queue_preview_work_event(&pending, || true));
+    }
+
+    #[test]
+    fn interactive_playback_poll_never_renews_an_owner_wake() {
+        let now = Instant::now();
+        for deadline in [
+            now - Duration::from_millis(25),
+            now + Duration::from_micros(250),
+        ] {
+            for pending in [false, true] {
+                assert_eq!(
+                    app_ui_interactive_playback_wake_deadline(deadline, now, pending),
+                    deadline
+                );
+            }
+        }
+        let later = now + Duration::from_millis(100);
+        assert_eq!(
+            app_ui_interactive_playback_wake_deadline(later, now, false),
+            later
+        );
+        assert_eq!(
+            app_ui_interactive_playback_wake_deadline(later, now, true),
+            now + APP_UI_BUFFERING_INTERACTIVE_WAKE_DELAY
+        );
     }
 
     #[test]

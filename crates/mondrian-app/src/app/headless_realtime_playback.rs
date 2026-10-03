@@ -2806,9 +2806,7 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
             );
         }
         let wait_observed_at = Instant::now();
-        let phase_wake = state
-            .playback_next_wake_delay()
-            .and_then(|delay| wait_observed_at.checked_add(delay));
+        let phase_wake = state.playback_next_wake_deadline();
         let presentation_deadline = state.playback_frame_deadline_at(wait_observed_at);
         let wake_deadline = [phase_wake, presentation_deadline]
             .into_iter()

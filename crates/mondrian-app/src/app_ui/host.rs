@@ -1421,9 +1421,9 @@ impl AppUiHost {
         true
     }
 
-    /// Delay until Playback next requires a Clock or bounded-priming wake.
-    pub fn playback_next_wake_delay(&self) -> Option<Duration> {
-        self.app_state.borrow().playback_next_wake_delay()
+    /// Absolute owner-derived Clock or bounded-priming wake.
+    pub fn playback_next_wake_deadline(&self) -> Option<Instant> {
+        self.app_state.borrow().playback_next_wake_deadline()
     }
 
     /// Whether transport currently requires the Window playback coordinator.

@@ -1718,9 +1718,20 @@ impl AppState {
         }
     }
 
-    /// Estimate how long an execution loop can wait before advancing playback.
-    pub fn playback_next_wake_delay(&self) -> Option<Duration> {
-        self.playback_next_wake().map(|wake| clamp_playback_wake_delay(wake.after()))
+    /// Project the next Engine wake into the existing absolute observation clock.
+    ///
+    /// Adapter processing can age the last observation. Adding its relative
+    /// delay to a later `Instant::now()` would renew the wake past its original
+    /// phase or presentation boundary. An already-due wake remains in the past.
+    pub fn playback_next_wake_deadline(&self) -> Option<Instant> {
+        let wake = self.playback_next_wake()?;
+        let offset = self
+            .playback_engine
+            .monotonic_high_water()
+            .duration_since_origin()
+            .checked_sub(self.playback_observation_time_anchor.duration_since_origin())?
+            .checked_add(clamp_playback_wake_delay(wake.after()))?;
+        self.playback_observation_instant_anchor.checked_add(offset)
     }
 
     /// Return the next Engine wake together with its authoritative reason.
@@ -4438,25 +4449,59 @@ mod tests {
     }
 
     #[test]
-    fn playback_next_wake_delay_is_bounded_while_playing() {
+    fn playback_next_wake_deadline_is_bounded_while_playing() {
         let mut state = state_with_sequence(30);
         play_ready(&mut state);
 
-        let delay = state.playback_next_wake_delay().expect("next playback wake");
+        let deadline = state.playback_next_wake_deadline().expect("next playback wake");
 
-        assert!(delay <= MAX_PLAYBACK_WAKE_DELAY);
+        assert!(deadline - state.playback_observation_instant_anchor <= MAX_PLAYBACK_WAKE_DELAY);
     }
 
     #[test]
-    fn playback_next_wake_delay_keeps_unpresented_priming_bounded() {
+    fn playback_next_wake_deadline_keeps_unpresented_priming_bounded() {
         let mut state = state_with_sequence(30);
         state.play().expect("play");
         assert!(state.is_playback_priming());
 
-        let delay =
-            state.playback_next_wake_delay().expect("priming fallback must schedule a wake");
+        let deadline = state
+            .playback_next_wake_deadline()
+            .expect("priming fallback must schedule a wake");
 
-        assert!(delay <= MAX_PLAYBACK_WAKE_DELAY);
+        assert!(deadline - state.playback_observation_instant_anchor <= MAX_PLAYBACK_WAKE_DELAY);
+    }
+
+    #[test]
+    fn playback_wake_stays_due_when_adapter_processing_ages_the_observation() {
+        let mut state = state_with_sequence(30);
+        play_ready(&mut state);
+        let anchor = state.playback_observation_instant_anchor;
+        let deadline = state.playback_next_wake_deadline().expect("frame boundary wake");
+        let delayed_adapter_now = deadline + Duration::from_millis(25);
+        let relative = state.playback_next_wake().expect("same Engine wake").after();
+        assert!(delayed_adapter_now + relative > deadline);
+        assert_eq!(state.playback_next_wake_deadline(), Some(deadline));
+        assert!(deadline < delayed_adapter_now);
+        assert_eq!(state.playback_observation_instant_anchor, anchor);
+        state.pause().expect("pause");
+        assert_eq!(state.playback_next_wake_deadline(), None);
+    }
+
+    #[test]
+    fn playback_wake_uses_the_complete_owner_observation_mapping() {
+        let mut state = state_with_sequence(30);
+        play_ready(&mut state);
+        let origin = state.playback_observation_instant_anchor;
+        let deadline = state.playback_next_wake_deadline().expect("frame wake");
+        state.advance_playback_clock_at(origin + Duration::from_millis(10));
+        let high_water = state.playback_engine.monotonic_high_water().duration_since_origin();
+        // The same clock mapping represented by an earlier observation pair.
+        // Engine high-water and the projection anchor need not be identical.
+        state.reanchor_playback_observation_projection_at(
+            origin + Duration::from_millis(5),
+            MonotonicTimestamp::from_duration(high_water - Duration::from_millis(5)),
+        );
+        assert_eq!(state.playback_next_wake_deadline(), Some(deadline));
     }
 
     #[test]
@@ -4553,16 +4598,16 @@ mod tests {
             MonotonicTimestamp::from_duration(Duration::from_millis(17))
         );
         assert_eq!(
-            state.playback_next_wake_delay(),
-            Some(Duration::from_millis(40))
+            state.playback_next_wake_deadline(),
+            Some(priming_completed_at + Duration::from_millis(40))
         );
 
         let subframe =
             state.advance_playback_clock_at(priming_completed_at + Duration::from_millis(3));
         assert_eq!(subframe.status, PlaybackAdvanceStatus::WaitingForFrame);
         assert_eq!(
-            state.playback_next_wake_delay(),
-            Some(Duration::from_millis(37))
+            state.playback_next_wake_deadline(),
+            Some(priming_completed_at + Duration::from_millis(40))
         );
 
         let boundary =
