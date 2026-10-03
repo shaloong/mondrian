@@ -253,7 +253,7 @@ enum DescribeResponse {
 struct NativeParameter {
     name: *const c_char,
     kind: c_int,
-    value: f64,
+    value: [f64; 4],
     string_value: *const c_char,
     string_length: usize,
 }
@@ -290,11 +290,11 @@ struct NativeParameterInfo {
     kind: c_int,
     preferred_interpolation: c_int,
     double_type: c_int,
-    default_value: f64,
-    minimum: f64,
-    maximum: f64,
-    display_minimum: f64,
-    display_maximum: f64,
+    default_value: [f64; 4],
+    minimum: [f64; 4],
+    maximum: [f64; 4],
+    display_minimum: [f64; 4],
+    display_maximum: [f64; 4],
     can_animate: c_int,
     secret: c_int,
     enabled: c_int,
@@ -661,78 +661,82 @@ unsafe fn decode_native_parameter(
         }
         Vec::new()
     };
-    let (default_value, double_type, minimum, maximum, display_minimum, display_maximum) = match raw
-        .kind
-    {
-        1 => (
-            OpenFxParameterValue::Double(raw.default_value),
-            Some(match raw.double_type {
-                0 => OpenFxDoubleType::Plain,
-                1 => OpenFxDoubleType::Scale,
-                _ => return Err("unsupported OpenFX Double interpretation".to_owned()),
-            }),
-            Some(raw.minimum),
-            Some(raw.maximum),
-            Some(raw.display_minimum),
-            Some(raw.display_maximum),
-        ),
-        2 if raw.double_type == -1 && (raw.default_value == 0.0 || raw.default_value == 1.0) => (
-            OpenFxParameterValue::Boolean(raw.default_value == 1.0),
-            None,
-            None,
-            None,
-            None,
-            None,
-        ),
-        3 if raw.double_type == -1 => (
-            OpenFxParameterValue::Integer(
-                checked_openfx_integer(raw.default_value)
-                    .ok_or("invalid OpenFX Integer default")?,
+    let (default_value, double_type, minimum, maximum, display_minimum, display_maximum) =
+        match raw.kind {
+            1 => (
+                OpenFxParameterValue::Double(raw.default_value[0]),
+                Some(match raw.double_type {
+                    0 => OpenFxDoubleType::Plain,
+                    1 => OpenFxDoubleType::Scale,
+                    _ => return Err("unsupported OpenFX Double interpretation".to_owned()),
+                }),
+                Some(raw.minimum[0]),
+                Some(raw.maximum[0]),
+                Some(raw.display_minimum[0]),
+                Some(raw.display_maximum[0]),
             ),
-            None,
-            Some(raw.minimum),
-            Some(raw.maximum),
-            Some(raw.display_minimum),
-            Some(raw.display_maximum),
-        ),
-        4 if raw.double_type == -1 => (
-            OpenFxParameterValue::Choice(
-                checked_openfx_integer(raw.default_value).ok_or("invalid OpenFX Choice default")?,
+            2 if raw.double_type == -1
+                && (raw.default_value[0] == 0.0 || raw.default_value[0] == 1.0) =>
+            {
+                (
+                    OpenFxParameterValue::Boolean(raw.default_value[0] == 1.0),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            3 if raw.double_type == -1 => (
+                OpenFxParameterValue::Integer(
+                    checked_openfx_integer(raw.default_value[0])
+                        .ok_or("invalid OpenFX Integer default")?,
+                ),
+                None,
+                Some(raw.minimum[0]),
+                Some(raw.maximum[0]),
+                Some(raw.display_minimum[0]),
+                Some(raw.display_maximum[0]),
             ),
-            None,
-            None,
-            None,
-            None,
-            None,
-        ),
-        5 if raw.double_type == -1 => (
-            // SAFETY: The matched host borrows the default string for this callback.
-            OpenFxParameterValue::StrChoice(unsafe {
-                copy_native_text(raw.string_default, raw.string_default_length, 256)?
-            }),
-            None,
-            None,
-            None,
-            None,
-            None,
-        ),
-        6 if raw.double_type == -1 => (
-            // SAFETY: The matched host borrows this bounded default for the callback.
-            OpenFxParameterValue::String(unsafe {
-                copy_native_text(
-                    raw.string_default,
-                    raw.string_default_length,
-                    OPENFX_MAX_STRING_BYTES,
-                )?
-            }),
-            None,
-            None,
-            None,
-            None,
-            None,
-        ),
-        _ => return Err("unsupported OpenFX parameter kind or default".to_owned()),
-    };
+            4 if raw.double_type == -1 => (
+                OpenFxParameterValue::Choice(
+                    checked_openfx_integer(raw.default_value[0])
+                        .ok_or("invalid OpenFX Choice default")?,
+                ),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            5 if raw.double_type == -1 => (
+                // SAFETY: The matched host borrows the default string for this callback.
+                OpenFxParameterValue::StrChoice(unsafe {
+                    copy_native_text(raw.string_default, raw.string_default_length, 256)?
+                }),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            6 if raw.double_type == -1 => (
+                // SAFETY: The matched host borrows this bounded default for the callback.
+                OpenFxParameterValue::String(unsafe {
+                    copy_native_text(
+                        raw.string_default,
+                        raw.string_default_length,
+                        OPENFX_MAX_STRING_BYTES,
+                    )?
+                }),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            _ => return Err("unsupported OpenFX parameter kind or default".to_owned()),
+        };
     let flag = |value| match value {
         0 => Ok(false),
         1 => Ok(true),
@@ -1453,6 +1457,111 @@ mod shared_frame_tests {
     }
 
     #[test]
+    #[ignore = "requires the owned SessionProbe native bundle"]
+    fn native_compound_parameters_preserve_exact_defaults_and_atomic_sdk_updates() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_compound_parameters_preserve_exact_defaults_and_atomic_sdk_updates";
+        if !qualification_child(TEST, &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "compound")]) {
+            return;
+        }
+        let path = PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe binary"),
+        );
+        let path = resolve_openfx_binary(&path).expect("probe binary path");
+        let bundle = path
+            .ancestors()
+            .find(|path| path.extension().is_some_and(|extension| extension == "bundle"))
+            .expect("probe bundle");
+        let binary = native_string(&path).expect("native binary");
+        let bundle = native_string(bundle).expect("native bundle");
+        let identifier = CString::new("uk.co.thefoundry.BasicGainPlugin").expect("identifier");
+        let info = NativeFrameInfo {
+            width: 1,
+            height: 1,
+            frame: 0.0,
+            frame_rate: 24.0,
+            first_frame: 0.0,
+            last_frame: 100.0,
+            pixel_aspect_ratio: 1.0,
+        };
+        let input = [0.25_f32; 4].into_iter().flat_map(f32::to_ne_bytes).collect::<Vec<_>>();
+        let specs = [
+            (
+                "point2",
+                7,
+                [0.12500000000000003, 10.000000000000002, 0.0, 0.0],
+            ),
+            (
+                "point3",
+                8,
+                [
+                    -0.5000000000000001,
+                    1.0000000000000002,
+                    2.0000000000000004,
+                    0.0,
+                ],
+            ),
+            (
+                "rgb",
+                9,
+                [
+                    0.10000000000000002,
+                    0.20000000000000004,
+                    0.30000000000000004,
+                    0.0,
+                ],
+            ),
+            (
+                "rgba",
+                10,
+                [
+                    0.12500000000000003,
+                    0.25000000000000006,
+                    0.5000000000000001,
+                    0.7500000000000001,
+                ],
+            ),
+            ("integer2", 11, [-123456789.0, 123456789.0, 0.0, 0.0]),
+            (
+                "integer3",
+                12,
+                [f64::from(i32::MIN), 0.0, f64::from(i32::MAX), 0.0],
+            ),
+        ];
+        let names = specs
+            .iter()
+            .map(|(name, _, _)| CString::new(*name).expect("name"))
+            .collect::<Vec<_>>();
+        let parameters = specs
+            .iter()
+            .zip(&names)
+            .map(|((_, kind, value), name)| NativeParameter {
+                name: name.as_ptr(),
+                kind: *kind,
+                value: *value,
+                string_value: std::ptr::null(),
+                string_length: 0,
+            })
+            .collect::<Vec<_>>();
+        let mut session =
+            NativeSession::create(&binary, &bundle, &identifier, &input, &info, &parameters)
+                .expect("complete native tuple instance");
+        let mut output = vec![0xa5; input.len()];
+        assert_eq!(session.render(&input, &mut output, &info, &parameters), 0);
+        assert_eq!(output, input);
+        let mut invalid = parameters;
+        invalid[0].value[0] = 0.5;
+        invalid[5].value[1] = 5.0;
+        let mut unchanged = vec![0xa5; input.len()];
+        assert_ne!(session.render(&input, &mut unchanged, &info, &invalid), 0);
+        assert_eq!(unchanged, vec![0xa5; input.len()]);
+        let mut recovered = vec![0xa5; input.len()];
+        invalid[0].value[0] = 0.12500000000000003;
+        invalid[5].value[1] = 0.0;
+        assert_eq!(session.render(&input, &mut recovered, &info, &invalid), 0);
+        assert_eq!(recovered, input);
+    }
+
+    #[test]
     #[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY to SessionProbe.ofx.bundle"]
     fn native_session_enforces_independent_frame_and_action_contracts() {
         const TEST: &str = "openfx_host::shared_frame_tests::native_session_enforces_independent_frame_and_action_contracts";
@@ -1516,7 +1625,7 @@ mod shared_frame_tests {
                 [NativeParameter {
                     name: name.as_ptr(),
                     kind: 1,
-                    value: gain,
+                    value: [gain, 0.0, 0.0, 0.0],
                     string_value: std::ptr::null(),
                     string_length: 0,
                 }]
@@ -1617,7 +1726,7 @@ mod shared_frame_tests {
             [NativeParameter {
                 name: name.as_ptr(),
                 kind: 1,
-                value: gain,
+                value: [gain, 0.0, 0.0, 0.0],
                 string_value: std::ptr::null(),
                 string_length: 0,
             }]

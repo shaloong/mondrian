@@ -636,7 +636,7 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
                         NativeParameter {
                             name: name.as_ptr(),
                             kind,
-                            value: number,
+                            value: [number, 0.0, 0.0, 0.0],
                             string_value: text
                                 .as_ref()
                                 .map_or(std::ptr::null(), |text| text.as_ptr()),

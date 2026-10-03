@@ -146,13 +146,17 @@ namespace MondrianOpenFx {
     else if(descriptor.getType()==kOfxParamTypeString)
       return new StringParameter(this,descriptor);
     else if(descriptor.getType()==kOfxParamTypeRGBA)
-      return new RgbaParameter(this,name,descriptor);
+      return new NumericTupleParameter<OFX::Host::Param::RGBAInstance, double, 4>(this,descriptor);
     else if(descriptor.getType()==kOfxParamTypeRGB)
-      return new RgbParameter(this,name,descriptor);
+      return new NumericTupleParameter<OFX::Host::Param::RGBInstance, double, 3>(this,descriptor);
     else if(descriptor.getType()==kOfxParamTypeDouble2D)
-      return new Double2DParameter(this,name,descriptor);
+      return new NumericTupleParameter<OFX::Host::Param::Double2DInstance, double, 2>(this,descriptor);
     else if(descriptor.getType()==kOfxParamTypeInteger2D)
-      return new Integer2DParameter(this,name,descriptor);
+      return new NumericTupleParameter<OFX::Host::Param::Integer2DInstance, int, 2>(this,descriptor);
+    else if(descriptor.getType()==kOfxParamTypeDouble3D)
+      return new NumericTupleParameter<OFX::Host::Param::Double3DInstance, double, 3>(this,descriptor);
+    else if(descriptor.getType()==kOfxParamTypeInteger3D)
+      return new NumericTupleParameter<OFX::Host::Param::Integer3DInstance, int, 3>(this,descriptor);
     else if(descriptor.getType()==kOfxParamTypePushButton)
       return new PushbuttonParameter(this,name,descriptor);
     else if(descriptor.getType()==kOfxParamTypeGroup)

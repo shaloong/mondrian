@@ -9,6 +9,9 @@
 #include <cstring>
 #include <cstdint>
 #include <algorithm>
+#include <array>
+#include <limits>
+#include <type_traits>
 
 #include "render.h"
 
@@ -124,12 +127,81 @@ static int loadFrame(MondrianOpenFx::FrameState& state, const void* input,
   return 0;
 }
 
+struct NumericLayout { int kind; int dimensions; bool integer; };
+static NumericLayout numericLayout(const std::string& type) {
+  if (type == kOfxParamTypeDouble) { return {1, 1, false}; }
+  if (type == kOfxParamTypeInteger) { return {3, 1, true}; }
+  if (type == kOfxParamTypeDouble2D) { return {7, 2, false}; }
+  if (type == kOfxParamTypeDouble3D) { return {8, 3, false}; }
+  if (type == kOfxParamTypeRGB) { return {9, 3, false}; }
+  if (type == kOfxParamTypeRGBA) { return {10, 4, false}; }
+  if (type == kOfxParamTypeInteger2D) { return {11, 2, true}; }
+  if (type == kOfxParamTypeInteger3D) { return {12, 3, true}; }
+  return {0, 0, false};
+}
+
+template<class Base, class T, size_t N>
+static OfxStatus readTuple(OFX::Host::Param::Instance* parameter, std::array<double, 4>& output) {
+  auto* tuple = dynamic_cast<Base*>(parameter);
+  if (!tuple) { return kOfxStatErrValue; }
+  std::array<T, N> value{};
+  OfxStatus status;
+  if constexpr (N == 2) { status = tuple->get(value[0], value[1]); }
+  else if constexpr (N == 3) { status = tuple->get(value[0], value[1], value[2]); }
+  else { status = tuple->get(value[0], value[1], value[2], value[3]); }
+  if (status != kOfxStatOK) { return status; }
+  for (size_t index = 0; index < N; ++index) { output[index] = value[index]; }
+  return kOfxStatOK;
+}
+
+template<class Base, class T, size_t N>
+static OfxStatus writeTuple(OFX::Host::Param::Instance* parameter, const std::array<double, 4>& values) {
+  auto* tuple = dynamic_cast<Base*>(parameter);
+  if (!tuple) { return kOfxStatErrValue; }
+  std::array<T, N> value{};
+  for (size_t index = 0; index < N; ++index) {
+    if (!std::isfinite(values[index])) { return kOfxStatErrValue; }
+    if constexpr (std::is_same_v<T, int>) {
+      if (std::trunc(values[index]) != values[index] || values[index] < std::numeric_limits<int>::min() ||
+          values[index] > std::numeric_limits<int>::max()) { return kOfxStatErrValue; }
+    }
+    value[index] = static_cast<T>(values[index]);
+  }
+  if constexpr (N == 2) { return tuple->set(value[0], value[1]); }
+  else if constexpr (N == 3) { return tuple->set(value[0], value[1], value[2]); }
+  else { return tuple->set(value[0], value[1], value[2], value[3]); }
+}
+
+static OfxStatus readCompound(OFX::Host::Param::Instance* parameter, int kind, std::array<double, 4>& values) {
+  switch (kind) {
+    case 7: return readTuple<OFX::Host::Param::Double2DInstance, double, 2>(parameter, values);
+    case 8: return readTuple<OFX::Host::Param::Double3DInstance, double, 3>(parameter, values);
+    case 9: return readTuple<OFX::Host::Param::RGBInstance, double, 3>(parameter, values);
+    case 10: return readTuple<OFX::Host::Param::RGBAInstance, double, 4>(parameter, values);
+    case 11: return readTuple<OFX::Host::Param::Integer2DInstance, int, 2>(parameter, values);
+    case 12: return readTuple<OFX::Host::Param::Integer3DInstance, int, 3>(parameter, values);
+    default: return kOfxStatErrValue;
+  }
+}
+
+static OfxStatus writeCompound(OFX::Host::Param::Instance* parameter, int kind, const std::array<double, 4>& values) {
+  switch (kind) {
+    case 7: return writeTuple<OFX::Host::Param::Double2DInstance, double, 2>(parameter, values);
+    case 8: return writeTuple<OFX::Host::Param::Double3DInstance, double, 3>(parameter, values);
+    case 9: return writeTuple<OFX::Host::Param::RGBInstance, double, 3>(parameter, values);
+    case 10: return writeTuple<OFX::Host::Param::RGBAInstance, double, 4>(parameter, values);
+    case 11: return writeTuple<OFX::Host::Param::Integer2DInstance, int, 2>(parameter, values);
+    case 12: return writeTuple<OFX::Host::Param::Integer3DInstance, int, 3>(parameter, values);
+    default: return kOfxStatErrValue;
+  }
+}
+
 struct ParameterUpdate {
   OFX::Host::Param::Instance* parameter;
   int kind;
-  double value;
+  std::array<double, 4> value;
   bool changed;
-  std::string stringValue;
+  std::string stringValue{};
 };
 
 // Declared in lifetime order: the instance dies before its plugin binary,
@@ -154,7 +226,7 @@ struct MondrianOpenFxSession {
     std::map<std::string, const MondrianOpenFxParameter*> authored;
     for (int index = 0; index < count; ++index) {
       const auto& value = parameters[index];
-      if (!value.name || !std::isfinite(value.value) ||
+      if (!value.name || !std::all_of(value.value, value.value + 4, [](double channel) { return std::isfinite(channel); }) ||
           !authored.emplace(value.name, &value).second ||
           !instance->getParam(value.name)) { return 4; }
     }
@@ -173,35 +245,51 @@ struct MondrianOpenFxSession {
       const auto* value = found == authored.end() ? nullptr : found->second;
       const auto& properties = parameter->getProperties();
       if (auto* scalar = dynamic_cast<OFX::Host::Param::DoubleInstance*>(parameter)) {
-        const double target = value ? value->value :
+        const double target = value ? value->value[0] :
             properties.getDoubleProperty(kOfxParamPropDefault);
         double current = 0.0;
         if ((value && value->kind != 1) || !std::isfinite(target) ||
             target < properties.getDoubleProperty(kOfxParamPropMin) ||
             target > properties.getDoubleProperty(kOfxParamPropMax) ||
             scalar->get(current) != kOfxStatOK) { return 4; }
-        updates.push_back({parameter, 1, target, current != target});
+        updates.push_back({parameter, 1, {target}, current != target});
       } else if (auto* scalar = dynamic_cast<OFX::Host::Param::BooleanInstance*>(parameter)) {
-        const double target = value ? value->value :
+        const double target = value ? value->value[0] :
             properties.getIntProperty(kOfxParamPropDefault);
         bool current = false;
         if ((value && value->kind != 2) || (target != 0.0 && target != 1.0) ||
             scalar->get(current) != kOfxStatOK) { return 4; }
-        updates.push_back({parameter, 2, target, current != (target == 1.0)});
+        updates.push_back({parameter, 2, {target}, current != (target == 1.0)});
       } else if (auto* scalar = dynamic_cast<OFX::Host::Param::IntegerInstance*>(parameter)) {
-        const double target = value ? value->value : properties.getIntProperty(kOfxParamPropDefault);
+        const double target = value ? value->value[0] : properties.getIntProperty(kOfxParamPropDefault);
         int current = 0;
         if ((value && value->kind != 3) || !std::isfinite(target) || std::trunc(target) != target ||
             target < properties.getIntProperty(kOfxParamPropMin) || target > properties.getIntProperty(kOfxParamPropMax) ||
             scalar->get(current) != kOfxStatOK) { return 4; }
-        updates.push_back({parameter, 3, target, current != target});
+        updates.push_back({parameter, 3, {target}, current != target});
       } else if (auto* choice = dynamic_cast<OFX::Host::Param::ChoiceInstance*>(parameter)) {
-        const double target = value ? value->value : properties.getIntProperty(kOfxParamPropDefault);
+        const double target = value ? value->value[0] : properties.getIntProperty(kOfxParamPropDefault);
         const int options = properties.getDimension(kOfxParamPropChoiceOption);
         int current = 0;
         if ((value && value->kind != 4) || !std::isfinite(target) || std::trunc(target) != target ||
             target < 0 || target >= options || choice->get(current) != kOfxStatOK) { return 4; }
-        updates.push_back({parameter, 4, target, current != target});
+        updates.push_back({parameter, 4, {target}, current != target});
+      } else if (numericLayout(type).kind >= 7) {
+        const auto layout = numericLayout(type);
+        std::array<double, 4> target{}, current{};
+        if ((value && value->kind != layout.kind) || readCompound(parameter, layout.kind, current) != kOfxStatOK) { return 4; }
+        for (int index = 0; index < layout.dimensions; ++index) {
+          const double minimum = layout.integer ? properties.getIntProperty(kOfxParamPropMin, index)
+                                                : properties.getDoubleProperty(kOfxParamPropMin, index);
+          const double maximum = layout.integer ? properties.getIntProperty(kOfxParamPropMax, index)
+                                                : properties.getDoubleProperty(kOfxParamPropMax, index);
+          target[index] = value ? value->value[index] : layout.integer
+              ? properties.getIntProperty(kOfxParamPropDefault, index)
+              : properties.getDoubleProperty(kOfxParamPropDefault, index);
+          if (!std::isfinite(target[index]) || target[index] < minimum || target[index] > maximum ||
+              (layout.integer && std::trunc(target[index]) != target[index])) { return 4; }
+        }
+        updates.push_back({parameter, layout.kind, target, current != target});
       } else if (type == kOfxParamTypeStrChoice) {
         auto* choice = dynamic_cast<OFX::Host::Param::StringInstance*>(parameter);
         if (!choice || (value && (value->kind != 5 || !value->string_value || value->string_length > 256))) { return 4; }
@@ -216,7 +304,7 @@ struct MondrianOpenFxSession {
         }
         std::string current;
         if (!found || target.size() > 256 || choice->get(current) != kOfxStatOK) { return 4; }
-        updates.push_back({parameter, 5, 0.0, current != target, std::move(target)});
+        updates.push_back({parameter, 5, {0.0}, current != target, std::move(target)});
       } else if (type == kOfxParamTypeString) {
         auto* text = dynamic_cast<OFX::Host::Param::StringInstance*>(parameter);
         if (!text || (value && (value->kind != 6 || !value->string_value ||
@@ -226,7 +314,7 @@ struct MondrianOpenFxSession {
         std::string current;
         if (target.size() > MONDRIAN_OPENFX_MAX_STRING_BYTES || target.find('\0') != std::string::npos ||
             text->get(current) != kOfxStatOK) { return 4; }
-        updates.push_back({parameter, 6, 0.0, current != target, std::move(target)});
+        updates.push_back({parameter, 6, {0.0}, current != target, std::move(target)});
       } else { return 7; }
       if (updates.back().kind == 5 || updates.back().kind == 6) {
         const size_t bytes = updates.back().stringValue.size();
@@ -235,21 +323,27 @@ struct MondrianOpenFxSession {
       }
       changed = changed || updates.back().changed;
     }
+    // Validation above has neither assigned values nor invoked plugin actions.
+    // Once native state can change, retain failure until a complete render
+    // succeeds; callback failures cannot safely reuse a partially changed instance.
+    if (notify) { failed = true; }
     const bool bracket = notify && changed;
     if (bracket && !accepted(instance->beginInstanceChangedAction(reason))) { return 4; }
     OfxStatus status = kOfxStatOK;
     // Assign the complete authored snapshot before any change callback reads it.
     for (const auto& update : updates) {
       if (update.kind == 1) {
-        status = static_cast<OFX::Host::Param::DoubleInstance*>(update.parameter)->set(update.value);
+        status = static_cast<OFX::Host::Param::DoubleInstance*>(update.parameter)->set(update.value[0]);
       } else if (update.kind == 3) {
-        status = static_cast<OFX::Host::Param::IntegerInstance*>(update.parameter)->set(static_cast<int>(update.value));
+        status = static_cast<OFX::Host::Param::IntegerInstance*>(update.parameter)->set(static_cast<int>(update.value[0]));
       } else if (update.kind == 4) {
-        status = static_cast<OFX::Host::Param::ChoiceInstance*>(update.parameter)->set(static_cast<int>(update.value));
+        status = static_cast<OFX::Host::Param::ChoiceInstance*>(update.parameter)->set(static_cast<int>(update.value[0]));
       } else if (update.kind == 5 || update.kind == 6) {
         status = static_cast<OFX::Host::Param::StringInstance*>(update.parameter)->set(update.stringValue.c_str());
+      } else if (update.kind >= 7) {
+        status = writeCompound(update.parameter, update.kind, update.value);
       } else {
-        status = static_cast<OFX::Host::Param::BooleanInstance*>(update.parameter)->set(update.value == 1.0);
+        status = static_cast<OFX::Host::Param::BooleanInstance*>(update.parameter)->set(update.value[0] == 1.0);
       }
       if (status != kOfxStatOK) { break; }
     }
@@ -304,22 +398,32 @@ struct MondrianOpenFxSession {
   int render(const void* input, void* output, size_t bytes,
              const MondrianOpenFxFrameInfo& info,
              const MondrianOpenFxParameter* parameters, int count) {
-    if (failed || !output || info.width != frame.info.width ||
-        info.height != frame.info.height) { return 2; }
+    if (failed) { return 2; }
+    // A prepared session has a fixed image-storage contract. Violating it is
+    // a transport fault, unlike an author snapshot rejected before assignment.
+    if (!output || info.width != frame.info.width || info.height != frame.info.height ||
+        reinterpret_cast<uintptr_t>(output) % alignof(OfxRGBAColourF) != 0 || output == input) {
+      failed = true;
+      return 2;
+    }
     const auto previous = frame.info;
-    if (reinterpret_cast<uintptr_t>(output) % alignof(OfxRGBAColourF) != 0 || output == input) { return 2; }
     MondrianOpenFx::FrameBorrow borrowed(frame);
     const int loaded = loadFrame(frame, input, bytes, info);
-    if (loaded != 0) { return loaded; }
+    if (loaded != 0) { failed = true; return loaded; }
     frame.output = static_cast<OfxRGBAColourF*>(output);
     auto* outputClip = dynamic_cast<MondrianOpenFx::FilterClipInstance*>(instance->getClip("Output"));
-    if (!outputClip) { return 5; }
+    if (!outputClip) { failed = true; return 5; }
     const bool clipsChanged = previous.frame_rate != info.frame_rate ||
         previous.first_frame != info.first_frame || previous.last_frame != info.last_frame ||
         previous.pixel_aspect_ratio != info.pixel_aspect_ratio;
     const int applied = applyParameters(parameters, count, true,
         previous.frame != info.frame ? kOfxChangeTime : kOfxChangeUserEdited, clipsChanged);
-    if (applied != 0) { return applied; }
+    if (applied != 0) {
+      // A rejected snapshot did not reach the commit boundary. Restore the
+      // last accepted timing facts so the next request observes the same state.
+      if (!failed) { frame.info = previous; }
+      return applied;
+    }
     if (!instance->getClipPreferences()) { return 4; }
     if (!admitsIndependentFrames(*instance)) { return 7; }
     for (const char* name : {"Source", "Output"}) {
@@ -354,7 +458,9 @@ struct MondrianOpenFxSession {
     }
     const auto endStatus = instance->endRenderAction(info.frame, info.frame, 1.0,
                                                     false, scale, false, false);
-    return status == kOfxStatOK && written && accepted(endStatus) ? 0 : 5;
+    const bool completed = status == kOfxStatOK && written && accepted(endStatus);
+    if (completed) { failed = false; }
+    return completed ? 0 : 5;
   }
 };
 
@@ -410,42 +516,38 @@ static int describe(const char* binary, const char* bundle,
     info.secret = parameter->getSecret();
     info.enabled = parameter->getEnabled();
     const auto& properties = parameter->getProperties();
-    if (type == kOfxParamTypeDouble) {
-      const std::string& doubleType = parameter->getDoubleType();
-      if (doubleType == kOfxParamDoubleTypePlain) {
-        info.double_type = 0;
-      } else if (doubleType == kOfxParamDoubleTypeScale) {
-        info.double_type = 1;
-      } else { return 7; }
-      info.kind = 1;
-      info.default_value = properties.getDoubleProperty(kOfxParamPropDefault);
-      info.minimum = properties.getDoubleProperty(kOfxParamPropMin);
-      info.maximum = properties.getDoubleProperty(kOfxParamPropMax);
-      info.display_minimum = properties.getDoubleProperty(kOfxParamPropDisplayMin);
-      info.display_maximum = properties.getDoubleProperty(kOfxParamPropDisplayMax);
-      if (!std::isfinite(info.default_value) || !std::isfinite(info.minimum) ||
-          !std::isfinite(info.maximum) || !std::isfinite(info.display_minimum) ||
-          !std::isfinite(info.display_maximum) || info.minimum > info.maximum ||
-          info.display_minimum > info.display_maximum) { return 7; }
-    } else if (type == kOfxParamTypeInteger) {
-      info.kind = 3;
+    const auto layout = numericLayout(type);
+    if (layout.kind != 0) {
+      info.kind = layout.kind;
       info.double_type = -1;
-      info.default_value = properties.getIntProperty(kOfxParamPropDefault);
-      info.minimum = properties.getIntProperty(kOfxParamPropMin);
-      info.maximum = properties.getIntProperty(kOfxParamPropMax);
-      info.display_minimum = properties.getIntProperty(kOfxParamPropDisplayMin);
-      info.display_maximum = properties.getIntProperty(kOfxParamPropDisplayMax);
-      if (info.minimum > info.maximum || info.display_minimum > info.display_maximum || info.default_value < info.minimum || info.default_value > info.maximum) { return 7; }
+      if (layout.kind == 1 || layout.kind == 7 || layout.kind == 8) {
+        const auto& doubleType = parameter->getDoubleType();
+        if (doubleType == kOfxParamDoubleTypePlain) { info.double_type = 0; }
+        else if (doubleType == kOfxParamDoubleTypeScale) { info.double_type = 1; }
+        else { return 7; }
+      }
+      const char* names[] = {kOfxParamPropDefault, kOfxParamPropMin, kOfxParamPropMax,
+                             kOfxParamPropDisplayMin, kOfxParamPropDisplayMax};
+      double* values[] = {info.default_value, info.minimum, info.maximum, info.display_minimum, info.display_maximum};
+      for (int index = 0; index < layout.dimensions; ++index) {
+        for (int field = 0; field < 5; ++field) {
+          values[field][index] = layout.integer ? properties.getIntProperty(names[field], index)
+                                               : properties.getDoubleProperty(names[field], index);
+          if (!std::isfinite(values[field][index])) { return 7; }
+        }
+        if (info.minimum[index] > info.maximum[index] || info.display_minimum[index] > info.display_maximum[index] ||
+            info.default_value[index] < info.minimum[index] || info.default_value[index] > info.maximum[index]) { return 7; }
+      }
     } else if (type == kOfxParamTypeBoolean) {
       info.kind = 2;
       info.double_type = -1;
       const int value = properties.getIntProperty(kOfxParamPropDefault);
       if (value != 0 && value != 1) { return 7; }
-      info.default_value = value;
-      info.minimum = 0.0;
-      info.maximum = 1.0;
-      info.display_minimum = 0.0;
-      info.display_maximum = 1.0;
+      info.default_value[0] = value;
+      info.minimum[0] = 0.0;
+      info.maximum[0] = 1.0;
+      info.display_minimum[0] = 0.0;
+      info.display_maximum[0] = 1.0;
     } else if (type == kOfxParamTypeString) {
       info.kind = 6;
       info.double_type = -1;
@@ -464,12 +566,12 @@ static int describe(const char* binary, const char* bundle,
       const bool stringChoice = type == kOfxParamTypeStrChoice;
       info.kind = stringChoice ? 5 : 4;
       info.double_type = -1;
-      if (!stringChoice) { info.default_value = properties.getIntProperty(kOfxParamPropDefault); }
+      if (!stringChoice) { info.default_value[0] = properties.getIntProperty(kOfxParamPropDefault); }
       if (stringChoice) { stringDefault = properties.getStringProperty(kOfxParamPropDefault); }
       const int options = properties.getDimension(kOfxParamPropChoiceOption);
       const int ranks = properties.getDimension(kOfxParamPropChoiceOrder);
       if (options < 1 || options > 4096 || (ranks != 0 && ranks != options) ||
-          (!stringChoice && (info.default_value < 0 || info.default_value >= options)) ||
+          (!stringChoice && (info.default_value[0] < 0 || info.default_value[0] >= options)) ||
           (stringChoice && properties.getDimension(kOfxParamPropChoiceEnum) != options)) { return 7; }
       if (stringChoice && stringDefault.empty()) {
         stringDefault = properties.getStringProperty(kOfxParamPropChoiceEnum, 0);
@@ -500,7 +602,7 @@ static int describe(const char* binary, const char* bundle,
       std::cerr << "unsupported parameter type: " << type << std::endl;
       return 7;
     }
-    if (type == kOfxParamTypeDouble || type == kOfxParamTypeInteger) {
+    if (layout.kind != 0) {
       const auto& interpolation = properties.getStringProperty(kOfxParamInterpType);
       if (interpolation == kOfxParamInterpTypeConstantStep) { info.preferred_interpolation = 0; }
       else if (interpolation == kOfxParamInterpTypeLinear) { info.preferred_interpolation = 1; }
@@ -558,9 +660,8 @@ extern "C" int mondrian_openfx_session_render(
 {
   if (!session) { return 2; }
   try {
-    const int status = info ? session->render(input, output, bytes, *info, parameters, count) : 2;
-    if (status != 0) { session->failed = true; }
-    return status;
+    if (!info) { session->failed = true; return 2; }
+    return session->render(input, output, bytes, *info, parameters, count);
   } catch (const std::exception& error) {
     session->failed = true;
     std::cerr << "OpenFX session render failed: " << error.what() << std::endl;

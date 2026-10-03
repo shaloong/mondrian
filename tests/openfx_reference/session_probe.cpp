@@ -13,6 +13,8 @@
 #include <string>
 #include <limits>
 #include <cmath>
+#include <array>
+#include <type_traits>
 
 namespace {
 struct ActionState { bool changing = false; int changes = 0; int renders = 0; };
@@ -21,6 +23,193 @@ std::string mode() {
   const char* value = std::getenv("MONDRIAN_OPENFX_SESSION_PROBE_MODE");
   return value ? value : "normal";
 }
+struct CompoundParameter {
+  const char* name;
+  const char* type;
+  int dimensions;
+  bool integer;
+  std::array<double, 4> defaults;
+};
+const CompoundParameter compounds[] = {
+  {"point2", kOfxParamTypeDouble2D, 2, false, {0.12500000000000003, 10.000000000000002}},
+  {"point3", kOfxParamTypeDouble3D, 3, false, {-0.5000000000000001, 1.0000000000000002, 2.0000000000000004}},
+  {"rgb", kOfxParamTypeRGB, 3, false, {0.10000000000000002, 0.20000000000000004, 0.30000000000000004}},
+  {"rgba", kOfxParamTypeRGBA, 4, false, {0.12500000000000003, 0.25000000000000006, 0.5000000000000001, 0.7500000000000001}},
+  {"integer2", kOfxParamTypeInteger2D, 2, true, {-123456789, 123456789}},
+  {"integer3", kOfxParamTypeInteger3D, 3, true, {-2147483648.0, 0, 2147483647.0}}
+};
+bool defineCompounds(const void* handle) {
+  OfxParamSetHandle params = nullptr;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK) { return false; }
+  for (const auto& parameter : compounds) {
+    OfxPropertySetHandle props = nullptr;
+    if (gParamHost->paramDefine(params, parameter.type, parameter.name, &props) != kOfxStatOK ||
+        gPropHost->propSetString(props, kOfxPropLabel, 0, parameter.name) != kOfxStatOK ||
+        gPropHost->propSetInt(props, kOfxParamPropAnimates, 0, 0) != kOfxStatOK) { return false; }
+    if ((parameter.type == std::string(kOfxParamTypeDouble2D) || parameter.type == std::string(kOfxParamTypeDouble3D)) &&
+        gPropHost->propSetString(props, kOfxParamPropDoubleType, 0, kOfxParamDoubleTypePlain) != kOfxStatOK) { return false; }
+    for (int index = 0; index < parameter.dimensions; ++index) {
+      if (parameter.integer) {
+        const int value = static_cast<int>(parameter.defaults[index]);
+        const int minimum = parameter.dimensions == 2 ? (index == 0 ? -200000000 : 0)
+            : index == 0 ? std::numeric_limits<int>::min() : index == 1 ? 0 : std::numeric_limits<int>::max() - 32;
+        const int maximum = parameter.dimensions == 2 ? (index == 0 ? -100000000 : 200000000)
+            : index == 0 ? std::numeric_limits<int>::min() + 32 : index == 1 ? 4 : std::numeric_limits<int>::max();
+        if (gPropHost->propSetInt(props, kOfxParamPropDefault, index, value) != kOfxStatOK ||
+            gPropHost->propSetInt(props, kOfxParamPropMin, index, minimum) != kOfxStatOK ||
+            gPropHost->propSetInt(props, kOfxParamPropMax, index, maximum) != kOfxStatOK ||
+            gPropHost->propSetInt(props, kOfxParamPropDisplayMin, index, minimum) != kOfxStatOK ||
+            gPropHost->propSetInt(props, kOfxParamPropDisplayMax, index, maximum) != kOfxStatOK) { return false; }
+      } else {
+        const double low = parameter.defaults[index] - index - 1;
+        const double high = parameter.defaults[index] + index + 1;
+        if (gPropHost->propSetDouble(props, kOfxParamPropDefault, index, parameter.defaults[index]) != kOfxStatOK ||
+            gPropHost->propSetDouble(props, kOfxParamPropMin, index, low) != kOfxStatOK ||
+            gPropHost->propSetDouble(props, kOfxParamPropMax, index, high) != kOfxStatOK ||
+            gPropHost->propSetDouble(props, kOfxParamPropDisplayMin, index, low) != kOfxStatOK ||
+            gPropHost->propSetDouble(props, kOfxParamPropDisplayMax, index, high) != kOfxStatOK) { return false; }
+      }
+    }
+  }
+  return true;
+}
+template<class T, int N>
+OfxStatus readCompound(OfxParamHandle parameter, bool timed, double time, std::array<double, 4>& output) {
+  std::array<T, N> values{};
+  for (int index = 0; index < N; ++index) { values[index] = static_cast<T>(output[index]); }
+  OfxStatus status;
+  if constexpr (N == 2) {
+    status = timed ? gParamHost->paramGetValueAtTime(parameter, time, &values[0], &values[1])
+                   : gParamHost->paramGetValue(parameter, &values[0], &values[1]);
+  } else if constexpr (N == 3) {
+    status = timed ? gParamHost->paramGetValueAtTime(parameter, time, &values[0], &values[1], &values[2])
+                   : gParamHost->paramGetValue(parameter, &values[0], &values[1], &values[2]);
+  } else {
+    status = timed ? gParamHost->paramGetValueAtTime(parameter, time, &values[0], &values[1], &values[2], &values[3])
+                   : gParamHost->paramGetValue(parameter, &values[0], &values[1], &values[2], &values[3]);
+  }
+  for (int index = 0; index < N; ++index) { output[index] = values[index]; }
+  return status;
+}
+template<class T, int N>
+OfxStatus writeCompound(OfxParamHandle parameter, bool timed, double time, const std::array<double, 4>& value) {
+  std::array<T, N> values{};
+  for (int index = 0; index < N; ++index) { values[index] = static_cast<T>(value[index]); }
+  if constexpr (N == 2) {
+    return timed ? gParamHost->paramSetValueAtTime(parameter, time, values[0], values[1])
+                 : gParamHost->paramSetValue(parameter, values[0], values[1]);
+  } else if constexpr (N == 3) {
+    return timed ? gParamHost->paramSetValueAtTime(parameter, time, values[0], values[1], values[2])
+                 : gParamHost->paramSetValue(parameter, values[0], values[1], values[2]);
+  } else {
+    return timed ? gParamHost->paramSetValueAtTime(parameter, time, values[0], values[1], values[2], values[3])
+                 : gParamHost->paramSetValue(parameter, values[0], values[1], values[2], values[3]);
+  }
+}
+template<int N>
+OfxStatus compoundCalculus(OfxParamHandle parameter, bool integral, double start, double end, std::array<double, 4>& output) {
+  if constexpr (N == 2) {
+    return integral ? gParamHost->paramGetIntegral(parameter, start, end, &output[0], &output[1])
+                    : gParamHost->paramGetDerivative(parameter, start, &output[0], &output[1]);
+  } else if constexpr (N == 3) {
+    return integral ? gParamHost->paramGetIntegral(parameter, start, end, &output[0], &output[1], &output[2])
+                    : gParamHost->paramGetDerivative(parameter, start, &output[0], &output[1], &output[2]);
+  } else {
+    return integral ? gParamHost->paramGetIntegral(parameter, start, end, &output[0], &output[1], &output[2], &output[3])
+                    : gParamHost->paramGetDerivative(parameter, start, &output[0], &output[1], &output[2], &output[3]);
+  }
+}
+template<class T, int N>
+bool compoundSuite(OfxParamHandle parameter, const CompoundParameter& definition, bool creating, bool rendering, double time) {
+  std::array<double, 4> saved{};
+  if (readCompound<T, N>(parameter, rendering, time, saved) != kOfxStatOK ||
+      (creating && saved != definition.defaults)) { return false; }
+  for (double query : {-3.25, 0.0, 9.5}) {
+    std::array<double, 4> actual{};
+    if (readCompound<T, N>(parameter, true, query, actual) != kOfxStatOK || actual != saved) { return false; }
+  }
+  for (double query : {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
+    std::array<double, 4> actual{-999, -999, -999, -999};
+    const auto sentinel = actual;
+    if (readCompound<T, N>(parameter, true, query, actual) != kOfxStatErrValue || actual != sentinel) { return false; }
+    if (!rendering && writeCompound<T, N>(parameter, true, query, saved) != kOfxStatErrValue) { return false; }
+  }
+  if constexpr (std::is_same_v<T, double>) {
+    std::array<double, 4> derivative{};
+    if (compoundCalculus<N>(parameter, false, -3.25, 0.0, derivative) != kOfxStatOK ||
+        derivative != std::array<double, 4>{}) { return false; }
+    for (double interval : {5.0, -5.0}) {
+      std::array<double, 4> actual{}, expected{};
+      for (int index = 0; index < N; ++index) { expected[index] = saved[index] * interval; }
+      if (compoundCalculus<N>(parameter, true, 0.0, interval, actual) != kOfxStatOK || actual != expected) { return false; }
+    }
+    std::array<double, 4> zero{};
+    const double largest = std::numeric_limits<double>::max();
+    if (compoundCalculus<N>(parameter, true, largest, largest, zero) != kOfxStatOK ||
+        zero != std::array<double, 4>{}) { return false; }
+    for (bool integral : {false, true}) {
+      std::array<double, 4> actual{-999, -999, -999, -999};
+      const auto sentinel = actual;
+      if (compoundCalculus<N>(parameter, integral, std::numeric_limits<double>::quiet_NaN(), 1.0, actual) != kOfxStatErrValue ||
+          actual != sentinel) { return false; }
+    }
+    std::array<double, 4> huge{-999, -999, -999, -999};
+    const auto sentinel = huge;
+    const bool representable = definition.type == std::string(kOfxParamTypeRGB);
+    const auto status = compoundCalculus<N>(parameter, true, -largest, largest, huge);
+    if (representable) {
+      if (status != kOfxStatOK) { return false; }
+      for (int index = 0; index < N; ++index) {
+        if (!std::isfinite(huge[index]) || huge[index] != (saved[index] * largest) * 2.0) { return false; }
+      }
+    } else if (status != kOfxStatErrValue || huge != sentinel) { return false; }
+  }
+  if (!rendering) {
+    OfxPropertySetHandle props = nullptr;
+    if (gParamHost->paramGetPropertySet(parameter, &props) != kOfxStatOK) { return false; }
+    auto rejected = saved;
+    rejected[0] = std::is_same_v<T, int> ? saved[0] + 1 : std::nextafter(saved[0], std::numeric_limits<double>::infinity());
+    if constexpr (std::is_same_v<T, int>) {
+      int minimum = 0;
+      if (gPropHost->propGetInt(props, kOfxParamPropMin, 1, &minimum) != kOfxStatOK) { return false; }
+      rejected[1] = minimum - 1.0;
+    } else {
+      double minimum = 0;
+      if (gPropHost->propGetDouble(props, kOfxParamPropMin, 1, &minimum) != kOfxStatOK) { return false; }
+      rejected[1] = minimum - 1.0;
+    }
+    std::array<double, 4> after{};
+    if (writeCompound<T, N>(parameter, false, 0.0, rejected) != kOfxStatErrValue ||
+        readCompound<T, N>(parameter, false, 0.0, after) != kOfxStatOK || after != saved) { return false; }
+    if (creating && writeCompound<T, N>(parameter, false, 0.0, saved) != kOfxStatOK) { return false; }
+  }
+  return true;
+}
+bool compoundValues(const void* handle, OfxPropertySetHandle in, bool creating, bool rendering) {
+  OfxParamSetHandle params = nullptr;
+  double time = 0.0;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK) { return false; }
+  if (rendering && gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK) { return false; }
+  for (const auto& definition : compounds) {
+    OfxParamHandle parameter = nullptr;
+    if (gParamHost->paramGetHandle(params, definition.name, &parameter, nullptr) != kOfxStatOK) { return false; }
+    bool valid;
+    if (definition.integer) {
+      valid = definition.dimensions == 2 ? compoundSuite<int, 2>(parameter, definition, creating, rendering, time)
+                                        : compoundSuite<int, 3>(parameter, definition, creating, rendering, time);
+    } else if (definition.dimensions == 2) {
+      valid = compoundSuite<double, 2>(parameter, definition, creating, rendering, time);
+    } else if (definition.dimensions == 3) {
+      valid = compoundSuite<double, 3>(parameter, definition, creating, rendering, time);
+    } else {
+      valid = compoundSuite<double, 4>(parameter, definition, creating, rendering, time);
+    }
+    if (!valid) { return false; }
+  }
+  return true;
+}
+
+
 void property(const void* handle, const char* name, int value) {
   OfxPropertySetHandle props = nullptr;
   gEffectHost->getPropertySet((OfxImageEffectHandle)handle, &props);
@@ -368,7 +557,16 @@ OfxStatus probe(const char* action, const void* handle,
       }
     }
   }
+  if (selected == "compound" &&
+      (operation == kOfxActionCreateInstance || operation == kOfxActionInstanceChanged || operation == kOfxImageEffectActionRender) &&
+      !compoundValues(handle, in, operation == kOfxActionCreateInstance, operation == kOfxImageEffectActionRender)) {
+    return kOfxStatFailed;
+  }
   const OfxStatus result = pluginMain(action, handle, in, out);
+  if (selected == "compound" && result == kOfxStatOK &&
+      operation == kOfxImageEffectActionDescribeInContext && !defineCompounds(handle)) {
+    return kOfxStatFailed;
+  }
   if (selected.find("strings") == 0 && operation == kOfxImageEffectActionRender &&
       result == kOfxStatOK && !stringValues(handle, in, true)) { return kOfxStatFailed; }
 

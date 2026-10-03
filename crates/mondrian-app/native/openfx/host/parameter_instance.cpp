@@ -4,6 +4,8 @@
 #include <iostream>
 #include <fstream>
 #include <cmath>
+#include <stdexcept>
+#include <type_traits>
 
 // ofx
 #include "ofxCore.h"
@@ -38,7 +40,7 @@ namespace MondrianOpenFx {
   IntegerParameter::IntegerParameter(FilterEffectInstance* effect,
                                        const std::string& name,
                                        OFX::Host::Param::Descriptor& descriptor)
-    : _effect(effect), _descriptor(descriptor), _value(descriptor.getProperties().getIntProperty(kOfxParamPropDefault)), OFX::Host::Param::IntegerInstance(descriptor, effect)
+    : OFX::Host::Param::IntegerInstance(descriptor, effect), _effect(effect), _descriptor(descriptor), _value(descriptor.getProperties().getIntProperty(kOfxParamPropDefault))
   {
   }
 
@@ -74,7 +76,7 @@ namespace MondrianOpenFx {
   DoubleParameter::DoubleParameter(FilterEffectInstance* effect,
                                      const std::string& name,
                                      OFX::Host::Param::Descriptor& descriptor)
-    : _effect(effect), _descriptor(descriptor), _value(descriptor.getProperties().getDoubleProperty(kOfxParamPropDefault)), OFX::Host::Param::DoubleInstance(descriptor, effect)
+    : OFX::Host::Param::DoubleInstance(descriptor, effect), _effect(effect), _descriptor(descriptor), _value(descriptor.getProperties().getDoubleProperty(kOfxParamPropDefault))
   {
   }
 
@@ -143,7 +145,7 @@ namespace MondrianOpenFx {
   BooleanParameter::BooleanParameter(FilterEffectInstance* effect,
                                        const std::string& name,
                                        OFX::Host::Param::Descriptor& descriptor)
-    : _effect(effect), _descriptor(descriptor), _value(descriptor.getProperties().getIntProperty(kOfxParamPropDefault) != 0), OFX::Host::Param::BooleanInstance(descriptor, effect)
+    : OFX::Host::Param::BooleanInstance(descriptor, effect), _effect(effect), _descriptor(descriptor), _value(descriptor.getProperties().getIntProperty(kOfxParamPropDefault) != 0)
   {
   }
 
@@ -278,138 +280,108 @@ namespace MondrianOpenFx {
     return time == _effect->frameState().info.frame ? set(value) : kOfxStatErrMissingHostFeature;
   }
 
-  //
-  // RgbaParameter
-  //
-
-  RgbaParameter::RgbaParameter(FilterEffectInstance* effect,
-                                 const std::string& name,
-                                 OFX::Host::Param::Descriptor& descriptor)
-    : _effect(effect), _descriptor(descriptor), OFX::Host::Param::RGBAInstance(descriptor, effect)
-  {
+  template<class T, size_t N>
+  T NumericTupleState<T, N>::property(const char* name, size_t index) const {
+    const auto& properties = _descriptor.getProperties();
+    if constexpr (std::is_same_v<T, double>) {
+      return properties.getDoubleProperty(name, static_cast<int>(index));
+    } else {
+      return properties.getIntProperty(name, static_cast<int>(index));
+    }
   }
 
-  OfxStatus RgbaParameter::get(double&,double&,double&,double&)
-  {
-    return kOfxStatErrMissingHostFeature;
+  template<class T, size_t N>
+  bool NumericTupleState<T, N>::admits(const std::array<T, N>& values) const {
+    for (size_t index = 0; index < N; ++index) {
+      if (!std::isfinite(values[index]) || values[index] < property(kOfxParamPropMin, index) ||
+          values[index] > property(kOfxParamPropMax, index)) { return false; }
+    }
+    return true;
   }
 
-  OfxStatus RgbaParameter::get(OfxTime time, double&,double&,double&,double&)
-  {
-    return kOfxStatErrMissingHostFeature;
+  template<class T, size_t N>
+  NumericTupleState<T, N>::NumericTupleState(FilterEffectInstance* effect, OFX::Host::Param::Descriptor& descriptor)
+      : _effect(effect), _descriptor(descriptor) {
+    for (size_t index = 0; index < N; ++index) { _values[index] = property(kOfxParamPropDefault, index); }
+    if (!admits(_values)) { throw std::runtime_error("invalid OpenFX compound default"); }
   }
 
-  OfxStatus RgbaParameter::set(double,double,double,double)
-  {
-    return kOfxStatErrMissingHostFeature;
+  template<class T, size_t N>
+  OfxStatus NumericTupleState<T, N>::read(const std::array<T*, N>& outputs) const {
+    for (size_t index = 0; index < N; ++index) { *outputs[index] = _values[index]; }
+    return kOfxStatOK;
   }
 
-  OfxStatus RgbaParameter::set(OfxTime time, double,double,double,double)
-  {
-    return kOfxStatErrMissingHostFeature;
+  template<class T, size_t N>
+  OfxStatus NumericTupleState<T, N>::read(OfxTime time, const std::array<T*, N>& outputs) const {
+    if (!std::isfinite(time)) { return kOfxStatErrValue; }
+    if (_descriptor.getCanAnimate() && time != _effect->frameState().info.frame) {
+      return kOfxStatErrMissingHostFeature;
+    }
+    return read(outputs);
   }
 
-  //
-  // RgbParameter
-  //
-
-  RgbParameter::RgbParameter(FilterEffectInstance* effect,
-                               const std::string& name,
-                               OFX::Host::Param::Descriptor& descriptor)
-    : _effect(effect), _descriptor(descriptor), OFX::Host::Param::RGBInstance(descriptor, effect)
-  {
+  template<class T, size_t N>
+  OfxStatus NumericTupleState<T, N>::write(const std::array<T, N>& values) {
+    if (!admits(values)) { return kOfxStatErrValue; }
+    _values = values;
+    return kOfxStatOK;
   }
 
-  OfxStatus RgbParameter::get(double&,double&,double&)
-  {
-    return kOfxStatErrMissingHostFeature;
+  template<class T, size_t N>
+  OfxStatus NumericTupleState<T, N>::write(OfxTime time, const std::array<T, N>& values) {
+    if (!std::isfinite(time)) { return kOfxStatErrValue; }
+    if (_descriptor.getCanAnimate() && time != _effect->frameState().info.frame) {
+      return kOfxStatErrMissingHostFeature;
+    }
+    return write(values);
   }
 
-  OfxStatus RgbParameter::get(OfxTime time, double&,double&,double&)
-  {
-    return kOfxStatErrMissingHostFeature;
+  template<class T, size_t N>
+  OfxStatus NumericTupleState<T, N>::derive(OfxTime time, const std::array<T*, N>& outputs) const {
+    if constexpr (!std::is_same_v<T, double>) {
+      return kOfxStatErrUnsupported;
+    } else {
+      if (!std::isfinite(time)) { return kOfxStatErrValue; }
+      if (_descriptor.getCanAnimate()) { return kOfxStatErrMissingHostFeature; }
+      for (auto* output : outputs) { *output = 0; }
+      return kOfxStatOK;
+    }
   }
 
-  OfxStatus RgbParameter::set(double,double,double)
-  {
-    return kOfxStatErrMissingHostFeature;
+  template<class T, size_t N>
+  OfxStatus NumericTupleState<T, N>::integrate(OfxTime start, OfxTime end, const std::array<T*, N>& outputs) const {
+    if constexpr (!std::is_same_v<T, double>) {
+      return kOfxStatErrUnsupported;
+    } else {
+      if (!std::isfinite(start) || !std::isfinite(end)) { return kOfxStatErrValue; }
+      if (_descriptor.getCanAnimate()) { return kOfxStatErrMissingHostFeature; }
+      std::array<T, N> result{};
+      const double interval = end - start;
+      for (size_t index = 0; index < N; ++index) {
+        if (_values[index] != 0 && start != end) {
+          result[index] = std::isfinite(interval) ? _values[index] * interval
+              : (_values[index] * (end * 0.5 - start * 0.5)) * 2.0;
+          if (!std::isfinite(result[index])) { return kOfxStatErrValue; }
+        }
+      }
+      for (size_t index = 0; index < N; ++index) { *outputs[index] = result[index]; }
+      return kOfxStatOK;
+    }
   }
 
-  OfxStatus RgbParameter::set(OfxTime time, double,double,double)
-  {
-    return kOfxStatErrMissingHostFeature;
-  }
+  template class NumericTupleState<double, 2>;
+  template class NumericTupleState<double, 3>;
+  template class NumericTupleState<double, 4>;
+  template class NumericTupleState<int, 2>;
+  template class NumericTupleState<int, 3>;
 
-  //
-  // Double2DParameter
-  //
-
-  Double2DParameter::Double2DParameter(FilterEffectInstance* effect,
-                                         const std::string& name,
-                                         OFX::Host::Param::Descriptor& descriptor)
-    : _effect(effect), _descriptor(descriptor), OFX::Host::Param::Double2DInstance(descriptor, effect)
-  {
-  }
-
-  OfxStatus Double2DParameter::get(double&,double&)
-  {
-    return kOfxStatErrMissingHostFeature;
-  }
-
-  OfxStatus Double2DParameter::get(OfxTime time,double&,double&)
-  {
-    return kOfxStatErrMissingHostFeature;
-  }
-
-  OfxStatus Double2DParameter::set(double,double)
-  {
-    return kOfxStatErrMissingHostFeature;
-  }
-
-  OfxStatus Double2DParameter::set(OfxTime time,double,double)
-  {
-    return kOfxStatErrMissingHostFeature;
-  }
-
-  //
-  // Integer2DParameter
-  //
-
-  Integer2DParameter::Integer2DParameter(FilterEffectInstance* effect,
-                                           const std::string& name,
-                                           OFX::Host::Param::Descriptor& descriptor)
-    : _effect(effect), _descriptor(descriptor), OFX::Host::Param::Integer2DInstance(descriptor, effect)
-  {
-  }
-
-  OfxStatus Integer2DParameter::get(int&,int&)
-  {
-    return kOfxStatErrMissingHostFeature;
-  }
-
-  OfxStatus Integer2DParameter::get(OfxTime time,int&,int&)
-  {
-    return kOfxStatErrMissingHostFeature;
-  }
-
-  OfxStatus Integer2DParameter::set(int,int)
-  {
-    return kOfxStatErrMissingHostFeature;
-  }
-
-  OfxStatus Integer2DParameter::set(OfxTime time,int,int)
-  {
-    return kOfxStatErrMissingHostFeature;
-  }
-
-  //
-  // Integer2DParameter
   //
 
   PushbuttonParameter::PushbuttonParameter(FilterEffectInstance* effect,
                                              const std::string& name,
                                              OFX::Host::Param::Descriptor& descriptor)
-    : _effect(effect), _descriptor(descriptor), OFX::Host::Param::PushbuttonInstance(descriptor, effect)
+    : OFX::Host::Param::PushbuttonInstance(descriptor, effect), _effect(effect), _descriptor(descriptor)
   {
   }
 

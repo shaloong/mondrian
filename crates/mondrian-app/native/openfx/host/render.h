@@ -15,8 +15,8 @@ enum {
 
 struct MondrianOpenFxParameter {
   const char* name;
-  int kind; // 1: double, 2: boolean, 3: integer, 4: choice, 5: string choice, 6: string
-  double value;
+  int kind; // 1: double, 2: boolean, 3: integer, 4: choice, 5: string choice, 6: string; 7: Double2D, 8: Double3D, 9: RGB, 10: RGBA, 11: Integer2D, 12: Integer3D
+  double value[4];
   const char* string_value;
   size_t string_length;
 };
@@ -47,14 +47,14 @@ struct MondrianOpenFxParameterInfo {
   size_t label_length;
   const char* hint;
   size_t hint_length;
-  int kind; // 1: double, 2: boolean, 3: integer, 4: choice, 5: string choice, 6: string
+  int kind; // 1: double, 2: boolean, 3: integer, 4: choice, 5: string choice, 6: string; 7: Double2D, 8: Double3D, 9: RGB, 10: RGBA, 11: Integer2D, 12: Integer3D
   int preferred_interpolation; // 0: hold, 1: linear, 2: smooth
   int double_type; // 0: plain, 1: scale, -1: not a Double
-  double default_value;
-  double minimum;
-  double maximum;
-  double display_minimum;
-  double display_maximum;
+  double default_value[4];
+  double minimum[4];
+  double maximum[4];
+  double display_minimum[4];
+  double display_maximum[4];
   int can_animate;
   int secret;
   int enabled;

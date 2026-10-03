@@ -26,6 +26,11 @@ fn build_openfx_host() {
     let vendor = std::path::Path::new("native/openfx/vendor");
     let mut build = cc::Build::new();
     build.cpp(true).std("c++17").define("NOMINMAX", None);
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        // SDK callbacks throw structured status exceptions; unwind their native
+        // owners before the C ABI converts a failure into a status code.
+        build.flag("/EHsc");
+    }
     build.include(vendor.join("include"));
     build.include(vendor.join("host/include"));
     for name in [

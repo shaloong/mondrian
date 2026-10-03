@@ -670,3 +670,42 @@ Allowing an absent path must not imply that the plugin writes that path or that
 packaging may discard it. The owned `strings_paths` probe qualifies all four
 file/directory existence variants through real native Float32 rendering and
 the resource dialog's authoring, Undo/Redo and durable reopen workflow.
+
+
+## Native compound parameter execution foundation
+
+The matched C/Rust execution ABI carries one fixed four-slot numeric packet per
+SDK parameter; the native kind determines its active dimension. Double2D,
+Double3D, RGB and RGBA retain SDK double precision. Integer2D/Integer3D use
+signed 32-bit components, represented exactly by the ABI doubles and checked
+before conversion. Defaults and hard/display bounds preserve each component's
+index. No compound parameter is split into scalar author identities.
+
+A shared bounded native tuple state implements the six SDK instance interfaces.
+It validates every component before assigning the complete tuple. Snapshot
+application similarly validates all parameter targets before assigning values
+or invoking grouped change callbacks. Static finite-time queries retain the
+snapshot; invalid times and rejected setters preserve caller outputs and state.
+Static floating tuples provide zero derivatives and finite constant integrals,
+including reversed intervals and representable results whose interval alone
+would overflow. Animated historical access still requires author-curve binding.
+
+A parameter snapshot rejected before the native commit boundary leaves the
+instance usable and restores its last accepted timing. Violations of the
+prepared frame/storage contract remain transport faults that retire the instance. Once parameter assignment or a
+plugin action starts, the instance remains failed until the complete render
+succeeds. Exceptions and callback/image-lifetime failures retire the instance;
+the supervised public transport also retires its worker on request failure.
+MSVC explicitly enables exception unwinding so native owners are destroyed
+before C ABI exception handlers return a status. Template SDK base names avoid
+colliding with the inherited HostSupport `Param::Base` type.
+
+The owned pinned Basic wrapper exercises all six tuple defaults beyond Float32
+precision, asymmetric bounds, int32 extremes, static-time reads, atomic rejected
+setters and floating derivative/integral output preservation. Raw native frame
+qualification additionally checks malformed whole snapshots preserve output and
+permit a subsequent valid request; existing failing-plugin tests require failed
+instances to remain retired. This is execution foundation only: public typed
+compound descriptions, exact canonical author tuple types, Inspector binding,
+Undo/archive/compiled-graph output, spatial/time/color interpretation and the
+vendor matrix remain separate outstanding qualification work.

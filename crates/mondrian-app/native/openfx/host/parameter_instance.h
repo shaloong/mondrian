@@ -3,6 +3,8 @@
 #ifndef HOST_DEMO_PARAM_INSTANCE_H
 #define HOST_DEMO_PARAM_INSTANCE_H
 
+#include <array>
+
 namespace MondrianOpenFx {
 
   class PushbuttonParameter : public OFX::Host::Param::PushbuttonInstance {
@@ -89,53 +91,72 @@ namespace MondrianOpenFx {
     OfxStatus set(OfxTime time, const char*) override;
   };
 
-  class RgbaParameter : public OFX::Host::Param::RGBAInstance {
-  protected:
-    FilterEffectInstance*   _effect;
+  // Bounded execution snapshot for one atomic SDK parameter.
+  template<class T, size_t N>
+  class NumericTupleState {
+    FilterEffectInstance* _effect;
     OFX::Host::Param::Descriptor& _descriptor;
+    std::array<T, N> _values;
+    T property(const char* name, size_t index) const;
+    bool admits(const std::array<T, N>& values) const;
   public:
-    RgbaParameter(FilterEffectInstance* effect, const std::string& name, OFX::Host::Param::Descriptor& descriptor);
-    OfxStatus get(double&,double&,double&,double&);
-    OfxStatus get(OfxTime time, double&,double&,double&,double&);
-    OfxStatus set(double,double,double,double);
-    OfxStatus set(OfxTime time, double,double,double,double);
+    NumericTupleState(FilterEffectInstance* effect, OFX::Host::Param::Descriptor& descriptor);
+    OfxStatus read(const std::array<T*, N>& outputs) const;
+    OfxStatus read(OfxTime time, const std::array<T*, N>& outputs) const;
+    OfxStatus write(const std::array<T, N>& values);
+    OfxStatus write(OfxTime time, const std::array<T, N>& values);
+    OfxStatus derive(OfxTime time, const std::array<T*, N>& outputs) const;
+    OfxStatus integrate(OfxTime start, OfxTime end, const std::array<T*, N>& outputs) const;
   };
 
+  template<class SdkInstance, class T, size_t N> class NumericTupleParameter;
 
-  class RgbParameter : public OFX::Host::Param::RGBInstance {
-  protected:
-    FilterEffectInstance*   _effect;
-    OFX::Host::Param::Descriptor& _descriptor;
+  template<class SdkInstance, class T>
+  class NumericTupleParameter<SdkInstance, T, 2> : public SdkInstance {
+    NumericTupleState<T, 2> _value;
   public:
-    RgbParameter(FilterEffectInstance* effect,  const std::string& name, OFX::Host::Param::Descriptor& descriptor);
-    OfxStatus get(double&,double&,double&);
-    OfxStatus get(OfxTime time, double&,double&,double&);
-    OfxStatus set(double,double,double);
-    OfxStatus set(OfxTime time, double,double,double);
+    NumericTupleParameter(FilterEffectInstance* effect, OFX::Host::Param::Descriptor& descriptor)
+        : SdkInstance(descriptor, effect), _value(effect, descriptor) {}
+    OfxStatus get(T& x, T& y) override { return _value.read({&x, &y}); }
+    OfxStatus get(OfxTime time, T& x, T& y) override { return _value.read(time, {&x, &y}); }
+    OfxStatus set(T x, T y) override { return _value.write({x, y}); }
+    OfxStatus set(OfxTime time, T x, T y) override { return _value.write(time, {x, y}); }
+    OfxStatus derive(OfxTime time, T& x, T& y) override { return _value.derive(time, {&x, &y}); }
+    OfxStatus integrate(OfxTime start, OfxTime end, T& x, T& y) override {
+      return _value.integrate(start, end, {&x, &y});
+    }
   };
 
-  class Double2DParameter : public OFX::Host::Param::Double2DInstance {
-  protected:
-    FilterEffectInstance*   _effect;
-    OFX::Host::Param::Descriptor& _descriptor;
+  template<class SdkInstance, class T>
+  class NumericTupleParameter<SdkInstance, T, 3> : public SdkInstance {
+    NumericTupleState<T, 3> _value;
   public:
-    Double2DParameter(FilterEffectInstance* effect, const std::string& name, OFX::Host::Param::Descriptor& descriptor);
-    OfxStatus get(double&,double&);
-    OfxStatus get(OfxTime time,double&,double&);
-    OfxStatus set(double,double);
-    OfxStatus set(OfxTime time,double,double);
+    NumericTupleParameter(FilterEffectInstance* effect, OFX::Host::Param::Descriptor& descriptor)
+        : SdkInstance(descriptor, effect), _value(effect, descriptor) {}
+    OfxStatus get(T& x, T& y, T& z) override { return _value.read({&x, &y, &z}); }
+    OfxStatus get(OfxTime time, T& x, T& y, T& z) override { return _value.read(time, {&x, &y, &z}); }
+    OfxStatus set(T x, T y, T z) override { return _value.write({x, y, z}); }
+    OfxStatus set(OfxTime time, T x, T y, T z) override { return _value.write(time, {x, y, z}); }
+    OfxStatus derive(OfxTime time, T& x, T& y, T& z) override { return _value.derive(time, {&x, &y, &z}); }
+    OfxStatus integrate(OfxTime start, OfxTime end, T& x, T& y, T& z) override {
+      return _value.integrate(start, end, {&x, &y, &z});
+    }
   };
 
-  class Integer2DParameter : public OFX::Host::Param::Integer2DInstance {
-  protected:
-    FilterEffectInstance*   _effect;
-    OFX::Host::Param::Descriptor& _descriptor;
+  template<class SdkInstance, class T>
+  class NumericTupleParameter<SdkInstance, T, 4> : public SdkInstance {
+    NumericTupleState<T, 4> _value;
   public:
-    Integer2DParameter(FilterEffectInstance* effect,  const std::string& name, OFX::Host::Param::Descriptor& descriptor);
-    OfxStatus get(int&,int&);
-    OfxStatus get(OfxTime time,int&,int&);
-    OfxStatus set(int,int);
-    OfxStatus set(OfxTime time,int,int);
+    NumericTupleParameter(FilterEffectInstance* effect, OFX::Host::Param::Descriptor& descriptor)
+        : SdkInstance(descriptor, effect), _value(effect, descriptor) {}
+    OfxStatus get(T& x, T& y, T& z, T& w) override { return _value.read({&x, &y, &z, &w}); }
+    OfxStatus get(OfxTime time, T& x, T& y, T& z, T& w) override { return _value.read(time, {&x, &y, &z, &w}); }
+    OfxStatus set(T x, T y, T z, T w) override { return _value.write({x, y, z, w}); }
+    OfxStatus set(OfxTime time, T x, T y, T z, T w) override { return _value.write(time, {x, y, z, w}); }
+    OfxStatus derive(OfxTime time, T& x, T& y, T& z, T& w) override { return _value.derive(time, {&x, &y, &z, &w}); }
+    OfxStatus integrate(OfxTime start, OfxTime end, T& x, T& y, T& z, T& w) override {
+      return _value.integrate(start, end, {&x, &y, &z, &w});
+    }
   };
 
 
