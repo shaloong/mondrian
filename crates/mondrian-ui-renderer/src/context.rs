@@ -178,8 +178,10 @@ pub struct UiRenderFrameStats {
     pub raster_image_upload_bytes: u64,
     /// Bytes written to per-frame uniform buffers.
     pub uniform_upload_bytes: u64,
-    /// Bytes written to per-batch vertex buffers.
+    /// Bytes written to the frame's packed vertex buffer.
     pub vertex_buffer_upload_bytes: u64,
+    /// Vertex buffer allocations for this frame: zero when empty, otherwise one.
+    pub vertex_buffer_allocations: u32,
     /// Total bytes uploaded by this renderer entry point.
     ///
     /// This excludes glyph uploads, because glyphs are uploaded through
@@ -940,6 +942,40 @@ impl UiRenderer {
             }],
         });
 
+        // Batch boundaries preserve painter order, texture and scissor state;
+        // they do not require separate GPU allocations. Upload only drawable
+        // batches into one frame-owned buffer. wgpu retains it until the real
+        // submission retires, so no reuse pool or completion inference is needed.
+        let mut vertices = Vec::<RectVertex>::with_capacity(stats.vertex_count);
+        let mut draws = Vec::with_capacity(batches.len());
+        for batch in &batches {
+            if batch.vertices.is_empty() {
+                stats.skipped_empty_batches = stats.skipped_empty_batches.saturating_add(1);
+                continue;
+            }
+            let Some(scissor) = scissor_rect_for_clip(batch.clip_rect, screen_size) else {
+                stats.skipped_scissor_batches = stats.skipped_scissor_batches.saturating_add(1);
+                continue;
+            };
+            if self.texture_bind_group_for_batch_key(batch.texture_key.as_deref()).is_none() {
+                stats.failed_external_textures = stats.failed_external_textures.saturating_add(1);
+                continue;
+            }
+            let start = std::mem::size_of_val(vertices.as_slice()) as u64;
+            vertices.extend_from_slice(&batch.vertices);
+            let end = std::mem::size_of_val(vertices.as_slice()) as u64;
+            draws.push((batch, scissor, start..end));
+        }
+        let vertex_buffer = (!vertices.is_empty()).then(|| {
+            stats.vertex_buffer_allocations = 1;
+            stats.vertex_buffer_upload_bytes = std::mem::size_of_val(vertices.as_slice()) as u64;
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("ui_frame_vertices"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            })
+        });
+
         let mut encoder = device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ui_encoder") });
 
@@ -959,7 +995,15 @@ impl UiRenderer {
                     resolve_target,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }),
-                        store: wgpu::StoreOp::Store,
+                        // Only the resolved pixels are consumed. The next
+                        // frame clears the multisample attachment, so storing
+                        // its four samples adds bandwidth without preserving
+                        // any product output or improving antialiasing.
+                        store: if resolve_target.is_some() {
+                            wgpu::StoreOp::Discard
+                        } else {
+                            wgpu::StoreOp::Store
+                        },
                     },
                     depth_slice: None,
                 })],
@@ -971,17 +1015,7 @@ impl UiRenderer {
 
             rpass.set_bind_group(0, &bind_group, &[]);
 
-            for batch in &batches {
-                if batch.vertices.is_empty() {
-                    stats.skipped_empty_batches = stats.skipped_empty_batches.saturating_add(1);
-                    continue;
-                }
-                let Some((x, y, width, height)) =
-                    scissor_rect_for_clip(batch.clip_rect, screen_size)
-                else {
-                    stats.skipped_scissor_batches = stats.skipped_scissor_batches.saturating_add(1);
-                    continue;
-                };
+            for (batch, (x, y, width, height), vertex_range) in draws {
                 rpass.set_scissor_rect(x, y, width, height);
                 rpass.set_pipeline(self.pipeline_for_batch_key(batch.texture_key.as_deref()));
                 let Some(texture_bind_group) =
@@ -1012,20 +1046,17 @@ impl UiRenderer {
                 }
                 rpass.set_bind_group(1, texture_bind_group, &[]);
 
-                let vertex_data: &[RectVertex] = &batch.vertices;
-                let vertex_bytes = std::mem::size_of_val(vertex_data) as u64;
-                let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("ui_vb"),
-                    contents: bytemuck::cast_slice(vertex_data),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-                rpass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                rpass.draw(0..vertex_data.len() as u32, 0..1);
+                rpass.set_vertex_buffer(
+                    0,
+                    vertex_buffer
+                        .as_ref()
+                        .expect("drawable batch has packed vertices")
+                        .slice(vertex_range),
+                );
+                rpass.draw(0..batch.vertices.len() as u32, 0..1);
                 stats.submitted_batches = stats.submitted_batches.saturating_add(1);
                 stats.submitted_vertices =
-                    stats.submitted_vertices.saturating_add(vertex_data.len());
-                stats.vertex_buffer_upload_bytes =
-                    stats.vertex_buffer_upload_bytes.saturating_add(vertex_bytes);
+                    stats.submitted_vertices.saturating_add(batch.vertices.len());
             }
         }
 
@@ -1195,6 +1226,52 @@ mod tests {
             stats.uniform_upload_bytes + stats.vertex_buffer_upload_bytes
         );
         assert!(stats.frame_cpu_time_micros > 0);
+    }
+
+    #[test]
+    fn offscreen_renderer_preserves_clipped_texture_and_painter_order_in_packed_vertices() {
+        let Some(mut harness) = OffscreenHarness::new(32, 32) else {
+            return;
+        };
+        let red = Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
+        let blue = Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 };
+        let full = Rect::new(0.0, 0.0, 32.0, 32.0);
+        let mut encoder = DrawEncoder::new();
+        encoder.draw_rect(full, red, 0.0);
+        encoder.push_clip(Rect::new(8.0, 8.0, 16.0, 16.0));
+        encoder.draw_raster_image(
+            "packed.green",
+            full,
+            1,
+            1,
+            RasterImageColorSpace::Srgb,
+            std::sync::Arc::from(vec![0, 255, 0, 255]),
+            Color::WHITE,
+        );
+        encoder.pop_clip();
+        encoder.push_clip(Rect::new(40.0, 40.0, 4.0, 4.0));
+        encoder.draw_rect(full, blue, 0.0);
+        encoder.pop_clip();
+        encoder.draw_rect(Rect::new(12.0, 12.0, 8.0, 8.0), blue, 0.0);
+
+        let pixels = harness.render(encoder.finish());
+        for (x, y, expected) in [
+            (4, 4, [255, 0, 0, 255]),
+            (10, 10, [0, 255, 0, 255]),
+            (16, 16, [0, 0, 255, 255]),
+            (22, 22, [0, 255, 0, 255]),
+            (28, 28, [255, 0, 0, 255]),
+        ] {
+            assert_eq!(pixel(&pixels, 32, x, y), expected, "pixel ({x},{y})");
+        }
+        let stats = harness.last_stats.unwrap();
+        assert_eq!(stats.submitted_batches, 3);
+        assert_eq!(stats.skipped_scissor_batches, 1);
+        assert_eq!(stats.vertex_buffer_allocations, 1);
+        assert_eq!(
+            stats.vertex_buffer_upload_bytes,
+            (stats.submitted_vertices * std::mem::size_of::<RectVertex>()) as u64
+        );
     }
 
     #[test]
