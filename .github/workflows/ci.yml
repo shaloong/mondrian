@@ -299,6 +299,11 @@ jobs:
       - name: 测试
         run: cargo test --workspace --exclude mondrian-app
 
+      - name: 编译默认 App 产品入口
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo build -p mondrian-app --bin mondrian -j1
+
       - name: 测试完整 App 产品路径
         env:
           CARGO_INCREMENTAL: "0"

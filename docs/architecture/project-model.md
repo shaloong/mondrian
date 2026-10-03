@@ -793,3 +793,9 @@ fresh archive reads. Schema 30 rejects earlier alpha schemas without migration;
 portable package version 2 still uses the canonical project payload. The durable
 channel-contract integration test covers all six compound types, signed i32
 extremes and doubles that cannot be represented by Float32.
+
+Exact endurance fixture installation and its machine-plan imports share the
+same `test`/`validation` compilation boundary. Ordinary project lifecycle and
+the default `mondrian` product entrypoint do not depend on the optional
+qualification modules. The CI platform matrix builds that default entrypoint
+explicitly, independently of the validation binaries and test configuration.

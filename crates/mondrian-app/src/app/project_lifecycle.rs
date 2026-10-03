@@ -1,3 +1,4 @@
+#[cfg(any(test, feature = "validation"))]
 use super::endurance_machine_plan::{
     EnduranceMachineFileBinding, PreparedCommercialEnduranceMachinePlan,
 };
