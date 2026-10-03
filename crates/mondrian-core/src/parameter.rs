@@ -531,12 +531,22 @@ pub enum AutomationError {
 
 fn validate_keyframe(keyframe: &ExactAutomationKeyframe) -> Result<(), AutomationError> {
     if !keyframe.value.is_finite()
-        || keyframe.in_handle.is_some_and(|handle| !handle.value_offset.is_finite())
-        || keyframe.out_handle.is_some_and(|handle| !handle.value_offset.is_finite())
+        || keyframe.in_handle.is_some_and(|handle| {
+            !handle.value_offset.is_finite() || !(keyframe.value + handle.value_offset).is_finite()
+        })
+        || keyframe.out_handle.is_some_and(|handle| {
+            !handle.value_offset.is_finite() || !(keyframe.value + handle.value_offset).is_finite()
+        })
     {
         return Err(AutomationError::NonFiniteValue);
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct ConstrainedSlope {
+    value: f64,
+    value_scale: f64,
 }
 
 fn constrained_slope(
@@ -544,7 +554,7 @@ fn constrained_slope(
     previous: Option<&ExactAutomationKeyframe>,
     current: &ExactAutomationKeyframe,
     next: Option<&ExactAutomationKeyframe>,
-) -> Result<f64, AutomationError> {
+) -> Result<ConstrainedSlope, AutomationError> {
     let incoming = previous
         .map(|keyframe| {
             let span = current.time.checked_sub(keyframe.time)?.to_f64();
@@ -557,16 +567,47 @@ fn constrained_slope(
             Ok::<_, AutomationError>(((keyframe.value - current.value) / span, span))
         })
         .transpose()?;
-    let slope = match (incoming, outgoing) {
+    let slope = resolve_constrained_slope(mode, incoming, outgoing);
+    if slope.is_finite() {
+        return Ok(ConstrainedSlope { value: slope, value_scale: 1.0 });
+    }
+    let value_scale = previous
+        .into_iter()
+        .chain(std::iter::once(current))
+        .chain(next)
+        .map(|key| key.value.abs())
+        .fold(0.0_f64, f64::max);
+    let value_scale = if value_scale == 0.0 { 1.0 } else { value_scale };
+    let incoming = previous.zip(incoming).map(|(key, (_, span))| {
+        (
+            crate::automation::scaled_numeric_difference(current.value, key.value, value_scale)
+                / span,
+            span,
+        )
+    });
+    let outgoing = next.zip(outgoing).map(|(key, (_, span))| {
+        (
+            crate::automation::scaled_numeric_difference(key.value, current.value, value_scale)
+                / span,
+            span,
+        )
+    });
+    let value = resolve_constrained_slope(mode, incoming, outgoing);
+    if !value.is_finite() {
+        return Err(AutomationError::NonFiniteValue);
+    }
+    Ok(ConstrainedSlope { value, value_scale })
+}
+
+fn resolve_constrained_slope(
+    mode: ExactAutomationTangentMode,
+    incoming: Option<(f64, f64)>,
+    outgoing: Option<(f64, f64)>,
+) -> f64 {
+    match (incoming, outgoing) {
         (Some((left, left_span)), Some((right, right_span))) => match mode {
             ExactAutomationTangentMode::Auto => {
-                if left == 0.0 || right == 0.0 || left.signum() != right.signum() {
-                    0.0
-                } else {
-                    let left_weight = 2.0 * right_span + left_span;
-                    let right_weight = right_span + 2.0 * left_span;
-                    (left_weight + right_weight) / (left_weight / left + right_weight / right)
-                }
+                crate::automation::monotone_harmonic_slope(left, right, left_span, right_span)
             }
             ExactAutomationTangentMode::Continuous => {
                 (left * right_span + right * left_span) / (left_span + right_span)
@@ -575,14 +616,13 @@ fn constrained_slope(
         },
         (Some((slope, _)), None) | (None, Some((slope, _))) => slope,
         (None, None) => 0.0,
-    };
-    slope.is_finite().then_some(slope).ok_or(AutomationError::NonFiniteValue)
+    }
 }
 
 fn tangent_handle(
     left: TimelineTime,
     right: TimelineTime,
-    slope: f64,
+    slope: ConstrainedSlope,
     incoming: bool,
 ) -> Result<ExactBezierHandle, AutomationError> {
     let duration = right.checked_sub(left)?;
@@ -592,7 +632,7 @@ fn tangent_handle(
         TimeScale::new(1, 3)?
     };
     let time_offset = duration.checked_scale(fraction)?;
-    let value_offset = slope * time_offset.to_f64();
+    let value_offset = (slope.value * time_offset.to_f64()) * slope.value_scale;
     if !value_offset.is_finite() {
         return Err(AutomationError::NonFiniteValue);
     }
@@ -630,7 +670,11 @@ fn linear_value(
 ) -> Result<f64, AutomationError> {
     let elapsed = time.checked_sub(left.time)?.to_f64();
     let duration = right.time.checked_sub(left.time)?.to_f64();
-    Ok(left.value + (right.value - left.value) * (elapsed / duration))
+    Ok(crate::automation::interpolate_numeric_value(
+        left.value,
+        right.value,
+        elapsed / duration,
+    ))
 }
 
 fn bezier_value(
@@ -638,40 +682,64 @@ fn bezier_value(
     right: &ExactAutomationKeyframe,
     time: TimelineTime,
 ) -> Result<f64, AutomationError> {
+    if left.out_handle.is_none() && right.in_handle.is_none() {
+        return linear_value(left, right, time);
+    }
     let duration = right.time.checked_sub(left.time)?;
     let default_out = duration.checked_scale(TimeScale::new(1, 3)?)?;
     let default_in = duration.checked_scale(TimeScale::new(-1, 3)?)?;
-    let out_handle = left.out_handle.unwrap_or(ExactBezierHandle {
-        time_offset: default_out,
-        value_offset: (right.value - left.value) / 3.0,
-    });
-    let in_handle = right.in_handle.unwrap_or(ExactBezierHandle {
-        time_offset: default_in,
-        value_offset: -(right.value - left.value) / 3.0,
-    });
-    let x0 = left.time.to_f64();
-    let x1 = left.time.checked_add(out_handle.time_offset)?.to_f64();
-    let x2 = right.time.checked_add(in_handle.time_offset)?.to_f64();
-    let x3 = right.time.to_f64();
-    let target = time.to_f64();
+    let out_time = left.out_handle.map_or(default_out, |handle| handle.time_offset);
+    let in_time = right.in_handle.map_or(default_in, |handle| handle.time_offset);
+    let y1 = left.out_handle.map_or_else(
+        || crate::automation::interpolate_numeric_value(left.value, right.value, 1.0 / 3.0),
+        |handle| left.value + handle.value_offset,
+    );
+    let y2 = right.in_handle.map_or_else(
+        || crate::automation::interpolate_numeric_value(left.value, right.value, 2.0 / 3.0),
+        |handle| right.value + handle.value_offset,
+    );
+    if !y1.is_finite() || !y2.is_finite() {
+        return Err(AutomationError::NonFiniteValue);
+    }
+    let span = duration.to_f64();
+    let x1 = out_time.to_f64() / span;
+    let x2 = 1.0 + in_time.to_f64() / span;
+    let target = time.checked_sub(left.time)?.to_f64() / span;
+    if out_time == default_out && in_time == default_in {
+        return Ok(cubic_numeric_value(left.value, y1, y2, right.value, target));
+    }
     let mut low = 0.0;
     let mut high = 1.0;
     for _ in 0..48 {
         let candidate = (low + high) * 0.5;
-        if cubic(x0, x1, x2, x3, candidate) < target {
+        let sample = cubic(0.0, x1, x2, 1.0, candidate);
+        if sample == target {
+            return Ok(cubic_numeric_value(
+                left.value,
+                y1,
+                y2,
+                right.value,
+                candidate,
+            ));
+        }
+        if sample < target {
             low = candidate;
         } else {
             high = candidate;
         }
     }
     let t = (low + high) * 0.5;
-    Ok(cubic(
-        left.value,
-        left.value + out_handle.value_offset,
-        right.value + in_handle.value_offset,
-        right.value,
-        t,
-    ))
+    Ok(cubic_numeric_value(left.value, y1, y2, right.value, t))
+}
+
+fn cubic_numeric_value(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {
+    use crate::automation::interpolate_numeric_value;
+    let left = interpolate_numeric_value(p0, p1, t);
+    let middle = interpolate_numeric_value(p1, p2, t);
+    let right = interpolate_numeric_value(p2, p3, t);
+    let left = interpolate_numeric_value(left, middle, t);
+    let right = interpolate_numeric_value(middle, right, t);
+    interpolate_numeric_value(left, right, t)
 }
 
 fn cubic(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {
@@ -685,6 +753,160 @@ fn cubic(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_finite_linear_automation_retains_convex_values() {
+        for reverse in [false, true] {
+            let (left, right) = if reverse {
+                (f64::MAX, -f64::MAX)
+            } else {
+                (-f64::MAX, f64::MAX)
+            };
+            let mut curve =
+                ExactAutomationCurve::new(ParameterId::new_static("test.fullrange.linear"), 0.0)
+                    .expect("curve");
+            curve
+                .set_keyframe(ExactAutomationKeyframe::linear(TimelineTime::ZERO, left))
+                .expect("left key");
+            curve
+                .set_keyframe(ExactAutomationKeyframe::linear(TimelineTime::ONE, right))
+                .expect("right key");
+            let segments = curve.prepared_segments().expect("prepared curve");
+            for (numerator, expected) in [
+                (0, left),
+                (1, left * 0.5),
+                (2, 0.0),
+                (3, right * 0.5),
+                (4, right),
+            ] {
+                let time = TimelineTime::new(numerator, 4).expect("exact sample time");
+                assert_eq!(
+                    curve.evaluate(time).expect("curve evaluation"),
+                    expected,
+                    "finite convex author values must not overflow during evaluation"
+                );
+                assert_eq!(
+                    segments[0].evaluate(time).expect("prepared evaluation"),
+                    expected
+                );
+            }
+        }
+    }
+
+    fn assert_full_finite_bezier_automation(mode: InterpolationType) {
+        for reverse in [false, true] {
+            let (left, right) = if reverse {
+                (f64::MAX, -f64::MAX)
+            } else {
+                (-f64::MAX, f64::MAX)
+            };
+            let mut curve =
+                ExactAutomationCurve::new(ParameterId::new_static("test.fullrange.bezier"), 0.0)
+                    .expect("curve");
+            let first = ExactAutomationKeyframe::linear(TimelineTime::ZERO, left);
+            let first_id = first.id;
+            let last = ExactAutomationKeyframe::linear(TimelineTime::ONE, right);
+            let last_id = last.id;
+            curve.set_keyframe(first).expect("left key");
+            curve.set_keyframe(last).expect("right key");
+            for id in [first_id, last_id] {
+                curve.set_keyframe_interpolation(id, mode).expect("finite control points must admit the constrained mode even when the absolute slope overflows");
+            }
+            let segments = curve.prepared_segments().expect("prepared curve");
+            for numerator in 0..=16 {
+                let time = TimelineTime::new(numerator, 16).expect("exact sample time");
+                let ratio = numerator as f64 / 16.0;
+                let expected_normalized = if reverse {
+                    1.0 - 2.0 * ratio
+                } else {
+                    -1.0 + 2.0 * ratio
+                };
+                let evaluated = curve.evaluate(time).expect("curve evaluation");
+                assert!(
+                    evaluated.is_finite(),
+                    "{mode:?}: a finite convex curve must produce finite values"
+                );
+                assert!(
+                    (evaluated / f64::MAX - expected_normalized).abs() <= 64.0 * f64::EPSILON,
+                    "{mode:?}: expected normalized value {expected_normalized}, got {}",
+                    evaluated / f64::MAX
+                );
+                assert_eq!(
+                    segments[0].evaluate(time).expect("prepared evaluation"),
+                    evaluated
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn full_finite_bezier_automation_retains_convex_values() {
+        assert_full_finite_bezier_automation(InterpolationType::Bezier);
+    }
+
+    #[test]
+    fn full_finite_auto_bezier_automation_retains_convex_values() {
+        assert_full_finite_bezier_automation(InterpolationType::AutoBezier);
+    }
+
+    #[test]
+    fn full_finite_continuous_bezier_automation_retains_convex_values() {
+        assert_full_finite_bezier_automation(InterpolationType::ContinuousBezier);
+    }
+
+    #[test]
+    fn unrepresentable_bezier_control_point_is_rejected_atomically() {
+        for sign in [-1.0, 1.0] {
+            let mut curve =
+                ExactAutomationCurve::new(ParameterId::new_static("test.invalid.control"), 0.0)
+                    .expect("curve");
+            let before = curve.clone();
+            let mut key = ExactAutomationKeyframe::linear(TimelineTime::ZERO, sign * f64::MAX);
+            key.interpolation_to_next = AutomationSegmentInterpolation::Bezier;
+            key.out_handle = Some(ExactBezierHandle {
+                time_offset: TimelineTime::ONE_THIRD,
+                value_offset: sign * f64::MAX,
+            });
+            assert_eq!(
+                curve.set_keyframe(key),
+                Err(AutomationError::NonFiniteValue),
+                "a finite offset must not admit an infinite control point"
+            );
+            assert_eq!(
+                curve, before,
+                "failed admission must preserve exact author state"
+            );
+        }
+    }
+
+    #[test]
+    fn subnormal_auto_automation_preserves_scale_invariance() {
+        let scale = f64::MIN_POSITIVE;
+        let mut curve =
+            ExactAutomationCurve::new(ParameterId::new_static("test.subnormal.auto"), 0.0)
+                .expect("curve");
+        let mut ids = Vec::new();
+        for (time, value) in [
+            (TimelineTime::ZERO, 0.0),
+            (TimelineTime::ONE, scale * 0.5),
+            (TimelineTime::new(2, 1).expect("last key time"), scale),
+        ] {
+            let key = ExactAutomationKeyframe::linear(time, value);
+            ids.push(key.id);
+            curve.set_keyframe(key).expect("canonical key mutation");
+        }
+        for id in ids {
+            curve
+                .set_keyframe_interpolation(id, InterpolationType::AutoBezier)
+                .expect("automatic interpolation");
+        }
+        for numerator in 0..=16 {
+            let time = TimelineTime::new(numerator, 8).expect("exact sample time");
+            let evaluated = curve.evaluate(time).expect("canonical curve evaluation");
+            let expected = numerator as f64 / 16.0;
+            assert!((evaluated / scale - expected).abs() <= 64.0 * f64::EPSILON, "an overflowing reciprocal must not flatten a representable subnormal tangent: expected {expected}, got {}", evaluated / scale);
+        }
+    }
 
     #[test]
     fn auto_tangent_flattens_an_extremum_and_recomputes_after_neighbor_move() {

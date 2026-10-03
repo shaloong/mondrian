@@ -89,7 +89,7 @@ impl Interpolatable for f32 {
 
 impl Interpolatable for f64 {
     fn lerp(a: &Self, b: &Self, t: f32) -> Self {
-        a + (b - a) * t as f64
+        interpolate_numeric_value(*a, *b, f64::from(t))
     }
 }
 
@@ -1015,6 +1015,61 @@ pub struct ParameterNumericRange {
     pub max: f64,
 }
 
+/// Interpolate finite numeric endpoints without requiring a finite difference.
+/// Unit-interval positions retain convex values and exact endpoints, in either
+/// direction. Extrapolation keeps its arithmetic meaning for Bezier overshoot.
+pub(crate) fn interpolate_numeric_value(left: f64, right: f64, position: f64) -> f64 {
+    if position == 0.0 {
+        return left;
+    }
+    if position == 1.0 {
+        return right;
+    }
+    if left == right {
+        return left;
+    }
+    if (left <= 0.0 && right >= 0.0) || (left >= 0.0 && right <= 0.0) {
+        if position <= 0.5 {
+            left.mul_add(1.0 - position, right * position)
+        } else {
+            right.mul_add(position, left * (1.0 - position))
+        }
+    } else {
+        (right - left).mul_add(position, left)
+    }
+}
+
+/// Resolve a value difference relative to a finite positive scale without
+/// overflowing the difference, retaining close-value subtraction precision.
+pub(crate) fn scaled_numeric_difference(right: f64, left: f64, scale: f64) -> f64 {
+    let difference = right - left;
+    if difference.is_finite() {
+        difference / scale
+    } else {
+        right / scale - left / scale
+    }
+}
+
+/// Resolve the monotone two-sided tangent through bounded slope ratios rather
+/// than potentially overflowing reciprocals. Opposite or zero secants flatten.
+pub(crate) fn monotone_harmonic_slope(
+    left: f64,
+    right: f64,
+    left_span: f64,
+    right_span: f64,
+) -> f64 {
+    if left == 0.0 || right == 0.0 || left.signum() != right.signum() {
+        return 0.0;
+    }
+    let left_weight = 2.0 * right_span + left_span;
+    let right_weight = right_span + 2.0 * left_span;
+    let left_fraction = left_weight / (left_weight + right_weight);
+    let magnitude = left.abs().min(right.abs());
+    let denominator = left_fraction * (magnitude / left.abs())
+        + (1.0 - left_fraction) * (magnitude / right.abs());
+    (magnitude / denominator).copysign(left)
+}
+
 impl ParameterNumericRange {
     /// Project a finite value into the unit interval without overflowing the span.
     /// Values outside this editor interval project to its endpoints; a fixed
@@ -1050,24 +1105,7 @@ impl ParameterNumericRange {
         if !position.is_finite() || !(0.0..=1.0).contains(&position) {
             return None;
         }
-        if position == 0.0 {
-            return Some(self.min);
-        }
-        if position == 1.0 {
-            return Some(self.max);
-        }
-        if self.min == self.max {
-            return Some(self.min);
-        }
-        let value = if self.min <= 0.0 && self.max >= 0.0 {
-            if position <= 0.5 {
-                self.min.mul_add(1.0 - position, self.max * position)
-            } else {
-                self.max.mul_add(position, self.min * (1.0 - position))
-            }
-        } else {
-            (self.max - self.min).mul_add(position, self.min)
-        };
+        let value = interpolate_numeric_value(self.min, self.max, position);
         Some(value.clamp(self.min, self.max))
     }
 
@@ -4572,6 +4610,206 @@ mod tests {
 
         let mid = track.evaluate(tt(50));
         assert!((mid - 50.0).abs() < 0.01, "Expected 50.0, got {mid}");
+    }
+
+    #[test]
+    fn full_finite_linear_visual_parameter_retains_convex_values() {
+        for reverse in [false, true] {
+            let (left, right) = if reverse {
+                (f64::MAX, -f64::MAX)
+            } else {
+                (-f64::MAX, f64::MAX)
+            };
+            let path = "test.fullrange.visual";
+            let mut bag = PropertyBag::default();
+            bag.define(
+                PropertyDescriptor::new(path, "Full finite parameter", PropertyValue::Double(0.0))
+                    .with_numeric_contract(
+                        ParameterUnit::Unitless,
+                        ParameterNumericContract::closed(
+                            -f64::MAX,
+                            f64::MAX,
+                            None,
+                            ParameterInvalidValuePolicy::Reject,
+                        )
+                        .expect("legal range"),
+                    ),
+            );
+            for (time, value) in [(TimelineTime::ZERO, left), (TimelineTime::ONE, right)] {
+                bag.apply_mutation(PropertyMutation::SetKeyframe {
+                    path: path.into(),
+                    keyframe: Keyframe::linear(time, PropertyValue::Double(value)),
+                })
+                .expect("canonical key mutation");
+            }
+            for (numerator, expected) in [
+                (0, left),
+                (1, left * 0.5),
+                (2, 0.0),
+                (3, right * 0.5),
+                (4, right),
+            ] {
+                let time = TimelineTime::new(numerator, 4).expect("exact sample time");
+                assert_eq!(
+                    bag.evaluate(path, time)
+                        .and_then(|value| value.as_f64())
+                        .expect("canonical visual evaluation"),
+                    expected,
+                    "finite convex visual values must not overflow during evaluation"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn full_finite_auto_visual_parameter_retains_convex_values() {
+        let path = "test.fullrange.auto_visual";
+        let mut bag = PropertyBag::default();
+        bag.define(
+            PropertyDescriptor::new(path, "Full finite parameter", PropertyValue::Double(0.0))
+                .with_numeric_contract(
+                    ParameterUnit::Unitless,
+                    ParameterNumericContract::closed(
+                        -f64::MAX,
+                        f64::MAX,
+                        None,
+                        ParameterInvalidValuePolicy::Reject,
+                    )
+                    .expect("legal range"),
+                ),
+        );
+        for (time, value) in [
+            (TimelineTime::ZERO, -f64::MAX),
+            (TimelineTime::ONE, f64::MAX),
+        ] {
+            bag.apply_mutation(PropertyMutation::SetKeyframe {
+                path: path.into(),
+                keyframe: Keyframe::linear(time, PropertyValue::Double(value)),
+            })
+            .expect("canonical key mutation");
+        }
+        for time in [TimelineTime::ZERO, TimelineTime::ONE] {
+            bag.apply_mutation(PropertyMutation::UpdateKeyframeInterpolation {
+                path: path.into(),
+                time,
+                interpolation: InterpolationType::AutoBezier,
+            })
+            .expect("legal finite values must admit auto Bezier");
+        }
+        for numerator in 0..=16 {
+            let time = TimelineTime::new(numerator, 16).expect("exact sample time");
+            let evaluated = bag
+                .evaluate(path, time)
+                .and_then(|value| value.as_f64())
+                .expect("canonical visual evaluation");
+            assert!(evaluated.is_finite());
+            let expected = -1.0 + numerator as f64 / 8.0;
+            assert!((evaluated / f64::MAX - expected).abs() <= 8.0 * f64::from(f32::EPSILON), "Auto Bezier must retain the two-key straight line within normalized UI solver precision");
+        }
+    }
+
+    #[test]
+    fn tiny_auto_visual_parameter_preserves_scale_invariance() {
+        let path = "test.tiny.auto_visual";
+        let scale = 1.0e-20;
+        let middle = TimelineTime::new(1, 2).expect("middle key time");
+        let mut bag = PropertyBag::default();
+        bag.define(
+            PropertyDescriptor::new(path, "Small finite parameter", PropertyValue::Double(0.0))
+                .with_numeric_contract(
+                    ParameterUnit::Unitless,
+                    ParameterNumericContract::closed(
+                        0.0,
+                        scale,
+                        None,
+                        ParameterInvalidValuePolicy::Reject,
+                    )
+                    .expect("legal range"),
+                ),
+        );
+        for (time, value) in [
+            (TimelineTime::ZERO, 0.0),
+            (middle, scale * 0.5),
+            (TimelineTime::ONE, scale),
+        ] {
+            bag.apply_mutation(PropertyMutation::SetKeyframe {
+                path: path.into(),
+                keyframe: Keyframe::linear(time, PropertyValue::Double(value)),
+            })
+            .expect("canonical key mutation");
+        }
+        for time in [TimelineTime::ZERO, middle, TimelineTime::ONE] {
+            bag.apply_mutation(PropertyMutation::UpdateKeyframeInterpolation {
+                path: path.into(),
+                time,
+                interpolation: InterpolationType::AutoBezier,
+            })
+            .expect("automatic interpolation");
+        }
+        for numerator in 0..=16 {
+            let time = TimelineTime::new(numerator, 16).expect("exact sample time");
+            let evaluated = bag
+                .evaluate(path, time)
+                .and_then(|value| value.as_f64())
+                .expect("canonical visual evaluation");
+            let expected = numerator as f64 / 16.0;
+            assert!((evaluated / scale - expected).abs() <= 8.0 * f64::from(f32::EPSILON), "changing physical value units must preserve the auto Bezier shape: expected {expected}, got {}", evaluated / scale);
+        }
+    }
+
+    #[test]
+    fn large_nonuniform_auto_visual_parameter_retains_endpoint_slope() {
+        let path = "test.large.nonuniform_visual";
+        let mut bag = PropertyBag::default();
+        bag.define(
+            PropertyDescriptor::new(
+                path,
+                "Nonuniform finite parameter",
+                PropertyValue::Double(0.0),
+            )
+            .with_numeric_contract(
+                ParameterUnit::Unitless,
+                ParameterNumericContract::closed(
+                    -f64::MAX,
+                    f64::MAX,
+                    None,
+                    ParameterInvalidValuePolicy::Reject,
+                )
+                .expect("legal range"),
+            ),
+        );
+        for (time, value) in [
+            (TimelineTime::ZERO, -f64::MAX),
+            (
+                TimelineTime::new(2, 1).expect("second key time"),
+                -f64::MAX * 0.1,
+            ),
+            (
+                TimelineTime::new(3, 1).expect("third key time"),
+                f64::MAX * 0.8,
+            ),
+        ] {
+            bag.apply_mutation(PropertyMutation::SetKeyframe {
+                path: path.into(),
+                keyframe: Keyframe::linear(time, PropertyValue::Double(value)),
+            })
+            .expect("canonical key mutation");
+        }
+        bag.apply_mutation(PropertyMutation::UpdateKeyframeInterpolation {
+            path: path.into(),
+            time: TimelineTime::ZERO,
+            interpolation: InterpolationType::AutoBezier,
+        })
+        .expect("automatic interpolation");
+        let first = bag
+            .property(path)
+            .and_then(|property| property.channel(0))
+            .and_then(|channel| channel.keyframe_at(TimelineTime::ZERO))
+            .expect("first canonical key");
+        let KeyframeInterpolation::Bezier(handle) = first.interp_out else {
+            panic!("Bezier control");
+        };
+        assert!((handle.value_offset - 1.0 / 9.0).abs() <= 8.0 * f64::EPSILON, "weighted intermediate overflow must not silently flatten a nonzero endpoint tangent: {}", handle.value_offset);
     }
 
     #[test]

@@ -14,6 +14,24 @@ Invalid ranges, nonfinite values and non-unit input positions are rejected.
 Visual and audio curve adapters share this arithmetic instead of narrowing
 admitted schemas or treating fixed-value parameters as missing curves.
 
+Core numeric interpolation shares the stable finite-endpoint arithmetic between
+editor intervals, visual numeric channels and exact audio curves. Opposite-sign
+endpoints do not require a representable difference, and endpoint values remain
+exact in either direction. Exact Bezier value evaluation uses de Casteljau
+interpolation over finite control points. Time inversion uses an exact local
+author-time origin; implicit linear handles and explicit one-third time handles
+avoid unnecessary root searches.
+
+Constrained tangents use bounded harmonic slope ratios rather than overflowing
+reciprocals. Unrepresentable intermediate slopes use a local value scale before
+materializing finite control offsets. Visual automatic endpoints use stable
+extrapolation instead of overflowing weighted products. Zero secants are detected
+as zero, independently of physical value units. Author admission checks both
+finite offsets and the resulting finite control points, preserving the original
+curve when admission fails. Regression coverage includes ascending/descending
+full finite intervals, manual/auto/continuous exact Bezier curves, nonuniform
+visual endpoints, small-value unit invariance and subnormal exact tangents.
+
 Core owns the shared `ParameterValueWrite` algebra: complete typed values or
 sparse numeric components at a stable `AnimationParameterAddress`. Clip, Effect
 and Mask adapters supply exact owner-local time to `PropertyBag::prepare_parameter_write`;

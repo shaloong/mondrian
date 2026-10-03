@@ -189,9 +189,9 @@ pub(crate) fn compute_auto_bezier_handles(
     slopes[0] = endpoint_auto_slope(delta[0], delta.get(1).copied(), h[0], h.get(1).copied());
     slopes[count - 1] = endpoint_auto_slope(
         *delta.last().unwrap_or(&0.0),
-        delta.get(delta.len().saturating_sub(2)).copied(),
+        delta.len().checked_sub(2).and_then(|index| delta.get(index)).copied(),
         *h.last().unwrap_or(&1.0),
-        h.get(h.len().saturating_sub(2)).copied(),
+        h.len().checked_sub(2).and_then(|index| h.get(index)).copied(),
     );
 
     for index in 1..count - 1 {
@@ -202,25 +202,81 @@ pub(crate) fn compute_auto_bezier_handles(
         .iter()
         .enumerate()
         .map(|(index, keyframe)| {
+            let needs_scale = !slopes[index].is_finite()
+                || (index == 0 && !delta[0].is_finite())
+                || (index == count - 1 && !delta[count - 2].is_finite());
+            let (slope, value_scale) = if needs_scale {
+                scaled_auto_slope(index, keyframes, &h)
+            } else {
+                (slopes[index], 1.0)
+            };
             let interp_in = if index == 0 {
                 KeyframeInterpolation::Linear
             } else {
                 let prev = &keyframes[index - 1];
                 let dt = time_delta(keyframe.time, prev.time);
-                let dv = keyframe.value - prev.value;
-                KeyframeInterpolation::Bezier(monotone_in_handle(slopes[index], dt, dv))
+                let dv = scaled_numeric_difference(keyframe.value, prev.value, value_scale);
+                KeyframeInterpolation::Bezier(monotone_in_handle(slope, dt, dv))
             };
             let interp_out = if index + 1 >= count {
                 KeyframeInterpolation::Linear
             } else {
                 let next = &keyframes[index + 1];
                 let dt = time_delta(next.time, keyframe.time);
-                let dv = next.value - keyframe.value;
-                KeyframeInterpolation::Bezier(monotone_out_handle(slopes[index], dt, dv))
+                let dv = scaled_numeric_difference(next.value, keyframe.value, value_scale);
+                KeyframeInterpolation::Bezier(monotone_out_handle(slope, dt, dv))
             };
             (interp_in, interp_out)
         })
         .collect()
+}
+
+fn scaled_auto_slope(index: usize, keyframes: &[Keyframe<f64>], spans: &[f64]) -> (f64, f64) {
+    let count = keyframes.len();
+    let start = if index == count - 1 {
+        count.saturating_sub(3)
+    } else {
+        index.saturating_sub(1)
+    };
+    let end = if index == 0 {
+        3.min(count)
+    } else {
+        (index + 2).min(count)
+    };
+    let value_scale =
+        keyframes[start..end].iter().map(|key| key.value.abs()).fold(0.0_f64, f64::max);
+    let value_scale = if value_scale == 0.0 { 1.0 } else { value_scale };
+    let delta = |segment: usize| {
+        scaled_numeric_difference(
+            keyframes[segment + 1].value,
+            keyframes[segment].value,
+            value_scale,
+        ) / spans[segment]
+    };
+    let slope = if index == 0 {
+        endpoint_auto_slope(
+            delta(0),
+            (count > 2).then(|| delta(1)),
+            spans[0],
+            spans.get(1).copied(),
+        )
+    } else if index == count - 1 {
+        let segment = count - 2;
+        endpoint_auto_slope(
+            delta(segment),
+            segment.checked_sub(1).map(delta),
+            spans[segment],
+            segment.checked_sub(1).map(|previous| spans[previous]),
+        )
+    } else {
+        interior_auto_slope(
+            delta(index - 1),
+            delta(index),
+            spans[index - 1],
+            spans[index],
+        )
+    };
+    (slope, value_scale)
 }
 
 pub(crate) fn endpoint_auto_slope(
@@ -232,9 +288,19 @@ pub(crate) fn endpoint_auto_slope(
     let Some(secondary_delta) = secondary_delta else {
         return primary_delta;
     };
+    if !primary_delta.is_finite() {
+        return primary_delta;
+    }
+    if !secondary_delta.is_finite() {
+        return if primary_delta.signum() == secondary_delta.signum() {
+            0.0
+        } else {
+            3.0 * primary_delta
+        };
+    }
     let secondary_h = secondary_h.unwrap_or(primary_h);
-    let mut slope = ((2.0 * primary_h + secondary_h) * primary_delta - primary_h * secondary_delta)
-        / (primary_h + secondary_h);
+    let weight = primary_h / (primary_h + secondary_h);
+    let mut slope = interpolate_numeric_value(primary_delta, secondary_delta, -weight);
     if slope.signum() != primary_delta.signum() {
         slope = 0.0;
     } else if primary_delta.signum() != secondary_delta.signum()
@@ -251,15 +317,7 @@ pub(crate) fn interior_auto_slope(
     h_prev: f64,
     h_next: f64,
 ) -> f64 {
-    if delta_prev.abs() < f64::EPSILON
-        || delta_next.abs() < f64::EPSILON
-        || delta_prev.signum() != delta_next.signum()
-    {
-        return 0.0;
-    }
-    let w1 = 2.0 * h_next + h_prev;
-    let w2 = h_next + 2.0 * h_prev;
-    (w1 + w2) / (w1 / delta_prev + w2 / delta_next)
+    monotone_harmonic_slope(delta_prev, delta_next, h_prev, h_next)
 }
 
 pub(crate) fn continuous_tangent_slope(
@@ -294,7 +352,7 @@ pub(crate) fn tangent_slope_from_out(
     let dv = next.value - current.value;
     let dt = time_delta(next.time, current.time);
     let dx = normalized_handle_magnitude(handle.time_offset);
-    if dv.abs() < f64::EPSILON {
+    if dv == 0.0 {
         Some(0.0)
     } else {
         Some(handle.value_offset * dv / (dx * dt))
@@ -309,7 +367,7 @@ pub(crate) fn tangent_slope_from_in(
     let dv = current.value - previous.value;
     let dt = time_delta(current.time, previous.time);
     let dx = normalized_handle_magnitude(handle.time_offset);
-    if dv.abs() < f64::EPSILON {
+    if dv == 0.0 {
         Some(0.0)
     } else {
         Some(-handle.value_offset * dv / (dx * dt))
@@ -325,7 +383,7 @@ pub(crate) fn continuous_handle_for_out(
     let dt = time_delta(next.time, current.time);
     let dv = next.value - current.value;
     let time_offset = normalized_positive_handle(time_offset);
-    if dv.abs() < f64::EPSILON || slope.abs() < f64::EPSILON {
+    if dv == 0.0 || slope == 0.0 {
         BezierHandle { time_offset, value_offset: 0.0 }
     } else {
         BezierHandle {
@@ -347,7 +405,7 @@ pub(crate) fn continuous_handle_for_in(
     let time_offset = positive
         .checked_scale(TimeScale::NEGATIVE_ONE)
         .unwrap_or(TimelineTime::NEGATIVE_ONE_THIRD);
-    if dv.abs() < f64::EPSILON || slope.abs() < f64::EPSILON {
+    if dv == 0.0 || slope == 0.0 {
         BezierHandle { time_offset, value_offset: 0.0 }
     } else {
         BezierHandle {
@@ -358,7 +416,7 @@ pub(crate) fn continuous_handle_for_in(
 }
 
 pub(crate) fn monotone_out_handle(slope: f64, dt: f64, dv: f64) -> BezierHandle {
-    if dv.abs() < f64::EPSILON || slope.abs() < f64::EPSILON {
+    if dv == 0.0 || slope == 0.0 {
         return default_out_bezier_handle();
     }
     BezierHandle {
@@ -368,7 +426,7 @@ pub(crate) fn monotone_out_handle(slope: f64, dt: f64, dv: f64) -> BezierHandle 
 }
 
 pub(crate) fn monotone_in_handle(slope: f64, dt: f64, dv: f64) -> BezierHandle {
-    if dv.abs() < f64::EPSILON || slope.abs() < f64::EPSILON {
+    if dv == 0.0 || slope == 0.0 {
         return default_in_bezier_handle();
     }
     BezierHandle {
