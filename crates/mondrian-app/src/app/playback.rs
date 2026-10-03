@@ -489,6 +489,28 @@ impl AppState {
         }
     }
 
+    fn trace_playback_preview_scale_change(
+        &self,
+        cause: &'static str,
+        before: mondrian_playback::PlaybackSnapshot,
+        after: mondrian_playback::PlaybackSnapshot,
+    ) {
+        if before.preview_scale == after.preview_scale || !tracing::enabled!(tracing::Level::DEBUG)
+        {
+            return;
+        }
+        let evidence = self.playback_evidence_report();
+        let resources = self.execution_resource_decision();
+        tracing::debug!(
+            cause,
+            ?before,
+            ?after,
+            ?evidence,
+            ?resources,
+            "Playback preview scale transition"
+        );
+    }
+
     fn synchronize_playback_observation_clock(&mut self, observed_at: Instant) {
         if self.is_playing() {
             let _ = self.advance_playback_clock_at(observed_at);
@@ -1633,6 +1655,7 @@ impl AppState {
                 };
             }
         };
+        let before = self.playback_engine.snapshot();
         let mut engine = self.playback_engine.clone();
         let snapshot = match engine.tick(observed_timestamp) {
             Ok(snapshot) => snapshot,
@@ -1649,6 +1672,7 @@ impl AppState {
         self.playback_engine = engine;
         self.reanchor_playback_observation_projection(observed_at);
         self.capture_playback_evidence();
+        self.trace_playback_preview_scale_change("clock_tick", before, snapshot);
         let target_frame = snapshot.position.frame;
         if snapshot.state == TransportState::Ended {
             self.settle_preview_access_source();
@@ -2299,6 +2323,7 @@ impl AppState {
             tracing::warn!(%error, "rejected Playback Evidence Frame Delivery");
         }
         self.capture_playback_evidence();
+        self.trace_playback_preview_scale_change("frame_delivery", before, after);
         if accepted {
             self.reanchor_playback_observation_projection_at(observed_at, completed_at);
         }
