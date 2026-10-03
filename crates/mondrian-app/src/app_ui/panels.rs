@@ -2105,6 +2105,8 @@ pub struct InspectorCurveKeyModel {
 pub struct InspectorCurveModel {
     /// Stable property instance and definition identity.
     pub property: AnimationParameterAddress,
+    /// Canonical visible value interval, including fixed-value intervals.
+    pub value_range: mondrian_core::automation::ParameterNumericRange,
     /// Editable keys in monotonic-time order.
     pub keys: Vec<InspectorCurveKeyModel>,
     /// Evaluated samples used to paint Hold/Bezier semantics faithfully.
@@ -4139,6 +4141,7 @@ fn numeric_curve_model_for_property(
 
     Some(InspectorCurveModel {
         property: property.address(),
+        value_range: numeric.soft_range,
         keys: keys.into_values().collect(),
         display_points,
     })

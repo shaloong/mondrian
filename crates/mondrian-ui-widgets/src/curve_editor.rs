@@ -153,6 +153,7 @@ pub struct CurveEditor {
     id: WidgetId,
     bounds: Rect,
     points: Vec<CurvePoint>,
+    fixed_value: Option<f32>,
     point_insertion_limit: Option<usize>,
     point_policies: Vec<CurvePointPolicy>,
     display_points: Option<Vec<CurvePoint>>,
@@ -191,6 +192,7 @@ impl CurveEditor {
             id: WidgetId::new(),
             bounds: Rect::ZERO,
             points: Vec::new(),
+            fixed_value: None,
             point_insertion_limit: None,
             point_policies: Vec::new(),
             display_points: None,
@@ -223,6 +225,37 @@ impl CurveEditor {
     pub fn with_point_insertion_limit(mut self, maximum: usize) -> Self {
         self.point_insertion_limit = Some(maximum);
         self
+    }
+
+    /// Fix all point values to one finite normalized coordinate.
+    /// Time movement, insertion, deletion and interpolation remain available.
+    /// Invalid coordinates are ignored. This also constrains supplied points
+    /// and samples, regardless of builder order or later point replacement.
+    pub fn with_fixed_value(mut self, value: f32) -> Self {
+        if !(0.0..=1.0).contains(&value) {
+            return self;
+        }
+        self.fixed_value = Some(value);
+        Self::constrain_values(&mut self.points, self.fixed_value);
+        if let Some(points) = &mut self.display_points {
+            Self::constrain_values(points, self.fixed_value);
+        }
+        self
+    }
+
+    fn constrain_values(points: &mut [CurvePoint], value: Option<f32>) {
+        if let Some(value) = value {
+            for point in points {
+                point.y = value;
+            }
+        }
+    }
+
+    fn constrained_value(&self, mut point: CurvePoint) -> CurvePoint {
+        if let Some(value) = self.fixed_value {
+            point.y = value;
+        }
+        point
     }
 
     /// Override the interaction policy for each point.
@@ -325,7 +358,9 @@ impl CurveEditor {
 
     /// Replace the read-only sampled curve used for painting.
     pub fn set_display_points(&mut self, points: Vec<CurvePoint>) {
-        self.display_points = Some(normalize_points(points));
+        let mut points = normalize_points(points);
+        Self::constrain_values(&mut points, self.fixed_value);
+        self.display_points = Some(points);
     }
 
     /// Paint through the editable points again.
@@ -374,6 +409,7 @@ impl CurveEditor {
             self.pending_capture_release = true;
         }
         self.points = normalize_points(points);
+        Self::constrain_values(&mut self.points, self.fixed_value);
         self.point_policies = default_point_policies(self.points.len());
         self.point_context_menus.clear();
         self.context_menu = None;
@@ -408,7 +444,7 @@ impl CurveEditor {
 
     fn constrained_point(&self, index: usize, point: CurvePoint) -> CurvePoint {
         let lock_x = self.point_policies.get(index).is_none_or(|policy| policy.lock_x);
-        constrained_point(&self.points, index, point, lock_x)
+        constrained_point(&self.points, index, self.constrained_value(point), lock_x)
     }
 
     fn move_point(&mut self, index: usize, point: CurvePoint) -> bool {
@@ -625,7 +661,9 @@ impl CurveEditor {
     }
 
     fn insertion_at(&self, position: Point) -> Option<(usize, CurvePoint)> {
-        self.geometry().insertion_at(&self.points, position)
+        self.geometry()
+            .insertion_at(&self.points, position)
+            .map(|(index, point)| (index, self.constrained_value(point)))
     }
 
     fn insert_point_from_input(
@@ -833,6 +871,15 @@ impl Widget for CurveEditor {
             {
                 EventResult::Handled
             }
+            UiEvent::KeyDown { key: KeyCode::Up | KeyCode::Down, modifiers }
+                if self.fixed_value.is_some()
+                    && self.selected.is_some()
+                    && !modifiers.ctrl
+                    && !modifiers.alt
+                    && !modifiers.meta =>
+            {
+                EventResult::Handled
+            }
             UiEvent::KeyDown { key, modifiers } if self.nudge_selected(*key, *modifiers, ctx) => {
                 EventResult::Handled
             }
@@ -1025,6 +1072,185 @@ mod tests {
         assert_eq!(editor.points()[0], CurvePoint::new(0.0, 1.0));
         assert_eq!(editor.points()[1], CurvePoint::new(0.5, 0.25));
         assert_eq!(editor.points()[2], CurvePoint::new(1.0, 0.0));
+    }
+
+    #[test]
+    fn fixed_value_survives_programmatic_and_display_replacement() {
+        let points = vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)];
+        for fixed in [0.0, 0.5, 1.0] {
+            let mut editor = CurveEditor::with_points(points.clone())
+                .with_display_points(points.clone())
+                .with_fixed_value(fixed);
+            editor.set_points(vec![CurvePoint::new(0.4, 0.25)]);
+            editor.set_display_points(points.clone());
+            assert_eq!(
+                editor.points(),
+                &[CurvePoint::new(0.0, fixed), CurvePoint::new(1.0, fixed)]
+            );
+            assert!(editor
+                .display_points
+                .as_ref()
+                .expect("display samples")
+                .iter()
+                .all(|point| point.y == fixed));
+        }
+        for invalid in [f32::NAN, f32::INFINITY, -0.1, 1.1] {
+            let editor = CurveEditor::with_points(points.clone()).with_fixed_value(invalid);
+            assert_eq!(editor.points(), points);
+            assert_eq!(editor.fixed_value, None);
+        }
+    }
+
+    #[test]
+    fn fixed_value_consumes_value_keys_but_retains_time_and_delete_edits() {
+        let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let recorded = std::rc::Rc::clone(&events);
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.5),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 0.5),
+        ])
+        .with_fixed_value(0.5)
+        .on_gesture(move |event| {
+            recorded.borrow_mut().push(event);
+            None::<Action>
+        });
+        editor.select(Some(1));
+        let mut ctx = event_ctx();
+        for key in [KeyCode::Up, KeyCode::Down] {
+            for modifiers in [Modifiers::none(), Modifiers::shift()] {
+                assert_eq!(
+                    editor.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                    EventResult::Handled
+                );
+            }
+            for modifiers in [
+                Modifiers::ctrl(),
+                Modifiers { alt: true, ..Default::default() },
+                Modifiers { meta: true, ..Default::default() },
+            ] {
+                assert_eq!(
+                    editor.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                    EventResult::Ignored
+                );
+            }
+        }
+        assert_eq!(editor.points()[1], CurvePoint::new(0.5, 0.5));
+        assert!(events.borrow().is_empty());
+        assert_eq!(
+            editor.event(
+                &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        assert!(editor.points()[1].x > 0.5);
+        assert_eq!(editor.points()[1].y, 0.5);
+        assert!(matches!(
+            events.borrow().as_slice(),
+            [CurveGestureEvent::Edit { gesture_id: None, edit: CurveEdit::Move { .. } }]
+        ));
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(editor.points().len(), 2);
+        assert!(matches!(
+            events.borrow()[1],
+            CurveGestureEvent::Edit {
+                gesture_id: None,
+                edit: CurveEdit::Delete { index: 1 }
+            }
+        ));
+    }
+
+    #[test]
+    fn fixed_value_pointer_gestures_keep_time_edits_atomic_and_cancellable() {
+        for mode in 0..5 {
+            let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let recorded = std::rc::Rc::clone(&events);
+            let original = vec![
+                CurvePoint::new(0.0, 0.5),
+                CurvePoint::new(0.5, 0.5),
+                CurvePoint::new(1.0, 0.5),
+            ];
+            let mut editor = CurveEditor::with_points(original.clone())
+                .with_fixed_value(0.5)
+                .on_gesture(move |event| {
+                    recorded.borrow_mut().push(event);
+                    None::<Action>
+                });
+            editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+            let start = if mode >= 3 {
+                Point::new(160.0, 27.0)
+            } else {
+                editor.to_screen(editor.points()[1])
+            };
+            let mut ctx = event_ctx();
+            editor.event(
+                &UiEvent::MouseDown {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            let CurveGestureEvent::Begin(id) = events.borrow()[0] else {
+                panic!("gesture begin");
+            };
+            editor.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(start.x + if mode == 0 { 0.0 } else { 20.0 }, 12.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            assert!(editor.points().iter().all(|point| point.y == 0.5));
+            assert_eq!(events.borrow().len(), 1, "draft stays local");
+            let cancel = mode == 2 || mode == 4;
+            let terminal = if cancel {
+                UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() }
+            } else {
+                UiEvent::MouseUp {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                }
+            };
+            editor.event(&terminal, &mut ctx);
+            assert!(!editor.has_active_pointer_interaction());
+            if cancel || mode == 0 {
+                assert_eq!(editor.points(), original);
+                assert_eq!(
+                    events.borrow().as_slice(),
+                    &[
+                        CurveGestureEvent::Begin(id),
+                        if cancel {
+                            CurveGestureEvent::Cancel(id)
+                        } else {
+                            CurveGestureEvent::Finish(id)
+                        }
+                    ]
+                );
+            } else {
+                assert_eq!(events.borrow().len(), 3);
+                assert_eq!(events.borrow()[2], CurveGestureEvent::Finish(id));
+                assert!(
+                    matches!(events.borrow()[1], CurveGestureEvent::Edit { gesture_id: Some(edit_id), .. } if edit_id == id)
+                );
+                if mode == 3 {
+                    assert_eq!(editor.points().len(), 4);
+                } else {
+                    assert!(editor.points()[1].x > 0.5);
+                }
+            }
+            editor.event(&UiEvent::FocusLost, &mut ctx);
+            assert_eq!(
+                events.borrow().len(),
+                if cancel || mode == 0 { 2 } else { 3 },
+                "terminal event is published once"
+            );
+        }
     }
 
     #[test]

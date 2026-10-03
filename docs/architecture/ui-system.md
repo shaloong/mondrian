@@ -3189,5 +3189,19 @@ Finite endpoints remain supported when their difference overflows; fixed ranges
 still expose key times and interpolation. Visual author preparation uses the same
 mapping as projection, so changed values retain the declared range's endpoints
 without infinity or a separate interpretation. Exact untouched coordinates keep
-the sparse-move semantics. Fixed-value pointer constraints and real audio plugin
-extreme-range qualification remain separate interaction acceptance work.
+the sparse-move semantics. Real audio plugin extreme-range qualification remains
+separate acceptance work.
+
+### Fixed-value curve interaction
+
+Inspector models carry the canonical value interval. Visual and audio curve
+factories configure `CurveEditor::with_fixed_value` for closed single-value
+intervals, retaining the normalized midpoint. Pointer movement and insertion
+constrain the visible draft before any author action. Selected Up/Down keys are
+consumed without edits, including Shift; Ctrl/Alt/Meta chords keep normal shortcut
+routing. Horizontal movement, insertion, deletion and interpolation remain
+available. Programmatic point and display-sample replacement obey the same
+constraint. Cancellation restores the original points and publishes no edit;
+release publishes at most one edit. An unchanged constrained drag only closes
+its gesture. Ordinary constant curves with a nonzero value interval remain
+editable.

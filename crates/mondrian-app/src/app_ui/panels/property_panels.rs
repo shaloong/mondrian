@@ -1819,40 +1819,44 @@ pub(super) fn audio_automation_curve_control(
             )
         })
         .collect();
-    Box::new(
-        CurveEditor::with_points(model.points())
-            .with_point_policies(model.point_policies())
-            .with_display_points(model.display_points.clone())
-            .with_point_context_menus(interpolation_menus)
-            .enabled(model.is_editable)
-            .on_gesture(move |event| match event {
-                CurveGestureEvent::Begin(gesture_id) => Some(
-                    ParameterGestureAction::BeginCurve {
-                        gesture_id,
-                        target: ParameterCurveGestureTarget::Audio {
-                            target: action_model.target.clone(),
-                        },
-                    }
-                    .action(),
-                ),
-                CurveGestureEvent::Edit { gesture_id, edit } => {
-                    let action = audio_automation_curve_edit_action(&action_model, edit)?;
-                    if let Some(gesture_id) = gesture_id {
-                        ParameterGestureEdit::from_action(&action).map(|edit| {
-                            ParameterGestureAction::Update { gesture_id, edit }.action()
-                        })
-                    } else {
-                        Some(action)
-                    }
+    let editor = CurveEditor::with_points(model.points())
+        .with_point_policies(model.point_policies())
+        .with_display_points(model.display_points.clone())
+        .with_point_context_menus(interpolation_menus)
+        .enabled(model.is_editable);
+    let editor = if model.view_min == model.view_max {
+        editor.with_fixed_value(0.5)
+    } else {
+        editor
+    };
+    Box::new(editor.on_gesture(move |event| {
+        match event {
+            CurveGestureEvent::Begin(gesture_id) => Some(
+                ParameterGestureAction::BeginCurve {
+                    gesture_id,
+                    target: ParameterCurveGestureTarget::Audio {
+                        target: action_model.target.clone(),
+                    },
                 }
-                CurveGestureEvent::Finish(gesture_id) => {
-                    Some(ParameterGestureAction::Finish { gesture_id }.action())
+                .action(),
+            ),
+            CurveGestureEvent::Edit { gesture_id, edit } => {
+                let action = audio_automation_curve_edit_action(&action_model, edit)?;
+                if let Some(gesture_id) = gesture_id {
+                    ParameterGestureEdit::from_action(&action)
+                        .map(|edit| ParameterGestureAction::Update { gesture_id, edit }.action())
+                } else {
+                    Some(action)
                 }
-                CurveGestureEvent::Cancel(gesture_id) => {
-                    Some(ParameterGestureAction::Cancel { gesture_id }.action())
-                }
-            }),
-    )
+            }
+            CurveGestureEvent::Finish(gesture_id) => {
+                Some(ParameterGestureAction::Finish { gesture_id }.action())
+            }
+            CurveGestureEvent::Cancel(gesture_id) => {
+                Some(ParameterGestureAction::Cancel { gesture_id }.action())
+            }
+        }
+    }))
 }
 
 pub(super) fn audio_processor_static_parameter_control(
@@ -2527,31 +2531,36 @@ fn numeric_curve_editor(
         })
         .collect();
     let display_points = model.display_points.clone();
-    CurveEditor::with_points(points)
+    let editor = CurveEditor::with_points(points)
         .with_point_policies(point_policies)
         .with_display_points(display_points)
         .with_point_context_menus(interpolation_menus)
-        .enabled(can_edit)
-        .on_gesture(move |event| match event {
-            CurveGestureEvent::Begin(gesture_id) => target
-                .clone()
-                .map(|target| ParameterGestureAction::BeginCurve { gesture_id, target }.action()),
-            CurveGestureEvent::Edit { gesture_id, edit } => {
-                let action = on_edit(&model, edit)?;
-                if let Some(gesture_id) = gesture_id {
-                    ParameterGestureEdit::from_action(&action)
-                        .map(|edit| ParameterGestureAction::Update { gesture_id, edit }.action())
-                } else {
-                    Some(action)
-                }
+        .enabled(can_edit);
+    let editor = if model.value_range.min == model.value_range.max {
+        editor.with_fixed_value(0.5)
+    } else {
+        editor
+    };
+    editor.on_gesture(move |event| match event {
+        CurveGestureEvent::Begin(gesture_id) => target
+            .clone()
+            .map(|target| ParameterGestureAction::BeginCurve { gesture_id, target }.action()),
+        CurveGestureEvent::Edit { gesture_id, edit } => {
+            let action = on_edit(&model, edit)?;
+            if let Some(gesture_id) = gesture_id {
+                ParameterGestureEdit::from_action(&action)
+                    .map(|edit| ParameterGestureAction::Update { gesture_id, edit }.action())
+            } else {
+                Some(action)
             }
-            CurveGestureEvent::Finish(gesture_id) => {
-                Some(ParameterGestureAction::Finish { gesture_id }.action())
-            }
-            CurveGestureEvent::Cancel(gesture_id) => {
-                Some(ParameterGestureAction::Cancel { gesture_id }.action())
-            }
-        })
+        }
+        CurveGestureEvent::Finish(gesture_id) => {
+            Some(ParameterGestureAction::Finish { gesture_id }.action())
+        }
+        CurveGestureEvent::Cancel(gesture_id) => {
+            Some(ParameterGestureAction::Cancel { gesture_id }.action())
+        }
+    })
 }
 
 fn numeric_curve_edit_payload(

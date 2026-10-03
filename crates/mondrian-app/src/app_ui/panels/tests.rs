@@ -8190,6 +8190,8 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
         parameter_id: mondrian_core::ParameterId::new_static("mondrian.transform.opacity"),
     };
     let model = InspectorCurveModel {
+        value_range: mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0)
+            .expect("range"),
         property: property.clone(),
         keys: vec![
             InspectorCurveKeyModel {
@@ -8238,6 +8240,8 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
 
     let boundary_keyframe_id = KeyframeId::new();
     let boundary_model = InspectorCurveModel {
+        value_range: mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0)
+            .expect("range"),
         property: property.clone(),
         keys: vec![
             InspectorCurveKeyModel {
@@ -8427,6 +8431,9 @@ fn effect_curve_axis_contract(case: &str, min: f64, max: f64) {
         state.test_set_sequence(Some(sequence));
         state.select_clip_by_id(clip_id).expect("select");
         let models = AppUiPanelModels::from_app_state(&state);
+        if min == max {
+            assert_fixed_curve_input_constraint(&models.inspector);
+        }
         let model = &models
             .inspector
             .effects
@@ -8498,6 +8505,127 @@ fn effect_curve_axis_contract(case: &str, min: f64, max: f64) {
             .active_sequence()
             .expect("Redo state")
             .author_state_eq_ignoring_revision(&after));
+    }
+}
+
+fn assert_fixed_curve_input_constraint(model: &InspectorPanelModel) {
+    use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+    fn editor(widget: &dyn Widget) -> &CurveEditor {
+        widget
+            .as_any()
+            .and_then(|value| value.downcast_ref::<CurveEditor>())
+            .expect("curve control")
+    }
+    fn find_curve(widget: &dyn Widget) -> Option<WidgetId> {
+        if widget
+            .as_any()
+            .and_then(|value| value.downcast_ref::<CurveEditor>())
+            .is_some_and(|curve| {
+                curve.points().len() == 3 && curve.points().iter().all(|point| point.y == 0.5)
+            })
+        {
+            return Some(widget.id());
+        }
+        (0..widget.child_count()).find_map(|index| widget.child(index).and_then(find_curve))
+    }
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    for input in 0..3 {
+        let mut panel = inspector_panel(model, &chinese_localizer());
+        let id = find_curve(&panel).expect("actual fixed-value Effect curve");
+        let mut tree = WidgetTreeView::new(&mut panel);
+        let curve = tree.get_mut(id).expect("fixed curve route");
+        curve.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let origin = editor(curve).points()[1];
+        let grab = Point::new(10.0 + 200.0 * origin.x, 52.0);
+        match input {
+            0 => {
+                curve.event(
+                    &UiEvent::MouseDown {
+                        position: grab,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                );
+                assert_eq!(editor(curve).selected_index(), Some(1));
+                curve.event(
+                    &UiEvent::MouseMove {
+                        position: Point::new(grab.x, 27.0),
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                );
+                assert_eq!(
+                    editor(curve).points()[1],
+                    origin,
+                    "fixed-value pointer movement must not produce an impossible visible draft"
+                );
+            }
+            1 => {
+                curve.event(
+                    &UiEvent::MouseDown {
+                        position: grab,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                );
+                curve.event(
+                    &UiEvent::MouseUp {
+                        position: grab,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                );
+                actions.borrow_mut().clear();
+                curve.event(
+                    &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+                    &mut ctx,
+                );
+                assert_eq!(
+                    editor(curve).points()[1],
+                    origin,
+                    "fixed-value keyboard movement must not alter the draft"
+                );
+                assert!(
+                    actions.borrow().is_empty(),
+                    "blocked value movement publishes no edit"
+                );
+            }
+            _ => {
+                curve.event(
+                    &UiEvent::MouseDown {
+                        position: Point::new(160.0, 27.0),
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                );
+                assert_eq!(
+                    editor(curve).points().len(),
+                    4,
+                    "fixed value still supports key insertion"
+                );
+                assert!(
+                    editor(curve).points().iter().all(|point| point.y == 0.5),
+                    "insertion must respect the fixed value before release"
+                );
+            }
+        }
     }
 }
 
@@ -8905,6 +9033,8 @@ fn inspector_actions_without_selection_produce_no_command() {
         None
     );
     let curve_model = InspectorCurveModel {
+        value_range: mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0)
+            .expect("range"),
         property: AnimationParameterAddress {
             animation_track_id: mondrian_core::types::AnimationTrackId::new(),
             parameter_id: mondrian_core::ParameterId::new_static("mondrian.transform.opacity"),
