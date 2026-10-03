@@ -355,8 +355,7 @@ fn prepare_curve_edit(
                 address.parameter_id
             ))
         })?;
-    let value_span = numeric.soft_range.max - numeric.soft_range.min;
-    if !value_span.is_finite() || value_span <= 0.0 {
+    if numeric.soft_range.normalized_position(numeric.soft_range.min).is_none() {
         return Err(curve_error(format!(
             "parameter {} has an unusable numeric editor range",
             address.parameter_id
@@ -473,7 +472,13 @@ fn prepare_curve_edit(
                 .transpose()?
                 .unwrap_or(keyframe.time);
             let target_value = value_ratio
-                .map(|ratio| curve_value(value_type, numeric.soft_range.min + value_span * ratio))
+                .map(|ratio| {
+                    let value = numeric
+                        .soft_range
+                        .value_at_normalized_position(ratio)
+                        .ok_or_else(|| curve_error("invalid normalized value coordinate"))?;
+                    curve_value(value_type, value)
+                })
                 .transpose()?
                 .unwrap_or(keyframe.value);
             prepare_key_position_edit(
@@ -489,7 +494,10 @@ fn prepare_curve_edit(
             let target_time = curve_time(clip, point.time_ratio)?;
             let target_value = curve_value(
                 value_type,
-                numeric.soft_range.min + value_span * point.value_ratio,
+                numeric
+                    .soft_range
+                    .value_at_normalized_position(point.value_ratio)
+                    .ok_or_else(|| curve_error("invalid normalized value coordinate"))?,
             )?;
 
             prepare_key_position_edit(

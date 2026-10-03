@@ -168,16 +168,11 @@ pub(crate) fn project_audio_automation(
         view_min = view_min.min(inspection.default_value());
         view_max = view_max.max(inspection.default_value());
     }
-    let value_span = view_max - view_min;
-    if !value_span.is_finite() || value_span <= 0.0 {
-        return None;
-    }
+    let value_range =
+        mondrian_core::automation::ParameterNumericRange::new(view_min, view_max).ok()?;
     let range_end = viewport.range.end().ok()?;
-    let normalized_value = |value: f64| {
-        value
-            .is_finite()
-            .then_some(((value - view_min) / value_span).clamp(0.0, 1.0) as f32)
-    };
+    let normalized_value =
+        |value: f64| value_range.normalized_position(value).map(|position| position as f32);
     let normalized_time = |time: TimelineTime| {
         let elapsed = time.checked_sub(viewport.range.start).ok()?.to_f64();
         Some((elapsed / viewport.range.duration.to_f64()).clamp(0.0, 1.0) as f32)
@@ -341,8 +336,10 @@ fn denormalized_time(range: TimelineTimeRange, ratio: f32) -> Option<TimelineTim
 }
 
 fn denormalized_value(model: &AudioAutomationCurveModel, ratio: f32) -> Option<f64> {
-    let span = model.view_max - model.view_min;
-    let mut value = model.view_min + span * f64::from(ratio.clamp(0.0, 1.0));
+    let range =
+        mondrian_core::automation::ParameterNumericRange::new(model.view_min, model.view_max)
+            .ok()?;
+    let mut value = range.value_at_normalized_position(f64::from(ratio.clamp(0.0, 1.0)))?;
     if let Some(step) = model.step.filter(|step| step.is_finite() && *step > 0.0) {
         value = (value / step).round() * step;
     }

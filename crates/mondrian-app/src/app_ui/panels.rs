@@ -4072,10 +4072,7 @@ fn numeric_curve_model_for_property(
         return None;
     }
     let numeric = property.descriptor.schema.numeric.as_ref()?.first().copied()?;
-    let value_span = numeric.soft_range.max - numeric.soft_range.min;
-    if !value_span.is_finite() || value_span <= 0.0 {
-        return None;
-    }
+    numeric.soft_range.normalized_position(numeric.soft_range.min)?;
     let start_tick = clip.clip_time_in;
     let end_tick = clip.clip_time_out().ok()?;
     let duration_ticks = end_tick.checked_sub(start_tick).ok()?;
@@ -4085,7 +4082,7 @@ fn numeric_curve_model_for_property(
 
     let normalized_value = |value: PropertyValue| {
         let value = value.as_f64()?;
-        Some(((value - numeric.soft_range.min) / value_span).clamp(0.0, 1.0) as f32)
+        Some(numeric.soft_range.normalized_position(value)? as f32)
     };
     let normalized_time = |keyframe_time: TimelineTime| {
         let elapsed = keyframe_time.checked_sub(start_tick).ok()?.to_f64();

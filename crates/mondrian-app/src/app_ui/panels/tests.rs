@@ -8348,6 +8348,20 @@ fn visual_curve_single_axis_drag_preserves_exact_untouched_author_coordinate() {
 
 #[test]
 fn effect_curve_axis_drag_preserves_double_value_and_exact_time() {
+    effect_curve_axis_contract("precision", 0.0, 1.0);
+}
+
+#[test]
+fn effect_curve_supports_full_finite_double_range() {
+    effect_curve_axis_contract("full_finite", -f64::MAX, f64::MAX);
+}
+
+#[test]
+fn effect_curve_fixed_value_range_retains_time_editing() {
+    effect_curve_axis_contract("fixed", 0.12345678901234568, 0.12345678901234568);
+}
+
+fn effect_curve_axis_contract(case: &str, min: f64, max: f64) {
     use mondrian_core::automation::{
         ParameterInvalidValuePolicy, ParameterNumericContract, ParameterUnit, PropertyDescriptor,
     };
@@ -8357,16 +8371,16 @@ fn effect_curve_axis_drag_preserves_double_value_and_exact_time() {
         EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
         EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
     };
-    let kind = EffectType::Plugin("plugin.test.curve_axis_precision".to_owned());
+    let kind = EffectType::Plugin(format!("plugin.test.curve_axis_{case}"));
     let parameter_id = kind.parameter_id("value").expect("parameter");
     let value = PropertyValue::Double(0.12345678901234568);
-    let path = "plugin.test.curve_axis_precision.value";
-    let descriptor = PropertyDescriptor::new(path, "Precise value", value.clone())
+    let path = format!("plugin.test.curve_axis_{case}.value");
+    let descriptor = PropertyDescriptor::new(&path, "Precise value", value.clone())
         .with_parameter_id(parameter_id.clone())
         .with_animatable(true)
         .with_numeric_contract(
             ParameterUnit::Normalized,
-            ParameterNumericContract::closed(0.0, 1.0, None, ParameterInvalidValuePolicy::Reject)
+            ParameterNumericContract::closed(min, max, None, ParameterInvalidValuePolicy::Reject)
                 .expect("range"),
         );
     register_effect_definition(
@@ -8391,7 +8405,8 @@ fn effect_curve_axis_drag_preserves_double_value_and_exact_time() {
         .build(),
     )
     .expect("canonical definition");
-    for horizontal in [true, false] {
+    let axes: &[bool] = if min == max { &[true] } else { &[true, false] };
+    for &horizontal in axes {
         let time = TimelineTime::new(1, 3).expect("exact third");
         let mut effect = instantiate_effect_node(kind.clone()).expect("effect");
         let effect_id = effect.id;

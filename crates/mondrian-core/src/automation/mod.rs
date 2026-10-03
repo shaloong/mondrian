@@ -1016,6 +1016,61 @@ pub struct ParameterNumericRange {
 }
 
 impl ParameterNumericRange {
+    /// Project a finite value into the unit interval without overflowing the span.
+    /// Values outside this editor interval project to its endpoints; a fixed
+    /// interval projects to its midpoint. Invalid ranges or values are rejected.
+    pub fn normalized_position(self, value: f64) -> Option<f64> {
+        Self::new(self.min, self.max).ok()?;
+        if !value.is_finite() {
+            return None;
+        }
+        if self.min == self.max {
+            return Some(0.5);
+        }
+        if value <= self.min {
+            return Some(0.0);
+        }
+        if value >= self.max {
+            return Some(1.0);
+        }
+        let span = self.max - self.min;
+        let position = if span.is_finite() {
+            (value - self.min) / span
+        } else {
+            (value * 0.5 - self.min * 0.5) / (self.max * 0.5 - self.min * 0.5)
+        };
+        Some(position.clamp(0.0, 1.0))
+    }
+
+    /// Resolve a finite unit-interval position while retaining exact endpoints.
+    /// Opposite-sign bounds use weighted interpolation to avoid overflowing
+    /// their difference. A fixed interval always resolves to its author value.
+    pub fn value_at_normalized_position(self, position: f64) -> Option<f64> {
+        Self::new(self.min, self.max).ok()?;
+        if !position.is_finite() || !(0.0..=1.0).contains(&position) {
+            return None;
+        }
+        if position == 0.0 {
+            return Some(self.min);
+        }
+        if position == 1.0 {
+            return Some(self.max);
+        }
+        if self.min == self.max {
+            return Some(self.min);
+        }
+        let value = if self.min <= 0.0 && self.max >= 0.0 {
+            if position <= 0.5 {
+                self.min.mul_add(1.0 - position, self.max * position)
+            } else {
+                self.max.mul_add(position, self.min * (1.0 - position))
+            }
+        } else {
+            (self.max - self.min).mul_add(position, self.min)
+        };
+        Some(value.clamp(self.min, self.max))
+    }
+
     /// Construct a finite, ordered closed range.
     pub fn new(min: f64, max: f64) -> std::result::Result<Self, ParameterSchemaError> {
         if !min.is_finite() || !max.is_finite() {
@@ -4297,6 +4352,78 @@ impl crate::AuthoringFootprint for PropertyBag {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numeric_range_mapping_keeps_finite_monotonic_values_and_exact_endpoints() {
+        let almost_max = f64::from_bits(f64::MAX.to_bits() - 1);
+        for (min, max) in [
+            (0.0, 1.0),
+            (-f64::MAX, f64::MAX),
+            (almost_max, f64::MAX),
+            (-f64::MAX, -almost_max),
+            (f64::from_bits(1), f64::from_bits(4)),
+            (-f64::from_bits(4), f64::from_bits(4)),
+            (0.0, f64::MIN_POSITIVE),
+            (0.12345678901234568, 0.12345678901234568),
+            (-0.0, 0.0),
+        ] {
+            let range = ParameterNumericRange::new(min, max).expect("canonical range");
+            assert_eq!(
+                range.value_at_normalized_position(0.0).expect("minimum").to_bits(),
+                min.to_bits()
+            );
+            assert_eq!(
+                range.value_at_normalized_position(1.0).expect("maximum").to_bits(),
+                max.to_bits()
+            );
+            let mut previous_value = min;
+            let mut previous_position = 0.0;
+            for index in 0..=64 {
+                let value =
+                    range.value_at_normalized_position(f64::from(index) / 64.0).expect("value");
+                assert!(value.is_finite() && value >= min && value <= max);
+                assert!(value >= previous_value, "range mapping must be monotonic");
+                let position = range.normalized_position(value).expect("position");
+                assert!(position.is_finite() && (0.0..=1.0).contains(&position));
+                assert!(position >= previous_position);
+                previous_value = value;
+                previous_position = position;
+            }
+        }
+        let full = ParameterNumericRange::new(-f64::MAX, f64::MAX).expect("full range");
+        assert_eq!(full.normalized_position(0.0), Some(0.5));
+        assert_eq!(full.value_at_normalized_position(0.5), Some(0.0));
+        assert_eq!(
+            full.value_at_normalized_position(0.25),
+            Some(-f64::MAX * 0.5)
+        );
+        assert_eq!(
+            full.value_at_normalized_position(0.75),
+            Some(f64::MAX * 0.5)
+        );
+    }
+
+    #[test]
+    fn numeric_range_mapping_rejects_invalid_input_and_clamps_only_projection() {
+        let range = ParameterNumericRange::new(1.0, 2.0).expect("range");
+        assert_eq!(range.normalized_position(-f64::MAX), Some(0.0));
+        assert_eq!(range.normalized_position(f64::MAX), Some(1.0));
+        for invalid in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY] {
+            assert_eq!(range.normalized_position(invalid), None);
+            assert_eq!(range.value_at_normalized_position(invalid), None);
+        }
+        for invalid in [-0.1, 1.1] {
+            assert_eq!(range.value_at_normalized_position(invalid), None);
+        }
+        for invalid in [
+            ParameterNumericRange { min: 2.0, max: 1.0 },
+            ParameterNumericRange { min: f64::NAN, max: 1.0 },
+            ParameterNumericRange { min: 0.0, max: f64::INFINITY },
+        ] {
+            assert_eq!(invalid.normalized_position(0.5), None);
+            assert_eq!(invalid.value_at_normalized_position(0.5), None);
+        }
+    }
 
     fn tt(frame: i64) -> TimelineTime {
         TimelineTime::new(frame, 25).expect("test timeline time")

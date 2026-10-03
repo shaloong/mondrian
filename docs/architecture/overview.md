@@ -6,6 +6,14 @@ Mondrian is a native video editor organized around strict crate boundaries. The 
 
 ## Layers
 
+Core's `ParameterNumericRange` owns finite editor projection and normalized value
+mapping for author parameters. Valid ordered endpoints may have an overflowing
+difference or be equal. Mapping retains exact endpoints, uses weighted
+interpolation across opposite signs, and projects fixed ranges to the midpoint.
+Invalid ranges, nonfinite values and non-unit input positions are rejected.
+Visual and audio curve adapters share this arithmetic instead of narrowing
+admitted schemas or treating fixed-value parameters as missing curves.
+
 Core owns the shared `ParameterValueWrite` algebra: complete typed values or
 sparse numeric components at a stable `AnimationParameterAddress`. Clip, Effect
 and Mask adapters supply exact owner-local time to `PropertyBag::prepare_parameter_write`;

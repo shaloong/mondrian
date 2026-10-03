@@ -3181,3 +3181,13 @@ update. Unchanged moves create no command or author generation. Synthetic curve
 endpoints insert keys; they do not invent an existing key identity. UI projection
 never reconstructs an untouched exact rational time or f64 value from screen
 coordinates.
+
+### Finite curve value ranges
+
+Inspector and audio automation curves consume Core's numeric interval mapping.
+Finite endpoints remain supported when their difference overflows; fixed ranges
+still expose key times and interpolation. Visual author preparation uses the same
+mapping as projection, so changed values retain the declared range's endpoints
+without infinity or a separate interpretation. Exact untouched coordinates keep
+the sparse-move semantics. Fixed-value pointer constraints and real audio plugin
+extreme-range qualification remain separate interaction acceptance work.
