@@ -6166,6 +6166,126 @@ fn inspector_effect_vec3_property_widget_dispatches_component_change() {
 }
 
 #[test]
+fn inspector_numeric_slider_keeps_decimal_endpoint_in_author_precision() {
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    for (value, component, y, animatable) in [
+        (PropertyValue::Vec3(glam::Vec3::splat(0.125)), 2, 75.0, true),
+        (PropertyValue::Float(0.125), 0, 12.0, true),
+        (
+            PropertyValue::Vec3(glam::Vec3::splat(0.125)),
+            2,
+            75.0,
+            false,
+        ),
+        (PropertyValue::Float(0.125), 0, 12.0, false),
+    ] {
+        let effect_id = EffectId::new();
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
+        };
+        let descriptor =
+            mondrian_core::automation::PropertyDescriptor::new("point", "Point", value)
+                .with_animatable(animatable)
+                .with_numeric_contract(
+                    mondrian_core::automation::ParameterUnit::Normalized,
+                    mondrian_core::automation::ParameterNumericContract::closed(
+                        0.0,
+                        0.2,
+                        Some(0.01),
+                        mondrian_core::automation::ParameterInvalidValuePolicy::Reject,
+                    )
+                    .expect("exact range"),
+                );
+        let mut authored = mondrian_core::automation::AnimatedProperty::from_descriptor(descriptor);
+        authored.validate().expect("canonical author");
+        let property =
+            inspector_property_model("point", &authored, TimelineTime::ZERO, &chinese_localizer());
+        let mut widget = effect_property_value_widget(
+            &chinese_localizer(),
+            &property,
+            true,
+            Some(selection),
+            effect_id,
+        );
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 94.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut router = mondrian_ui_events::EventRouter::new(widget.id());
+        let mut tree = mondrian_ui_core::tree::WidgetTreeView::new(widget.as_mut());
+        assert_eq!(
+            router.route(
+                UiEvent::MouseDown {
+                    position: Point::new(80.0, y),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut tree,
+                &dispatch
+            ),
+            EventResult::Handled
+        );
+        router.route(
+            UiEvent::MouseMove {
+                position: Point::new(500.0, y),
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &dispatch,
+        );
+        router.route(
+            UiEvent::MouseUp {
+                position: Point::new(500.0, y),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &dispatch,
+        );
+        let payload = actions
+            .borrow()
+            .iter()
+            .rev()
+            .find_map(
+                |action| match crate::app::parameter_gesture::ParameterGestureAction::decode(action)
+                    .expect("typed gesture")
+                {
+                    Some(crate::app::parameter_gesture::ParameterGestureAction::Update {
+                        edit: crate::app::parameter_gesture::ParameterGestureEdit::Effect(payload),
+                        ..
+                    }) => Some(payload),
+                    _ => None,
+                },
+            )
+            .expect("captured slider update");
+        assert_eq!(payload.clip_id, selection.clip_id);
+        assert_eq!(payload.effect_id, effect_id);
+        let ParameterValueWrite::Channels { parameter, channel_values } = payload.write else {
+            panic!("expected component write");
+        };
+        assert_eq!(parameter, property.address);
+        assert_eq!(
+            channel_values,
+            vec![(component, 0.2)],
+            "exact endpoint with animatable={animatable}"
+        );
+        authored
+            .write_channels(
+                TimelineTime::ZERO,
+                &channel_values,
+                InterpolationType::Linear,
+                None,
+            )
+            .expect("Reject admits UI endpoint");
+        authored.validate().expect("physical value stays within exact bounds");
+        if !animatable {
+            assert_eq!(authored.channel_count(), 0);
+        }
+    }
+}
+
+#[test]
 fn inspector_vector_slider_uses_its_own_channel_contract() {
     let effect_id = EffectId::new();
     let selection = SelectedClipRef {
@@ -6632,13 +6752,13 @@ fn inspector_effect_float_property_text_input_preserves_value_between_steps() {
     };
     let payload: VisualEffectSetParameterValuePayload =
         serde_json::from_value(payload.clone()).expect("set effect property payload");
-    let ParameterValueWrite::Value { parameter, value } = payload.write else {
-        panic!("expected complete property write");
+    let ParameterValueWrite::Channels { parameter, channel_values } = payload.write else {
+        panic!("expected precise Float channel write");
     };
+    assert_eq!(channel_values.len(), 1);
+    assert_eq!(channel_values[0].0, 0);
+    let value = channel_values[0].1;
     assert_eq!(parameter, property.address);
-    let PropertyValue::Float(value) = value else {
-        panic!("expected Float payload");
-    };
     assert!(
         (value - 0.62).abs() <= 0.0001,
         "expected exact typed value 0.62, got {value}"
@@ -6728,15 +6848,15 @@ fn inspector_disabled_effect_property_row_remains_editable_for_unlocked_clip() {
     else {
         panic!("expected effect gesture begin, got {:?}", recorded[0]);
     };
-    let ParameterValueWrite::Value { parameter, value } = payload.write else {
-        panic!("expected complete property write");
+    let ParameterValueWrite::Channels { parameter, channel_values } = payload.write else {
+        panic!("expected precise Float channel write");
     };
+    assert_eq!(channel_values.len(), 1);
+    assert_eq!(channel_values[0].0, 0);
+    let value = channel_values[0].1;
     assert_eq!(payload.clip_id, selection.clip_id);
     assert_eq!(payload.effect_id, effect_id);
     assert_eq!(parameter, property.address);
-    let PropertyValue::Float(value) = value else {
-        panic!("expected Float payload");
-    };
     assert!(
         value > 0.2,
         "clicking the enabled property row should update a disabled effect's property, got {value}"
@@ -6819,13 +6939,13 @@ fn inspector_effect_float_property_keyboard_nudge_sanitizes_descriptor_bounds() 
     };
     let payload: VisualEffectSetParameterValuePayload =
         serde_json::from_value(payload.clone()).expect("set effect property payload");
-    let ParameterValueWrite::Value { parameter, value } = payload.write else {
-        panic!("expected complete property write");
+    let ParameterValueWrite::Channels { parameter, channel_values } = payload.write else {
+        panic!("expected precise Float channel write");
     };
+    assert_eq!(channel_values.len(), 1);
+    assert_eq!(channel_values[0].0, 0);
+    let value = channel_values[0].1;
     assert_eq!(parameter, property.address);
-    let PropertyValue::Float(value) = value else {
-        panic!("expected Float payload");
-    };
     assert!(
         (value - 0.45).abs() <= 0.0001,
         "expected finite stepped nudge, got {value}"

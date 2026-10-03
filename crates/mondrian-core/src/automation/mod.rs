@@ -1277,6 +1277,13 @@ impl PropertyValue {
 }
 
 impl PropertyValueType {
+    fn uses_f32_channels(self) -> bool {
+        matches!(
+            self,
+            Self::Float | Self::Vec2 | Self::Vec3 | Self::Vec4 | Self::Color
+        )
+    }
+
     pub fn channel_count(self) -> usize {
         match self {
             Self::Bool | Self::Int | Self::Float | Self::Double => 1,
@@ -1813,6 +1820,20 @@ impl AnimatedProperty {
             reason: format!("{}: {error}", self.descriptor.path),
         })?;
         let _ = self.normalize_value(self.descriptor.schema.default_value.clone())?;
+        if let Some(contracts) = self.descriptor.schema.numeric.as_ref()
+            && let Some((contract, value)) = contracts
+                .iter()
+                .zip(self.static_value.to_channel_values())
+                .find(|(contract, value)| !contract.hard_range.contains(*value))
+        {
+            return Err(parameter_value_error(
+                &self.descriptor.path,
+                &format!(
+                    "persisted value lies outside [{}, {}]: {value}",
+                    contract.hard_range.min, contract.hard_range.max
+                ),
+            ));
+        }
         let normalized_static = self.normalize_value(self.static_value.clone())?;
         if normalized_static != self.static_value {
             return Err(parameter_value_error(
@@ -2274,7 +2295,11 @@ impl AnimatedProperty {
         interpolation: InterpolationType,
         handles: Option<(Option<Vec2>, Option<Vec2>)>,
     ) -> Result<()> {
-        validate_channel_updates(self.channel_count(), channel_values, &self.descriptor.path)?;
+        validate_channel_updates(
+            self.value_type().channel_count(),
+            channel_values,
+            &self.descriptor.path,
+        )?;
         let channel_values = channel_values
             .iter()
             .map(|(index, value)| Ok((*index, self.normalize_numeric_channel(*index, *value)?)))
@@ -2704,6 +2729,32 @@ impl AnimatedProperty {
             }
             return fallback.clone();
         }
+        // Preserve f64 author channels. Only correct a Float projection when rounding
+        // an in-range channel would cross its exact declared bound.
+        if self.value_type().uses_f32_channels()
+            && let Some(contracts) = &self.descriptor.schema.numeric
+            && channels.len() == self.value_type().channel_count()
+        {
+            let mut projected = [0.0; 4];
+            for (index, value) in channels.iter().copied().enumerate() {
+                projected[index] = value;
+                if let Some(contract) = contracts.get(index)
+                    && contract.hard_range.contains(value)
+                {
+                    let rounded = value as f32;
+                    if f64::from(rounded) < contract.hard_range.min {
+                        projected[index] = f64::from(rounded.next_up());
+                    } else if f64::from(rounded) > contract.hard_range.max {
+                        projected[index] = f64::from(rounded.next_down());
+                    }
+                }
+            }
+            return PropertyValue::from_channel_values(
+                self.value_type(),
+                &projected[..channels.len()],
+                fallback,
+            );
+        }
         PropertyValue::from_channel_values(self.value_type(), channels, fallback)
     }
 
@@ -2714,33 +2765,44 @@ impl AnimatedProperty {
                 "numeric values must be finite",
             ));
         }
-        let Some(contracts) = self.descriptor.schema.numeric.as_ref() else {
-            return Ok(value);
+        let normalized = if let Some(contracts) = self.descriptor.schema.numeric.as_ref() {
+            if contracts.len() != self.value_type().channel_count() {
+                return Err(parameter_value_error(
+                    &self.descriptor.path,
+                    "numeric channel contracts must cover every declared channel",
+                ));
+            }
+            let contract = contracts.get(index).ok_or_else(|| {
+                parameter_value_error(&self.descriptor.path, "numeric channel contract is missing")
+            })?;
+            if contract.hard_range.contains(value) {
+                value
+            } else {
+                match contract.invalid_value_policy {
+                    ParameterInvalidValuePolicy::Reject => {
+                        return Err(parameter_value_error(
+                            &self.descriptor.path,
+                            &format!(
+                                "value {value} is outside [{}, {}]",
+                                contract.hard_range.min, contract.hard_range.max
+                            ),
+                        ))
+                    }
+                    ParameterInvalidValuePolicy::Clamp => {
+                        value.clamp(contract.hard_range.min, contract.hard_range.max)
+                    }
+                }
+            }
+        } else {
+            value
         };
-        if contracts.len() != self.value_type().channel_count() {
+        if self.value_type().uses_f32_channels() && !(normalized as f32).is_finite() {
             return Err(parameter_value_error(
                 &self.descriptor.path,
-                "numeric channel contracts must cover every declared channel",
+                "numeric channel cannot be represented as a finite Float value",
             ));
         }
-        let contract = contracts.get(index).ok_or_else(|| {
-            parameter_value_error(&self.descriptor.path, "numeric channel contract is missing")
-        })?;
-        if contract.hard_range.contains(value) {
-            return Ok(value);
-        }
-        match contract.invalid_value_policy {
-            ParameterInvalidValuePolicy::Reject => Err(parameter_value_error(
-                &self.descriptor.path,
-                &format!(
-                    "value {value} is outside [{}, {}]",
-                    contract.hard_range.min, contract.hard_range.max
-                ),
-            )),
-            ParameterInvalidValuePolicy::Clamp => {
-                Ok(value.clamp(contract.hard_range.min, contract.hard_range.max))
-            }
-        }
+        Ok(normalized)
     }
 
     fn ensure_interpolation_allowed(&self, interpolation: ParameterInterpolation) -> Result<()> {
@@ -3054,13 +3116,13 @@ impl PropertyBag {
                         address.animation_track_id, address.parameter_id
                     ),
                 })?;
-        validate_channel_updates(property.channel_count(), channel_values, path)?;
+        validate_channel_updates(property.value_type().channel_count(), channel_values, path)?;
         if channel_values.is_empty() {
             return Ok(None);
         }
         let current_value = property.evaluate(time);
         let current = property.value_to_channel_values(&current_value)?;
-        if current.len() != property.channel_count() {
+        if current.len() != property.value_type().channel_count() {
             return Err(parameter_value_error(
                 path,
                 "canonical value and channel counts differ",
@@ -4544,6 +4606,161 @@ mod tests {
             .set_static_value("effect.key.color", PropertyValue::Float(1.0))
             .expect_err("mismatched value should fail");
         assert!(err.to_string().contains("属性类型不匹配"));
+    }
+
+    #[test]
+    fn non_animatable_numeric_components_accept_atomic_sparse_edits() {
+        for default in [
+            PropertyValue::Float(0.125),
+            PropertyValue::Vec2(Vec2::new(0.125, 0.125)),
+            PropertyValue::Double(0.125),
+        ] {
+            let mut bag = PropertyBag::default();
+            bag.define(
+                PropertyDescriptor::new("static.point", "Point", default)
+                    .with_animatable(false)
+                    .with_numeric_contract(
+                        ParameterUnit::Unitless,
+                        ParameterNumericContract::closed(
+                            0.0,
+                            0.2,
+                            None,
+                            ParameterInvalidValuePolicy::Reject,
+                        )
+                        .expect("range"),
+                    ),
+            );
+            bag.validate().expect("static definition is valid");
+            let address = bag.property("static.point").expect("property").address();
+            let mutation = bag
+                .prepare_channel_write_by_address(&address, tt(0), &[(0, 0.2)])
+                .expect("static value components do not require animation storage")
+                .expect("changed component");
+            bag.apply_mutation(mutation).expect("static sparse write");
+            bag.validate().expect("accepted static value");
+            let property = bag.property("static.point").expect("property");
+            assert_eq!(
+                property.channel_count(),
+                0,
+                "no animation channel is allocated"
+            );
+            assert!(property.static_value().to_channel_values()[0] <= 0.2);
+            if property.value_type() == PropertyValueType::Vec2 {
+                assert_eq!(
+                    property.static_value().to_channel_values()[1],
+                    0.125,
+                    "sibling is preserved"
+                );
+            }
+            assert!(bag
+                .prepare_channel_write_by_address(&address, tt(0), &[(0, 0.2)])
+                .expect("unchanged physical value")
+                .is_none());
+            let before = bag.clone();
+            assert!(bag.prepare_channel_write_by_address(&address, tt(0), &[(0, 0.3)]).is_err());
+            assert_eq!(bag, before);
+        }
+    }
+
+    #[test]
+    fn float_parameter_projection_obeys_exact_bounds_without_narrowing_double() {
+        for kind in [
+            PropertyValueType::Float,
+            PropertyValueType::Vec2,
+            PropertyValueType::Vec3,
+            PropertyValueType::Vec4,
+            PropertyValueType::Color,
+        ] {
+            let value = |v| {
+                PropertyValue::from_channel_values(
+                    kind,
+                    &vec![v; kind.channel_count()],
+                    &PropertyValue::Float(0.0),
+                )
+            };
+            let descriptor = PropertyDescriptor::new("test.precision", "Precision", value(0.125))
+                .with_numeric_contract(
+                    ParameterUnit::Unitless,
+                    ParameterNumericContract::closed(
+                        -0.2,
+                        0.2,
+                        None,
+                        ParameterInvalidValuePolicy::Clamp,
+                    )
+                    .expect("range"),
+                );
+            descriptor.validate().expect("representable default");
+            for sign in [-1.0, 1.0] {
+                let mut property = AnimatedProperty::from_descriptor(descriptor.clone());
+                property.set_static_value(value(sign * 0.3)).expect("clamp");
+                assert!(
+                    property
+                        .static_value()
+                        .to_channel_values()
+                        .iter()
+                        .all(|v| (-0.2..=0.2).contains(v)),
+                    "{kind:?}: rounded clamp must stay inside exact bounds"
+                );
+                property.validate().expect("accepted state is valid");
+                let reopened: AnimatedProperty =
+                    serde_json::from_slice(&serde_json::to_vec(&property).expect("wire"))
+                        .expect("reopen");
+                reopened.validate().expect("reopened bounds");
+                assert_eq!(reopened, property);
+                property.enable_animation(tt(0)).expect("enable");
+                property
+                    .write_channels(tt(1), &[(0, sign * 0.2)], InterpolationType::Linear, None)
+                    .expect("exact channel endpoint");
+                assert_eq!(
+                    property.channel(0).expect("channel").keyframes[1].value,
+                    sign * 0.2,
+                    "author channel precision is retained"
+                );
+                assert!(
+                    property
+                        .evaluate(tt(1))
+                        .to_channel_values()
+                        .iter()
+                        .all(|v| (-0.2..=0.2).contains(v)),
+                    "physical Float projection stays inside bounds"
+                );
+                let mut tampered = AnimatedProperty::from_descriptor(descriptor.clone());
+                tampered.static_value = value(sign * 0.2);
+                assert!(
+                    tampered.validate().is_err(),
+                    "persisted values must not be repaired by edit clamping"
+                );
+            }
+        }
+        let mut unbounded = AnimatedProperty::from_descriptor(PropertyDescriptor::new(
+            "test.width",
+            "Width",
+            PropertyValue::Float(0.125),
+        ));
+        let before = unbounded.clone();
+        assert!(
+            unbounded
+                .write_channels(tt(0), &[(0, f64::MAX)], InterpolationType::Linear, None)
+                .is_err(),
+            "finite channels must not publish infinite Float values"
+        );
+        assert_eq!(unbounded, before);
+        let mut double = AnimatedProperty::from_descriptor(
+            PropertyDescriptor::new("test.double", "Double", PropertyValue::Double(0.125))
+                .with_numeric_contract(
+                    ParameterUnit::Unitless,
+                    ParameterNumericContract::closed(
+                        0.0,
+                        0.2,
+                        None,
+                        ParameterInvalidValuePolicy::Clamp,
+                    )
+                    .expect("double range"),
+                ),
+        );
+        double.set_static_value(PropertyValue::Double(0.3)).expect("double clamp");
+        assert_eq!(double.static_value(), &PropertyValue::Double(0.2));
+        double.validate().expect("exact double bounds");
     }
 
     #[test]

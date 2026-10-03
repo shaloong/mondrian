@@ -490,3 +490,13 @@ cardinality before normalization and prepare all values before publishing mutati
 The list participates in authoring footprint accounting and shares snapshot roots.
 Uniform contract builders expand across the declared arity; serialized scalar
 contracts are not accepted through an alpha compatibility adapter.
+
+### Float parameter representation
+
+Numeric author channels retain f64 values. Materializing a Float/vector/Color
+corrects rounding toward the interior only when an in-range channel would round
+outside its exact hard bounds. This uses a fixed four-channel stack array and
+does not quantize Double values or rewrite source keys. Numeric edit admission
+rejects finite values that become nonfinite in the declared Float representation.
+Persisted static bounds are checked directly, independently of edit Clamp policy.
+Sparse numeric edits use the declared value shape even without animation storage.

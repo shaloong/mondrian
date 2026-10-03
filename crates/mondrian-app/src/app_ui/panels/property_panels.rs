@@ -2779,22 +2779,23 @@ pub(super) fn inspector_property_value_widget(
             )
         }
         PropertyValue::Float(value) => {
-            let ((min, max), (hard_min, hard_max)) = parameter_numeric_ranges(property, 0.0, 1.0);
+            let ((min, max), (hard_min, hard_max)) = parameter_float_ranges(property);
             let selected_clip = selection;
             numeric_slider_input_control_with_hard_range(
-                *value,
+                f64::from(*value),
                 min,
                 max,
                 hard_min,
                 hard_max,
-                property_step(property.step, None),
+                property.step.filter(|step| step.is_finite() && *step > 0.0),
                 numeric_decimals(property.step, *value),
                 can_edit,
-                move |v| {
-                    inspector_property_action(
+                move |v: f64| {
+                    inspector_property_channel_action(
                         selected_clip,
                         target.clone(),
-                        PropertyValue::Float(v.clamp(hard_min, hard_max)),
+                        0,
+                        v.clamp(hard_min, hard_max),
                     )
                 },
             )
@@ -3170,28 +3171,22 @@ pub(super) fn vector_property_widget(
                 .as_ref()
                 .and_then(|contracts| contracts.get(component_index));
             let ((min, max), (hard_min, hard_max), step) = if let Some(numeric) = numeric {
-                let hard = numeric_property_range(
-                    Some(numeric.hard_range.min),
-                    Some(numeric.hard_range.max),
-                    -f32::MAX,
-                    f32::MAX,
+                let hard = (
+                    numeric.hard_range.min.max(-f64::from(f32::MAX)),
+                    numeric.hard_range.max.min(f64::from(f32::MAX)),
                 );
-                let soft = numeric_property_range(
-                    Some(numeric.soft_range.min),
-                    Some(numeric.soft_range.max),
-                    0.0,
-                    1.0,
+                let soft = (
+                    numeric.soft_range.min.clamp(hard.0, hard.1),
+                    numeric.soft_range.max.clamp(hard.0, hard.1),
                 );
-                (
-                    (soft.0.clamp(hard.0, hard.1), soft.1.clamp(hard.0, hard.1)),
-                    hard,
-                    numeric.step,
-                )
+                (soft, hard, numeric.step)
             } else {
-                let (soft, hard) = parameter_numeric_ranges(property, 0.0, 1.0);
+                let (soft, hard) = parameter_float_ranges(property);
                 (soft, hard, property.step)
             };
-            let value = finite_f32_from_f32(*value).unwrap_or(hard_min).clamp(hard_min, hard_max);
+            let source_value = *value;
+            let value = f64::from(source_value);
+            let value = if value.is_finite() { value } else { hard_min }.clamp(hard_min, hard_max);
             let selected_clip = selection;
             let target = target.clone();
             let control = numeric_slider_input_control_with_hard_range(
@@ -3200,15 +3195,15 @@ pub(super) fn vector_property_widget(
                 max,
                 hard_min,
                 hard_max,
-                property_step(step, None),
-                numeric_decimals(step, value),
+                step.filter(|step| step.is_finite() && *step > 0.0),
+                numeric_decimals(step, source_value),
                 can_edit,
-                move |v| {
+                move |v: f64| {
                     inspector_property_channel_action(
                         selected_clip,
                         target.clone(),
                         component_index,
-                        f64::from(v.clamp(hard_min, hard_max)),
+                        v.clamp(hard_min, hard_max),
                     )
                 },
             );
@@ -3226,21 +3221,16 @@ pub(super) fn vector_property_widget(
     Box::new(FlexContainer::column(rows).with_gap(4.0))
 }
 
-pub(super) fn numeric_property_range(
-    descriptor_min: Option<f64>,
-    descriptor_max: Option<f64>,
-    default_min: f32,
-    default_max: f32,
-) -> (f32, f32) {
-    let (default_min, default_max) = ordered_numeric_range(default_min, default_max);
-    let min = descriptor_min.and_then(finite_f32);
-    let max = descriptor_max.and_then(finite_f32);
-    match (min, max) {
-        (Some(min), Some(max)) => ordered_numeric_range(min, max),
-        (Some(min), None) => (min, default_max.max(min)),
-        (None, Some(max)) => (default_min.min(max), max),
-        (None, None) => (default_min, default_max),
-    }
+fn parameter_float_ranges(property: &InspectorEffectPropertyModel) -> ((f64, f64), (f64, f64)) {
+    let (soft, hard) = parameter_double_ranges(property);
+    let hard = (
+        hard.0.max(-f64::from(f32::MAX)),
+        hard.1.min(f64::from(f32::MAX)),
+    );
+    (
+        (soft.0.clamp(hard.0, hard.1), soft.1.clamp(hard.0, hard.1)),
+        hard,
+    )
 }
 
 fn parameter_double_ranges(property: &InspectorEffectPropertyModel) -> ((f64, f64), (f64, f64)) {
@@ -3281,46 +3271,6 @@ fn parameter_integer_ranges(property: &InspectorEffectPropertyModel) -> ((i64, i
         .map_or(100, |value| value.floor() as i64)
         .clamp(hard_min, hard_max);
     ((min.min(max), min.max(max)), (hard_min, hard_max))
-}
-
-pub(super) fn parameter_numeric_ranges(
-    property: &InspectorEffectPropertyModel,
-    default_min: f32,
-    default_max: f32,
-) -> ((f32, f32), (f32, f32)) {
-    let soft = numeric_property_range(property.min, property.max, default_min, default_max);
-    let hard = numeric_property_range(property.hard_min, property.hard_max, -f32::MAX, f32::MAX);
-    let soft = (soft.0.clamp(hard.0, hard.1), soft.1.clamp(hard.0, hard.1));
-    (soft, hard)
-}
-
-pub(super) fn ordered_numeric_range(min: f32, max: f32) -> (f32, f32) {
-    let min = finite_f32_from_f32(min).unwrap_or(0.0);
-    let max = finite_f32_from_f32(max).unwrap_or(1.0);
-    if min <= max {
-        (min, max)
-    } else {
-        (max, min)
-    }
-}
-
-pub(super) fn finite_f32(value: f64) -> Option<f32> {
-    finite_f32_from_f32(value as f32)
-}
-
-pub(super) fn finite_f32_from_f32(value: f32) -> Option<f32> {
-    value.is_finite().then_some(value)
-}
-
-pub(super) fn property_step(
-    descriptor_step: Option<f64>,
-    fallback_step: Option<f32>,
-) -> Option<f32> {
-    descriptor_step
-        .filter(|step| step.is_finite() && *step > 0.0)
-        .map(|step| step as f32)
-        .or(fallback_step)
-        .filter(|step| step.is_finite() && *step > 0.0)
 }
 
 pub(super) fn numeric_decimals(descriptor_step: Option<f64>, value: f32) -> usize {

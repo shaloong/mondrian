@@ -2416,7 +2416,7 @@ fn inspector_property_model(
     author_time: TimelineTime,
     localizer: &Localizer,
 ) -> InspectorEffectPropertyModel {
-    let numeric = (property.channel_count() == 1)
+    let numeric = (property.value_type().channel_count() == 1)
         .then(|| {
             property
                 .descriptor

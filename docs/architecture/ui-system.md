@@ -3124,3 +3124,10 @@ Inspector vector controls read the matching schema channel range and step.
 Scalar model hints are projected only for scalar parameters; they do not stand
 in for all vector components. Sparse component actions retain the canonical
 parameter address and write only the selected index through the author session.
+
+### Exact numeric editor endpoints
+
+Float and vector Inspector controls edit f64 author channels with exact schema
+ranges and steps. Their values materialize through Core Float projection; the UI
+does not prematurely round a decimal hard endpoint to f32. Non-animated numeric
+components use the same sparse write seam without creating animation channels.
