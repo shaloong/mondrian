@@ -3189,8 +3189,10 @@ Finite endpoints remain supported when their difference overflows; fixed ranges
 still expose key times and interpolation. Visual author preparation uses the same
 mapping as projection, so changed values retain the declared range's endpoints
 without infinity or a separate interpretation. Exact untouched coordinates keep
-the sparse-move semantics. Real audio plugin extreme-range qualification remains
-separate acceptance work.
+the sparse-move semantics. Audio processor curve insertion is qualified through
+validated plugin parameter snapshots, canonical Rack insertion and author actions
+with Undo/Redo, including full finite intervals and fixed maximum values. Native
+DSP execution remains separate acceptance evidence.
 
 ### Fixed-value curve interaction
 
@@ -3205,3 +3207,15 @@ constraint. Cancellation restores the original points and publishes no edit;
 release publishes at most one edit. An unchanged constrained drag only closes
 its gesture. Ordinary constant curves with a nonzero value interval remain
 editable.
+
+### Continuous audio curve values
+
+Audio automation projection carries the declared value type and hard/visible
+intervals. Continuous pointer edits map directly through Core's interval mapping;
+the numeric editor's increment is not an author-value quantization grid. This
+preserves continuous values and avoids overflow from dividing large values by
+small editor increments. Integer parameters still round to integral values before
+hard-range admission. Numeric input and keyboard stepping retain their own editor
+increment behavior. Stable-key movement preserves untouched exact time/value
+coordinates, and every resulting edit uses the existing author transaction and
+Undo/Redo path.

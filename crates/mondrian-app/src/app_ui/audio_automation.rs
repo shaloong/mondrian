@@ -48,7 +48,6 @@ pub(crate) struct AudioAutomationCurveModel {
     pub(crate) hard_max: f64,
     pub(crate) view_min: f64,
     pub(crate) view_max: f64,
-    pub(crate) step: Option<f64>,
     pub(crate) value_type: PropertyValueType,
     pub(crate) insert_interpolation: AutomationSegmentInterpolation,
     pub(crate) allowed_interpolations: Vec<ParameterInterpolation>,
@@ -239,7 +238,6 @@ pub(crate) fn project_audio_automation(
         hard_max: contract.hard_range.max,
         view_min,
         view_max,
-        step: contract.step,
         value_type: contract.value_type,
         insert_interpolation,
         allowed_interpolations: allowed.to_vec(),
@@ -340,9 +338,6 @@ fn denormalized_value(model: &AudioAutomationCurveModel, ratio: f32) -> Option<f
         mondrian_core::automation::ParameterNumericRange::new(model.view_min, model.view_max)
             .ok()?;
     let mut value = range.value_at_normalized_position(f64::from(ratio.clamp(0.0, 1.0)))?;
-    if let Some(step) = model.step.filter(|step| step.is_finite() && *step > 0.0) {
-        value = (value / step).round() * step;
-    }
     if model.value_type == PropertyValueType::Int {
         value = value.round();
     }
@@ -355,6 +350,153 @@ mod tests {
     use crate::app::product_action::{AudioProductAction, ProductAction};
     use mondrian_core::AutomationSegmentInterpolation;
     use mondrian_timeline::{AudioAutomationTarget, AudioChannelStripOwner};
+
+    #[test]
+    fn processor_curve_edits_preserve_continuous_values_across_finite_ranges() {
+        use mondrian_core::automation::{
+            ParameterInvalidValuePolicy, ParameterNumericContract, ParameterSchema, ParameterUnit,
+        };
+        use mondrian_core::{AudioProcessorInstanceId, AuthoringMap, ParameterId, PropertyValue};
+        use mondrian_timeline::audio::{
+            AudioProcessorDefinitionRef, AudioProcessorInstance, AudioProcessorParameter,
+        };
+        use mondrian_timeline::{
+            apply_audio_processor_rack_edit, AudioChannelStripRack, AudioProcessorRackAddress,
+            AudioProcessorRackEdit, AudioProcessorRackEditRequest, AudioProcessorRackPlacement,
+        };
+
+        for (name, min, max, initial, ratio, expected) in [
+            (
+                "full range quarter",
+                -f64::MAX,
+                f64::MAX,
+                PropertyValue::Double(0.0),
+                0.25,
+                -f64::MAX * 0.5,
+            ),
+            (
+                "full range endpoint",
+                -f64::MAX,
+                f64::MAX,
+                PropertyValue::Double(0.0),
+                1.0,
+                f64::MAX,
+            ),
+            (
+                "fixed maximum",
+                f64::MAX,
+                f64::MAX,
+                PropertyValue::Double(f64::MAX),
+                0.5,
+                f64::MAX,
+            ),
+            (
+                "continuous value",
+                0.0,
+                1.0,
+                PropertyValue::Double(0.0),
+                0.125,
+                0.125,
+            ),
+            (
+                "integer rounding",
+                0.0,
+                10.0,
+                PropertyValue::Int(0),
+                0.25,
+                3.0,
+            ),
+        ] {
+            let parameter_id = ParameterId::new_static("test.audio.continuous.value");
+            let step = if matches!(initial, PropertyValue::Int(_)) {
+                2.0
+            } else {
+                0.1
+            };
+            let schema = ParameterSchema::v1(parameter_id.clone(), initial).with_numeric_contract(
+                ParameterUnit::Unitless,
+                ParameterNumericContract::closed(
+                    min,
+                    max,
+                    Some(step),
+                    ParameterInvalidValuePolicy::Reject,
+                )
+                .expect("legal finite numeric contract"),
+            );
+            let mut parameters = AuthoringMap::new();
+            parameters.insert(
+                parameter_id.clone(),
+                AudioProcessorParameter::from_schema(schema)
+                    .expect("validated processor parameter"),
+            );
+            let processor = AudioProcessorInstance {
+                id: AudioProcessorInstanceId::new(),
+                definition: AudioProcessorDefinitionRef::Clap {
+                    plugin_id: "org.mondrian.test.continuous".into(),
+                    schema_version: 1,
+                    binary_sha256: None,
+                },
+                bypassed: false,
+                parameters,
+                opaque_state: None,
+            };
+            let processor_id = processor.id;
+            let mut sequence = Sequence::new(name);
+            let rack = AudioProcessorRackAddress::ChannelStrip {
+                owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+                rack: AudioChannelStripRack::PreFader,
+            };
+            apply_audio_processor_rack_edit(
+                &mut sequence,
+                &AudioProcessorRackEditRequest {
+                    address: rack,
+                    edit: AudioProcessorRackEdit::Insert {
+                        processor,
+                        placement: AudioProcessorRackPlacement::End,
+                    },
+                },
+            )
+            .expect("atomic validated processor insertion");
+            let target =
+                AudioAutomationTarget::ProcessorParameter { rack, processor_id, parameter_id };
+            let viewport = sequence_automation_viewport(&sequence).expect("Sequence viewport");
+            let model = project_audio_automation(&sequence, target.clone(), viewport)
+                .expect("actual processor projection");
+            assert!(model.is_editable);
+            assert!(model.points().iter().all(|point| point.x.is_finite() && point.y.is_finite()));
+            let before = sequence.clone();
+            let mut state = crate::app::AppState::new();
+            state.test_set_sequence(Some(sequence));
+            let action = audio_automation_curve_edit_action(
+                &model,
+                CurveEdit::Insert { index: 1, point: CurvePoint::new(0.25, ratio) },
+            )
+            .expect(
+                "legal continuous curve edit must dispatch even when value / editor step overflows",
+            );
+            state.dispatch_action(action).expect("canonical author transaction");
+            let after = state.active_sequence().expect("committed Sequence").clone();
+            let inspection =
+                inspect_audio_automation(&after, &target).expect("stable target inspection");
+            let keys = &inspection.curve().expect("authored curve").keyframes;
+            assert_eq!(keys.len(), 1);
+            assert_eq!(keys[0].time, TimelineTime::new(1, 4).expect("exact time"));
+            assert_eq!(
+                keys[0].value, expected,
+                "{name}: an editor increment must not quantize continuous automation"
+            );
+            assert!(state.undo_timeline().expect("Undo"));
+            assert!(state
+                .active_sequence()
+                .expect("Undo state")
+                .author_state_eq_ignoring_revision(&before));
+            assert!(state.redo_timeline().expect("Redo"));
+            assert!(state
+                .active_sequence()
+                .expect("Redo state")
+                .author_state_eq_ignoring_revision(&after));
+        }
+    }
 
     #[test]
     fn projection_preserves_stable_keys_and_exact_owner_domain() {
