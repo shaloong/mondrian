@@ -2076,6 +2076,12 @@ impl AppState {
         if !applied.accepted {
             return FramePresentationDisposition::LostAuthority;
         }
+        trace_non_ready_frame_presentation(
+            ticket,
+            visibility_timestamp,
+            "already_visible",
+            delivery,
+        );
         commit();
         FramePresentationDisposition::Presented(FramePresentationCompletion {
             delivery,
@@ -2130,10 +2136,15 @@ impl AppState {
                     completion.delivery().identity() == ticket.identity()
                         && completion.delivery().kind() == FrameDeliveryKind::Late
                 })
-                .map_or(
-                    FramePresentationDisposition::LostAuthority,
-                    FramePresentationDisposition::DroppedLate,
-                );
+                .map_or(FramePresentationDisposition::LostAuthority, |completion| {
+                    trace_non_ready_frame_presentation(
+                        ticket,
+                        completion_timestamp,
+                        "new_output",
+                        completion.delivery(),
+                    );
+                    FramePresentationDisposition::DroppedLate(completion)
+                });
         }
         if !matches!(kind, FrameDeliveryKind::Ready | FrameDeliveryKind::Degraded) {
             return FramePresentationDisposition::LostAuthority;
@@ -2153,6 +2164,12 @@ impl AppState {
         {
             return FramePresentationDisposition::LostAuthority;
         }
+        trace_non_ready_frame_presentation(
+            ticket,
+            completion_timestamp,
+            "new_output",
+            completion.delivery(),
+        );
         commit();
         FramePresentationDisposition::Presented(completion)
     }
@@ -2416,6 +2433,28 @@ impl AppState {
             })
             .transpose()
             .map_err(Into::into)
+    }
+}
+
+/// Preserve the owner-issued ticket and real terminal timestamp when a
+/// presentation misses its contract. This diagnostic never reclassifies a
+/// delivery or supplies timing authority to an Adapter.
+fn trace_non_ready_frame_presentation(
+    ticket: FramePresentationTicket,
+    classified_at: MonotonicTimestamp,
+    publication_origin: &'static str,
+    delivery: FrameDelivery,
+) {
+    if delivery.kind() != FrameDeliveryKind::Ready {
+        tracing::debug!(
+            target: "mondrian_app::frame_presentation",
+            ?ticket,
+            ?classified_at,
+            carried_kind = ?ticket.delivery_kind_at(classified_at),
+            ?delivery,
+            publication_origin,
+            "accepted non-Ready presentation timing"
+        );
     }
 }
 
