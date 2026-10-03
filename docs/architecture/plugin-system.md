@@ -717,7 +717,16 @@ four-slot native packets without Float32 parameter narrowing. Integer tuples
 admit the declared numeric interpolation with integral component steps.
 
 Exact Inspector transactions and durable project tuple roundtrips are covered
-by the authoring foundation. Real authored compound pixel output, historical
-curve access, spatial/time/color interpretation and the vendor matrix remain
-separate outstanding qualification work; SDK default execution alone does not
-qualify complete format support.
+by the authoring foundation. The owned `compound_author` SDK wrapper additionally
+qualifies all six non-animatable tuple shapes through the rebuilt ordinary
+product's supervised worker and sole compiled graph: each final component edit
+changes actual pixels, Undo/Redo restores the corresponding output, and durable
+Unicode-path project reopening preserves precise values, component contracts,
+effect identity and output without importing library media. Untouched first
+components exercise exact Double and int32 SDK reads; each tuple component
+contributes independently to the output. This complements the original SDK
+default, atomic rejection and native action/lifetime probes.
+
+Historical curve access, spatial/time/color interpretation, native plugin
+editors and the vendor matrix remain separate outstanding qualification work;
+these owned static fixtures do not qualify complete format support.

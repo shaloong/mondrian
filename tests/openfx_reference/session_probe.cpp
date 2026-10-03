@@ -209,6 +209,58 @@ bool compoundValues(const void* handle, OfxPropertySetHandle in, bool creating, 
   return true;
 }
 
+// Author-workflow probe: every tuple component contributes independently to
+// the output. The untouched first component also checks exact SDK precision.
+bool compoundAuthorOutput(const void* handle, OfxPropertySetHandle in) {
+  OfxParamSetHandle params = nullptr;
+  double time = 0.0, gain = 1.0;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+      gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK) { return false; }
+  int tuple = 0;
+  for (const auto& definition : compounds) {
+    OfxParamHandle parameter = nullptr;
+    std::array<double, 4> values{};
+    if (gParamHost->paramGetHandle(params, definition.name, &parameter, nullptr) != kOfxStatOK) { return false; }
+    OfxStatus status;
+    if (definition.integer) {
+      status = definition.dimensions == 2 ? readCompound<int, 2>(parameter, true, time, values)
+                                          : readCompound<int, 3>(parameter, true, time, values);
+    } else if (definition.dimensions == 2) {
+      status = readCompound<double, 2>(parameter, true, time, values);
+    } else if (definition.dimensions == 3) {
+      status = readCompound<double, 3>(parameter, true, time, values);
+    } else {
+      status = readCompound<double, 4>(parameter, true, time, values);
+    }
+    if (status != kOfxStatOK || values[0] != definition.defaults[0]) { return false; }
+    for (int channel = 0; channel < definition.dimensions; ++channel) {
+      gain += (values[channel] - definition.defaults[channel]) * (tuple + 1) * (channel + 1) / 128.0;
+    }
+    ++tuple;
+  }
+  OfxImageClipHandle clip = nullptr;
+  OfxPropertySetHandle image = nullptr;
+  if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Output", &clip, nullptr) != kOfxStatOK ||
+      gEffectHost->clipGetImage(clip, time, nullptr, &image) != kOfxStatOK) { return false; }
+  void* data = nullptr;
+  int bounds[4]{}, stride = 0;
+  bool valid = std::isfinite(gain) &&
+    gPropHost->propGetPointer(image, kOfxImagePropData, 0, &data) == kOfxStatOK && data &&
+    gPropHost->propGetIntN(image, kOfxImagePropBounds, 4, bounds) == kOfxStatOK &&
+    gPropHost->propGetInt(image, kOfxImagePropRowBytes, 0, &stride) == kOfxStatOK;
+  if (valid) {
+    const float multiplier = static_cast<float>(gain);
+    for (int y = 0; y < bounds[3] - bounds[1]; ++y) {
+      auto* row = reinterpret_cast<OfxRGBAColourF*>(static_cast<char*>(data) + y * stride);
+      for (int x = 0; x < bounds[2] - bounds[0]; ++x) {
+        row[x].r *= multiplier; row[x].g *= multiplier;
+        row[x].b *= multiplier; row[x].a *= multiplier;
+      }
+    }
+  }
+  return gEffectHost->clipReleaseImage(image) == kOfxStatOK && valid;
+}
+
 
 void property(const void* handle, const char* name, int value) {
   OfxPropertySetHandle props = nullptr;
@@ -563,8 +615,12 @@ OfxStatus probe(const char* action, const void* handle,
     return kOfxStatFailed;
   }
   const OfxStatus result = pluginMain(action, handle, in, out);
-  if (selected == "compound" && result == kOfxStatOK &&
+  if ((selected == "compound" || selected == "compound_author") && result == kOfxStatOK &&
       operation == kOfxImageEffectActionDescribeInContext && !defineCompounds(handle)) {
+    return kOfxStatFailed;
+  }
+  if (selected == "compound_author" && result == kOfxStatOK &&
+      operation == kOfxImageEffectActionRender && !compoundAuthorOutput(handle, in)) {
     return kOfxStatFailed;
   }
   if (selected.find("strings") == 0 && operation == kOfxImageEffectActionRender &&

@@ -6269,6 +6269,219 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires rebuilt product and SessionProbe in compound_author mode"]
+    fn native_compound_author_edits_undo_and_archive_preserve_actual_pixels() {
+        use crate::app::ui_actions::{
+            visual_effect_set_parameter_value_action, VisualEffectSetParameterValuePayload,
+        };
+        use mondrian_core::automation::ParameterValueWrite;
+        use mondrian_core::{PropertyValue, TimelineTime};
+        use mondrian_effects::{EffectFrameContext, LutPreparationCache, PreparedEffectProgram};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        assert_eq!(
+            std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
+            "compound_author"
+        );
+        let helper =
+            PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").expect("product"));
+        let binary =
+            PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));
+        let inspection = crate::openfx_adapter::inspect_openfx_binary(&helper, &binary)
+            .expect("inspect actual SDK binary");
+        let kind = crate::openfx_effect::register_selected_openfx_filter(
+            &helper,
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+        )
+        .expect("describe and register compound controls");
+        let effect =
+            mondrian_effects::instantiate_effect_node(kind).expect("native compound effect");
+        let defaults = [
+            (
+                "point2",
+                PropertyValue::DoubleVec2([0.12500000000000003, 10.000000000000002]),
+            ),
+            (
+                "point3",
+                PropertyValue::DoubleVec3([
+                    -0.5000000000000001,
+                    1.0000000000000002,
+                    2.0000000000000004,
+                ]),
+            ),
+            (
+                "rgb",
+                PropertyValue::DoubleRgb([
+                    0.10000000000000002,
+                    0.20000000000000004,
+                    0.30000000000000004,
+                ]),
+            ),
+            (
+                "rgba",
+                PropertyValue::DoubleColor([
+                    0.12500000000000003,
+                    0.25000000000000006,
+                    0.5000000000000001,
+                    0.7500000000000001,
+                ]),
+            ),
+            ("integer2", PropertyValue::IntVec2([-123456789, 123456789])),
+            ("integer3", PropertyValue::IntVec3([i32::MIN, 0, i32::MAX])),
+        ];
+        let effect_id = effect.id;
+        let addresses = defaults
+            .iter()
+            .map(|(name, expected)| {
+                let property = effect
+                    .properties
+                    .iter()
+                    .find(|(_, property)| property.descriptor.display_name == *name)
+                    .expect("typed native author property")
+                    .1;
+                assert_eq!(property.static_value(), expected);
+                property.address()
+            })
+            .collect::<Vec<_>>();
+        let mut clip = mondrian_timeline::Clip::new_basic_title(
+            "Tuple",
+            "Arial",
+            TimelineTime::ZERO,
+            TimelineTime::new(1, 1).expect("duration"),
+        )
+        .expect("clip");
+        let clip_id = clip.id;
+        clip.add_effect_node(effect);
+        let mut sequence = mondrian_timeline::Sequence::new("Compound author workflow");
+        sequence.video_tracks[0].add_clip(clip).expect("insert clip");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        let execute = |state: &AppState| {
+            let clip = state.active_sequence().expect("sequence").find_clip(clip_id).expect("clip");
+            let range = mondrian_core::TimelineTimeRange::new(
+                TimelineTime::ZERO,
+                TimelineTime::new(1, 1).expect("end"),
+            )
+            .expect("range");
+            let context = EffectFrameContext::new(
+                mondrian_core::Rational::FPS_24,
+                mondrian_core::SampleAspectRatio::SQUARE,
+                range,
+            )
+            .expect("context");
+            let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+                &clip.effects,
+                &[],
+                &[],
+                &[],
+                mondrian_core::WorkingColorSpace::LinearRec709,
+                context,
+                &LutPreparationCache::uncached(),
+            )
+            .expect("compile native compound graph");
+            let graph = program.evaluate(TimelineTime::ZERO).expect("evaluate graph");
+            let input = [[0.1, 0.2, 0.3, 0.05]; 4];
+            let output =
+                mondrian_effects::apply_compiled_effect_graph_rgba_f32(&input, 2, 2, &graph, 1415)
+                    .expect("execute actual supervised product SDK pixels");
+            let mut multiplier = 1.0;
+            for (index, (name, default)) in defaults.iter().enumerate() {
+                let actual = clip.effects[0]
+                    .properties
+                    .iter()
+                    .find(|(_, property)| property.descriptor.display_name == *name)
+                    .expect("author property")
+                    .1
+                    .static_value()
+                    .to_channel_values();
+                for (channel, (actual, original)) in
+                    actual.iter().zip(default.to_channel_values()).enumerate()
+                {
+                    multiplier +=
+                        (actual - original) * (index + 1) as f64 * (channel + 1) as f64 / 128.0;
+                }
+            }
+            for (actual, original) in output.iter().zip(&input) {
+                for channel in 0..4 {
+                    assert!(
+                        (actual[channel] - original[channel] * multiplier as f32).abs() < 1e-6,
+                        "each precise author component must reach SDK pixel execution"
+                    );
+                }
+            }
+            output
+        };
+        assert_eq!(execute(&state), vec![[0.1, 0.2, 0.3, 0.05]; 4]);
+        for (index, (_, original)) in defaults.iter().enumerate() {
+            let before = execute(&state);
+            let mut channels = original.to_channel_values();
+            let last = channels.len() - 1;
+            channels[last] += if index < 4 { 0.125 } else { -1.0 };
+            let changed =
+                PropertyValue::from_channel_values(original.value_type(), &channels, original);
+            state
+                .dispatch_action(visual_effect_set_parameter_value_action(
+                    VisualEffectSetParameterValuePayload {
+                        clip_id,
+                        effect_id,
+                        write: ParameterValueWrite::Value {
+                            parameter: addresses[index].clone(),
+                            value: changed.clone(),
+                        },
+                    },
+                ))
+                .expect("commit precise native author edit");
+            let after = execute(&state);
+            assert_ne!(after, before, "every tuple kind must change native output");
+            assert!(state.undo_timeline().expect("undo tuple"));
+            assert_eq!(execute(&state), before);
+            assert!(state.redo_timeline().expect("redo tuple"));
+            assert_eq!(execute(&state), after);
+            let clip = state.active_sequence().expect("sequence").find_clip(clip_id).expect("clip");
+            assert_eq!(
+                clip.effects[0]
+                    .properties
+                    .iter()
+                    .find(|(_, property)| property.descriptor.display_name == defaults[index].0)
+                    .expect("edited tuple")
+                    .1
+                    .static_value(),
+                &changed
+            );
+        }
+        let before_save = execute(&state);
+        let properties = state
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(clip_id)
+            .expect("clip")
+            .effects[0]
+            .properties
+            .clone();
+        let workspace = tempfile::tempdir().expect("project folder");
+        let project = workspace.path().join("复合参数🙂.mdp");
+        state
+            .save_project_file_as(project.clone())
+            .expect("durably save actual project");
+        drop(state);
+        let mut reopened = AppState::new();
+        reopened.open_project_file(project).expect("reopen actual container");
+        let clip = reopened
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(clip_id)
+            .expect("reopened clip");
+        assert_eq!(clip.effects[0].id, effect_id);
+        assert_eq!(clip.effects[0].properties, properties);
+        assert_eq!(execute(&reopened), before_save);
+        assert_eq!(
+            reopened.asset_library().expect("library").list_assets().expect("assets").len(),
+            0
+        );
+        drop(reopened);
+    }
+
+    #[test]
     #[ignore = "set MONDRIAN_OPENFX_PRODUCT_BINARY, SESSION_PROBE_BINARY and probe mode strings_paths"]
     fn native_path_resource_draft_cancel_undo_save_reopen_preserves_output_pixels() {
         use crate::app_ui::resource_dialog::{
