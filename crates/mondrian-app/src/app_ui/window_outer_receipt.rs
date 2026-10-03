@@ -874,6 +874,8 @@ fn test_clean_gpu_shutdown_json(surface_generation: u64, device_generation: u64)
             "retired": {
                 "worker_shutdown": "terminated",
                 "wake_callbacks": host["preview"]["work_callbacks"],
+                "native_completion_wake_captures_pending": 0,
+                "native_completion_wake_registrations": 0,
                 "native_wake_failures": 0,
                 "wake_registration_rejections": 0,
                 "worker_started": true,

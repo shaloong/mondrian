@@ -833,6 +833,8 @@ impl EnduranceExecutionOwners {
             let gpu = EnduranceGpuShutdownEvidence {
                 worker_shutdown: super::owned_worker_lifecycle::OwnedWorkerShutdown::NotStarted,
                 wake_callbacks: Default::default(),
+                native_completion_wake_captures_pending: None,
+                native_completion_wake_registrations: None,
                 native_wake_failures: 0,
                 wake_registration_rejections: 0,
                 worker_started: false,

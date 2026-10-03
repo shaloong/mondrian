@@ -17,6 +17,8 @@ fn normal_receipt() -> EnduranceGpuShutdownEvidence {
             owners["host_shutdown"]["preview"]["work_callbacks"].clone(),
         )
         .expect("callback receipt"),
+        native_completion_wake_captures_pending: Some(0),
+        native_completion_wake_registrations: Some(0),
         native_wake_failures: 0,
         wake_registration_rejections: 0,
         worker_started: true,
@@ -61,6 +63,14 @@ fn every_normal_shutdown_barrier_is_required() {
     let normal = normal_receipt();
     assert!(normal.qualifies_normal_runtime());
     for evidence in [
+        EnduranceGpuShutdownEvidence {
+            native_completion_wake_captures_pending: Some(1),
+            ..normal
+        },
+        EnduranceGpuShutdownEvidence {
+            native_completion_wake_captures_pending: None,
+            ..normal
+        },
         EnduranceGpuShutdownEvidence { native_wake_failures: 1, ..normal },
         EnduranceGpuShutdownEvidence { wake_registration_rejections: 1, ..normal },
         EnduranceGpuShutdownEvidence { wake_callbacks: Default::default(), ..normal },

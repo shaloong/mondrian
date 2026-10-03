@@ -565,6 +565,8 @@ struct AppUiViewerGpuShutdownContract {
     device_generation: u64,
     worker_shutdown: crate::app::owned_worker_lifecycle::OwnedWorkerShutdown,
     wake_callbacks: crate::app::preview_work_notification::PreviewWorkCallbackEvidence,
+    native_completion_wake_captures_pending: Option<usize>,
+    native_completion_wake_registrations: Option<u64>,
     native_wake_failures: u64,
     wake_registration_rejections: u64,
     worker_started: bool,
@@ -693,6 +695,8 @@ fn seal_clean_viewer_gpu_shutdown(
         device_generation,
         worker_shutdown: evidence.worker_shutdown,
         wake_callbacks: evidence.wake_callbacks,
+        native_completion_wake_captures_pending: evidence.native_completion_wake_captures_pending,
+        native_completion_wake_registrations: evidence.native_completion_wake_registrations,
         native_wake_failures: evidence.native_wake_failures,
         wake_registration_rejections: evidence.wake_registration_rejections,
         worker_started: evidence.worker_started,
@@ -7496,7 +7500,7 @@ fn prepare_viewer_gpu_preview(
     // Progress capacity is part of submission admission, not fallible
     // post-submit bookkeeping. Once `Queue::submit` returns, committing its
     // exact index through this move-only permit cannot reject the batch.
-    let progress_permit = match session.viewer_gpu_device_progress.reserve_submission() {
+    let mut progress_permit = match session.viewer_gpu_device_progress.reserve_submission() {
         Ok(permit) => permit,
         Err(ViewerGpuDeviceProgressReserveError::Backpressured) => finish_prepare!(),
         Err(error) => {
@@ -7755,6 +7759,7 @@ fn prepare_viewer_gpu_preview(
         tracing::error!(%reason, "Window Viewer rejected terminal-generation submission");
         finish_prepare!();
     }
+    progress_permit.arm_native_completion_wake(queue);
     let submission_index = queue.submit(std::iter::once(encoder.finish()));
     let heterogeneous_submission = record.assert_adapter_submission(submission_index.clone());
     let output_lease = match session.viewer_gpu_execution.take_presentation_output(&mut record) {
@@ -9672,6 +9677,8 @@ mod tests {
                             .clone(),
                     )
                     .expect("callback fixture"),
+                    native_completion_wake_captures_pending: Some(0),
+                    native_completion_wake_registrations: Some(0),
                     native_wake_failures: 0,
                     wake_registration_rejections: 0,
                     worker_started: true,

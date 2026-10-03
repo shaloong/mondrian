@@ -739,6 +739,8 @@ impl HeadlessViewerGpuAdapter {
         ViewerGpuDeviceProgressShutdownEvidence {
             worker_shutdown: super::owned_worker_lifecycle::OwnedWorkerShutdown::NotStarted,
             wake_callbacks: Default::default(),
+            native_completion_wake_captures_pending: None,
+            native_completion_wake_registrations: None,
             native_wake_failures: 0,
             wake_registration_rejections: 0,
             worker_started: true,
@@ -763,6 +765,8 @@ impl HeadlessViewerGpuAdapter {
             return ViewerGpuDeviceProgressShutdownEvidence {
                 worker_shutdown: super::owned_worker_lifecycle::OwnedWorkerShutdown::NotStarted,
                 wake_callbacks: Default::default(),
+                native_completion_wake_captures_pending: None,
+                native_completion_wake_registrations: None,
                 native_wake_failures: 0,
                 wake_registration_rejections: 0,
                 worker_started: false,
@@ -1313,7 +1317,7 @@ impl HeadlessViewerGpuAdapter {
                 height: frame.height,
             });
         }
-        let progress_permit = self
+        let mut progress_permit = self
             .device_progress
             .reserve_submission()
             .map_err(map_headless_device_progress_reserve_error)?;
@@ -1490,6 +1494,7 @@ impl HeadlessViewerGpuAdapter {
             }
             return Err(HeadlessViewerGpuError::DeviceGenerationTerminal(terminal));
         }
+        progress_permit.arm_native_completion_wake(&self.queue);
         let submission = self.queue.submit(std::iter::once(encoder.finish()));
         let heterogeneous_submission = record.assert_adapter_submission(submission.clone());
         let native_import_gpu_timing_receipt = native_import_gpu_timing_receipt

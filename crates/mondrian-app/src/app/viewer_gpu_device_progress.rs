@@ -355,6 +355,10 @@ pub struct ViewerGpuDeviceProgressShutdownEvidence {
     pub worker_shutdown: super::owned_worker_lifecycle::OwnedWorkerShutdown,
     /// Complete callback capture, invocation, destruction, and retirement inventory.
     pub wake_callbacks: super::preview_work_notification::PreviewWorkCallbackEvidence,
+    /// Native Metal notification block captures still retained after shutdown.
+    pub native_completion_wake_captures_pending: Option<usize>,
+    /// Successfully staged platform wake hints, without completion authority.
+    pub native_completion_wake_registrations: Option<u64>,
     /// Native event-loop delivery rejections observed by the concrete Adapter.
     pub native_wake_failures: u64,
     /// Unaccepted callback captures deliberately retained without running foreign Drop.
@@ -399,6 +403,7 @@ impl ViewerGpuDeviceProgressShutdownEvidence {
                 super::owned_worker_lifecycle::OwnedWorkerShutdown::Terminated
             )
             && self.wake_callbacks.all_resources_released()
+            && matches!(self.native_completion_wake_captures_pending, Some(0))
             && self.native_wake_failures == 0
             && self.wake_registration_rejections == 0
             && self.worker_terminated
@@ -448,6 +453,22 @@ impl ViewerGpuDeviceCompletionSignal {
         // Wake the existing progress owner rather than stranding its level
         // predicate behind an entire external pacing quantum. This is only
         // a hint; the owner still performs its post-callback device barrier.
+        self.progress_thread.unpark();
+    }
+}
+
+struct ViewerGpuNativeWakeCapture {
+    state: Arc<ViewerGpuDeviceProgressState>,
+    progress_thread: thread::Thread,
+    _slot: Option<ViewerGpuDeviceProgressSlot>,
+    _generation: Option<ViewerGpuDeviceGenerationAdmission>,
+}
+
+impl Drop for ViewerGpuNativeWakeCapture {
+    fn drop(&mut self) {
+        drop(self._slot.take());
+        drop(self._generation.take());
+        self.state.native_wake_captures.fetch_sub(1, Ordering::AcqRel);
         self.progress_thread.unpark();
     }
 }
@@ -720,11 +741,17 @@ fn classify_wgpu_device_loss(
 
 struct ViewerGpuDeviceProgressState {
     active_slots: AtomicUsize,
+    native_wake_captures: AtomicUsize,
+    native_wake_registrations: AtomicU64,
 }
 
 impl ViewerGpuDeviceProgressState {
     fn new() -> Self {
-        Self { active_slots: AtomicUsize::new(0) }
+        Self {
+            active_slots: AtomicUsize::new(0),
+            native_wake_captures: AtomicUsize::new(0),
+            native_wake_registrations: AtomicU64::new(0),
+        }
     }
 
     fn reserve_slot(
@@ -747,7 +774,9 @@ impl ViewerGpuDeviceProgressState {
                 .compare_exchange_weak(active, active + 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                let slot = ViewerGpuDeviceProgressSlot { state: Arc::clone(self) };
+                let slot = ViewerGpuDeviceProgressSlot {
+                    token: Arc::new(ViewerGpuDeviceProgressSlotToken { state: Arc::clone(self) }),
+                };
                 if let Some(terminal) = health.terminal() {
                     drop(slot);
                     return Err(ViewerGpuDeviceProgressReserveError::GenerationTerminal {
@@ -761,11 +790,16 @@ impl ViewerGpuDeviceProgressState {
     }
 }
 
+#[derive(Clone)]
 struct ViewerGpuDeviceProgressSlot {
+    token: Arc<ViewerGpuDeviceProgressSlotToken>,
+}
+
+struct ViewerGpuDeviceProgressSlotToken {
     state: Arc<ViewerGpuDeviceProgressState>,
 }
 
-impl Drop for ViewerGpuDeviceProgressSlot {
+impl Drop for ViewerGpuDeviceProgressSlotToken {
     fn drop(&mut self) {
         self.state.active_slots.fetch_sub(1, Ordering::AcqRel);
     }
@@ -777,6 +811,7 @@ enum ViewerGpuDeviceProgressCommand<I> {
         submission_index: I,
         callback_observed: Arc<AtomicBool>,
         queued_at: Instant,
+        native_wake: Option<mondrian_renderer::gpu_completion_wake::GpuCompletionWake>,
         _slot: ViewerGpuDeviceProgressSlot,
     },
     DriveRendererCleanup {
@@ -797,6 +832,7 @@ struct ViewerGpuDeviceProgressWorker<I> {
     health: ViewerGpuDeviceGenerationHealth,
     progress_state: Arc<ViewerGpuDeviceProgressState>,
     generation_admission: Option<ViewerGpuDeviceGenerationAdmission>,
+    native_wake_source: mondrian_renderer::gpu_completion_wake::GpuCompletionWakeSource,
 }
 
 struct ViewerGpuDeviceProgressWorkerPermit<'a, I> {
@@ -806,6 +842,9 @@ struct ViewerGpuDeviceProgressWorkerPermit<'a, I> {
     callback_observed: Arc<AtomicBool>,
     progress_thread: thread::Thread,
     slot: ViewerGpuDeviceProgressSlot,
+    generation_admission: Option<ViewerGpuDeviceGenerationAdmission>,
+    native_wake: Option<mondrian_renderer::gpu_completion_wake::GpuCompletionWake>,
+    native_wake_source: &'a mondrian_renderer::gpu_completion_wake::GpuCompletionWakeSource,
     _worker: PhantomData<&'a ViewerGpuDeviceProgressWorker<I>>,
 }
 
@@ -825,6 +864,9 @@ impl<I> ViewerGpuDeviceProgressWorkerPermit<'_, I> {
             callback_observed,
             progress_thread: _,
             slot,
+            generation_admission: _,
+            native_wake,
+            native_wake_source: _,
             _worker: _,
         } = self;
         let command = ViewerGpuDeviceProgressCommand::Track {
@@ -832,6 +874,7 @@ impl<I> ViewerGpuDeviceProgressWorkerPermit<'_, I> {
             submission_index,
             callback_observed,
             queued_at: Instant::now(),
+            native_wake,
             _slot: slot,
         };
         send_progress_command(sender, health, wake, submission_id, command);
@@ -845,6 +888,9 @@ impl<I> ViewerGpuDeviceProgressWorkerPermit<'_, I> {
             callback_observed: _,
             progress_thread: _,
             slot,
+            generation_admission: _,
+            native_wake: _,
+            native_wake_source: _,
             _worker: _,
         } = self;
         let command =
@@ -879,6 +925,26 @@ impl ViewerGpuDeviceProgressPermit<'_> {
     /// Signal to capture in the exact queue callback before submission.
     pub(crate) fn completion_signal(&self) -> ViewerGpuDeviceCompletionSignal {
         self.inner.completion_signal()
+    }
+
+    /// Arm a platform wake immediately before this permit's queue submit.
+    /// The private native event never carries fence or publication authority.
+    pub(crate) fn arm_native_completion_wake(&mut self, queue: &wgpu::Queue) {
+        let state = Arc::clone(&self.inner.slot.token.state);
+        state.native_wake_captures.fetch_add(1, Ordering::AcqRel);
+        let capture = ViewerGpuNativeWakeCapture {
+            state: Arc::clone(&state),
+            progress_thread: self.inner.progress_thread.clone(),
+            _slot: Some(self.inner.slot.clone()),
+            _generation: self.inner.generation_admission.clone(),
+        };
+        self.inner.native_wake =
+            self.inner
+                .native_wake_source
+                .stage(queue, self.inner.progress_thread.clone(), capture);
+        if self.inner.native_wake.is_some() {
+            state.native_wake_registrations.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Commit the already-returned queue index without a recoverable error.
@@ -1060,6 +1126,7 @@ where
             health,
             progress_state,
             generation_admission: owner_generation_admission,
+            native_wake_source: Default::default(),
         })
     }
 
@@ -1084,6 +1151,9 @@ where
             callback_observed: Arc::new(AtomicBool::new(false)),
             progress_thread,
             slot,
+            generation_admission: self.generation_admission.clone(),
+            native_wake: None,
+            native_wake_source: &self.native_wake_source,
             _worker: PhantomData,
         })
     }
@@ -1139,6 +1209,17 @@ where
             }
             None => (false, OwnedWorkerShutdown::NotStarted, None),
         };
+        while self.progress_state.native_wake_captures.load(Ordering::Acquire) != 0
+            && Instant::now() < deadline
+        {
+            thread::park_timeout(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(DEFAULT_VIEWER_GPU_WAIT_QUANTUM),
+            );
+        }
+        let native_completion_wake_captures_pending =
+            self.progress_state.native_wake_captures.load(Ordering::Acquire);
         let wake_callbacks = self.wake.watch.shutdown_until(deadline);
         let receipt = match exit {
             Some(ViewerGpuDeviceProgressExit::Retired(receipt)) => Some(receipt),
@@ -1158,13 +1239,18 @@ where
         ViewerGpuDeviceProgressShutdownEvidence {
             worker_shutdown,
             wake_callbacks,
+            native_completion_wake_captures_pending: Some(native_completion_wake_captures_pending),
+            native_completion_wake_registrations: Some(
+                self.progress_state.native_wake_registrations.load(Ordering::Acquire),
+            ),
             native_wake_failures: self.wake.native_failures.load(Ordering::Acquire),
             wake_registration_rejections: self.wake.registration_rejections.load(Ordering::Acquire),
             worker_started,
             worker_terminated,
             worker_panicked,
             timed_out: matches!(worker_shutdown, OwnedWorkerShutdown::TimedOutDetached)
-                || !wake_callbacks.deadline_met,
+                || !wake_callbacks.deadline_met
+                || native_completion_wake_captures_pending != 0,
             retirement_requested,
             retirement_handoff_accepted,
             retirement_completed: receipt.is_some(),
@@ -1318,6 +1404,7 @@ where
                 submission_index,
                 callback_observed,
                 queued_at,
+                native_wake: _native_wake,
                 _slot,
             } => {
                 tracing::debug!(
@@ -2705,6 +2792,33 @@ mod tests {
     }
 
     #[test]
+    fn native_wake_capture_retains_existing_slot_and_generation_until_drop() {
+        static GENERATIONS: AtomicUsize = AtomicUsize::new(0);
+        let generation = ViewerGpuDeviceGenerationAdmission::reserve_from(&GENERATIONS, 1)
+            .expect("generation capacity");
+        let state = Arc::new(ViewerGpuDeviceProgressState::new());
+        let health =
+            ViewerGpuDeviceGenerationHealth::for_test(ViewerGpuDeviceProgressWake::default());
+        let slot = state.reserve_slot(&health).expect("progress slot");
+        state.native_wake_captures.fetch_add(1, Ordering::AcqRel);
+        let capture = ViewerGpuNativeWakeCapture {
+            state: Arc::clone(&state),
+            progress_thread: thread::current(),
+            _slot: Some(slot.clone()),
+            _generation: Some(generation.clone()),
+        };
+        drop(slot);
+        drop(generation);
+        assert_eq!(state.active_slots.load(Ordering::Acquire), 1);
+        assert_eq!(state.native_wake_captures.load(Ordering::Acquire), 1);
+        assert!(ViewerGpuDeviceGenerationAdmission::reserve_from(&GENERATIONS, 1).is_none());
+        drop(capture);
+        assert_eq!(state.native_wake_captures.load(Ordering::Acquire), 0);
+        assert_eq!(state.active_slots.load(Ordering::Acquire), 0);
+        assert_eq!(GENERATIONS.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
     fn device_generation_admission_has_a_hard_upper_bound() {
         let active = AtomicUsize::new(0);
         for _ in 0..MAX_LIVE_VIEWER_GPU_DEVICE_GENERATIONS {
@@ -2743,6 +2857,7 @@ mod tests {
             health,
             progress_state: Arc::new(ViewerGpuDeviceProgressState::new()),
             generation_admission: Some(admission),
+            native_wake_source: Default::default(),
         };
         let drops = Arc::new(AtomicUsize::new(0));
         worker.enqueue_generation_retirement(Box::new(TestRetirement {

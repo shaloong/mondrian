@@ -152,6 +152,8 @@
       "worker_start_failures": 0,
       "worker_started": true
     },
+    "native_completion_wake_captures_pending": 0,
+    "native_completion_wake_registrations": 0,
     "native_wake_failures": 0,
     "wake_registration_rejections": 0,
     "worker_started": true,

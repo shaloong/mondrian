@@ -474,6 +474,8 @@ impl EnduranceRecoveryOperationReceipt {
                     .clone(),
             )
             .expect("callback fixture"),
+            native_completion_wake_captures_pending: Some(0),
+            native_completion_wake_registrations: Some(0),
             native_wake_failures: 0,
             wake_registration_rejections: 0,
             worker_started: true,
@@ -660,6 +662,8 @@ struct SurfaceShutdownReceiptEvidence {
     device_generation: u64,
     worker_shutdown: super::owned_worker_lifecycle::OwnedWorkerShutdown,
     wake_callbacks: super::preview_work_notification::PreviewWorkCallbackEvidence,
+    native_completion_wake_captures_pending: Option<usize>,
+    native_completion_wake_registrations: Option<u64>,
     native_wake_failures: u64,
     wake_registration_rejections: u64,
     worker_started: bool,
@@ -689,6 +693,7 @@ fn valid_surface_shutdown_receipt(
                 )
                 && receipt.wake_callbacks.all_resources_released()
                 && receipt.wake_callbacks.registrations_accepted > 0
+                && matches!(receipt.native_completion_wake_captures_pending, Some(0))
                 && receipt.native_wake_failures == 0
                 && receipt.wake_registration_rejections == 0
                 && receipt.surface_generation == expected_surface_generation
