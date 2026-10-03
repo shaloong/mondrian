@@ -902,6 +902,7 @@ fn wait_for_proxy_control(
             Instant::now() < deadline,
             "product proxy generation exceeded original run deadline"
         );
+        state.refresh_execution_resource_decision(Default::default());
         state.poll_proxy_generation();
         let diagnostics = state.proxy_generation_diagnostics();
         if diagnostics.queued == 0 && diagnostics.running == 0 && diagnostics.yielding == 0 {

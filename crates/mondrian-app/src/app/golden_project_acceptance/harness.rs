@@ -306,6 +306,7 @@ pub(super) fn wait_for_media_imports_until(
         "media import deadline elapsed before waiting"
     );
     while state.pending_media_import_batches() > 0 {
+        state.refresh_execution_resource_decision(Default::default());
         state.poll_media_imports();
         ensure!(
             Instant::now() < deadline,

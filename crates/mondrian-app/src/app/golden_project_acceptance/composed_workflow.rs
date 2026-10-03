@@ -188,9 +188,18 @@ fn wait_for_proxy_quiescence(
     workflow: &mut GoldenProductWorkflowDriver,
 ) -> anyhow::Result<crate::app::proxy_generation::ProxyGenerationDiagnostics> {
     let deadline = Instant::now() + Duration::from_secs(120);
+    wait_for_proxy_quiescence_until(workflow.app_mut(), deadline)
+}
+
+/// Drain proxy work while advancing the resource cadence normally owned by a Window.
+pub(in crate::app) fn wait_for_proxy_quiescence_until(
+    state: &mut crate::app::AppState,
+    deadline: Instant,
+) -> anyhow::Result<crate::app::proxy_generation::ProxyGenerationDiagnostics> {
     loop {
-        workflow.app_mut().poll_proxy_generation();
-        let diagnostics = workflow.app().proxy_generation_diagnostics();
+        state.refresh_execution_resource_decision(Default::default());
+        state.poll_proxy_generation();
+        let diagnostics = state.proxy_generation_diagnostics();
         if diagnostics.queued == 0 && diagnostics.running == 0 {
             ensure!(
                 diagnostics.failures == 0,
@@ -201,7 +210,7 @@ fn wait_for_proxy_quiescence(
         }
         ensure!(
             Instant::now() < deadline,
-            "timed out waiting for Golden proxy execution to quiesce"
+            "timed out waiting for Golden proxy execution to quiesce: {diagnostics:?}"
         );
         std::thread::sleep(Duration::from_millis(10));
     }

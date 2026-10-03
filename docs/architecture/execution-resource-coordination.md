@@ -119,6 +119,19 @@ a user-visible completion, replay terminal evidence, or dirty the editor widget
 tree. Both revisions are wrapping equality tokens, never attempt identities,
 event counts, or linearizable snapshot versions.
 
+### Headless waiting cadence
+
+Golden Headless waits must advance `refresh_execution_resource_decision` with
+their actual external demand before polling domain completion. A paused proxy,
+import, mutation, or export attempt may have no new model revision: resource
+yield and dispatch-policy publication deliberately do not dirty the UI model.
+Completion polling alone therefore cannot resume an admitted attempt or finish
+a resource handoff. Headless waits use the same fresh-demand observation and
+projection boundary as the Window; they do not directly reopen worker dispatch,
+invent model events, discard queued work, or extend the original deadline.
+The proxy quiescence regression exercises that actual wait with a paused Import
+request whose admission model revision has already been consumed.
+
 The snapshot `revision` is a saturating diagnostic publication counter, not
 decision identity. A consumer compares the projection it owns (for example,
 Preview's trim level) and applies semantic transitions from those fields.

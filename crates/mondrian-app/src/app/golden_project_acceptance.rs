@@ -7,6 +7,8 @@
 mod audio_authoring_evidence;
 mod color_media_roundtrip;
 mod composed_workflow;
+#[cfg(test)]
+pub(super) use composed_workflow::wait_for_proxy_quiescence_until;
 #[cfg(feature = "validation")]
 mod cross_application_capture;
 mod editorial_transport;
