@@ -3170,3 +3170,14 @@ Clip bound to that scope. Mixer channel-strip targets remain independent of Clip
 selection. A locked, removed or superseded owner cannot accept a late release.
 Visual and audio target identities are separate enum variants, without dummy
 Clip identities or a second audio-authoring interpretation.
+
+### Sparse numeric curve movement
+
+Clip and Effect curves distinguish existing-key movement from insertion. A move
+names the stable key and supplies only changed normalized axes. The shared author
+adapter validates supplied coordinates, retains exact original time/value for
+absent axes, and applies the same collision, identity and history rules as a full
+update. Unchanged moves create no command or author generation. Synthetic curve
+endpoints insert keys; they do not invent an existing key identity. UI projection
+never reconstructs an untouched exact rational time or f64 value from screen
+coordinates.

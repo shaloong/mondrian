@@ -8226,12 +8226,10 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
             assert_eq!(payload.parameter, property);
             assert_eq!(
                 payload.edit,
-                ClipCurveEditPayload::Upsert {
-                    keyframe_id: Some(keyframe_id),
-                    point: ClipNormalizedCurvePointPayload {
-                        time_ratio: f64::from(0.6_f32),
-                        value_ratio: f64::from(0.7_f32),
-                    },
+                ClipCurveEditPayload::Move {
+                    keyframe_id,
+                    time_ratio: Some(f64::from(0.6_f32)),
+                    value_ratio: Some(f64::from(0.7_f32)),
                 }
             );
         }
@@ -8269,6 +8267,223 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
         payload.edit,
         ClipCurveEditPayload::Remove { keyframe_id: boundary_keyframe_id }
     );
+}
+
+#[test]
+fn visual_curve_single_axis_drag_preserves_exact_untouched_author_coordinate() {
+    for horizontal in [true, false] {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("Exact curve axes");
+        let mut clip =
+            Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("clip");
+        let clip_id = clip.id;
+        let track_id = sequence.video_tracks[0].id;
+        let time = TimelineTime::new(1, 3).expect("exact third");
+        let value = PropertyValue::Float(0.123_456_79);
+        let keyframe = Keyframe::linear(time, value.clone());
+        let keyframe_id = keyframe.id;
+        clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+            path: Transform2D::OPACITY_PATH.to_owned(),
+            keyframe,
+        })
+        .expect("exact key");
+        sequence.video_tracks[0].add_clip(clip).expect("add clip");
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("select");
+        let model = AppUiPanelModels::from_app_state(&state)
+            .inspector
+            .opacity_curve
+            .expect("projected curve");
+        let index = model
+            .keys
+            .iter()
+            .position(|key| key.keyframe_id == Some(keyframe_id))
+            .expect("stable projected key");
+        let origin = model.keys[index].point;
+        let point = if horizontal {
+            CurvePoint::new(origin.x + 0.1, origin.y)
+        } else {
+            CurvePoint::new(origin.x, origin.y + 0.1)
+        };
+        let before = state.active_sequence().expect("before").clone();
+        state
+            .dispatch_action(
+                inspector_curve_edit_action(
+                    Some(SelectedClipRef { track_id, clip_id, is_video_track: true }),
+                    &model,
+                    CurveEdit::Move { index, point },
+                )
+                .expect("real curve action"),
+            )
+            .expect("author edit");
+        let after = state.active_sequence().expect("after").clone();
+        let bag = after.find_clip(clip_id).expect("clip").intrinsic_parameter_bag();
+        let (_, property) = bag.property_by_address(&model.property).expect("property");
+        let key = property.keyframe_by_id(keyframe_id).expect("same stable key");
+        if horizontal {
+            assert_eq!(
+                key.value, value,
+                "horizontal drag must retain exact author value"
+            );
+            assert_ne!(key.time, time);
+        } else {
+            assert_eq!(
+                key.time, time,
+                "vertical drag must retain exact author time"
+            );
+            assert_ne!(key.value, value);
+        }
+        assert!(state.undo_timeline().expect("Undo"));
+        assert!(state
+            .active_sequence()
+            .expect("Undo state")
+            .author_state_eq_ignoring_revision(&before));
+        assert!(state.redo_timeline().expect("Redo"));
+        assert!(state
+            .active_sequence()
+            .expect("Redo state")
+            .author_state_eq_ignoring_revision(&after));
+    }
+}
+
+#[test]
+fn effect_curve_axis_drag_preserves_double_value_and_exact_time() {
+    use mondrian_core::automation::{
+        ParameterInvalidValuePolicy, ParameterNumericContract, ParameterUnit, PropertyDescriptor,
+    };
+    use mondrian_effects::{
+        instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
+        EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
+        EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
+        EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
+    };
+    let kind = EffectType::Plugin("plugin.test.curve_axis_precision".to_owned());
+    let parameter_id = kind.parameter_id("value").expect("parameter");
+    let value = PropertyValue::Double(0.12345678901234568);
+    let path = "plugin.test.curve_axis_precision.value";
+    let descriptor = PropertyDescriptor::new(path, "Precise value", value.clone())
+        .with_parameter_id(parameter_id.clone())
+        .with_animatable(true)
+        .with_numeric_contract(
+            ParameterUnit::Normalized,
+            ParameterNumericContract::closed(0.0, 1.0, None, ParameterInvalidValuePolicy::Reject)
+                .expect("range"),
+        );
+    register_effect_definition(
+        EffectPluginDefinitionBuilder::new(
+            kind.key(),
+            "Curve precision",
+            EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            determinism: EffectDeterminism::Deterministic,
+            state_model: EffectStateModel::Stateless,
+            temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+            resource_lifetime: EffectResourceLifetime::Frame,
+            topology: EffectGraphTopology::LinearChain,
+        })
+        .with_branching_graph(|_, _, graph| {
+            graph.apply(EffectRenderOp::Sharpen { amount: 0.0 });
+        })
+        .property(descriptor)
+        .build(),
+    )
+    .expect("canonical definition");
+    for horizontal in [true, false] {
+        let time = TimelineTime::new(1, 3).expect("exact third");
+        let mut effect = instantiate_effect_node(kind.clone()).expect("effect");
+        let effect_id = effect.id;
+        let keyframe = Keyframe::linear(time, value.clone());
+        let keyframe_id = keyframe.id;
+        effect
+            .properties
+            .apply_mutation(PropertyMutation::SetKeyframe { path: path.to_owned(), keyframe })
+            .expect("key");
+        let mut clip =
+            Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("clip");
+        let clip_id = clip.id;
+        clip.add_effect_node(effect);
+        let mut sequence = Sequence::new("Exact effect axes");
+        let track_id = sequence.video_tracks[0].id;
+        sequence.video_tracks[0].add_clip(clip).expect("clip placement");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("select");
+        let models = AppUiPanelModels::from_app_state(&state);
+        let model = &models
+            .inspector
+            .effects
+            .iter()
+            .find(|effect| effect.effect_id == effect_id)
+            .expect("same Effect")
+            .properties
+            .iter()
+            .find(|property| property.schema.parameter_id == parameter_id)
+            .expect("effect property")
+            .numeric_curve
+            .as_ref()
+            .expect("effect curve")
+            .curve;
+        let index = model
+            .keys
+            .iter()
+            .position(|key| key.keyframe_id == Some(keyframe_id))
+            .expect("stable key");
+        let origin = model.keys[index].point;
+        let point = if horizontal {
+            CurvePoint::new(origin.x + 0.1, origin.y)
+        } else {
+            CurvePoint::new(origin.x, origin.y + 0.1)
+        };
+        let before = state.active_sequence().expect("before").clone();
+        state
+            .dispatch_action(
+                effect_curve_edit_action(
+                    Some(SelectedClipRef { track_id, clip_id, is_video_track: true }),
+                    effect_id,
+                    model,
+                    CurveEdit::Move { index, point },
+                )
+                .expect("effect curve action"),
+            )
+            .expect("canonical edit");
+        let after = state.active_sequence().expect("after").clone();
+        let key = after
+            .find_clip(clip_id)
+            .expect("clip")
+            .effects
+            .iter()
+            .find(|effect| effect.id == effect_id)
+            .expect("same Effect")
+            .properties
+            .property_by_address(&model.property)
+            .expect("same parameter")
+            .1
+            .keyframe_by_id(keyframe_id)
+            .expect("same key");
+        if horizontal {
+            assert_eq!(
+                key.value, value,
+                "horizontal effect drag retains every double bit"
+            );
+            assert_ne!(key.time, time);
+        } else {
+            assert_eq!(key.time, time, "vertical effect drag retains exact third");
+            assert_ne!(key.value, value);
+        }
+        assert!(state.undo_timeline().expect("Undo"));
+        assert!(state
+            .active_sequence()
+            .expect("Undo state")
+            .author_state_eq_ignoring_revision(&before));
+        assert!(state.redo_timeline().expect("Redo"));
+        assert!(state
+            .active_sequence()
+            .expect("Redo state")
+            .author_state_eq_ignoring_revision(&after));
+    }
 }
 
 #[test]

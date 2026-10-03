@@ -2565,9 +2565,15 @@ fn numeric_curve_edit_payload(
         },
         CurveEdit::Move { index, point } => {
             let key = model.keys.get(index)?;
-            ClipCurveEditPayload::Upsert {
-                keyframe_id: key.keyframe_id,
-                point: inspector_curve_point_payload(point),
+            let projected = inspector_curve_point_payload(point);
+            if let Some(keyframe_id) = key.keyframe_id {
+                ClipCurveEditPayload::Move {
+                    keyframe_id,
+                    time_ratio: (point.x != key.point.x).then_some(projected.time_ratio),
+                    value_ratio: (point.y != key.point.y).then_some(projected.value_ratio),
+                }
+            } else {
+                ClipCurveEditPayload::Upsert { keyframe_id: None, point: projected }
             }
         }
         CurveEdit::Delete { index } => {
@@ -2593,7 +2599,8 @@ pub(super) fn inspector_curve_edit_action(
     ))
 }
 
-fn effect_curve_edit_action(
+/// Lower a projected Effect curve interaction to its canonical author action.
+pub(super) fn effect_curve_edit_action(
     selection: Option<SelectedClipRef>,
     effect_id: EffectId,
     model: &InspectorCurveModel,

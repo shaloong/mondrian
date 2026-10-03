@@ -2562,6 +2562,15 @@ pub struct ClipNormalizedCurvePointPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClipCurveEditPayload {
+    /// Move only the dimensions changed by an existing-key interaction.
+    Move {
+        /// Existing complete key's stable identity.
+        keyframe_id: KeyframeId,
+        /// Changed normalized time; `None` retains exact author time.
+        time_ratio: Option<f64>,
+        /// Changed normalized value; `None` retains exact author value.
+        value_ratio: Option<f64>,
+    },
     /// Insert a key, or edit one existing complete key.
     Upsert {
         /// Existing stable identity; `None` inserts or resolves by exact time.

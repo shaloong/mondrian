@@ -43,6 +43,15 @@ impl NormalizedCurvePoint {
 /// One stable-identity curve edit requested by a product Adapter.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClipNumericCurveEdit {
+    /// Move an existing key without reconstructing untouched coordinates.
+    Move {
+        /// Stable identity of the existing complete key.
+        keyframe_id: KeyframeId,
+        /// Changed normalized time, or exact original time when absent.
+        time_ratio: Option<f64>,
+        /// Changed normalized value, or exact original value when absent.
+        value_ratio: Option<f64>,
+    },
     /// Insert a key, or edit the key with the supplied stable identity.
     Upsert {
         /// Existing identity for a move/value edit; `None` inserts at the
@@ -452,6 +461,30 @@ fn prepare_curve_edit(
             };
             Ok(PreparedCurveEdit { mutations: vec![mutation], keyframe_id })
         }
+        ClipNumericCurveEdit::Move { keyframe_id, time_ratio, value_ratio } => {
+            NormalizedCurvePoint::new(time_ratio.unwrap_or(0.0), value_ratio.unwrap_or(0.0))?;
+            let keyframe = property.keyframe_by_id(keyframe_id).ok_or_else(|| {
+                curve_error(format!(
+                    "keyframe {keyframe_id} is stale or is not a complete key"
+                ))
+            })?;
+            let target_time = time_ratio
+                .map(|ratio| curve_time(clip, ratio))
+                .transpose()?
+                .unwrap_or(keyframe.time);
+            let target_value = value_ratio
+                .map(|ratio| curve_value(value_type, numeric.soft_range.min + value_span * ratio))
+                .transpose()?
+                .unwrap_or(keyframe.value);
+            prepare_key_position_edit(
+                property,
+                path,
+                address,
+                Some(keyframe_id),
+                target_time,
+                target_value,
+            )
+        }
         ClipNumericCurveEdit::Upsert { keyframe_id, point } => {
             let target_time = curve_time(clip, point.time_ratio)?;
             let target_value = curve_value(
@@ -459,53 +492,68 @@ fn prepare_curve_edit(
                 numeric.soft_range.min + value_span * point.value_ratio,
             )?;
 
-            let existing = if let Some(keyframe_id) = keyframe_id {
-                let keyframe = property.keyframe_by_id(keyframe_id).ok_or_else(|| {
-                    curve_error(format!(
-                        "keyframe {keyframe_id} is stale or is not a complete key of parameter {}",
-                        address.parameter_id
-                    ))
-                })?;
-                if property
-                    .keyframe_at(target_time)
-                    .is_some_and(|candidate| candidate.id != keyframe_id)
-                {
-                    return Err(curve_error(format!(
-                        "keyframe {keyframe_id} cannot move onto an occupied author time"
-                    )));
-                }
-                Some(keyframe)
-            } else {
-                property.keyframe_at(target_time)
-            };
-
-            if let Some(keyframe) = existing {
-                if keyframe.time == target_time && keyframe.value == target_value {
-                    return Ok(PreparedCurveEdit {
-                        mutations: Vec::new(),
-                        keyframe_id: keyframe.id,
-                    });
-                }
-                return Ok(PreparedCurveEdit {
-                    mutations: vec![PropertyMutation::EditKeyframe {
-                        path: path.to_owned(),
-                        keyframe_id: keyframe.id,
-                        time: target_time,
-                        value: target_value,
-                    }],
-                    keyframe_id: keyframe.id,
-                });
-            }
-
-            let keyframe =
-                Keyframe::from_preset(target_time, target_value, property.default_interpolation()?);
-            let keyframe_id = keyframe.id;
-            Ok(PreparedCurveEdit {
-                mutations: vec![PropertyMutation::SetKeyframe { path: path.to_owned(), keyframe }],
+            prepare_key_position_edit(
+                property,
+                path,
+                address,
                 keyframe_id,
-            })
+                target_time,
+                target_value,
+            )
         }
     }
+}
+
+fn prepare_key_position_edit(
+    property: &mondrian_core::automation::AnimatedProperty,
+    path: &str,
+    address: &AnimationParameterAddress,
+    keyframe_id: Option<KeyframeId>,
+    target_time: TimelineTime,
+    target_value: PropertyValue,
+) -> Result<PreparedCurveEdit> {
+    let existing = if let Some(keyframe_id) = keyframe_id {
+        let keyframe = property.keyframe_by_id(keyframe_id).ok_or_else(|| {
+            curve_error(format!(
+                "keyframe {keyframe_id} is stale or is not a complete key of parameter {}",
+                address.parameter_id
+            ))
+        })?;
+        if property
+            .keyframe_at(target_time)
+            .is_some_and(|candidate| candidate.id != keyframe_id)
+        {
+            return Err(curve_error(format!(
+                "keyframe {keyframe_id} cannot move onto an occupied author time"
+            )));
+        }
+        Some(keyframe)
+    } else {
+        property.keyframe_at(target_time)
+    };
+
+    if let Some(keyframe) = existing {
+        if keyframe.time == target_time && keyframe.value == target_value {
+            return Ok(PreparedCurveEdit { mutations: Vec::new(), keyframe_id: keyframe.id });
+        }
+        return Ok(PreparedCurveEdit {
+            mutations: vec![PropertyMutation::EditKeyframe {
+                path: path.to_owned(),
+                keyframe_id: keyframe.id,
+                time: target_time,
+                value: target_value,
+            }],
+            keyframe_id: keyframe.id,
+        });
+    }
+
+    let keyframe =
+        Keyframe::from_preset(target_time, target_value, property.default_interpolation()?);
+    let keyframe_id = keyframe.id;
+    Ok(PreparedCurveEdit {
+        mutations: vec![PropertyMutation::SetKeyframe { path: path.to_owned(), keyframe }],
+        keyframe_id,
+    })
 }
 
 fn schema_interpolation(interpolation: InterpolationType) -> ParameterInterpolation {
@@ -995,6 +1043,75 @@ mod tests {
         assert_eq!(restored.value, middle.value);
         assert_eq!(restored.interp_in, middle.interp_in);
         assert_eq!(restored.interp_out, middle.interp_out);
+    }
+
+    #[test]
+    fn sparse_curve_moves_reject_invalid_coordinates_and_preserve_noop_history() {
+        let (mut state, selection, _) = state_with_clip();
+        let keyframe = Keyframe::linear(
+            TimelineTime::new(1, 3).expect("third"),
+            PropertyValue::Float(0.25),
+        );
+        let keyframe_id = keyframe.id;
+        state
+            .mutate_clip_property(
+                selection,
+                PropertyMutation::SetKeyframe {
+                    path: Transform2D::OPACITY_PATH.to_owned(),
+                    keyframe,
+                },
+                "seed",
+            )
+            .expect("key");
+        let address = opacity_address(&state, selection);
+        let before = state.active_sequence().expect("before").clone();
+        let history = state.authoring_history().expect("history").diagnostics();
+        let generation = state.project_author_generation();
+        assert!(
+            !state
+                .edit_clip_numeric_curve(
+                    selection.clip_id,
+                    address.clone(),
+                    ClipNumericCurveEdit::Move { keyframe_id, time_ratio: None, value_ratio: None }
+                )
+                .expect("unchanged move")
+                .changed
+        );
+        for invalid in [f64::NAN, f64::INFINITY, -0.1, 1.1] {
+            for horizontal in [true, false] {
+                state
+                    .edit_clip_numeric_curve(
+                        selection.clip_id,
+                        address.clone(),
+                        ClipNumericCurveEdit::Move {
+                            keyframe_id,
+                            time_ratio: horizontal.then_some(invalid),
+                            value_ratio: (!horizontal).then_some(invalid),
+                        },
+                    )
+                    .expect_err("invalid changed axis rejects");
+            }
+        }
+        state
+            .edit_clip_numeric_curve(
+                selection.clip_id,
+                address,
+                ClipNumericCurveEdit::Move {
+                    keyframe_id: KeyframeId::new(),
+                    time_ratio: None,
+                    value_ratio: Some(0.5),
+                },
+            )
+            .expect_err("stale key rejects");
+        assert!(state
+            .active_sequence()
+            .expect("unchanged")
+            .author_state_eq_ignoring_revision(&before));
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
+        assert_eq!(state.project_author_generation(), generation);
     }
 
     #[test]
