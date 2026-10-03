@@ -107,3 +107,52 @@ fn asymmetric_channel_contracts_and_keys_survive_a_durable_archive_reopen() {
     );
     std::fs::remove_dir_all(&root).expect("remove owned fixture");
 }
+
+#[test]
+fn precise_compound_types_defaults_and_keys_survive_durable_archive_reopen() {
+    let precise = 0.12500000000000003;
+    let cases = [
+        PropertyValue::DoubleVec2([precise; 2]),
+        PropertyValue::DoubleVec3([precise; 3]),
+        PropertyValue::DoubleRgb([precise; 3]),
+        PropertyValue::DoubleColor([precise; 4]),
+        PropertyValue::IntVec2([i32::MIN, i32::MAX]),
+        PropertyValue::IntVec3([i32::MIN, 0, i32::MAX]),
+    ];
+    let mut document: ProjectDocument =
+        serde_json::from_str(include_str!("fixtures/current/project.json"))
+            .expect("current canonical fixture");
+    let mut effect = EffectNode::new(EffectType::Plugin("test.precise.compound".to_owned()));
+    for (index, value) in cases.into_iter().enumerate() {
+        let path = format!("component{index}");
+        let descriptor = PropertyDescriptor::new(path.clone(), path.clone(), value.clone());
+        effect.define_property(descriptor);
+        effect
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path,
+                keyframe: Keyframe::from_preset(TimelineTime::ZERO, value, InterpolationType::Hold),
+            })
+            .expect("complete precise key");
+    }
+    let mut clip = Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("clip");
+    clip.add_effect_node(effect);
+    let expected = clip.effects[0].clone();
+    document.sequences.active_mut().expect("sequence").video_tracks[0]
+        .add_clip(clip)
+        .expect("clip admission");
+    let root = std::env::temp_dir().join(format!("mondrian-precise-compounds-{}", AssetId::new()));
+    std::fs::create_dir_all(&root).expect("owned directory");
+    let database = root.join("index.db");
+    std::fs::write(&database, b"sqlite placeholder").expect("library fixture");
+    let archive = root.join("precise.mdp");
+    save_project_archive(&document, &database, &archive).expect("durable publication");
+    let reopened = read_project_document_from_archive(&archive).expect("fresh archive reopen");
+    reopened.validate().expect("canonical precise values");
+    let actual =
+        &reopened.sequences.active().expect("sequence").video_tracks[0].clips[0].effects[0];
+    assert_eq!(
+        actual, &expected,
+        "all six types, component precision, defaults and keys survive"
+    );
+    std::fs::remove_dir_all(&root).expect("remove owned fixture");
+}

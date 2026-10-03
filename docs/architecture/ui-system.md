@@ -3131,3 +3131,17 @@ Float and vector Inspector controls edit f64 author channels with exact schema
 ranges and steps. Their values materialize through Core Float projection; the UI
 does not prematurely round a decimal hard endpoint to f32. Non-animated numeric
 components use the same sparse write seam without creating animation channels.
+
+
+### Precise compound numeric Inspector controls
+
+The shared component editor consumes f64 channel values for Float, precise
+Double and i32 vector families. Existing Float vectors retain their finite f32
+representation bounds; double components keep the full f64 domain and integer
+vectors use exact i32 limits and integral editor steps. Every component reads its
+own numeric contract and dispatches a sparse typed channel write so editing one
+field preserves all siblings. Double vectors use X/Y/Z and precise RGB/RGBA use
+R/G/B/A labels. Typed text editing, one-command Undo/Redo and Escape cancellation
+are exercised through actual Inspector widgets and the canonical App author
+boundary for all six compound families. Precision-preserving color picker and
+OpenFX descriptor/temporal/color binding remain outstanding product work.

@@ -500,3 +500,22 @@ does not quantize Double values or rewrite source keys. Numeric edit admission
 rejects finite values that become nonfinite in the declared Float representation.
 Persisted static bounds are checked directly, independently of edit Clamp policy.
 Sparse numeric edits use the declared value shape even without animation storage.
+
+
+### Precise compound author values
+
+Core retains DoubleVec2/DoubleVec3, DoubleRgb/DoubleColor and IntVec2/IntVec3
+as complete inline typed values with two, three or four channels. Double
+components remain f64 throughout author edits, key storage and materialization;
+integer-vector components are exact i32 values. RGB and RGBA keep distinct shapes
+and parameter color-domain interpretation belongs to their owning definition.
+These types use the existing author transaction, sparse channel mutation,
+interpolation, COW snapshot and bounded footprint contracts. No plugin-specific
+scalar identity aliases or second automation authority are introduced.
+
+Integer-vector definition bounds must be integral and fit i32; channel writes
+reject unrepresentable values before projection. Hold is their default key mode,
+while definitions can explicitly admit numeric interpolation with rounding at
+value materialization. Nonfinite double components and any invalid sparse member
+reject the entire author edit. Inline footprint accounting includes these values
+without allocating a per-value component vector in persisted author state.

@@ -2732,9 +2732,12 @@ pub(super) fn effect_property_row_height(value: &PropertyValue) -> Option<f32> {
         PropertyValue::QualifierSamples(samples) => {
             return Some((samples.samples().len() as f32 + 1.0) * 34.0);
         }
-        PropertyValue::Vec2(_) => 2,
-        PropertyValue::Vec3(_) => 3,
-        PropertyValue::Vec4(_) => 4,
+        PropertyValue::Vec2(_) | PropertyValue::DoubleVec2(_) | PropertyValue::IntVec2(_) => 2,
+        PropertyValue::Vec3(_)
+        | PropertyValue::DoubleVec3(_)
+        | PropertyValue::DoubleRgb(_)
+        | PropertyValue::IntVec3(_) => 3,
+        PropertyValue::Vec4(_) | PropertyValue::DoubleColor(_) => 4,
         _ => return None,
     };
     Some(components as f32 * 30.0 + components.saturating_sub(1) as f32 * 4.0)
@@ -3010,9 +3013,52 @@ pub(super) fn inspector_property_value_widget(
         PropertyValue::QualifierSamples(samples) => {
             qualifier_sample_editor(localizer, samples, can_edit, selection, target)
         }
+        PropertyValue::DoubleVec2(value) => {
+            vector_property_widget(&["X", "Y"], value, property, can_edit, selection, target)
+        }
+        PropertyValue::DoubleVec3(value) => vector_property_widget(
+            &["X", "Y", "Z"],
+            value,
+            property,
+            can_edit,
+            selection,
+            target,
+        ),
+        PropertyValue::DoubleRgb(value) => vector_property_widget(
+            &["R", "G", "B"],
+            value,
+            property,
+            can_edit,
+            selection,
+            target,
+        ),
+        PropertyValue::DoubleColor(value) => vector_property_widget(
+            &["R", "G", "B", "A"],
+            value,
+            property,
+            can_edit,
+            selection,
+            target,
+        ),
+        PropertyValue::IntVec2(value) => vector_property_widget(
+            &["X", "Y"],
+            &value.map(f64::from),
+            property,
+            can_edit,
+            selection,
+            target,
+        ),
+        PropertyValue::IntVec3(value) => vector_property_widget(
+            &["X", "Y", "Z"],
+            &value.map(f64::from),
+            property,
+            can_edit,
+            selection,
+            target,
+        ),
         PropertyValue::Vec2(value) => vector_property_widget(
             &["X", "Y"],
-            &[value.x, value.y],
+            &[f64::from(value.x), f64::from(value.y)],
             property,
             can_edit,
             selection,
@@ -3020,7 +3066,7 @@ pub(super) fn inspector_property_value_widget(
         ),
         PropertyValue::Vec3(value) => vector_property_widget(
             &["X", "Y", "Z"],
-            &[value.x, value.y, value.z],
+            &[f64::from(value.x), f64::from(value.y), f64::from(value.z)],
             property,
             can_edit,
             selection,
@@ -3028,7 +3074,7 @@ pub(super) fn inspector_property_value_widget(
         ),
         PropertyValue::Vec4(value) => vector_property_widget(
             &["X", "Y", "Z", "W"],
-            value,
+            &value.map(f64::from),
             property,
             can_edit,
             selection,
@@ -3154,12 +3200,25 @@ pub(super) fn qualifier_sample_set_action(
 
 pub(super) fn vector_property_widget(
     labels: &[&'static str],
-    values: &[f32],
+    values: &[f64],
     property: &InspectorEffectPropertyModel,
     can_edit: bool,
     selection: Option<SelectedClipRef>,
     target: InspectorPropertyTarget,
 ) -> Box<dyn Widget> {
+    let (type_min, type_max) = match property.value.value_type() {
+        mondrian_core::PropertyValueType::IntVec2 | mondrian_core::PropertyValueType::IntVec3 => {
+            (f64::from(i32::MIN), f64::from(i32::MAX))
+        }
+        mondrian_core::PropertyValueType::Vec2
+        | mondrian_core::PropertyValueType::Vec3
+        | mondrian_core::PropertyValueType::Vec4 => (-f64::from(f32::MAX), f64::from(f32::MAX)),
+        _ => (-f64::MAX, f64::MAX),
+    };
+    let integer = matches!(
+        property.value,
+        PropertyValue::IntVec2(_) | PropertyValue::IntVec3(_)
+    );
     let rows = labels
         .iter()
         .zip(values.iter())
@@ -3172,8 +3231,8 @@ pub(super) fn vector_property_widget(
                 .and_then(|contracts| contracts.get(component_index));
             let ((min, max), (hard_min, hard_max), step) = if let Some(numeric) = numeric {
                 let hard = (
-                    numeric.hard_range.min.max(-f64::from(f32::MAX)),
-                    numeric.hard_range.max.min(f64::from(f32::MAX)),
+                    numeric.hard_range.min.max(type_min),
+                    numeric.hard_range.max.min(type_max),
                 );
                 let soft = (
                     numeric.soft_range.min.clamp(hard.0, hard.1),
@@ -3181,11 +3240,17 @@ pub(super) fn vector_property_widget(
                 );
                 (soft, hard, numeric.step)
             } else {
-                let (soft, hard) = parameter_float_ranges(property);
+                let (soft, hard) = parameter_double_ranges(property);
+                let hard = (hard.0.max(type_min), hard.1.min(type_max));
+                let soft = (soft.0.clamp(hard.0, hard.1), soft.1.clamp(hard.0, hard.1));
                 (soft, hard, property.step)
             };
-            let source_value = *value;
-            let value = f64::from(source_value);
+            let step = if integer {
+                Some(step.unwrap_or(1.0).max(1.0))
+            } else {
+                step
+            };
+            let value = *value;
             let value = if value.is_finite() { value } else { hard_min }.clamp(hard_min, hard_max);
             let selected_clip = selection;
             let target = target.clone();
@@ -3196,7 +3261,16 @@ pub(super) fn vector_property_widget(
                 hard_min,
                 hard_max,
                 step.filter(|step| step.is_finite() && *step > 0.0),
-                numeric_decimals(step, source_value),
+                if integer {
+                    0
+                } else if matches!(
+                    property.value,
+                    PropertyValue::Vec2(_) | PropertyValue::Vec3(_) | PropertyValue::Vec4(_)
+                ) {
+                    numeric_decimals(step, value as f32)
+                } else {
+                    step.map_or(2, decimal_places_for_step)
+                },
                 can_edit,
                 move |v: f64| {
                     inspector_property_channel_action(

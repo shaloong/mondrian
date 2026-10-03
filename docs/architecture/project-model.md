@@ -763,10 +763,11 @@ preparation, budget admission or validation leaves author state and both history
 ledgers unchanged. Disabled or insufficient Undo retention does not disable
 cancellation: pending origin admission has its own explicit byte budget.
 
-### Schema 29 and portable package version 2
+### Schema 30 and portable package version 2
 
-Schema 29 persists external processor resources as platform-tagged native units
-and numeric parameter bounds as complete ordered channel-contract lists. Earlier
+Schema 30 persists external processor resources as platform-tagged native units,
+complete ordered channel-contract lists and precise double/integer compound
+author values. Earlier
 alpha schemas, including scalar-contract schema 28, are rejected without migration.
 The Alpha document registry has no earlier-schema migration steps or plain-string
 resource aliases. Non-Unicode native filenames survive save/reopen exactly.
@@ -784,3 +785,11 @@ components and separator spellings. Local `OsString` storage borrows a `Path`
 or transfers its existing buffer into `PathBuf` at the execution seam without
 copying filename units. Package inventory copies one canonical file while
 retaining every exact source coordinate for foreign-platform rebinding.
+
+
+Precise compound values retain their type, full component precision, defaults,
+parameter identities and authored keys through validated `.mdp` publication and
+fresh archive reads. Schema 30 rejects earlier alpha schemas without migration;
+portable package version 2 still uses the canonical project payload. The durable
+channel-contract integration test covers all six compound types, signed i32
+extremes and doubles that cannot be represented by Float32.

@@ -128,6 +128,18 @@ pub enum PropertyValue {
     Int(i64),
     Float(f32),
     Double(f64),
+    /// A double-precision two-dimensional vector.
+    DoubleVec2([f64; 2]),
+    /// A double-precision three-dimensional vector.
+    DoubleVec3([f64; 3]),
+    /// Three double-precision RGB components in the declared parameter color domain.
+    DoubleRgb([f64; 3]),
+    /// Four double-precision RGBA components in the declared parameter color domain.
+    DoubleColor([f64; 4]),
+    /// Two exact signed 32-bit integer components.
+    IntVec2([i32; 2]),
+    /// Three exact signed 32-bit integer components.
+    IntVec3([i32; 3]),
     Vec2(Vec2),
     Vec3(Vec3),
     Color(Color),
@@ -147,6 +159,18 @@ pub enum PropertyValueType {
     Int,
     Float,
     Double,
+    /// A double-precision two-dimensional vector.
+    DoubleVec2,
+    /// A double-precision three-dimensional vector.
+    DoubleVec3,
+    /// Three double-precision RGB components in the declared parameter color domain.
+    DoubleRgb,
+    /// Four double-precision RGBA components in the declared parameter color domain.
+    DoubleColor,
+    /// Two exact signed 32-bit integer components.
+    IntVec2,
+    /// Three exact signed 32-bit integer components.
+    IntVec3,
     Vec2,
     Vec3,
     Color,
@@ -702,6 +726,8 @@ impl ParameterSchema {
             value_type,
             PropertyValueType::Bool
                 | PropertyValueType::Int
+                | PropertyValueType::IntVec2
+                | PropertyValueType::IntVec3
                 | PropertyValueType::Curve
                 | PropertyValueType::QualifierSamples
                 | PropertyValueType::Enum
@@ -862,6 +888,22 @@ impl ParameterSchema {
             }
             for numeric in contracts {
                 numeric.validate()?;
+                if matches!(
+                    self.value_type,
+                    PropertyValueType::IntVec2 | PropertyValueType::IntVec3
+                ) && [
+                    numeric.hard_range.min,
+                    numeric.hard_range.max,
+                    numeric.soft_range.min,
+                    numeric.soft_range.max,
+                ]
+                .into_iter()
+                .any(|value| {
+                    value.fract() != 0.0
+                        || !(f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&value)
+                }) {
+                    return Err(ParameterSchemaError::IntegerVectorRange);
+                }
             }
         }
         if self.value_type == PropertyValueType::Int
@@ -1079,6 +1121,9 @@ pub enum ParameterSchemaError {
     InvalidResourceDefault,
     #[error("numeric constraints require a numeric property type")]
     NumericContractTypeMismatch,
+    /// Integer-vector bounds must be exactly representable signed 32-bit integers.
+    #[error("integer vector bounds must be signed 32-bit integers")]
+    IntegerVectorRange,
     /// Bound lists must cover exactly the declared numeric value shape.
     #[error(
         "numeric channel contract count {actual} does not match value channel count {expected}"
@@ -1131,6 +1176,12 @@ impl PropertyValue {
             Self::Int(_) => "int",
             Self::Float(_) => "float",
             Self::Double(_) => "double",
+            Self::DoubleVec2(_) => "doublevec2",
+            Self::DoubleVec3(_) => "doublevec3",
+            Self::DoubleRgb(_) => "doublergb",
+            Self::DoubleColor(_) => "doublecolor",
+            Self::IntVec2(_) => "intvec2",
+            Self::IntVec3(_) => "intvec3",
             Self::Vec2(_) => "vec2",
             Self::Vec3(_) => "vec3",
             Self::Color(_) => "color",
@@ -1149,6 +1200,12 @@ impl PropertyValue {
             Self::Int(_) => PropertyValueType::Int,
             Self::Float(_) => PropertyValueType::Float,
             Self::Double(_) => PropertyValueType::Double,
+            Self::DoubleVec2(_) => PropertyValueType::DoubleVec2,
+            Self::DoubleVec3(_) => PropertyValueType::DoubleVec3,
+            Self::DoubleRgb(_) => PropertyValueType::DoubleRgb,
+            Self::DoubleColor(_) => PropertyValueType::DoubleColor,
+            Self::IntVec2(_) => PropertyValueType::IntVec2,
+            Self::IntVec3(_) => PropertyValueType::IntVec3,
             Self::Vec2(_) => PropertyValueType::Vec2,
             Self::Vec3(_) => PropertyValueType::Vec3,
             Self::Color(_) => PropertyValueType::Color,
@@ -1211,6 +1268,12 @@ impl PropertyValue {
             Self::Int(value) => vec![*value as f64],
             Self::Float(value) => vec![*value as f64],
             Self::Double(value) => vec![*value],
+            Self::DoubleVec2(value) => value.to_vec(),
+            Self::DoubleVec3(value) => value.to_vec(),
+            Self::DoubleRgb(value) => value.to_vec(),
+            Self::DoubleColor(value) => value.to_vec(),
+            Self::IntVec2(value) => value.iter().copied().map(f64::from).collect(),
+            Self::IntVec3(value) => value.iter().copied().map(f64::from).collect(),
             Self::Vec2(value) => vec![value.x as f64, value.y as f64],
             Self::Vec3(value) => vec![value.x as f64, value.y as f64, value.z as f64],
             Self::Color(value) => vec![
@@ -1246,6 +1309,24 @@ impl PropertyValue {
             PropertyValueType::Double => {
                 Self::Double(channel_values.first().copied().unwrap_or(0.0))
             }
+            PropertyValueType::DoubleVec2 => Self::DoubleVec2(std::array::from_fn(|index| {
+                channel_values.get(index).copied().unwrap_or(0.0)
+            })),
+            PropertyValueType::DoubleVec3 => Self::DoubleVec3(std::array::from_fn(|index| {
+                channel_values.get(index).copied().unwrap_or(0.0)
+            })),
+            PropertyValueType::DoubleRgb => Self::DoubleRgb(std::array::from_fn(|index| {
+                channel_values.get(index).copied().unwrap_or(0.0)
+            })),
+            PropertyValueType::DoubleColor => Self::DoubleColor(std::array::from_fn(|index| {
+                channel_values.get(index).copied().unwrap_or(0.0)
+            })),
+            PropertyValueType::IntVec2 => Self::IntVec2(std::array::from_fn(|index| {
+                channel_values.get(index).copied().unwrap_or(0.0).round() as i32
+            })),
+            PropertyValueType::IntVec3 => Self::IntVec3(std::array::from_fn(|index| {
+                channel_values.get(index).copied().unwrap_or(0.0).round() as i32
+            })),
             PropertyValueType::Vec2 => Self::Vec2(Vec2::new(
                 channel_values.first().copied().unwrap_or(0.0) as f32,
                 channel_values.get(1).copied().unwrap_or(0.0) as f32,
@@ -1287,9 +1368,9 @@ impl PropertyValueType {
     pub fn channel_count(self) -> usize {
         match self {
             Self::Bool | Self::Int | Self::Float | Self::Double => 1,
-            Self::Vec2 => 2,
-            Self::Vec3 => 3,
-            Self::Color | Self::Vec4 => 4,
+            Self::Vec2 | Self::DoubleVec2 | Self::IntVec2 => 2,
+            Self::Vec3 | Self::DoubleVec3 | Self::DoubleRgb | Self::IntVec3 => 3,
+            Self::Color | Self::Vec4 | Self::DoubleColor => 4,
             Self::Enum => 1,
             Self::Curve | Self::QualifierSamples | Self::Resource | Self::Text => 0,
         }
@@ -1321,6 +1402,34 @@ impl Interpolatable for PropertyValue {
         match (a, b) {
             (Self::Float(a), Self::Float(b)) => Self::Float(f32::lerp(a, b, t)),
             (Self::Double(a), Self::Double(b)) => Self::Double(f64::lerp(a, b, t)),
+            (Self::DoubleVec2(a), Self::DoubleVec2(b)) => {
+                Self::DoubleVec2(std::array::from_fn(|index| {
+                    a[index] * (1.0 - f64::from(t)) + b[index] * f64::from(t)
+                }))
+            }
+            (Self::DoubleVec3(a), Self::DoubleVec3(b)) => {
+                Self::DoubleVec3(std::array::from_fn(|index| {
+                    a[index] * (1.0 - f64::from(t)) + b[index] * f64::from(t)
+                }))
+            }
+            (Self::DoubleRgb(a), Self::DoubleRgb(b)) => {
+                Self::DoubleRgb(std::array::from_fn(|index| {
+                    a[index] * (1.0 - f64::from(t)) + b[index] * f64::from(t)
+                }))
+            }
+            (Self::DoubleColor(a), Self::DoubleColor(b)) => {
+                Self::DoubleColor(std::array::from_fn(|index| {
+                    a[index] * (1.0 - f64::from(t)) + b[index] * f64::from(t)
+                }))
+            }
+            (Self::IntVec2(a), Self::IntVec2(b)) => Self::IntVec2(std::array::from_fn(|index| {
+                (f64::from(a[index]) * (1.0 - f64::from(t)) + f64::from(b[index]) * f64::from(t))
+                    .round() as i32
+            })),
+            (Self::IntVec3(a), Self::IntVec3(b)) => Self::IntVec3(std::array::from_fn(|index| {
+                (f64::from(a[index]) * (1.0 - f64::from(t)) + f64::from(b[index]) * f64::from(t))
+                    .round() as i32
+            })),
             (Self::Int(a), Self::Int(b)) => {
                 Self::Int((*a as f64 + (*b - *a) as f64 * t as f64).round() as i64)
             }
@@ -2796,6 +2905,16 @@ impl AnimatedProperty {
         } else {
             value
         };
+        if matches!(
+            self.value_type(),
+            PropertyValueType::IntVec2 | PropertyValueType::IntVec3
+        ) && !(f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&normalized)
+        {
+            return Err(parameter_value_error(
+                &self.descriptor.path,
+                "integer vector channels must fit a signed 32-bit component",
+            ));
+        }
         if self.value_type().uses_f32_channels() && !(normalized as f32).is_finite() {
             return Err(parameter_value_error(
                 &self.descriptor.path,
@@ -3856,6 +3975,12 @@ impl crate::AuthoringFootprint for PropertyValueType {
             | Self::Int
             | Self::Float
             | Self::Double
+            | Self::DoubleVec2
+            | Self::DoubleVec3
+            | Self::DoubleRgb
+            | Self::DoubleColor
+            | Self::IntVec2
+            | Self::IntVec3
             | Self::Vec2
             | Self::Vec3
             | Self::Color
@@ -3951,6 +4076,12 @@ impl crate::AuthoringFootprint for PropertyValue {
             | Self::Int(_)
             | Self::Float(_)
             | Self::Double(_)
+            | Self::DoubleVec2(_)
+            | Self::DoubleVec3(_)
+            | Self::DoubleRgb(_)
+            | Self::DoubleColor(_)
+            | Self::IntVec2(_)
+            | Self::IntVec3(_)
             | Self::Vec2(_)
             | Self::Vec3(_)
             | Self::Color(_)
@@ -4606,6 +4737,98 @@ mod tests {
             .set_static_value("effect.key.color", PropertyValue::Float(1.0))
             .expect_err("mismatched value should fail");
         assert!(err.to_string().contains("属性类型不匹配"));
+    }
+
+    #[test]
+    fn precise_compound_author_values_keep_all_components_and_atomic_sparse_keys() {
+        let precise = 0.12500000000000003;
+        let cases = [
+            PropertyValue::DoubleVec2([precise; 2]),
+            PropertyValue::DoubleVec3([precise; 3]),
+            PropertyValue::DoubleRgb([precise; 3]),
+            PropertyValue::DoubleColor([precise; 4]),
+            PropertyValue::IntVec2([0, i32::MIN]),
+            PropertyValue::IntVec3([0, i32::MIN, i32::MAX]),
+        ];
+        for default in cases {
+            let integer = matches!(
+                default,
+                PropertyValue::IntVec2(_) | PropertyValue::IntVec3(_)
+            );
+            let initial = default.to_channel_values();
+            for animated in [false, true] {
+                let mut bag = PropertyBag::default();
+                bag.define(
+                    PropertyDescriptor::new("precise", "Precise", default.clone())
+                        .with_animatable(animated),
+                );
+                bag.validate().expect("precise schema");
+                let address = bag.property("precise").expect("property").address();
+                let changed = if integer {
+                    123456789.0
+                } else {
+                    0.25000000000000006
+                };
+                let mutation = bag
+                    .prepare_channel_write_by_address(&address, tt(3), &[(0, changed)])
+                    .expect("precise channel write")
+                    .expect("changed");
+                bag.apply_mutation(mutation).expect("atomic write");
+                bag.validate().expect("valid author state");
+                let actual = bag.evaluate("precise", tt(3)).expect("evaluate").to_channel_values();
+                assert_eq!(actual[0].to_bits(), changed.to_bits());
+                assert_eq!(&actual[1..], &initial[1..], "siblings remain exact");
+                assert!(bag
+                    .prepare_channel_write_by_address(&address, tt(3), &[(0, changed)])
+                    .expect("no-op")
+                    .is_none());
+                let before = bag.clone();
+                let invalid = if integer {
+                    f64::from(i32::MAX) + 1.0
+                } else {
+                    f64::NAN
+                };
+                assert!(bag
+                    .prepare_channel_write_by_address(&address, tt(4), &[(0, 0.5), (1, invalid)])
+                    .is_err());
+                assert_eq!(
+                    bag, before,
+                    "one invalid component rejects the complete edit"
+                );
+                let encoded = serde_json::to_vec(&bag).expect("serialize");
+                let reopened: PropertyBag = serde_json::from_slice(&encoded).expect("reopen");
+                reopened.validate().expect("reopened state");
+                assert_eq!(reopened, bag, "types, IDs and exact key components survive");
+            }
+        }
+    }
+
+    #[test]
+    fn integer_vector_schemas_reject_fractional_or_unrepresentable_bounds() {
+        for range in [
+            (0.0, 0.5),
+            (f64::from(i32::MIN) - 1.0, 0.0),
+            (0.0, f64::from(i32::MAX) + 1.0),
+        ] {
+            let schema = ParameterSchema::v1(
+                ParameterId::new_static("integer.point"),
+                PropertyValue::IntVec2([0; 2]),
+            )
+            .with_numeric_contract(
+                ParameterUnit::Unitless,
+                ParameterNumericContract::closed(
+                    range.0,
+                    range.1,
+                    Some(1.0),
+                    ParameterInvalidValuePolicy::Reject,
+                )
+                .expect("finite bounds"),
+            );
+            assert_eq!(
+                schema.validate(),
+                Err(ParameterSchemaError::IntegerVectorRange)
+            );
+        }
     }
 
     #[test]

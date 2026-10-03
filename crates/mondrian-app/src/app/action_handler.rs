@@ -2516,6 +2516,24 @@ mod tests {
             PropertyValue::Int(value) => PropertyValue::Int(value.saturating_add(1)),
             PropertyValue::Float(value) => PropertyValue::Float(*value + 0.5),
             PropertyValue::Double(value) => PropertyValue::Double(*value + 0.5),
+            PropertyValue::DoubleVec2(value) => {
+                PropertyValue::DoubleVec2(value.map(|component| component + 0.5))
+            }
+            PropertyValue::DoubleVec3(value) => {
+                PropertyValue::DoubleVec3(value.map(|component| component + 0.5))
+            }
+            PropertyValue::DoubleRgb(value) => {
+                PropertyValue::DoubleRgb(value.map(|component| component + 0.5))
+            }
+            PropertyValue::DoubleColor(value) => {
+                PropertyValue::DoubleColor(value.map(|component| component + 0.5))
+            }
+            PropertyValue::IntVec2(value) => {
+                PropertyValue::IntVec2(value.map(|component| component.saturating_add(1)))
+            }
+            PropertyValue::IntVec3(value) => {
+                PropertyValue::IntVec3(value.map(|component| component.saturating_add(1)))
+            }
             PropertyValue::Curve(value) => {
                 let mut points = value.points().to_vec();
                 points[0].y = if points[0].y < 0.5 {

@@ -5755,6 +5755,24 @@ fn node_graph_model_preserves_selected_effect_after_reorder() {
 }
 
 #[test]
+fn precise_compound_inspector_rows_reserve_every_component() {
+    for value in [
+        PropertyValue::DoubleVec2([0.0; 2]),
+        PropertyValue::DoubleVec3([0.0; 3]),
+        PropertyValue::DoubleRgb([0.0; 3]),
+        PropertyValue::DoubleColor([0.0; 4]),
+        PropertyValue::IntVec2([0; 2]),
+        PropertyValue::IntVec3([0; 3]),
+    ] {
+        let count = value.channel_count();
+        assert_eq!(
+            effect_property_row_height(&value),
+            Some(count as f32 * 30.0 + (count - 1) as f32 * 4.0)
+        );
+    }
+}
+
+#[test]
 fn inspector_effect_vector_property_rows_get_multi_component_height() {
     assert_eq!(
         effect_property_row_height(&PropertyValue::Vec2(glam::Vec2::ZERO)),
@@ -6518,6 +6536,68 @@ fn precise_inspector_entry_commits_and_undoes_exact_integer_and_double_values() 
             "0.23456789012345678",
             PropertyValue::Double(0.23456789012345678),
         ),
+        (
+            "double_vec2",
+            PropertyValue::DoubleVec2([0.12345678901234568, 0.12500000000000003]),
+            "0.23456789012345678",
+            PropertyValue::DoubleVec2([0.12345678901234568, 0.23456789012345678]),
+        ),
+        (
+            "double_vec3",
+            PropertyValue::DoubleVec3([
+                0.12345678901234568,
+                0.12500000000000003,
+                0.12500000000000003,
+            ]),
+            "0.23456789012345678",
+            PropertyValue::DoubleVec3([
+                0.12345678901234568,
+                0.12500000000000003,
+                0.23456789012345678,
+            ]),
+        ),
+        (
+            "double_rgb",
+            PropertyValue::DoubleRgb([
+                0.12345678901234568,
+                0.12500000000000003,
+                0.12500000000000003,
+            ]),
+            "0.23456789012345678",
+            PropertyValue::DoubleRgb([
+                0.12345678901234568,
+                0.12500000000000003,
+                0.23456789012345678,
+            ]),
+        ),
+        (
+            "double_color",
+            PropertyValue::DoubleColor([
+                0.12345678901234568,
+                0.12500000000000003,
+                0.12500000000000003,
+                0.12500000000000003,
+            ]),
+            "0.23456789012345678",
+            PropertyValue::DoubleColor([
+                0.12345678901234568,
+                0.12500000000000003,
+                0.12500000000000003,
+                0.23456789012345678,
+            ]),
+        ),
+        (
+            "int_vec2",
+            PropertyValue::IntVec2([0, i32::MIN]),
+            "2147483647",
+            PropertyValue::IntVec2([0, i32::MAX]),
+        ),
+        (
+            "int_vec3",
+            PropertyValue::IntVec3([0, i32::MIN, i32::MAX]),
+            "-2147483648",
+            PropertyValue::IntVec3([0, i32::MIN, i32::MIN]),
+        ),
     ];
     let mut builder = EffectPluginDefinitionBuilder::new(
         kind.key(),
@@ -6602,7 +6682,9 @@ fn precise_inspector_entry_commits_and_undoes_exact_integer_and_double_values() 
             Some(selection),
             effect_id,
         );
-        widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+        let component = initial.channel_count().saturating_sub(1);
+        let height = effect_property_row_height(&initial).unwrap_or(28.0);
+        widget.layout(Rect::new(0.0, 0.0, 220.0, height));
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
         let mut focus = DummyFocus;
@@ -6618,7 +6700,7 @@ fn precise_inspector_entry_commits_and_undoes_exact_integer_and_double_values() 
         );
         widget.event(
             &UiEvent::MouseDown {
-                position: Point::new(190.0, 14.0),
+                position: Point::new(190.0, component as f32 * 34.0 + 14.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
