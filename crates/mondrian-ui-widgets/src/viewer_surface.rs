@@ -133,17 +133,17 @@ impl ViewerExternalTextureFrame {
     }
 
     /// Create a prefiltered external texture for an exact Viewer presentation.
+    /// Source dimensions describe the Preview raster before Viewer cropping or
+    /// spatial filtering; the presentation separately owns the texture extent.
     pub fn new_spatial(
         key: impl Into<String>,
+        source_width: u32,
+        source_height: u32,
         presentation: ViewerExternalTexturePresentation,
     ) -> Option<Self> {
-        let key = key.into();
-        (!key.is_empty()).then_some(Self {
-            key,
-            width: presentation.output_width,
-            height: presentation.output_height,
-            presentation: Some(presentation),
-        })
+        let mut frame = Self::new(key, source_width, source_height)?;
+        frame.presentation = Some(presentation);
+        Some(frame)
     }
 }
 
@@ -701,6 +701,12 @@ impl ViewerSurface {
     }
 
     fn metadata_text(&self) -> String {
+        if let Some((width, height)) =
+            self.frame_content.as_ref().map(ViewerFrameContent::dimensions)
+            && (width, height) != (self.source_width, self.source_height)
+        {
+            return format!("{} · {width}×{height}", self.position_label);
+        }
         self.position_label.clone()
     }
 
@@ -1865,6 +1871,49 @@ mod tests {
             .any(|color| *color == mix_color(theme.colors.popover, theme.colors.primary, 0.18)));
         assert_eq!(encoder.lines, 0);
         assert!(encoder.rects.len() >= 12);
+    }
+
+    #[test]
+    fn retained_viewer_exposes_reduced_raster_without_relabeling_author_quality() {
+        let mut viewer = ViewerSurface::new("Scene 01", 3840, 2160)
+            .with_position_label("F697")
+            .with_preview_quality_label("1/1")
+            .with_frame_content(ViewerFrameContent::ExternalTexture(
+                ViewerExternalTextureFrame::new("recovered-frame", 960, 540)
+                    .expect("reduced preview raster"),
+            ));
+        viewer.layout(Rect::new(0.0, 0.0, 800.0, 480.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        viewer.paint(&mut PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: viewer.bounds,
+        });
+        assert!(encoder.texts.iter().any(|text| text == "F697 · 960×540"));
+        assert!(encoder.texts.iter().any(|text| text == "1/1"));
+
+        viewer.set_playback_frame_content_state(
+            "Paused",
+            ViewerStatusTone::Neutral,
+            "F698",
+            false,
+            Some(ViewerFrameContent::ExternalTexture(
+                ViewerExternalTextureFrame::new("full-frame", 3840, 2160)
+                    .expect("full preview raster"),
+            )),
+            None,
+        );
+        assert_eq!(viewer.metadata_text(), "F698");
+        viewer.set_playback_frame_content_state(
+            "Waiting",
+            ViewerStatusTone::Neutral,
+            "F699",
+            false,
+            None,
+            None,
+        );
+        assert_eq!(viewer.metadata_text(), "F699");
     }
 
     #[test]
@@ -3163,10 +3212,17 @@ mod tests {
         let geometry = viewer.presentation_geometry().expect("visible presentation");
         let frame = ViewerExternalTextureFrame::new_spatial(
             "viewer.preview.spatial",
+            1920,
+            1080,
             geometry.presentation,
         )
         .expect("spatial frame");
+        assert_eq!((frame.width, frame.height), (1920, 1080));
         viewer.frame_content = Some(ViewerFrameContent::ExternalTexture(frame));
+        assert!(
+            !viewer.metadata_text().contains('×'),
+            "Viewer crop is not a reduced Preview raster"
+        );
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {

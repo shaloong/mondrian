@@ -636,6 +636,8 @@ impl AppUiHost {
         let texture_key = texture_key.into();
         let visible_output = mondrian_ui_widgets::ViewerExternalTextureFrame::new_spatial(
             texture_key.clone(),
+            frame.width,
+            frame.height,
             presentation,
         );
         let visible_changed = Cell::new(false);
@@ -3192,6 +3194,8 @@ mod tests {
         );
         let output = ViewerExternalTextureFrame::new_spatial(
             "seeded-window-gpu",
+            1,
+            1,
             ViewerExternalTexturePresentation::full_frame(1, 1).expect("valid seeded presentation"),
         )
         .expect("valid seeded external frame");
@@ -3222,6 +3226,8 @@ mod tests {
         let output = |name| {
             ViewerExternalTextureFrame::new_spatial(
                 name,
+                1,
+                1,
                 ViewerExternalTexturePresentation::full_frame(1, 1).expect("presentation"),
             )
             .expect("external texture")
@@ -3408,6 +3414,8 @@ mod tests {
         };
         let old = ViewerExternalTextureFrame::new_spatial(
             "old-widget-only",
+            1,
+            1,
             ViewerExternalTexturePresentation::full_frame(1, 1).expect("presentation"),
         )
         .expect("frame");
@@ -3435,6 +3443,8 @@ mod tests {
         let output = |name| {
             ViewerExternalTextureFrame::new_spatial(
                 name,
+                1,
+                1,
                 ViewerExternalTexturePresentation::full_frame(1, 1).expect("presentation"),
             )
             .expect("frame")
@@ -3471,6 +3481,8 @@ mod tests {
         );
         let output = ViewerExternalTextureFrame::new_spatial(
             "window-gpu:submission:7",
+            1,
+            1,
             ViewerExternalTexturePresentation::full_frame(1, 1)
                 .expect("valid external presentation"),
         )

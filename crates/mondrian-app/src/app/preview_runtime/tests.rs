@@ -53,7 +53,12 @@ fn register_test_window_preview_output(
     texture_key: impl Into<String>,
     presentation: ViewerExternalTexturePresentation,
 ) -> bool {
-    let Some(output) = ViewerExternalTextureFrame::new_spatial(texture_key, presentation) else {
+    let Some(output) = ViewerExternalTextureFrame::new_spatial(
+        texture_key,
+        frame.width,
+        frame.height,
+        presentation,
+    ) else {
         service.reject_gpu_output_registration();
         return false;
     };
@@ -16902,6 +16907,8 @@ fn gpu_output_registration_does_not_run_settled_media_release_inside_commit() {
     ));
     let output = ViewerExternalTextureFrame::new_spatial(
         "bounded-registration",
+        frame.width,
+        frame.height,
         ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
             .expect("valid test presentation"),
     )

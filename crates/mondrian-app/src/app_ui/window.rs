@@ -6815,6 +6815,8 @@ fn retain_completed_window_viewer_gpu_successor(
     };
     let Some(visible_output) = mondrian_ui_widgets::ViewerExternalTextureFrame::new_spatial(
         owner.texture_key.as_str().to_owned(),
+        owner.frame.width,
+        owner.frame.height,
         owner.presentation,
     ) else {
         retire_window_viewer_gpu_registration(session, host, owner);
@@ -8012,15 +8014,17 @@ fn publish_ordinary_window_viewer_gpu_submission(
         .owner(submission_id)
         .is_some_and(|owner| owner.frame.is_successor_preparation());
     if successor_preparation {
-        let Some(visible_output) = mondrian_ui_widgets::ViewerExternalTextureFrame::new_spatial(
-            texture_key.as_str().to_owned(),
-            presentation,
-        ) else {
+        let Some(owner) = session.viewer_gpu_submissions.owner(submission_id) else {
             session.frame_renderer.unregister_external_texture(&texture_key);
             drop(output_lease);
             return;
         };
-        let Some(owner) = session.viewer_gpu_submissions.owner(submission_id) else {
+        let Some(visible_output) = mondrian_ui_widgets::ViewerExternalTextureFrame::new_spatial(
+            texture_key.as_str().to_owned(),
+            owner.frame.width,
+            owner.frame.height,
+            presentation,
+        ) else {
             session.frame_renderer.unregister_external_texture(&texture_key);
             drop(output_lease);
             return;
