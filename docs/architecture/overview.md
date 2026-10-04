@@ -660,3 +660,24 @@ and tuple parameters. Constant bindings have zero keys; indexed lookup returns
 BadIndex without changing the time output, and finite searches return Failed
 with index -1. CurrentFrame samples reject key queries requiring an absent
 snapshot. Nonfinite search times are rejected before writing the output.
+
+### Continuous automation execution queries
+
+Core prepares a read-only `PreparedPropertyQuery` from a validated canonical
+`AnimatedProperty`. `AutomationQueryTime` denotes finite owner-local seconds at
+a floating execution boundary; it is not a persisted author value or a rounding
+grid. Preparation rejects author keys that collapse to the same floating time.
+Ordered union key times and complete compound values come from the frozen source.
+Exact author evaluation and prepared queries share numeric segment lowering,
+Bezier time inversion and de Casteljau value evaluation.
+
+Floating numeric derivatives follow the right-hand segment at a key and endpoint
+extension outside the keyed interval. Vertical slopes report an unrepresentable
+result; Hold jumps do not create impulses. Signed integration includes all keyed
+segments and endpoint extension. Cubic area integrates the degree-five product
+`y(u) * x'(u)` with exact-order Gauss quadrature. Within each segment a weighted
+mean avoids unnecessary overflow. Signed areas accumulate binary significand
+products in fixed storage and round only once at publication; overflowing pieces
+can cancel without erasing a small remaining area. Integer and categorical values retain their
+canonical value conversion but do not expose floating calculus. The OpenFX
+snapshot transport and frame-unit conversion remain separate integration work.

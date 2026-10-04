@@ -3,6 +3,9 @@
 //! 提供共享的关键帧轨道、动态属性值、属性包和 mutation API，
 //! 让内建属性、效果参数和未来插件属性走同一条链路。
 
+mod query;
+pub use query::{AutomationQueryError, AutomationQueryTime, PreparedPropertyQuery};
+
 use crate::{
     authoring::AuthoringMap,
     error::{MondrianError, Result},
@@ -3912,42 +3915,11 @@ fn evaluate_numeric_channel(channel: &AnimationChannel, time: TimelineTime, fall
         .saturating_sub(1);
     let keyframe_a = &channel.keyframes[idx];
     let keyframe_b = &channel.keyframes[idx + 1];
-    match (keyframe_a.interp_out, keyframe_b.interp_in) {
-        (KeyframeInterpolation::Hold, _) | (_, KeyframeInterpolation::Hold) => keyframe_a.value,
-        (KeyframeInterpolation::Linear, KeyframeInterpolation::Linear) => {
-            interpolate_numeric_value(
-                keyframe_a.value,
-                keyframe_b.value,
-                normalize_time(time, keyframe_a.time, keyframe_b.time),
-            )
-        }
-        _ => {
-            let span = keyframe_b.time.distance_from_f64(keyframe_a.time);
-            let exact_span = keyframe_b.time.checked_sub(keyframe_a.time).ok();
-            let out = numeric_segment_control(
-                keyframe_a.interp_out,
-                keyframe_a.value,
-                keyframe_b.value,
-                span,
-                exact_span,
-                false,
-            );
-            let incoming = numeric_segment_control(
-                keyframe_b.interp_in,
-                keyframe_a.value,
-                keyframe_b.value,
-                span,
-                exact_span,
-                true,
-            );
-            crate::numeric_bezier::evaluate_numeric_bezier(
-                normalize_time(time, keyframe_a.time, keyframe_b.time),
-                [out.0, incoming.0],
-                [keyframe_a.value, out.1, incoming.1, keyframe_b.value],
-                out.2 && incoming.2,
-            )
-        }
-    }
+    query::NumericSegment::between(keyframe_a, keyframe_b).evaluate(normalize_time(
+        time,
+        keyframe_a.time,
+        keyframe_b.time,
+    ))
 }
 
 fn normalize_time(t: TimelineTime, start: TimelineTime, end: TimelineTime) -> f64 {
