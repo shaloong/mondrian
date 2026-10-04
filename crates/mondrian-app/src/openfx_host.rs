@@ -1,5 +1,6 @@
 //! Supervised Float32 OpenFX filter execution for one selected native binary.
 
+mod curves;
 mod resident;
 pub use resident::{
     run_openfx_resident_worker, OpenFxFilterSession, OPENFX_RESIDENT_WORKER_ARGUMENT,
@@ -97,13 +98,20 @@ impl OpenFxParameterValue {
 }
 
 /// Temporal authority supplied with an OpenFX parameter value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OpenFxParameterQueryMode {
     /// The supplied value is constant over the parameter time domain.
-    Constant,
+    Constant {},
     /// Only the requested render frame has been evaluated; no curve is supplied.
-    CurrentFrame,
+    CurrentFrame {},
+    /// Frozen canonical author property on the SDK's frame time grid.
+    Curve {
+        /// Complete author curve, including sparse compound channels.
+        property: Box<mondrian_core::AnimatedProperty>,
+        /// Exact sequence frames per author second.
+        time_scale: mondrian_core::TimeScale,
+    },
 }
 
 /// One immutable execution binding, distinct from descriptor animation capability.
@@ -121,7 +129,7 @@ impl OpenFxParameterBinding {
     pub fn constant(value: OpenFxParameterValue) -> Self {
         Self {
             value,
-            query_mode: OpenFxParameterQueryMode::Constant,
+            query_mode: OpenFxParameterQueryMode::Constant {},
         }
     }
 
@@ -129,7 +137,23 @@ impl OpenFxParameterBinding {
     pub fn current_frame(value: OpenFxParameterValue) -> Self {
         Self {
             value,
-            query_mode: OpenFxParameterQueryMode::CurrentFrame,
+            query_mode: OpenFxParameterQueryMode::CurrentFrame {},
+        }
+    }
+
+    /// Bind a complete curve. The worker derives the current value from Core;
+    /// the supplied value declares the SDK type and is not curve authority.
+    pub fn curve(
+        value: OpenFxParameterValue,
+        property: mondrian_core::AnimatedProperty,
+        time_scale: mondrian_core::TimeScale,
+    ) -> Self {
+        Self {
+            value,
+            query_mode: OpenFxParameterQueryMode::Curve {
+                property: Box::new(property),
+                time_scale,
+            },
         }
     }
 }
@@ -346,6 +370,9 @@ struct NativeParameter {
     value: [f64; 4],
     string_value: *const c_char,
     string_length: usize,
+    query: Option<curves::NativeQuery>,
+    query_context: *const c_void,
+    query_revision: u64,
 }
 
 #[repr(C)]
@@ -1769,6 +1796,9 @@ mod shared_frame_tests {
                     "asymmetric component bounds must remain distinct"
                 );
                 NativeParameter {
+                    query: None,
+                    query_context: std::ptr::null(),
+                    query_revision: 0,
                     query_mode: i32::from(mode == "compound_frame_sample"),
                     name: name.as_ptr(),
                     kind: native_kind,
@@ -1859,6 +1889,9 @@ mod shared_frame_tests {
                 [0.25_f32; 4].iter().flat_map(|value| value.to_ne_bytes()).collect::<Vec<_>>();
             let parameters = |gain| {
                 [NativeParameter {
+                    query: None,
+                    query_context: std::ptr::null(),
+                    query_revision: 0,
                     query_mode: 0,
                     name: name.as_ptr(),
                     kind: 1,
@@ -1961,6 +1994,9 @@ mod shared_frame_tests {
         let mut input = encode(&original);
         let parameters = |gain| {
             [NativeParameter {
+                query: None,
+                query_context: std::ptr::null(),
+                query_revision: 0,
                 query_mode: 0,
                 name: name.as_ptr(),
                 kind: 1,

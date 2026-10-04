@@ -3,6 +3,7 @@
 #define MONDRIAN_OPENFX_RENDER_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -13,13 +14,28 @@ enum {
   MONDRIAN_OPENFX_MAX_PARAMETER_STRING_BYTES = 1024 * 1024
 };
 
+struct MondrianOpenFxQueryResult {
+  double value[4];
+  const char* string_value;
+  size_t string_length;
+  unsigned int key_count;
+  double key_time;
+  int key_index;
+};
+// Value, derivative, integral, key count, indexed key time, directional key index.
+typedef int (*MondrianOpenFxQuery)(const void*, int, double, double, int, int,
+                                  struct MondrianOpenFxQueryResult*);
+
 struct MondrianOpenFxParameter {
   const char* name;
-  int query_mode; // 0: constant binding, 1: current-frame sample without a curve
+  int query_mode; // 0: constant, 1: current-frame sample, 2: canonical curve
   int kind; // 1: double, 2: boolean, 3: integer, 4: choice, 5: string choice, 6: string; 7: Double2D, 8: Double3D, 9: RGB, 10: RGBA, 11: Integer2D, 12: Integer3D
   double value[4];
   const char* string_value;
   size_t string_length;
+  MondrianOpenFxQuery query;
+  const void* query_context;
+  uint64_t query_revision;
 };
 
 struct MondrianOpenFxFrameInfo {

@@ -525,7 +525,7 @@ fn build_definition(
                     }
                     None => parameter.default_value.clone(),
                 };
-                let animated = match &parameter.parameter_id {
+                let curve = match &parameter.parameter_id {
                     Some(id) => {
                         let address = effect
                             .properties
@@ -543,12 +543,15 @@ fn build_definition(
                                     parameter.name
                                 ))
                             })?;
-                        property.is_enabled() && property.is_animated()
+                        (property.is_enabled() && property.is_animated()).then(|| property.clone())
                     }
-                    None => false,
+                    None => None,
                 };
-                let binding = if animated {
-                    OpenFxParameterBinding::current_frame(value)
+                let binding = if let Some(property) = curve {
+                    let rate = frame_context.frame_rate();
+                    let grid = mondrian_core::TimeScale::new(rate.num, rate.den)
+                        .map_err(|error| invalid(error.to_string()))?;
+                    OpenFxParameterBinding::curve(value, property, grid)
                 } else {
                     OpenFxParameterBinding::constant(value)
                 };
@@ -927,7 +930,7 @@ mod tests {
         let static_bindings = bindings(&first);
         assert_eq!(
             static_bindings.values["gain"].query_mode,
-            crate::openfx_host::OpenFxParameterQueryMode::Constant
+            crate::openfx_host::OpenFxParameterQueryMode::Constant {}
         );
         assert_eq!(
             static_bindings.values["gain"].value,
@@ -935,7 +938,7 @@ mod tests {
         );
         assert_eq!(
             static_bindings.values["internalSwitch"].query_mode,
-            crate::openfx_host::OpenFxParameterQueryMode::Constant
+            crate::openfx_host::OpenFxParameterQueryMode::Constant {}
         );
         let path = effect.properties.iter().next().expect("gain").0.to_owned();
         for (time, value) in [
@@ -969,9 +972,23 @@ mod tests {
             .expect("evaluate author binding")
         };
         let animated_bindings = bindings(&compile(&effect));
+        let crate::openfx_host::OpenFxParameterQueryMode::Curve { property, time_scale } =
+            &animated_bindings.values["gain"].query_mode
+        else {
+            panic!("complete curve binding");
+        };
         assert_eq!(
-            animated_bindings.values["gain"].query_mode,
-            crate::openfx_host::OpenFxParameterQueryMode::CurrentFrame
+            **property,
+            effect.properties.property(&path).expect("gain").clone()
+        );
+        let query = mondrian_core::PreparedPropertyQuery::prepare(property, *time_scale)
+            .expect("frame query");
+        assert_eq!(query.key_times(), [0.0, 1.0]);
+        assert_eq!(
+            query
+                .evaluate(mondrian_core::AutomationQueryTime::new(0.5).expect("subframe"))
+                .expect("full source evaluation"),
+            PropertyValue::Double(1.5)
         );
         assert_eq!(
             animated_bindings.values["gain"].value,
@@ -983,7 +1000,7 @@ mod tests {
         let disabled_bindings = bindings(&compile(&effect));
         assert_eq!(
             disabled_bindings.values["gain"].query_mode,
-            crate::openfx_host::OpenFxParameterQueryMode::Constant
+            crate::openfx_host::OpenFxParameterQueryMode::Constant {}
         );
         assert_eq!(
             disabled_bindings.values["gain"].value,

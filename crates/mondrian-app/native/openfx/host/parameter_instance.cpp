@@ -6,6 +6,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <type_traits>
+#include <limits>
 
 // ofx
 #include "ofxCore.h"
@@ -33,18 +34,68 @@
 
 namespace MondrianOpenFx {
 
+  template<class T, size_t N>
+  OfxStatus curveNumbers(const FilterEffectInstance& effect, const std::string& name,
+                        int operation, double start, double end, const std::array<T*, N>& outputs,
+                        const OFX::Host::Property::Set* bounds = nullptr) {
+    MondrianOpenFxQueryResult result{};
+    const auto status = effect.frameState().queryParameter(name, operation, start, end, 0, 0, result);
+    if (status != kOfxStatOK) { return status; }
+    std::array<T, N> values{};
+    for (size_t index = 0; index < N; ++index) {
+      const double value = result.value[index];
+      if (!std::isfinite(value)) { return kOfxStatErrValue; }
+      if constexpr (std::is_integral_v<T>) {
+        if (std::trunc(value) != value || value < std::numeric_limits<T>::lowest() ||
+            value > std::numeric_limits<T>::max()) { return kOfxStatErrValue; }
+      }
+      if (bounds) {
+        const double minimum = std::is_integral_v<T> ? bounds->getIntProperty(kOfxParamPropMin, index)
+                                                     : bounds->getDoubleProperty(kOfxParamPropMin, index);
+        const double maximum = std::is_integral_v<T> ? bounds->getIntProperty(kOfxParamPropMax, index)
+                                                     : bounds->getDoubleProperty(kOfxParamPropMax, index);
+        if (value < minimum || value > maximum) { return kOfxStatErrValue; }
+      }
+      values[index] = static_cast<T>(value);
+    }
+    // Complete result admission precedes every caller-owned component write.
+    for (size_t index = 0; index < N; ++index) { *outputs[index] = values[index]; }
+    return kOfxStatOK;
+  }
+
   OfxStatus parameterKeyCount(const FilterEffectInstance& effect, const std::string& name, unsigned int& count) {
+    if (effect.frameState().curveParameter(name)) {
+      MondrianOpenFxQueryResult result{};
+      const auto status = effect.frameState().queryParameter(name, 3, 0, 0, 0, 0, result);
+      if (status == kOfxStatOK) { count = result.key_count; }
+      return status;
+    }
     if (!effect.frameState().constantParameter(name)) { return kOfxStatErrMissingHostFeature; }
     count = 0;
     return kOfxStatOK;
   }
 
-  OfxStatus parameterKeyTime(const FilterEffectInstance& effect, const std::string& name) {
+  OfxStatus parameterKeyTime(const FilterEffectInstance& effect, const std::string& name, int index, OfxTime& time) {
+    if (effect.frameState().curveParameter(name)) {
+      MondrianOpenFxQueryResult result{};
+      const auto status = effect.frameState().queryParameter(name, 4, 0, 0, index, 0, result);
+      if (status == kOfxStatOK) {
+        if (!std::isfinite(result.key_time)) { return kOfxStatErrValue; }
+        time = result.key_time;
+      }
+      return status;
+    }
     return effect.frameState().constantParameter(name) ? kOfxStatErrBadIndex : kOfxStatErrMissingHostFeature;
   }
 
-  OfxStatus parameterKeyIndex(const FilterEffectInstance& effect, const std::string& name, OfxTime time, int& index) {
+  OfxStatus parameterKeyIndex(const FilterEffectInstance& effect, const std::string& name, OfxTime time, int direction, int& index) {
     if (!std::isfinite(time)) { return kOfxStatErrValue; }
+    if (effect.frameState().curveParameter(name)) {
+      MondrianOpenFxQueryResult result{};
+      const auto status = effect.frameState().queryParameter(name, 5, time, 0, 0, direction, result);
+      if (status == kOfxStatOK || status == kOfxStatFailed) { index = result.key_index; }
+      return status;
+    }
     if (!effect.frameState().constantParameter(name)) { return kOfxStatErrMissingHostFeature; }
     index = -1;
     return kOfxStatFailed;
@@ -69,6 +120,9 @@ namespace MondrianOpenFx {
 
   OfxStatus IntegerParameter::get(OfxTime time, int& value)
   {
+    if (_effect->frameState().curveParameter(getName())) {
+      return curveNumbers<int, 1>(*_effect, getName(), 0, time, 0, {&value}, &_descriptor.getProperties());
+    }
     if (!std::isfinite(time)) { return kOfxStatErrValue; }
     return _effect->frameState().permitsParameterTime(getName(), time)
         ? get(value) : kOfxStatErrMissingHostFeature;
@@ -76,6 +130,7 @@ namespace MondrianOpenFx {
 
   OfxStatus IntegerParameter::set(int value)
   {
+    if (!_effect->frameState().permitsParameterWrite(getName())) { return kOfxStatErrUnsupported; }
     const auto& properties = _descriptor.getProperties();
     if (value < properties.getIntProperty(kOfxParamPropMin) || value > properties.getIntProperty(kOfxParamPropMax)) { return kOfxStatErrValue; }
     _value = value;
@@ -105,6 +160,9 @@ namespace MondrianOpenFx {
 
   OfxStatus DoubleParameter::get(OfxTime time, double& d)
   {
+    if (_effect->frameState().curveParameter(getName())) {
+      return curveNumbers<double, 1>(*_effect, getName(), 0, time, 0, {&d}, &_descriptor.getProperties());
+    }
     if (!std::isfinite(time)) { return kOfxStatErrValue; }
     return _effect->frameState().permitsParameterTime(getName(), time)
         ? get(d) : kOfxStatErrMissingHostFeature;
@@ -112,6 +170,7 @@ namespace MondrianOpenFx {
 
   OfxStatus DoubleParameter::set(double value)
   {
+    if (!_effect->frameState().permitsParameterWrite(getName())) { return kOfxStatErrUnsupported; }
     const auto& properties = _descriptor.getProperties();
     if (!std::isfinite(value) ||
         value < properties.getDoubleProperty(kOfxParamPropMin) ||
@@ -130,6 +189,9 @@ namespace MondrianOpenFx {
 
   OfxStatus DoubleParameter::derive(OfxTime time, double& value)
   {
+    if (_effect->frameState().curveParameter(getName())) {
+      return curveNumbers<double, 1>(*_effect, getName(), 1, time, 0, {&value});
+    }
     if (!std::isfinite(time)) { return kOfxStatErrValue; }
     if (!_effect->frameState().constantParameter(getName())) { return kOfxStatErrMissingHostFeature; }
     value = 0.0;
@@ -138,6 +200,9 @@ namespace MondrianOpenFx {
 
   OfxStatus DoubleParameter::integrate(OfxTime time1, OfxTime time2, double& value)
   {
+    if (_effect->frameState().curveParameter(getName())) {
+      return curveNumbers<double, 1>(*_effect, getName(), 2, time1, time2, {&value});
+    }
     if (!std::isfinite(time1) || !std::isfinite(time2)) { return kOfxStatErrValue; }
     if (time1 == time2) { value = 0.0; return kOfxStatOK; }
     if (!_effect->frameState().constantParameter(getName())) { return kOfxStatErrMissingHostFeature; }
@@ -175,6 +240,9 @@ namespace MondrianOpenFx {
 
   OfxStatus BooleanParameter::get(OfxTime time, bool& b)
   {
+    if (_effect->frameState().curveParameter(getName())) {
+      return curveNumbers<bool, 1>(*_effect, getName(), 0, time, 0, {&b}, nullptr);
+    }
     if (!std::isfinite(time)) { return kOfxStatErrValue; }
     return _effect->frameState().permitsParameterTime(getName(), time)
         ? get(b) : kOfxStatErrMissingHostFeature;
@@ -182,6 +250,7 @@ namespace MondrianOpenFx {
 
   OfxStatus BooleanParameter::set(bool value)
   {
+    if (!_effect->frameState().permitsParameterWrite(getName())) { return kOfxStatErrUnsupported; }
     _value = value;
     return kOfxStatOK;
   }
@@ -213,6 +282,14 @@ namespace MondrianOpenFx {
 
   OfxStatus ChoiceParameter::get(OfxTime time, int& value)
   {
+    if (_effect->frameState().curveParameter(getName())) {
+      int result = 0;
+      const auto status = curveNumbers<int, 1>(*_effect, getName(), 0, time, 0, {&result});
+      if (status != kOfxStatOK) { return status; }
+      if (result < 0 || result >= getProperties().getDimension(kOfxParamPropChoiceOption)) { return kOfxStatErrValue; }
+      value = result;
+      return kOfxStatOK;
+    }
     if (!std::isfinite(time)) { return kOfxStatErrValue; }
     return _effect->frameState().permitsParameterTime(getName(), time)
         ? get(value) : kOfxStatErrMissingHostFeature;
@@ -220,6 +297,7 @@ namespace MondrianOpenFx {
 
   OfxStatus ChoiceParameter::set(int value)
   {
+    if (!_effect->frameState().permitsParameterWrite(getName())) { return kOfxStatErrUnsupported; }
     const int count = getProperties().getDimension(kOfxParamPropChoiceOption);
     if (value < 0 || value >= count) { return kOfxStatErrValue; }
     _value = value;
@@ -256,11 +334,22 @@ namespace MondrianOpenFx {
     return kOfxStatOK;
   }
   OfxStatus StrChoiceParameter::get(OfxTime time, std::string& value) {
+    if (_effect->frameState().curveParameter(getName())) {
+      MondrianOpenFxQueryResult result{};
+      const auto status = _effect->frameState().queryParameter(getName(), 0, time, 0, 0, 0, result);
+      if (status != kOfxStatOK) { return status; }
+      if (!result.string_value || result.string_length > 256) { return kOfxStatErrValue; }
+      std::string text(result.string_value, result.string_length);
+      if (!contains(text)) { return kOfxStatErrValue; }
+      value = std::move(text);
+      return kOfxStatOK;
+    }
     if (!std::isfinite(time)) { return kOfxStatErrValue; }
     return _effect->frameState().permitsParameterTime(getName(), time)
         ? get(value) : kOfxStatErrMissingHostFeature;
   }
   OfxStatus StrChoiceParameter::set(const char* value) {
+    if (!_effect->frameState().permitsParameterWrite(getName())) { return kOfxStatErrUnsupported; }
     if (!value || !contains(value)) { return kOfxStatErrValue; }
     _value = value;
     return kOfxStatOK;
@@ -332,6 +421,9 @@ namespace MondrianOpenFx {
 
   template<class T, size_t N>
   OfxStatus NumericTupleState<T, N>::read(OfxTime time, const std::array<T*, N>& outputs) const {
+    if (_effect->frameState().curveParameter(_descriptor.getName())) {
+      return curveNumbers<T, N>(*_effect, _descriptor.getName(), 0, time, 0, outputs, &_descriptor.getProperties());
+    }
     if (!std::isfinite(time)) { return kOfxStatErrValue; }
     if (!_effect->frameState().permitsParameterTime(_descriptor.getName(), time)) {
       return kOfxStatErrMissingHostFeature;
@@ -341,6 +433,7 @@ namespace MondrianOpenFx {
 
   template<class T, size_t N>
   OfxStatus NumericTupleState<T, N>::write(const std::array<T, N>& values) {
+    if (!_effect->frameState().permitsParameterWrite(_descriptor.getName())) { return kOfxStatErrUnsupported; }
     if (!admits(values)) { return kOfxStatErrValue; }
     _values = values;
     return kOfxStatOK;
@@ -360,6 +453,9 @@ namespace MondrianOpenFx {
     if constexpr (!std::is_same_v<T, double>) {
       return kOfxStatErrUnsupported;
     } else {
+      if (_effect->frameState().curveParameter(_descriptor.getName())) {
+        return curveNumbers<T, N>(*_effect, _descriptor.getName(), 1, time, 0, outputs);
+      }
       if (!std::isfinite(time)) { return kOfxStatErrValue; }
       if (!_effect->frameState().constantParameter(_descriptor.getName())) { return kOfxStatErrMissingHostFeature; }
       for (auto* output : outputs) { *output = 0; }
@@ -372,6 +468,9 @@ namespace MondrianOpenFx {
     if constexpr (!std::is_same_v<T, double>) {
       return kOfxStatErrUnsupported;
     } else {
+      if (_effect->frameState().curveParameter(_descriptor.getName())) {
+        return curveNumbers<T, N>(*_effect, _descriptor.getName(), 2, start, end, outputs);
+      }
       if (!std::isfinite(start) || !std::isfinite(end)) { return kOfxStatErrValue; }
       if (start == end) {
         for (auto* output : outputs) { *output = 0; }

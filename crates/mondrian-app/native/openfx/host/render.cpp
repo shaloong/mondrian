@@ -226,11 +226,13 @@ struct MondrianOpenFxSession {
     std::map<std::string, const MondrianOpenFxParameter*> authored;
     for (int index = 0; index < count; ++index) {
       const auto& value = parameters[index];
-      if (!value.name || (value.query_mode != 0 && value.query_mode != 1) || !std::all_of(value.value, value.value + 4, [](double channel) { return std::isfinite(channel); }) ||
+      if (!value.name || (value.query_mode < 0 || value.query_mode > 2) ||
+          (value.query_mode == 2 && (!value.query || !value.query_context || value.query_revision == 0)) ||
+          (value.query_mode != 2 && (value.query || value.query_context || value.query_revision != 0)) || !std::all_of(value.value, value.value + 4, [](double channel) { return std::isfinite(channel); }) ||
           !authored.emplace(value.name, &value).second ||
           !instance->getParam(value.name)) { return 4; }
     }
-    std::set<std::string> frameSamples;
+    std::map<std::string, MondrianOpenFx::ParameterSource> sources;
     std::vector<ParameterUpdate> updates;
     size_t stringBytes = 0;
     bool changed = clipsChanged;
@@ -245,6 +247,7 @@ struct MondrianOpenFxSession {
       const auto found = authored.find(entry.first);
       const auto* value = found == authored.end() ? nullptr : found->second;
       const auto& properties = parameter->getProperties();
+      if (value && value->query_mode == 2 && !properties.getIntProperty(kOfxParamPropAnimates)) { return 4; }
       if (auto* scalar = dynamic_cast<OFX::Host::Param::DoubleInstance*>(parameter)) {
         const double target = value ? value->value[0] :
             properties.getDoubleProperty(kOfxParamPropDefault);
@@ -322,37 +325,45 @@ struct MondrianOpenFxSession {
         if (bytes > MONDRIAN_OPENFX_MAX_PARAMETER_STRING_BYTES - stringBytes) { return 4; }
         stringBytes += bytes;
       }
-      const bool frameSample = value && value->query_mode == 1;
-      if (frameSample) { frameSamples.insert(entry.first); }
-      updates.back().changed = updates.back().changed ||
-          (frame.frameSampleParameters.count(entry.first) != 0) != frameSample;
+      const int mode = value ? value->query_mode : 0;
+      const uint64_t revision = value ? value->query_revision : 0;
+      if (mode != 0) { sources.emplace(entry.first, MondrianOpenFx::ParameterSource{
+          mode, value->query, value->query_context, revision}); }
+      const auto old = frame.parameterSources.find(entry.first);
+      const int oldMode = old == frame.parameterSources.end() ? 0 : old->second.mode;
+      const uint64_t oldRevision = old == frame.parameterSources.end() ? 0 : old->second.revision;
+      updates.back().changed = updates.back().changed || oldMode != mode || oldRevision != revision;
       changed = changed || updates.back().changed;
     }
     // Validation above has neither assigned values nor invoked plugin actions.
     // Once native state can change, retain failure until a complete render
     // succeeds; callback failures cannot safely reuse a partially changed instance.
     if (notify) { failed = true; }
-    frame.frameSampleParameters = std::move(frameSamples);
     const bool bracket = notify && changed;
-    if (bracket && !accepted(instance->beginInstanceChangedAction(reason))) { return 4; }
     OfxStatus status = kOfxStatOK;
-    // Assign the complete authored snapshot before any change callback reads it.
-    for (const auto& update : updates) {
-      if (update.kind == 1) {
-        status = static_cast<OFX::Host::Param::DoubleInstance*>(update.parameter)->set(update.value[0]);
-      } else if (update.kind == 3) {
-        status = static_cast<OFX::Host::Param::IntegerInstance*>(update.parameter)->set(static_cast<int>(update.value[0]));
-      } else if (update.kind == 4) {
-        status = static_cast<OFX::Host::Param::ChoiceInstance*>(update.parameter)->set(static_cast<int>(update.value[0]));
-      } else if (update.kind == 5 || update.kind == 6) {
-        status = static_cast<OFX::Host::Param::StringInstance*>(update.parameter)->set(update.stringValue.c_str());
-      } else if (update.kind >= 7) {
-        status = writeCompound(update.parameter, update.kind, update.value);
-      } else {
-        status = static_cast<OFX::Host::Param::BooleanInstance*>(update.parameter)->set(update.value[0] == 1.0);
+    // No SDK callback can observe a partially assigned author snapshot.
+    {
+      MondrianOpenFx::ParameterAssignment assigning(frame);
+      for (const auto& update : updates) {
+        if (update.kind == 1) {
+          status = static_cast<OFX::Host::Param::DoubleInstance*>(update.parameter)->set(update.value[0]);
+        } else if (update.kind == 3) {
+          status = static_cast<OFX::Host::Param::IntegerInstance*>(update.parameter)->set(static_cast<int>(update.value[0]));
+        } else if (update.kind == 4) {
+          status = static_cast<OFX::Host::Param::ChoiceInstance*>(update.parameter)->set(static_cast<int>(update.value[0]));
+        } else if (update.kind == 5 || update.kind == 6) {
+          status = static_cast<OFX::Host::Param::StringInstance*>(update.parameter)->set(update.stringValue.c_str());
+        } else if (update.kind >= 7) {
+          status = writeCompound(update.parameter, update.kind, update.value);
+        } else {
+          status = static_cast<OFX::Host::Param::BooleanInstance*>(update.parameter)->set(update.value[0] == 1.0);
+        }
+        if (status != kOfxStatOK) { break; }
       }
-      if (status != kOfxStatOK) { break; }
     }
+    if (status != kOfxStatOK) { return 4; }
+    frame.parameterSources = std::move(sources);
+    if (bracket && !accepted(instance->beginInstanceChangedAction(reason))) { return 4; }
     const OfxPointD scale{1.0, 1.0};
     if (bracket && status == kOfxStatOK) {
       for (const auto& update : updates) {

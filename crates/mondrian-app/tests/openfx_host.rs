@@ -28,6 +28,193 @@ fn constant_parameters<const N: usize>(
         .collect()
 }
 
+#[test]
+#[ignore = "requires rebuilt product and SessionProbe mode canonical_curves"]
+fn product_worker_queries_canonical_sparse_curves_across_seeks() {
+    use mondrian_core::{ExactBezierHandle, InterpolationType, KeyframeInterpolation, TimeScale};
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
+        "canonical_curves"
+    );
+    let binary =
+        PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));
+    let inspection = inspect_openfx_binary(product_executable(), &binary).expect("inspect");
+    let identifier = "uk.co.thefoundry.BasicGainPlugin";
+    let kind = register_selected_openfx_filter(product_executable(), &inspection, identifier)
+        .expect("register actual native curve definitions");
+    let mut effect = instantiate_effect_node(kind).expect("effect");
+    let description =
+        describe_openfx_filter(product_executable(), &inspection, identifier).expect("describe");
+    let mut bindings = BTreeMap::new();
+    for parameter in description.parameters.iter().filter(|parameter| {
+        matches!(
+            parameter.name.as_str(),
+            "scale" | "point2" | "point3" | "rgb" | "rgba" | "integer2" | "integer3"
+        )
+    }) {
+        assert!(parameter.can_animate);
+        let mut property = effect
+            .properties
+            .iter()
+            .find(|(_, property)| property.descriptor.display_name == parameter.label)
+            .expect("canonical provider author property")
+            .1
+            .clone();
+        let channel = if parameter.name == "scale" { 0 } else { 1 };
+        let default = property.static_value().to_channel_values()[channel];
+        property.set_animation_enabled(true);
+        let integer = matches!(
+            parameter.default_value,
+            OpenFxParameterValue::Integer2(_) | OpenFxParameterValue::Integer3(_)
+        );
+        let interpolation = if integer {
+            InterpolationType::Hold
+        } else {
+            InterpolationType::Linear
+        };
+        property
+            .write_channels(TimelineTime::ZERO, &[(channel, default)], interpolation)
+            .expect("sparse start");
+        property
+            .write_channels(
+                TimelineTime::ONE,
+                &[(channel, default + 1.0)],
+                interpolation,
+            )
+            .expect("sparse end");
+        if !integer {
+            property
+                .update_channel_keyframe_handles(
+                    TimelineTime::ZERO,
+                    channel,
+                    KeyframeInterpolation::Linear,
+                    KeyframeInterpolation::Bezier(ExactBezierHandle {
+                        time_offset: TimelineTime::new(1, 3).expect("outgoing time"),
+                        value_offset: 0.0,
+                    }),
+                )
+                .expect("outgoing cubic");
+            property
+                .update_channel_keyframe_handles(
+                    TimelineTime::ONE,
+                    channel,
+                    KeyframeInterpolation::Bezier(ExactBezierHandle {
+                        time_offset: TimelineTime::new(-1, 3).expect("incoming time"),
+                        value_offset: 0.0,
+                    }),
+                    KeyframeInterpolation::Linear,
+                )
+                .expect("incoming cubic");
+        }
+        assert!(
+            property.channels().iter().enumerate().all(|(index, channel)| index
+                == if parameter.name == "scale" { 0 } else { 1 }
+                || channel.keyframes().is_empty())
+        );
+        effect.properties.upsert(property.clone());
+        bindings.insert(
+            parameter.name.clone(),
+            OpenFxParameterBinding::curve(
+                parameter.default_value.clone(),
+                property,
+                TimeScale::new(24, 1).expect("SDK grid"),
+            ),
+        );
+    }
+    assert_eq!(bindings.len(), 7);
+    let input = OpenFxFloatFrame {
+        width: 2,
+        height: 2,
+        pixels: vec![[-0.25, 0.5, 2.0, 0.25]; 4],
+    };
+    let cancellation = mondrian_core::ExecutionCancellationToken::new();
+    let mut session = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        identifier,
+        input.width,
+        input.height,
+        &mut checkpoint(&cancellation),
+    )
+    .expect("prepare");
+    let worker = session.worker_process_id();
+    for frame in [6.0_f64, 18.0, 0.0, 24.0, 30.0, -6.0, 6.0] {
+        let timing = OpenFxRenderTiming {
+            frame,
+            frame_rate: 24.0,
+            first_frame: -12.0,
+            last_frame: 60.0,
+            pixel_aspect_ratio: 1.0,
+        };
+        let output = session
+            .render(&timing, &bindings, &input, &mut checkpoint(&cancellation))
+            .expect("native independent SDK curve assertions");
+        let t = (frame / 24.0).clamp(0.0, 1.0);
+        let smooth = 3.0 * t * t - 2.0 * t * t * t;
+        let step = if frame >= 24.0 { 1.0 } else { 0.0 };
+        let gain = (1.0 + (20.0 * smooth + 22.0 * step) / 128.0) as f32;
+        assert_eq!(
+            output.pixels,
+            input
+                .pixels
+                .iter()
+                .map(|pixel| pixel.map(|value| (value * (1.0 + smooth) as f32) * gain))
+                .collect::<Vec<_>>(),
+            "independent raster at frame {frame}"
+        );
+        assert_eq!(
+            session.worker_process_id(),
+            worker,
+            "seeking must reuse the native owner"
+        );
+    }
+    session.shutdown().expect("curve-querying native teardown");
+    let frame_context = EffectFrameContext::new(
+        Rational::new(24, 1),
+        SampleAspectRatio::new(1, 1).expect("square samples"),
+        TimelineTimeRange::new(
+            TimelineTime::new(-1, 2).expect("start"),
+            TimelineTime::new(3, 1).expect("duration"),
+        )
+        .expect("owner range"),
+    )
+    .expect("frame context");
+    let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+        &[effect],
+        &[],
+        &[],
+        &[],
+        WorkingColorSpace::LinearRec709,
+        frame_context,
+        &LutPreparationCache::uncached(),
+    )
+    .expect("production graph preparation");
+    for frame in [6, 18] {
+        let graph = program
+            .evaluate(TimelineTime::new(frame, 24).expect("exact owner time"))
+            .expect("production author evaluation");
+        let output = apply_compiled_effect_graph_rgba_f32(
+            &input.pixels,
+            input.width,
+            input.height,
+            &graph,
+            0,
+        )
+        .expect("canonical queries through the production compiled graph");
+        let t = frame as f64 / 24.0;
+        let smooth = 3.0 * t * t - 2.0 * t * t * t;
+        let gain = (1.0 + 20.0 * smooth / 128.0) as f32;
+        assert_eq!(
+            output,
+            input
+                .pixels
+                .iter()
+                .map(|pixel| pixel.map(|value| (value * (1.0 + smooth) as f32) * gain))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
 fn product_executable() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_mondrian"))
 }

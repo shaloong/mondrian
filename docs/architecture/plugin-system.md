@@ -738,3 +738,30 @@ default, atomic rejection and native action/lifetime probes.
 Historical curve access, spatial/time/color interpretation, native plugin
 editors and the vendor matrix remain separate outstanding qualification work;
 these owned static fixtures do not qualify complete format support.
+
+
+### Canonical OpenFX parameter query snapshots
+
+Animated graph bindings carry the complete canonical AnimatedProperty and an exact
+sequence-frame TimeScale. The resident worker derives the current SDK value from
+Core PreparedPropertyQuery and reuses unchanged frozen snapshots across renders.
+Native value, derivative, integral and key queries call this same Core evaluator;
+there is no native curve interpreter or floating-to-author-time quantization.
+Sparse compound channels retain their static values. Queries validate complete
+results before writing caller outputs, and calculus uses SDK frame units.
+
+The worker owns old and candidate snapshots through native publication and failure
+teardown. Successful publication retains the new contexts before any fallible
+response write; destruction precedes releasing the final query contexts. Native
+parameter source revisions trigger change notifications even when a changed curve
+has the same current value. Host assignments publish all current values and query
+sources before invoking change callbacks. Canonical curves are currently read-only
+from the SDK: mutations are rejected; untimed value writes return Unsupported.
+They cannot claim a persistent edit outside the editor authoring session.
+Full SDK author edits remain pending.
+
+The owned SessionProbe qualifies independent cubic value/calculus, Hold extension,
+ordered key queries and complete sparse Double2/Double3/RGB/RGBA/Integer2/Integer3
+values across non-monotonic seeks and instance teardown. Its reference raster
+formula is independent of Core. This scope does not imply all OFX contexts,
+formats, temporal image dependencies, native interacts or vendor compatibility.

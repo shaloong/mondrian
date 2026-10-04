@@ -45,7 +45,7 @@ bool defineCompounds(const void* handle) {
     OfxPropertySetHandle props = nullptr;
     if (gParamHost->paramDefine(params, parameter.type, parameter.name, &props) != kOfxStatOK ||
         gPropHost->propSetString(props, kOfxPropLabel, 0, parameter.name) != kOfxStatOK ||
-        gPropHost->propSetInt(props, kOfxParamPropAnimates, 0, (mode() == "compound_constant_animatable" || mode() == "compound_frame_sample") ? 1 : 0) != kOfxStatOK) { return false; }
+        gPropHost->propSetInt(props, kOfxParamPropAnimates, 0, (mode() == "compound_constant_animatable" || mode() == "compound_frame_sample" || mode() == "canonical_curves") ? 1 : 0) != kOfxStatOK) { return false; }
     if ((parameter.type == std::string(kOfxParamTypeDouble2D) || parameter.type == std::string(kOfxParamTypeDouble3D)) &&
         gPropHost->propSetString(props, kOfxParamPropDoubleType, 0, kOfxParamDoubleTypePlain) != kOfxStatOK) { return false; }
     for (int index = 0; index < parameter.dimensions; ++index) {
@@ -302,6 +302,96 @@ bool compoundAuthorOutput(const void* handle, OfxPropertySetHandle in) {
   return gEffectHost->clipReleaseImage(image) == kOfxStatOK && valid;
 }
 
+
+bool curveKeys(OfxParamHandle parameter) {
+  unsigned int count = 999;
+  if (gParamHost->paramGetNumKeys(parameter, &count) != kOfxStatOK || count != 2) { return false; }
+  for (int index = 0; index < 2; ++index) {
+    double time = -999;
+    if (gParamHost->paramGetKeyTime(parameter, index, &time) != kOfxStatOK || time != index * 24.0) { return false; }
+  }
+  for (int index : {-1, 2}) {
+    double time = -999;
+    if (gParamHost->paramGetKeyTime(parameter, index, &time) != kOfxStatErrBadIndex || time != -999) { return false; }
+  }
+  for (double time : {-1.0, -0.0, 0.0, 6.0, 24.0, 25.0}) {
+    for (int direction : {-1, 0, 1}) {
+      const int expected = direction < 0 ? (time > 24 ? 1 : time > 0 ? 0 : -1)
+          : direction > 0 ? (time < 0 ? 0 : time < 24 ? 1 : -1)
+          : time == 0 ? 0 : time == 24 ? 1 : -1;
+      int index = -999;
+      const auto status = gParamHost->paramGetKeyIndex(parameter, time, direction, &index);
+      if (status != (expected == -1 ? kOfxStatFailed : kOfxStatOK) || index != expected) { return false; }
+    }
+  }
+  int index = -999;
+  return gParamHost->paramGetKeyIndex(parameter, std::numeric_limits<double>::quiet_NaN(), 1, &index)
+      == kOfxStatErrValue && index == -999;
+}
+
+template<class T, int N>
+bool canonicalTuple(OfxParamHandle parameter, const CompoundParameter& definition) {
+  if (!curveKeys(parameter)) { return false; }
+  for (double frame : {-6.0, 0.0, 6.0, 18.0, 24.0, 30.0}) {
+    const double t = std::max(0.0, std::min(1.0, frame / 24.0));
+    const double increment = definition.integer ? (frame >= 24 ? 1 : 0) : 3*t*t - 2*t*t*t;
+    std::array<double, 4> values{};
+    if (readCompound<T, N>(parameter, true, frame, values) != kOfxStatOK) { return false; }
+    for (int channel = 0; channel < N; ++channel) {
+      const double expected = definition.defaults[channel] + (channel == 1 ? increment : 0);
+      if (std::abs(values[channel] - expected) > 2e-12) { return false; }
+    }
+    if constexpr (std::is_same_v<T, double>) {
+      std::array<double, 4> slopes{};
+      if (compoundCalculus<N>(parameter, false, frame, 0, slopes) != kOfxStatOK) { return false; }
+      for (int channel = 0; channel < N; ++channel) {
+        const double expected = channel == 1 ? (6*t - 6*t*t)/24.0 : 0;
+        if (std::abs(slopes[channel] - expected) > 2e-12) { return false; }
+      }
+    }
+  }
+  std::array<double, 4> invalid{-999,-999,-999,-999};
+  if (readCompound<T, N>(parameter, true, std::numeric_limits<double>::infinity(), invalid) != kOfxStatErrValue ||
+      invalid != std::array<double,4>{-999,-999,-999,-999}) { return false; }
+  if constexpr (std::is_same_v<T, double>) {
+    for (bool reverse : {false,true}) {
+      std::array<double,4> areas{};
+      if (compoundCalculus<N>(parameter, true, reverse ? 24 : 0, reverse ? 0 : 24, areas) != kOfxStatOK) { return false; }
+      for (int channel = 0; channel < N; ++channel) {
+        const double expected = (24*definition.defaults[channel] + (channel == 1 ? 12 : 0)) * (reverse ? -1 : 1);
+        if (std::abs(areas[channel] - expected) > 2e-11) { return false; }
+      }
+    }
+  }
+  return writeCompound<T,N>(parameter, false, 0, definition.defaults) == kOfxStatErrUnsupported;
+}
+
+bool canonicalCurves(const void* handle) {
+  OfxParamSetHandle params = nullptr;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK) { return false; }
+  OfxParamHandle scale = nullptr;
+  if (gParamHost->paramGetHandle(params, "scale", &scale, nullptr) != kOfxStatOK || !curveKeys(scale)) { return false; }
+  for (double frame : {-6.0, 0.0, 6.0, 18.0, 24.0, 30.0}) {
+    const double t = std::max(0.0, std::min(1.0, frame/24));
+    double value = -999, slope = -999;
+    if (gParamHost->paramGetValueAtTime(scale, frame, &value) != kOfxStatOK ||
+        std::abs(value - (1+3*t*t-2*t*t*t)) > 2e-12 ||
+        gParamHost->paramGetDerivative(scale, frame, &slope) != kOfxStatOK ||
+        std::abs(slope - (6*t-6*t*t)/24) > 2e-12) { return false; }
+  }
+  double area = -999;
+  if (gParamHost->paramGetIntegral(scale, 0, 24, &area) != kOfxStatOK || std::abs(area-36) > 2e-12) { return false; }
+  for (const auto& definition : compounds) {
+    OfxParamHandle parameter = nullptr;
+    if (gParamHost->paramGetHandle(params, definition.name, &parameter, nullptr) != kOfxStatOK) { return false; }
+    const bool valid = definition.integer
+        ? definition.dimensions == 2 ? canonicalTuple<int,2>(parameter, definition) : canonicalTuple<int,3>(parameter, definition)
+        : definition.dimensions == 2 ? canonicalTuple<double,2>(parameter, definition)
+        : definition.dimensions == 3 ? canonicalTuple<double,3>(parameter, definition) : canonicalTuple<double,4>(parameter, definition);
+    if (!valid) { return false; }
+  }
+  return true;
+}
 
 void property(const void* handle, const char* name, int value) {
   OfxPropertySetHandle props = nullptr;
@@ -629,7 +719,7 @@ OfxStatus probe(const char* action, const void* handle,
         gParamHost->paramGetHandle(params, "scaleComponents", &toggle, nullptr) != kOfxStatOK ||
         gParamHost->paramGetValue(scalar, &scale) != kOfxStatOK ||
         gParamHost->paramGetValue(toggle, &enabled) != kOfxStatOK ||
-        gParamHost->paramSetValue(scalar, scale) != kOfxStatOK ||
+        gParamHost->paramSetValue(scalar, scale) != (selected == "canonical_curves" ? kOfxStatErrUnsupported : kOfxStatOK) ||
         gParamHost->paramSetValue(toggle, enabled) != kOfxStatOK) { return kOfxStatFailed; }
     if (selected == "choice" || selected.find("strchoice") == 0) {
       OfxParamHandle parameter = nullptr, integer = nullptr;
@@ -655,12 +745,16 @@ OfxStatus probe(const char* action, const void* handle,
       !compoundValues(handle, in, operation == kOfxActionCreateInstance, operation == kOfxImageEffectActionRender)) {
     return kOfxStatFailed;
   }
+  if (selected == "canonical_curves" &&
+      (operation == kOfxActionCreateInstance || operation == kOfxActionBeginInstanceChanged ||
+       operation == kOfxActionInstanceChanged || operation == kOfxImageEffectActionRender ||
+       operation == kOfxActionDestroyInstance) && !canonicalCurves(handle)) { return kOfxStatFailed; }
   const OfxStatus result = pluginMain(action, handle, in, out);
-  if ((selected == "compound" || selected == "compound_author" || selected == "compound_constant_animatable" || selected == "compound_frame_sample") && result == kOfxStatOK &&
+  if ((selected == "compound" || selected == "compound_author" || selected == "compound_constant_animatable" || selected == "compound_frame_sample" || selected == "canonical_curves") && result == kOfxStatOK &&
       operation == kOfxImageEffectActionDescribeInContext && !defineCompounds(handle)) {
     return kOfxStatFailed;
   }
-  if (selected == "compound_author" && result == kOfxStatOK &&
+  if ((selected == "compound_author" || selected == "canonical_curves") && result == kOfxStatOK &&
       operation == kOfxImageEffectActionRender && !compoundAuthorOutput(handle, in)) {
     return kOfxStatFailed;
   }

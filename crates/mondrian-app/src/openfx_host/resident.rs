@@ -577,6 +577,8 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
     let identifier = CString::new(prepare.plugin_identifier.as_str())
         .map_err(|_| invalid("plugin identifier contains a null byte"))?;
     write_response(&mut control, &Response::Ready { version: VERSION, nonce })?;
+    // Declared before the session: native destruction may query its last snapshot.
+    let mut curves: BTreeMap<String, std::sync::Arc<curves::CurveContext>> = BTreeMap::new();
     let mut session: Option<NativeSession> = None;
     let mut sequence = 0_u64;
     loop {
@@ -589,7 +591,7 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
                 write_response(&mut control, &Response::Closed {})?;
                 return Ok(());
             }
-            Request::Render { sequence: received, timing, parameters } => {
+            Request::Render { sequence: received, timing, mut parameters } => {
                 sequence = sequence
                     .checked_add(1)
                     .ok_or_else(|| invalid("native session sequence exhausted"))?;
@@ -597,6 +599,29 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
                     return Err(invalid("native session request sequence does not match"));
                 }
                 validate_timing(&timing)?;
+                validate_parameters(&parameters)?;
+                let mut candidate_curves = BTreeMap::new();
+                for (name, binding) in &mut parameters {
+                    if let OpenFxParameterQueryMode::Curve { time_scale, .. } = &binding.query_mode
+                    {
+                        if mondrian_core::TimelineTime::from(*time_scale).to_f64()
+                            != timing.frame_rate
+                        {
+                            return Err(invalid("curve grid does not match the render frame rate"));
+                        }
+                        let kind = binding.value.native_fields().0;
+                        let prepared = if let Some(cached) = curves.get(name)
+                            && cached.source == binding.query_mode
+                            && cached.kind == kind
+                        {
+                            std::sync::Arc::clone(cached)
+                        } else {
+                            std::sync::Arc::new(curves::CurveContext::prepare(binding, sequence)?)
+                        };
+                        binding.value = prepared.value_at(timing.frame)?;
+                        candidate_curves.insert(name.clone(), prepared);
+                    }
+                }
                 validate_parameters(&parameters)?;
                 verify_worker_binary(
                     &prepare.binary_path,
@@ -622,14 +647,15 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
                     })
                     .collect::<Result<Vec<_>, OpenFxHostError>>()?;
                 let native = parameters
-                    .values()
+                    .iter()
                     .zip(&strings)
-                    .map(|(value, (name, text))| {
+                    .map(|((key, value), (name, text))| {
                         let (kind, channels) = value.value.native_fields();
                         NativeParameter {
-                            query_mode: match value.query_mode {
-                                OpenFxParameterQueryMode::Constant => 0,
-                                OpenFxParameterQueryMode::CurrentFrame => 1,
+                            query_mode: match &value.query_mode {
+                                OpenFxParameterQueryMode::Constant {} => 0,
+                                OpenFxParameterQueryMode::CurrentFrame {} => 1,
+                                OpenFxParameterQueryMode::Curve { .. } => 2,
                             },
                             name: name.as_ptr(),
                             kind,
@@ -638,6 +664,15 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
                                 .as_ref()
                                 .map_or(std::ptr::null(), |text| text.as_ptr()),
                             string_length: text.as_ref().map_or(0, |text| text.as_bytes().len()),
+                            query: candidate_curves.contains_key(key).then_some(curves::query),
+                            query_context: candidate_curves
+                                .get(key)
+                                .map_or(std::ptr::null(), |curve| {
+                                    std::sync::Arc::as_ptr(curve).cast()
+                                }),
+                            query_revision: candidate_curves
+                                .get(key)
+                                .map_or(0, |curve| curve.revision),
                         }
                     })
                     .collect::<Vec<_>>();
@@ -669,10 +704,15 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
                         Err(status) => status,
                     }
                 };
-                write_response(&mut control, &Response::Rendered { sequence, status })?;
                 if status != 0 {
+                    // Both old and candidate contexts survive failure teardown,
+                    // even if native publication stopped between callbacks.
+                    drop(session.take());
+                    write_response(&mut control, &Response::Rendered { sequence, status })?;
                     return Ok(());
                 }
+                curves = candidate_curves;
+                write_response(&mut control, &Response::Rendered { sequence, status })?;
             }
         }
     }

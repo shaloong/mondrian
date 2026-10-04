@@ -8,8 +8,8 @@
 namespace MondrianOpenFx {
 
   OfxStatus parameterKeyCount(const FilterEffectInstance& effect, const std::string& name, unsigned int& count);
-  OfxStatus parameterKeyTime(const FilterEffectInstance& effect, const std::string& name);
-  OfxStatus parameterKeyIndex(const FilterEffectInstance& effect, const std::string& name, OfxTime time, int& index);
+  OfxStatus parameterKeyTime(const FilterEffectInstance& effect, const std::string& name, int index, OfxTime& time);
+  OfxStatus parameterKeyIndex(const FilterEffectInstance& effect, const std::string& name, OfxTime time, int direction, int& index);
 
   // Read-only key queries share the same binding authority as value queries.
   template<class SdkInstance>
@@ -22,11 +22,11 @@ namespace MondrianOpenFx {
     OfxStatus getNumKeys(unsigned int& count) const override {
       return parameterKeyCount(*_effect, this->getName(), count);
     }
-    OfxStatus getKeyTime(int, OfxTime&) const override {
-      return parameterKeyTime(*_effect, this->getName());
+    OfxStatus getKeyTime(int index, OfxTime& time) const override {
+      return parameterKeyTime(*_effect, this->getName(), index, time);
     }
-    OfxStatus getKeyIndex(OfxTime time, int, int& index) const override {
-      return parameterKeyIndex(*_effect, this->getName(), time, index);
+    OfxStatus getKeyIndex(OfxTime time, int direction, int& index) const override {
+      return parameterKeyIndex(*_effect, this->getName(), time, direction, index);
     }
   };
 

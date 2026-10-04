@@ -5,14 +5,33 @@
 #include "ofxPixels.h"
 #include <cstddef>
 #include <atomic>
-#include <set>
+#include <map>
 #include <string>
 namespace MondrianOpenFx {
+  struct ParameterSource {
+    int mode;
+    MondrianOpenFxQuery query;
+    const void* context;
+    uint64_t revision;
+  };
   struct FrameState {
     MondrianOpenFxFrameInfo info{};
-    std::set<std::string> frameSampleParameters;
+    std::map<std::string, ParameterSource> parameterSources;
+    bool applyingParameters = false;
     bool constantParameter(const std::string& name) const {
-      return frameSampleParameters.count(name) == 0;
+      return parameterSources.count(name) == 0;
+    }
+    const ParameterSource* curveParameter(const std::string& name) const {
+      const auto found = parameterSources.find(name);
+      return found != parameterSources.end() && found->second.mode == 2 ? &found->second : nullptr;
+    }
+    bool permitsParameterWrite(const std::string& name) const {
+      return applyingParameters || !curveParameter(name);
+    }
+    int queryParameter(const std::string& name, int operation, double start,
+                       double end, int index, int direction, MondrianOpenFxQueryResult& result) const {
+      const auto* source = curveParameter(name);
+      return source ? source->query(source->context, operation, start, end, index, direction, &result) : 4;
     }
     bool permitsParameterTime(const std::string& name, double time) const {
       return constantParameter(name) || time == info.frame;
@@ -24,6 +43,11 @@ namespace MondrianOpenFx {
     bool outputAvailable = false;
     mutable std::atomic<size_t> imageHandles{0};
     bool invalidImageLifetime = false;
+  };
+  struct ParameterAssignment {
+    FrameState& state;
+    explicit ParameterAssignment(FrameState& frame) : state(frame) { state.applyingParameters = true; }
+    ~ParameterAssignment() { state.applyingParameters = false; }
   };
   // Every exit, including exceptions, retires caller-owned frame addresses.
   struct FrameBorrow {
