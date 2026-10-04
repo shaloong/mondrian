@@ -8264,11 +8264,11 @@ fn live_visual_curve_samples_equal_real_author_results() {
                         path: Transform2D::OPACITY_PATH.to_owned(),
                         time: TimelineTime::new(1, 2).unwrap(),
                         channel_index: 0,
-                        interp_in: mondrian_core::automation::KeyframeInterpolation::Bezier(mondrian_core::automation::BezierHandle {
+                        interp_in: mondrian_core::automation::KeyframeInterpolation::Bezier(mondrian_core::automation::ExactBezierHandle {
                             time_offset: TimelineTime::new(-1, 4).unwrap(),
                             value_offset: -1.0 / 3.0,
                         }),
-                        interp_out: mondrian_core::automation::KeyframeInterpolation::Bezier(mondrian_core::automation::BezierHandle {
+                        interp_out: mondrian_core::automation::KeyframeInterpolation::Bezier(mondrian_core::automation::ExactBezierHandle {
                             time_offset: TimelineTime::new(1, 4).unwrap(),
                             value_offset: -1.0 / 2.0,
                         }),
@@ -8357,19 +8357,35 @@ fn live_visual_curve_return_to_origin_restores_exact_author_coordinates() {
     use crate::app::parameter_gesture::{
         ParameterCurveGestureTarget, ParameterGestureAction, ParameterGestureEdit,
     };
-    use mondrian_core::automation::{Keyframe, PropertyMutation};
+    use mondrian_core::automation::{
+        ExactBezierHandle, Keyframe, KeyframeInterpolation, PropertyMutation,
+    };
     let mut sequence = mondrian_timeline::Sequence::new("Exact curve gesture origin");
     let mut clip =
         Clip::new_basic_title("Title", "Arial", TimelineTime::ZERO, TimelineTime::ONE).unwrap();
     let clip_id = clip.id;
-    let key = Keyframe::linear(TimelineTime::new(1, 3).unwrap(), PropertyValue::Float(0.8));
+    let mut key = Keyframe::linear(TimelineTime::new(1, 3).unwrap(), PropertyValue::Float(0.8));
+    key.interp_in = KeyframeInterpolation::Bezier(ExactBezierHandle {
+        time_offset: TimelineTime::new(-1, 4).unwrap(),
+        value_offset: -0.1,
+    });
+    key.interp_out = KeyframeInterpolation::Bezier(ExactBezierHandle {
+        time_offset: TimelineTime::new(1, 4).unwrap(),
+        value_offset: 0.1,
+    });
     let key_id = key.id;
-    clip.transform
-        .apply_property_mutation(PropertyMutation::SetKeyframe {
-            path: Transform2D::OPACITY_PATH.to_owned(),
-            keyframe: key.clone(),
-        })
-        .unwrap();
+    for seeded in [
+        Keyframe::linear(TimelineTime::ZERO, PropertyValue::Float(0.0)),
+        key.clone(),
+        Keyframe::linear(TimelineTime::ONE, PropertyValue::Float(1.0)),
+    ] {
+        clip.transform
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: Transform2D::OPACITY_PATH.to_owned(),
+                keyframe: seeded,
+            })
+            .unwrap();
+    }
     let selection = SelectedClipRef {
         track_id: sequence.video_tracks[0].id,
         is_video_track: true,
@@ -8403,7 +8419,19 @@ fn live_visual_curve_return_to_origin_restores_exact_author_coordinates() {
             .action(),
         )
         .unwrap();
-    for point in [CurvePoint::new(0.6, 0.7), model.keys[index].point] {
+    let mut preview_source = model.curve_source.clone();
+    for point in [
+        CurvePoint::new(0.9, 0.7),
+        CurvePoint::new(0.6, 0.9),
+        model.keys[index].point,
+    ] {
+        preview_source = model.curve_source.clone();
+        preview_numeric_curve_points(
+            &model,
+            &mut preview_source,
+            CurveEdit::Move { index, point },
+        )
+        .expect("canonical curve preview");
         let action =
             inspector_curve_edit_action(Some(selection), &model, CurveEdit::Move { index, point })
                 .unwrap();
@@ -8435,6 +8463,18 @@ fn live_visual_curve_return_to_origin_restores_exact_author_coordinates() {
     assert_eq!(
         restored.value, key.value,
         "returning to the grab point must restore the original value"
+    );
+    assert_eq!(
+        restored.interp_in, key.interp_in,
+        "restore incoming world control"
+    );
+    assert_eq!(
+        restored.interp_out, key.interp_out,
+        "restore outgoing world control after span shortening"
+    );
+    assert_eq!(
+        preview_source, model.curve_source,
+        "preview must restore complete original geometry"
     );
     state
         .dispatch_action(ParameterGestureAction::Finish { gesture_id }.action())

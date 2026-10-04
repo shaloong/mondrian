@@ -2562,6 +2562,11 @@ fn numeric_curve_editor(
                 None
             }
             CurveGestureEvent::Edit { edit, .. } => {
+                if matches!(edit, CurveEdit::Move { .. } | CurveEdit::Insert { .. })
+                    && let Some(origin) = &preview_origin
+                {
+                    preview_source = origin.clone();
+                }
                 preview_numeric_curve_points(&preview_model, &mut preview_source, edit)
             }
             CurveGestureEvent::Cancel(_) => {

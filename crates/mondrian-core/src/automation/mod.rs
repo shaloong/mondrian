@@ -57,72 +57,34 @@ impl InterpolationType {
     }
 }
 
+/// Temporal intent for one side of a numeric keyframe.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum KeyframeInterpolation {
+    /// Keep the left endpoint value throughout the segment.
     Hold,
+    /// Use the segment's straight line.
     Linear,
-    Bezier(BezierHandle),
+    /// An authored control in exact owner time and parameter-value units.
+    Bezier(ExactBezierHandle),
+    /// Default flat controls derived from the adjacent owner-time span.
+    DefaultBezier,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct BezierHandle {
-    pub time_offset: TimelineTime,
-    pub value_offset: f64,
+impl KeyframeInterpolation {
+    /// Whether this side carries authored or derived Bezier control intent.
+    pub const fn is_bezier(self) -> bool {
+        matches!(self, Self::Bezier(_) | Self::DefaultBezier)
+    }
 }
+
+/// The shared owner-time and parameter-value control geometry.
+pub use crate::parameter::ExactBezierHandle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct KeyframeTemporalFlags {
     pub auto_bezier: bool,
     pub continuous: bool,
     pub broken_handles: bool,
-}
-
-/// Values evaluated with double-precision progress derived from author time.
-pub trait Interpolatable: Clone + std::fmt::Debug + Send + Sync {
-    /// Interpolate values without narrowing progress for double-precision types.
-    fn lerp(a: &Self, b: &Self, t: f64) -> Self;
-}
-
-impl Interpolatable for f32 {
-    fn lerp(a: &Self, b: &Self, t: f64) -> Self {
-        a + (b - a) * t as f32
-    }
-}
-
-impl Interpolatable for f64 {
-    fn lerp(a: &Self, b: &Self, t: f64) -> Self {
-        interpolate_numeric_value(*a, *b, t)
-    }
-}
-
-impl Interpolatable for Vec2 {
-    fn lerp(a: &Self, b: &Self, t: f64) -> Self {
-        Vec2::lerp(*a, *b, t as f32)
-    }
-}
-
-impl Interpolatable for Vec3 {
-    fn lerp(a: &Self, b: &Self, t: f64) -> Self {
-        Vec3::lerp(*a, *b, t as f32)
-    }
-}
-
-impl Interpolatable for [f32; 4] {
-    fn lerp(a: &Self, b: &Self, t: f64) -> Self {
-        let t = t as f32;
-        [
-            a[0] + (b[0] - a[0]) * t,
-            a[1] + (b[1] - a[1]) * t,
-            a[2] + (b[2] - a[2]) * t,
-            a[3] + (b[3] - a[3]) * t,
-        ]
-    }
-}
-
-impl Interpolatable for Color {
-    fn lerp(a: &Self, b: &Self, t: f64) -> Self {
-        a.lerp(*b, t as f32)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1493,49 +1455,6 @@ impl PropertyValueType {
     }
 }
 
-impl Interpolatable for PropertyValue {
-    fn lerp(a: &Self, b: &Self, t: f64) -> Self {
-        match (a, b) {
-            (Self::Float(a), Self::Float(b)) => Self::Float(f32::lerp(a, b, t)),
-            (Self::Double(a), Self::Double(b)) => Self::Double(f64::lerp(a, b, t)),
-            (Self::DoubleVec2(a), Self::DoubleVec2(b)) => {
-                Self::DoubleVec2(std::array::from_fn(|index| {
-                    interpolate_numeric_value(a[index], b[index], t)
-                }))
-            }
-            (Self::DoubleVec3(a), Self::DoubleVec3(b)) => {
-                Self::DoubleVec3(std::array::from_fn(|index| {
-                    interpolate_numeric_value(a[index], b[index], t)
-                }))
-            }
-            (Self::DoubleRgb(a), Self::DoubleRgb(b)) => {
-                Self::DoubleRgb(std::array::from_fn(|index| {
-                    interpolate_numeric_value(a[index], b[index], t)
-                }))
-            }
-            (Self::DoubleColor(a), Self::DoubleColor(b)) => {
-                Self::DoubleColor(std::array::from_fn(|index| {
-                    interpolate_numeric_value(a[index], b[index], t)
-                }))
-            }
-            (Self::IntVec2(a), Self::IntVec2(b)) => Self::IntVec2(std::array::from_fn(|index| {
-                (f64::from(a[index]) * (1.0 - t) + f64::from(b[index]) * t).round() as i32
-            })),
-            (Self::IntVec3(a), Self::IntVec3(b)) => Self::IntVec3(std::array::from_fn(|index| {
-                (f64::from(a[index]) * (1.0 - t) + f64::from(b[index]) * t).round() as i32
-            })),
-            (Self::Int(a), Self::Int(b)) => {
-                Self::Int((*a as f64 + (*b - *a) as f64 * t).round() as i64)
-            }
-            (Self::Vec2(a), Self::Vec2(b)) => Self::Vec2(Vec2::lerp(*a, *b, t as f32)),
-            (Self::Vec3(a), Self::Vec3(b)) => Self::Vec3(Vec3::lerp(*a, *b, t as f32)),
-            (Self::Color(a), Self::Color(b)) => Self::Color(a.lerp(*b, t as f32)),
-            (Self::Vec4(a), Self::Vec4(b)) => Self::Vec4(<[f32; 4]>::lerp(a, b, t)),
-            _ => a.clone(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Keyframe<T> {
     pub id: KeyframeId,
@@ -1562,168 +1481,6 @@ impl<T> Keyframe<T> {
             temporal_flags,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KeyframeTrack<T: Interpolatable> {
-    keyframes: Vec<Keyframe<T>>,
-    static_value: T,
-    #[serde(default = "default_track_enabled")]
-    enabled: bool,
-}
-
-impl<T: Interpolatable + Serialize + for<'de> Deserialize<'de>> KeyframeTrack<T> {
-    pub fn constant(value: T) -> Self {
-        Self {
-            keyframes: vec![],
-            static_value: value,
-            enabled: false,
-        }
-    }
-
-    pub fn from_parts(static_value: T, mut keyframes: Vec<Keyframe<T>>) -> Self {
-        keyframes.sort_by_key(|keyframe| keyframe.time);
-        Self { keyframes, static_value, enabled: true }
-    }
-
-    pub fn from_parts_with_enabled(
-        static_value: T,
-        mut keyframes: Vec<Keyframe<T>>,
-        enabled: bool,
-    ) -> Self {
-        keyframes.sort_by_key(|keyframe| keyframe.time);
-        Self { keyframes, static_value, enabled }
-    }
-
-    pub fn static_value(&self) -> &T {
-        &self.static_value
-    }
-
-    pub fn set_static_value(&mut self, value: T) {
-        self.static_value = value;
-    }
-
-    pub fn keyframes(&self) -> &[Keyframe<T>] {
-        &self.keyframes
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
-    }
-
-    pub fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-    }
-
-    pub fn map<U, F>(&self, mut map_value: F) -> KeyframeTrack<U>
-    where
-        U: Interpolatable + Serialize + for<'de> Deserialize<'de>,
-        F: FnMut(&T) -> U,
-    {
-        KeyframeTrack::from_parts_with_enabled(
-            map_value(&self.static_value),
-            self.keyframes
-                .iter()
-                .map(|keyframe| Keyframe {
-                    id: keyframe.id,
-                    time: keyframe.time,
-                    value: map_value(&keyframe.value),
-                    interp_in: keyframe.interp_in,
-                    interp_out: keyframe.interp_out,
-                    temporal_flags: keyframe.temporal_flags,
-                })
-                .collect(),
-            self.enabled,
-        )
-    }
-
-    pub fn try_map<U, E, F>(&self, mut map_value: F) -> std::result::Result<KeyframeTrack<U>, E>
-    where
-        U: Interpolatable + Serialize + for<'de> Deserialize<'de>,
-        F: FnMut(&T) -> std::result::Result<U, E>,
-    {
-        let static_value = map_value(&self.static_value)?;
-        let mut keyframes = Vec::with_capacity(self.keyframes.len());
-        for keyframe in &self.keyframes {
-            keyframes.push(Keyframe {
-                id: keyframe.id,
-                time: keyframe.time,
-                value: map_value(&keyframe.value)?,
-                interp_in: keyframe.interp_in,
-                interp_out: keyframe.interp_out,
-                temporal_flags: keyframe.temporal_flags,
-            });
-        }
-        Ok(KeyframeTrack::from_parts_with_enabled(
-            static_value,
-            keyframes,
-            self.enabled,
-        ))
-    }
-
-    pub fn evaluate(&self, time: TimelineTime) -> T {
-        if self.keyframes.is_empty() || !self.enabled {
-            return self.static_value.clone();
-        }
-
-        let Some(first) = self.keyframes.first() else {
-            return self.static_value.clone();
-        };
-        if time <= first.time {
-            return first.value.clone();
-        }
-        let Some(last) = self.keyframes.last() else {
-            return self.static_value.clone();
-        };
-        if time >= last.time {
-            return last.value.clone();
-        }
-
-        let idx = self
-            .keyframes
-            .partition_point(|keyframe| keyframe.time <= time)
-            .saturating_sub(1);
-        let keyframe_a = &self.keyframes[idx];
-        let keyframe_b = &self.keyframes[idx + 1];
-        match segment_progress(
-            normalize_time(time, keyframe_a.time, keyframe_b.time),
-            keyframe_a.interp_out,
-            keyframe_b.interp_in,
-        ) {
-            SegmentProgress::Hold => keyframe_a.value.clone(),
-            SegmentProgress::Progress(t) => T::lerp(&keyframe_a.value, &keyframe_b.value, t),
-        }
-    }
-
-    pub fn set_keyframe(&mut self, keyframe: Keyframe<T>) {
-        self.enabled = true;
-        let pos = self.keyframes.partition_point(|candidate| candidate.time < keyframe.time);
-        if pos < self.keyframes.len() && self.keyframes[pos].time == keyframe.time {
-            self.keyframes[pos] = keyframe;
-        } else {
-            self.keyframes.insert(pos, keyframe);
-        }
-    }
-
-    pub fn remove_keyframe(&mut self, time: TimelineTime) -> Option<Keyframe<T>> {
-        if let Some(pos) = self.keyframes.iter().position(|keyframe| keyframe.time == time) {
-            Some(self.keyframes.remove(pos))
-        } else {
-            None
-        }
-    }
-
-    pub fn keyframe_count(&self) -> usize {
-        self.keyframes.len()
-    }
-
-    pub fn is_animated(&self) -> bool {
-        !self.keyframes.is_empty()
-    }
-}
-
-const fn default_track_enabled() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1877,99 +1634,143 @@ impl AnimationChannel {
         self.keyframes.iter().find(|keyframe| keyframe.time == time)
     }
 
-    pub fn set_keyframe(&mut self, keyframe: Keyframe<f64>) {
+    fn set_keyframe(&mut self, keyframe: Keyframe<f64>) {
         let pos = self.keyframes.partition_point(|candidate| candidate.time < keyframe.time);
         if pos < self.keyframes.len() && self.keyframes[pos].time == keyframe.time {
             self.keyframes[pos] = keyframe;
         } else {
             self.keyframes.insert(pos, keyframe);
         }
-        self.normalize_keyframes();
     }
 
-    pub fn remove_keyframe(&mut self, time: TimelineTime) -> Option<Keyframe<f64>> {
-        if let Some(pos) = self.keyframes.iter().position(|keyframe| keyframe.time == time) {
-            let removed = self.keyframes.remove(pos);
-            self.normalize_keyframes();
-            Some(removed)
-        } else {
-            None
-        }
+    fn remove_keyframe(&mut self, time: TimelineTime) -> Option<Keyframe<f64>> {
+        self.keyframes
+            .iter()
+            .position(|keyframe| keyframe.time == time)
+            .map(|index| self.keyframes.remove(index))
     }
 
+    /// Evaluate the admitted numeric channel with shared owner-space execution math.
     pub fn evaluate(&self, time: TimelineTime, fallback: f64) -> f64 {
         evaluate_numeric_channel(self, time, fallback)
     }
 
+    /// Whether this channel contains author keyframes.
     pub fn is_animated(&self) -> bool {
         !self.keyframes.is_empty()
     }
 
-    fn normalize_keyframes(&mut self) {
-        if self.keyframes.is_empty() {
-            return;
-        }
-
-        if self.keyframes.len() == 1 {
-            return;
-        }
-
-        let auto_handles = compute_auto_bezier_handles(&self.keyframes);
-
+    fn normalize_keyframes(&mut self, parameter_id: &ParameterId) -> Result<()> {
         for index in 0..self.keyframes.len() {
-            let has_prev = index > 0;
-            let has_next = index + 1 < self.keyframes.len();
-            let keyframe = &mut self.keyframes[index];
-
-            if keyframe.temporal_flags.auto_bezier
-                && let Some((interp_in, interp_out)) = auto_handles.get(index).copied()
-            {
-                keyframe.interp_in = if has_prev {
-                    interp_in
-                } else {
-                    keyframe.interp_in
-                };
-                keyframe.interp_out = if has_next {
-                    interp_out
-                } else {
-                    keyframe.interp_out
-                };
-                keyframe.temporal_flags.continuous = has_prev && has_next;
-                keyframe.temporal_flags.broken_handles = false;
+            let previous = index.checked_sub(1).map(|i| self.keyframes[i].time);
+            let next = self.keyframes.get(index + 1).map(|key| key.time);
+            let key = &self.keyframes[index];
+            let mut incoming_control = key.interp_in;
+            let mut outgoing_control = key.interp_out;
+            for (interpolation, neighbor, incoming) in [
+                (&mut incoming_control, previous, true),
+                (&mut outgoing_control, next, false),
+            ] {
+                if let (KeyframeInterpolation::Bezier(handle), Some(neighbor)) =
+                    (*interpolation, neighbor)
+                {
+                    let duration = if incoming {
+                        key.time.checked_sub(neighbor)?
+                    } else {
+                        neighbor.checked_sub(key.time)?
+                    };
+                    *interpolation = KeyframeInterpolation::Bezier(
+                        crate::parameter::bound_continuous_handle(handle, duration, incoming)
+                            .map_err(|error| {
+                                parameter_value_error(parameter_id.as_str(), &error.to_string())
+                            })?,
+                    );
+                }
+            }
+            if incoming_control != key.interp_in || outgoing_control != key.interp_out {
+                let key = &mut self.keyframes[index];
+                key.interp_in = incoming_control;
+                key.interp_out = outgoing_control;
             }
         }
-
-        for index in 0..self.keyframes.len() {
-            if index == 0 || index + 1 >= self.keyframes.len() {
+        if !self.keyframes.iter().any(|key| {
+            key.temporal_flags.auto_bezier
+                || (key.temporal_flags.continuous && !key.temporal_flags.broken_handles)
+        }) {
+            return Ok(());
+        }
+        let mut curve = crate::ExactAutomationCurve {
+            parameter_id: parameter_id.clone(),
+            default_value: 0.0,
+            keyframes: self
+                .keyframes
+                .iter()
+                .map(|key| crate::ExactAutomationKeyframe {
+                    id: key.id,
+                    time: key.time,
+                    value: key.value,
+                    interpolation_to_next: crate::AutomationSegmentInterpolation::Bezier,
+                    in_handle: match key.interp_in {
+                        KeyframeInterpolation::Bezier(handle) => Some(handle),
+                        _ => None,
+                    },
+                    out_handle: match key.interp_out {
+                        KeyframeInterpolation::Bezier(handle) => Some(handle),
+                        _ => None,
+                    },
+                    tangent_mode: if key.temporal_flags.auto_bezier {
+                        crate::ExactAutomationTangentMode::Auto
+                    } else if key.temporal_flags.continuous && !key.temporal_flags.broken_handles {
+                        crate::ExactAutomationTangentMode::Continuous
+                    } else {
+                        crate::ExactAutomationTangentMode::Manual
+                    },
+                })
+                .collect(),
+        };
+        for index in 0..curve.keyframes.len() {
+            if curve.keyframes[index].tangent_mode == crate::ExactAutomationTangentMode::Continuous
+            {
+                curve.initialize_continuous_constraint(index);
+            }
+        }
+        let initialized = curve.keyframes.clone();
+        curve
+            .normalize_constrained_tangents()
+            .map_err(|error| parameter_value_error(parameter_id.as_str(), &error.to_string()))?;
+        for (index, native) in curve.keyframes.iter().enumerate() {
+            let key = &self.keyframes[index];
+            if !key.temporal_flags.auto_bezier
+                && (!key.temporal_flags.continuous || key.temporal_flags.broken_handles)
+            {
                 continue;
             }
-
-            let previous = self.keyframes[index - 1].clone();
-            let current = self.keyframes[index].clone();
-            let next = self.keyframes[index + 1].clone();
-
-            if current.temporal_flags.auto_bezier
-                || !current.temporal_flags.continuous
-                || current.temporal_flags.broken_handles
+            let incoming = native
+                .in_handle
+                .or(initialized[index].in_handle)
+                .map(KeyframeInterpolation::Bezier)
+                .unwrap_or(key.interp_in);
+            let outgoing = native
+                .out_handle
+                .or(initialized[index].out_handle)
+                .map(KeyframeInterpolation::Bezier)
+                .unwrap_or(key.interp_out);
+            let continuous = index > 0 && index + 1 < curve.keyframes.len();
+            if incoming != key.interp_in
+                || outgoing != key.interp_out
+                || (key.temporal_flags.auto_bezier && key.temporal_flags.continuous != continuous)
+                || (key.temporal_flags.auto_bezier && key.temporal_flags.broken_handles)
             {
-                continue;
+                let key = &mut self.keyframes[index];
+                key.interp_in = incoming;
+                key.interp_out = outgoing;
+                if key.temporal_flags.auto_bezier {
+                    key.temporal_flags.continuous = continuous;
+                    key.temporal_flags.broken_handles = false;
+                }
             }
-
-            let slope = continuous_tangent_slope(&previous, &current, &next);
-            let keyframe = &mut self.keyframes[index];
-            keyframe.interp_in = KeyframeInterpolation::Bezier(continuous_handle_for_in(
-                &previous,
-                &current,
-                slope,
-                handle_for_in(current.interp_in).time_offset,
-            ));
-            keyframe.interp_out = KeyframeInterpolation::Bezier(continuous_handle_for_out(
-                &current,
-                &next,
-                slope,
-                handle_for_out(current.interp_out).time_offset,
-            ));
         }
+        Ok(())
     }
 }
 
@@ -2065,7 +1866,7 @@ impl AnimatedProperty {
                 ));
             }
             let mut previous_time = None;
-            for keyframe in &channel.keyframes {
+            for (index, keyframe) in channel.keyframes.iter().enumerate() {
                 if let Some(existing_time) = keyframe_times.insert(keyframe.id, keyframe.time)
                     && existing_time != keyframe.time
                 {
@@ -2098,12 +1899,23 @@ impl AnimatedProperty {
                         "enum keyframe does not address a declared option",
                     ));
                 }
-                validate_visual_handle_coordinates(
+                validate_numeric_control_points(
                     &self.descriptor.path,
-                    keyframe.interp_in,
-                    keyframe.interp_out,
+                    keyframe,
+                    index.checked_sub(1).map(|i| channel.keyframes[i].time),
+                    channel.keyframes.get(index + 1).map(|key| key.time),
                 )?;
                 self.ensure_interpolation_allowed(channel_keyframe_interpolation_type(keyframe))?;
+            }
+        }
+        for channel in &self.channels {
+            let mut normalized = channel.clone();
+            normalized.normalize_keyframes(&self.descriptor.schema.parameter_id)?;
+            if normalized != *channel {
+                return Err(parameter_value_error(
+                    &self.descriptor.path,
+                    "persisted controls do not satisfy their temporal constraints",
+                ));
             }
         }
         Ok(())
@@ -2188,7 +2000,7 @@ impl AnimatedProperty {
                     keyframe.time = keyframe.time.checked_add(delta)?;
                 }
             }
-            channel.normalize_keyframes();
+            channel.normalize_keyframes(&self.descriptor.schema.parameter_id)?;
         }
         candidate.validate()?;
         *self = candidate;
@@ -2216,7 +2028,7 @@ impl AnimatedProperty {
                     keyframe.time = keyframe.time.checked_sub(range.duration)?;
                 }
             }
-            channel.normalize_keyframes();
+            channel.normalize_keyframes(&self.descriptor.schema.parameter_id)?;
         }
         candidate.validate()?;
         *self = candidate;
@@ -2432,8 +2244,20 @@ impl AnimatedProperty {
                 interp_out: keyframe.interp_out,
                 temporal_flags: keyframe.temporal_flags,
             });
+            let position = channel
+                .keyframes
+                .binary_search_by_key(&keyframe.time, |key| key.time)
+                .map_err(|_| {
+                parameter_value_error(&candidate.descriptor.path, "inserted key is missing")
+            })?;
+            validate_numeric_control_points(
+                &candidate.descriptor.path,
+                &channel.keyframes[position],
+                position.checked_sub(1).map(|i| channel.keyframes[i].time),
+                channel.keyframes.get(position + 1).map(|key| key.time),
+            )?;
         }
-        candidate.normalize_channels();
+        candidate.normalize_channels()?;
         candidate.validate()?;
         *self = candidate;
         Ok(())
@@ -2446,6 +2270,15 @@ impl AnimatedProperty {
     /// Bezier handles. The stored interpolation, temporal flags, and identity
     /// remain unchanged.
     pub fn edit_keyframe(
+        &mut self,
+        keyframe_id: KeyframeId,
+        time: TimelineTime,
+        value: PropertyValue,
+    ) -> Result<()> {
+        self.admit_channels(|candidate| candidate.edit_keyframe_candidate(keyframe_id, time, value))
+    }
+
+    fn edit_keyframe_candidate(
         &mut self,
         keyframe_id: KeyframeId,
         time: TimelineTime,
@@ -2504,12 +2337,23 @@ impl AnimatedProperty {
             channel.keyframes.sort_by_key(|keyframe| keyframe.time);
         }
         self.channels = channels;
-        self.normalize_channels();
+        self.normalize_channels()?;
         Ok(())
     }
 
     /// Write selected numeric channels, retaining existing exact handles and identities.
     pub fn write_channels(
+        &mut self,
+        time: TimelineTime,
+        channel_values: &[(usize, f64)],
+        interpolation: InterpolationType,
+    ) -> Result<()> {
+        self.admit_channels(|candidate| {
+            candidate.write_channels_candidate(time, channel_values, interpolation)
+        })
+    }
+
+    fn write_channels_candidate(
         &mut self,
         time: TimelineTime,
         channel_values: &[(usize, f64)],
@@ -2551,8 +2395,7 @@ impl AnimatedProperty {
                         .unwrap_or(default_flags),
                 });
             }
-            // set_keyframe normalizes each edited channel already. Leave
-            // independent siblings and their shared curve allocations untouched.
+            self.normalize_channels()?;
             Ok(())
         } else {
             let mut static_channels = self.value_to_channel_values(&self.static_value)?;
@@ -2567,14 +2410,29 @@ impl AnimatedProperty {
         }
     }
 
-    pub fn remove_keyframe(&mut self, time: TimelineTime) {
+    /// Atomically remove a complete key and admit all resulting channel constraints.
+    pub fn remove_keyframe(&mut self, time: TimelineTime) -> Result<()> {
+        self.admit_channels(|candidate| candidate.remove_keyframe_candidate(time))
+    }
+
+    fn remove_keyframe_candidate(&mut self, time: TimelineTime) -> Result<()> {
         for channel in &mut self.channels {
             let _ = channel.remove_keyframe(time);
         }
-        self.normalize_channels();
+        self.normalize_channels()?;
+        Ok(())
     }
 
+    /// Atomically move a complete key while retaining its identity and typed value.
     pub fn move_keyframe(&mut self, from_time: TimelineTime, to_time: TimelineTime) -> Result<()> {
+        self.admit_channels(|candidate| candidate.move_keyframe_candidate(from_time, to_time))
+    }
+
+    fn move_keyframe_candidate(
+        &mut self,
+        from_time: TimelineTime,
+        to_time: TimelineTime,
+    ) -> Result<()> {
         if from_time == to_time {
             return Ok(());
         }
@@ -2621,7 +2479,7 @@ impl AnimatedProperty {
             keyframe.time = to_time;
             channel.set_keyframe(keyframe);
         }
-        self.normalize_channels();
+        self.normalize_channels()?;
 
         Ok(())
     }
@@ -2630,6 +2488,16 @@ impl AnimatedProperty {
     /// Explicit Bezier presets also retain both currently unconnected temporal sides,
     /// so adding a neighbor cannot discard the selected interpolation intent.
     pub fn update_keyframe_interpolation(
+        &mut self,
+        time: TimelineTime,
+        interpolation: InterpolationType,
+    ) -> Result<()> {
+        self.admit_channels(|candidate| {
+            candidate.update_keyframe_interpolation_candidate(time, interpolation)
+        })
+    }
+
+    fn update_keyframe_interpolation_candidate(
         &mut self,
         time: TimelineTime,
         interpolation: InterpolationType,
@@ -2683,7 +2551,7 @@ impl AnimatedProperty {
             });
         }
 
-        self.normalize_channels();
+        self.normalize_channels()?;
         Ok(())
     }
 
@@ -2718,41 +2586,42 @@ impl AnimatedProperty {
                     ),
                 },
             )?;
-        let previous = keyframe_index
-            .checked_sub(1)
-            .and_then(|index| channel.keyframes.get(index))
-            .cloned();
-        let next = channel.keyframes.get(keyframe_index + 1).cloned();
+        let mut provided = channel.keyframes[keyframe_index].clone();
+        provided.interp_in = interp_in;
+        provided.interp_out = interp_out;
+        validate_numeric_control_points(
+            &candidate.descriptor.path,
+            &provided,
+            keyframe_index.checked_sub(1).map(|index| channel.keyframes[index].time),
+            channel.keyframes.get(keyframe_index + 1).map(|key| key.time),
+        )?;
         let keyframe = &mut channel.keyframes[keyframe_index];
         let old_in = keyframe.interp_in;
         let old_out = keyframe.interp_out;
         let cleared_auto = keyframe.temporal_flags.auto_bezier;
         keyframe.interp_in = interp_in;
         keyframe.interp_out = interp_out;
-        if keyframe.temporal_flags.continuous
-            && !keyframe.temporal_flags.broken_handles
-            && let (Some(previous), Some(next)) = (previous.as_ref(), next.as_ref())
-        {
-            if old_in != interp_in && old_out == interp_out {
-                let slope = tangent_slope_from_in(previous, keyframe, handle_for_in(interp_in));
-                if let Some(slope) = slope {
-                    keyframe.interp_out = KeyframeInterpolation::Bezier(continuous_handle_for_out(
-                        keyframe,
-                        next,
-                        slope,
-                        handle_for_out(old_out).time_offset,
-                    ));
-                }
-            } else if old_out != interp_out && old_in == interp_in {
-                let slope = tangent_slope_from_out(keyframe, next, handle_for_out(interp_out));
-                if let Some(slope) = slope {
-                    keyframe.interp_in = KeyframeInterpolation::Bezier(continuous_handle_for_in(
-                        previous,
-                        keyframe,
-                        slope,
-                        handle_for_in(old_in).time_offset,
-                    ));
-                }
+        if keyframe.temporal_flags.continuous && !keyframe.temporal_flags.broken_handles {
+            if old_in != interp_in
+                && old_out == interp_out
+                && let (
+                    KeyframeInterpolation::Bezier(edited),
+                    KeyframeInterpolation::Bezier(partner),
+                ) = (interp_in, old_out)
+            {
+                keyframe.interp_out = KeyframeInterpolation::Bezier(
+                    crate::parameter::align_continuous_partner(edited, partner),
+                );
+            } else if old_out != interp_out
+                && old_in == interp_in
+                && let (
+                    KeyframeInterpolation::Bezier(edited),
+                    KeyframeInterpolation::Bezier(partner),
+                ) = (interp_out, old_in)
+            {
+                keyframe.interp_in = KeyframeInterpolation::Bezier(
+                    crate::parameter::align_continuous_partner(edited, partner),
+                );
             }
         }
         if cleared_auto {
@@ -2761,16 +2630,30 @@ impl AnimatedProperty {
                     channel.keyframes.iter_mut().find(|candidate| candidate.time == time)
                 {
                     other.temporal_flags.auto_bezier = false;
+                    other.temporal_flags.continuous = true;
+                    other.temporal_flags.broken_handles = false;
                 }
             }
         }
-        candidate.normalize_channels();
+        candidate.normalize_channels()?;
         candidate.validate()?;
         *self = candidate;
         Ok(())
     }
 
+    /// Atomically change one numeric channel while admitting its retained constraints.
     pub fn update_channel_keyframe_value(
+        &mut self,
+        time: TimelineTime,
+        channel_index: usize,
+        value: f64,
+    ) -> Result<()> {
+        self.admit_channels(|candidate| {
+            candidate.update_channel_keyframe_value_candidate(time, channel_index, value)
+        })
+    }
+
+    fn update_channel_keyframe_value_candidate(
         &mut self,
         time: TimelineTime,
         channel_index: usize,
@@ -2796,11 +2679,22 @@ impl AnimatedProperty {
             )?;
 
         keyframe.value = value;
-        self.normalize_channels();
+        self.normalize_channels()?;
         Ok(())
     }
 
+    /// Atomically select the complete property key's temporal constraints.
     pub fn update_keyframe_temporal_flags(
+        &mut self,
+        time: TimelineTime,
+        temporal_flags: KeyframeTemporalFlags,
+    ) -> Result<()> {
+        self.admit_channels(|candidate| {
+            candidate.update_keyframe_temporal_flags_candidate(time, temporal_flags)
+        })
+    }
+
+    fn update_keyframe_temporal_flags_candidate(
         &mut self,
         time: TimelineTime,
         temporal_flags: KeyframeTemporalFlags,
@@ -2823,14 +2717,23 @@ impl AnimatedProperty {
             });
         }
 
-        self.normalize_channels();
+        self.normalize_channels()?;
         Ok(())
     }
 
-    fn normalize_channels(&mut self) {
+    fn admit_channels(&mut self, edit: impl FnOnce(&mut Self) -> Result<()>) -> Result<()> {
+        let mut candidate = self.clone();
+        edit(&mut candidate)?;
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
+    fn normalize_channels(&mut self) -> Result<()> {
         for channel in &mut self.channels {
-            channel.normalize_keyframes();
+            channel.normalize_keyframes(&self.descriptor.schema.parameter_id)?;
         }
+        Ok(())
     }
 
     fn normalize_value(&self, value: PropertyValue) -> Result<PropertyValue> {
@@ -3071,7 +2974,7 @@ impl AnimatedProperty {
             }
             PropertyMutation::RemoveKeyframe { path, time } => {
                 self.ensure_path(&path)?;
-                self.remove_keyframe(time);
+                self.remove_keyframe(time)?;
                 Ok(())
             }
             PropertyMutation::MoveKeyframe { path, from_time, to_time } => {
@@ -3528,7 +3431,7 @@ impl PropertyBag {
 
     pub fn remove_keyframe(&mut self, path: &str, time: TimelineTime) -> Result<()> {
         let property = self.require_property_mut(path)?;
-        property.remove_keyframe(time);
+        property.remove_keyframe(time)?;
         Ok(())
     }
 
@@ -3861,10 +3764,7 @@ fn validate_visual_handle_coordinates(
     interp_in: KeyframeInterpolation,
     interp_out: KeyframeInterpolation,
 ) -> Result<()> {
-    for (interpolation, min, max) in [
-        (interp_in, TimelineTime::NEGATIVE_ONE, TimelineTime::ZERO),
-        (interp_out, TimelineTime::ZERO, TimelineTime::ONE),
-    ] {
+    for (interpolation, incoming) in [(interp_in, true), (interp_out, false)] {
         let KeyframeInterpolation::Bezier(handle) = interpolation else {
             continue;
         };
@@ -3874,11 +3774,54 @@ fn validate_visual_handle_coordinates(
                 "Bezier value coordinates must be finite",
             ));
         }
-        if handle.time_offset < min || handle.time_offset > max {
+        if (incoming && handle.time_offset > TimelineTime::ZERO)
+            || (!incoming && handle.time_offset < TimelineTime::ZERO)
+        {
             return Err(parameter_value_error(
                 path,
                 "Bezier time coordinates must remain on their temporal side within the segment",
             ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_numeric_control_points(
+    path: &str,
+    key: &Keyframe<f64>,
+    previous: Option<TimelineTime>,
+    next: Option<TimelineTime>,
+) -> Result<()> {
+    validate_visual_handle_coordinates(path, key.interp_in, key.interp_out)?;
+    for (interpolation, neighbor, incoming) in [
+        (key.interp_in, previous, true),
+        (key.interp_out, next, false),
+    ] {
+        if let KeyframeInterpolation::Bezier(handle) = interpolation {
+            if !(key.value + handle.value_offset).is_finite() {
+                return Err(parameter_value_error(
+                    path,
+                    "Bezier value control is not representable",
+                ));
+            }
+            if let Some(neighbor) = neighbor {
+                let duration = if incoming {
+                    key.time.checked_sub(neighbor)?
+                } else {
+                    neighbor.checked_sub(key.time)?
+                };
+                let magnitude = if incoming {
+                    handle.time_offset.checked_scale(crate::TimeScale::NEGATIVE_ONE)?
+                } else {
+                    handle.time_offset
+                };
+                if magnitude > duration {
+                    return Err(parameter_value_error(
+                        path,
+                        "Bezier time control exceeds the owner-time segment",
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -3969,13 +3912,41 @@ fn evaluate_numeric_channel(channel: &AnimationChannel, time: TimelineTime, fall
         .saturating_sub(1);
     let keyframe_a = &channel.keyframes[idx];
     let keyframe_b = &channel.keyframes[idx + 1];
-    match segment_progress(
-        normalize_time(time, keyframe_a.time, keyframe_b.time),
-        keyframe_a.interp_out,
-        keyframe_b.interp_in,
-    ) {
-        SegmentProgress::Hold => keyframe_a.value,
-        SegmentProgress::Progress(t) => f64::lerp(&keyframe_a.value, &keyframe_b.value, t),
+    match (keyframe_a.interp_out, keyframe_b.interp_in) {
+        (KeyframeInterpolation::Hold, _) | (_, KeyframeInterpolation::Hold) => keyframe_a.value,
+        (KeyframeInterpolation::Linear, KeyframeInterpolation::Linear) => {
+            interpolate_numeric_value(
+                keyframe_a.value,
+                keyframe_b.value,
+                normalize_time(time, keyframe_a.time, keyframe_b.time),
+            )
+        }
+        _ => {
+            let span = keyframe_b.time.distance_from_f64(keyframe_a.time);
+            let exact_span = keyframe_b.time.checked_sub(keyframe_a.time).ok();
+            let out = numeric_segment_control(
+                keyframe_a.interp_out,
+                keyframe_a.value,
+                keyframe_b.value,
+                span,
+                exact_span,
+                false,
+            );
+            let incoming = numeric_segment_control(
+                keyframe_b.interp_in,
+                keyframe_a.value,
+                keyframe_b.value,
+                span,
+                exact_span,
+                true,
+            );
+            crate::numeric_bezier::evaluate_numeric_bezier(
+                normalize_time(time, keyframe_a.time, keyframe_b.time),
+                [out.0, incoming.0],
+                [keyframe_a.value, out.1, incoming.1, keyframe_b.value],
+                out.2 && incoming.2,
+            )
+        }
     }
 }
 
@@ -3987,28 +3958,37 @@ fn normalize_time(t: TimelineTime, start: TimelineTime, end: TimelineTime) -> f6
     t.distance_from_f64(start) / total
 }
 
-enum SegmentProgress {
-    Hold,
-    Progress(f64),
-}
-
-fn segment_progress(
-    t: f64,
-    interp_out: KeyframeInterpolation,
-    interp_in: KeyframeInterpolation,
-) -> SegmentProgress {
-    match (interp_out, interp_in) {
-        (KeyframeInterpolation::Hold, _) | (_, KeyframeInterpolation::Hold) => {
-            SegmentProgress::Hold
+fn numeric_segment_control(
+    interpolation: KeyframeInterpolation,
+    left: f64,
+    right: f64,
+    span: f64,
+    exact_span: Option<TimelineTime>,
+    incoming: bool,
+) -> (f64, f64, bool) {
+    let ratio = if incoming { 1.0 - 1.0 / 3.0 } else { 1.0 / 3.0 };
+    let owner_value = if incoming { right } else { left };
+    match interpolation {
+        KeyframeInterpolation::Bezier(handle) => {
+            let fraction = handle.time_offset.to_f64() / span;
+            (
+                if incoming { 1.0 + fraction } else { fraction },
+                owner_value + handle.value_offset,
+                exact_span.is_some_and(|duration| {
+                    crate::TimeScale::new(if incoming { -3 } else { 3 }, 1).is_ok_and(|scale| {
+                        handle
+                            .time_offset
+                            .checked_scale(scale)
+                            .is_ok_and(|offset| offset == duration)
+                    })
+                }),
+            )
         }
-        (KeyframeInterpolation::Linear, KeyframeInterpolation::Linear) => {
-            SegmentProgress::Progress(t)
+        KeyframeInterpolation::DefaultBezier => (ratio, owner_value, true),
+        KeyframeInterpolation::Linear => {
+            (ratio, interpolate_numeric_value(left, right, ratio), true)
         }
-        (out_interp, in_interp) => {
-            let out_handle = handle_for_out(out_interp);
-            let in_handle = handle_for_in(in_interp);
-            SegmentProgress::Progress(solve_bezier_t(t, out_handle, in_handle))
-        }
+        KeyframeInterpolation::Hold => (ratio, owner_value, true),
     }
 }
 
@@ -4049,12 +4029,12 @@ impl crate::AuthoringFootprint for KeyframeInterpolation {
         _collector: &mut crate::AuthoringFootprintCollector,
     ) -> std::result::Result<(), crate::AuthoringFootprintError> {
         match self {
-            Self::Hold | Self::Linear | Self::Bezier(_) => Ok(()),
+            Self::Hold | Self::Linear | Self::Bezier(_) | Self::DefaultBezier => Ok(()),
         }
     }
 }
 
-impl crate::AuthoringFootprint for BezierHandle {
+impl crate::AuthoringFootprint for ExactBezierHandle {
     fn collect_authoring_footprint(
         &self,
         _collector: &mut crate::AuthoringFootprintCollector,
@@ -4344,17 +4324,6 @@ impl<T: crate::AuthoringFootprint> crate::AuthoringFootprint for Keyframe<T> {
     }
 }
 
-impl<T: Interpolatable + crate::AuthoringFootprint> crate::AuthoringFootprint for KeyframeTrack<T> {
-    fn collect_authoring_footprint(
-        &self,
-        collector: &mut crate::AuthoringFootprintCollector,
-    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
-        let Self { keyframes, static_value, enabled: _ } = self;
-        collector.collect(keyframes)?;
-        collector.collect(static_value)
-    }
-}
-
 impl crate::AuthoringFootprint for AnimationChannel {
     fn collect_authoring_footprint(
         &self,
@@ -4434,13 +4403,13 @@ mod tests {
         bag
     }
 
-    fn invalid_visual_handles() -> Vec<(bool, BezierHandle)> {
+    fn invalid_visual_handles() -> Vec<(bool, ExactBezierHandle)> {
         let mut cases = Vec::new();
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             for incoming in [false, true] {
                 cases.push((
                     incoming,
-                    BezierHandle {
+                    ExactBezierHandle {
                         time_offset: if incoming {
                             TimelineTime::NEGATIVE_ONE_THIRD
                         } else {
@@ -4457,7 +4426,10 @@ mod tests {
             (true, TimelineTime::ONE_THIRD),
             (true, TimelineTime::new(-2, 1).expect("negative two")),
         ] {
-            cases.push((incoming, BezierHandle { time_offset, value_offset: 0.25 }));
+            cases.push((
+                incoming,
+                ExactBezierHandle { time_offset, value_offset: 0.25 },
+            ));
         }
         cases
     }
@@ -4504,7 +4476,11 @@ mod tests {
             assert!(
                 bag.update_channel_keyframe_handles(
                     path,
-                    TimelineTime::ZERO,
+                    if incoming {
+                        TimelineTime::ONE
+                    } else {
+                        TimelineTime::ZERO
+                    },
                     0,
                     interp_in,
                     interp_out
@@ -4525,11 +4501,11 @@ mod tests {
             (TimelineTime::NEGATIVE_ONE_THIRD, TimelineTime::ONE_THIRD),
         ] {
             let mut bag = visual_handle_admission_fixture(path);
-            let interp_in = KeyframeInterpolation::Bezier(BezierHandle {
+            let interp_in = KeyframeInterpolation::Bezier(ExactBezierHandle {
                 time_offset: time_in,
                 value_offset: -0.25,
             });
-            let interp_out = KeyframeInterpolation::Bezier(BezierHandle {
+            let interp_out = KeyframeInterpolation::Bezier(ExactBezierHandle {
                 time_offset: time_out,
                 value_offset: 0.25,
             });
@@ -4578,7 +4554,8 @@ mod tests {
         let path = "test.visual.handle.admission";
         for (incoming, handle) in invalid_visual_handles() {
             let mut bag = visual_handle_admission_fixture(path);
-            let key = &mut bag.properties.get_mut(path).expect("property").channels[0].keyframes[0];
+            let key = &mut bag.properties.get_mut(path).expect("property").channels[0].keyframes
+                [usize::from(incoming)];
             if incoming {
                 key.interp_in = KeyframeInterpolation::Bezier(handle);
             } else {
@@ -4599,6 +4576,326 @@ mod tests {
     }
 
     #[test]
+    fn visual_world_bezier_equal_endpoints_retain_absolute_value_excursion() {
+        let path = "test.visual.world_equal_endpoints";
+        let mut bag = overshoot_property_bag(path, 10.0);
+        let mut left = Keyframe::linear(TimelineTime::ZERO, PropertyValue::Double(2.0));
+        let mut right = Keyframe::linear(TimelineTime::ONE, PropertyValue::Double(2.0));
+        left.interp_out = KeyframeInterpolation::Bezier(ExactBezierHandle {
+            time_offset: TimelineTime::ONE_THIRD,
+            value_offset: 4.0,
+        });
+        right.interp_in = KeyframeInterpolation::Bezier(ExactBezierHandle {
+            time_offset: TimelineTime::NEGATIVE_ONE_THIRD,
+            value_offset: 4.0,
+        });
+        for keyframe in [left, right] {
+            bag.set_keyframe(path, keyframe).expect("legal world-space controls");
+        }
+        // Independent Bernstein reference: (2 + 3*6 + 3*6 + 2) / 8.
+        assert_eq!(
+            bag.evaluate(path, TimelineTime::new(1, 2).expect("midpoint")),
+            Some(PropertyValue::Double(5.0)),
+            "equal endpoint values must not erase authored handle value offsets"
+        );
+        let restored: PropertyBag =
+            serde_json::from_slice(&serde_json::to_vec(&bag).expect("serialize")).expect("reopen");
+        assert_eq!(restored, bag);
+        assert_eq!(
+            restored.evaluate(path, TimelineTime::new(1, 2).expect("midpoint")),
+            Some(PropertyValue::Double(5.0))
+        );
+    }
+
+    #[test]
+    fn visual_world_bezier_handles_use_exact_owner_time_and_parameter_units() {
+        let path = "test.visual.world_control_units";
+        let mut bag = overshoot_property_bag(path, 10.0);
+        let mut left = Keyframe::linear(
+            TimelineTime::new(2, 1).expect("left"),
+            PropertyValue::Double(1.0),
+        );
+        let mut right = Keyframe::linear(
+            TimelineTime::new(8, 1).expect("right"),
+            PropertyValue::Double(3.0),
+        );
+        left.interp_out = KeyframeInterpolation::Bezier(ExactBezierHandle {
+            time_offset: TimelineTime::new(2, 1).expect("two owner seconds"),
+            value_offset: 2.0,
+        });
+        right.interp_in = KeyframeInterpolation::Bezier(ExactBezierHandle {
+            time_offset: TimelineTime::new(-2, 1).expect("negative two owner seconds"),
+            value_offset: -0.5,
+        });
+        for keyframe in [left, right] {
+            bag.set_keyframe(path, keyframe).expect("handles within the six-second segment");
+        }
+        // Control times are 2,4,6,8, so the time midpoint is the cubic midpoint.
+        // Independent value reference: (1 + 3*3 + 3*2.5 + 3) / 8.
+        assert_eq!(
+            bag.evaluate(path, TimelineTime::new(5, 1).expect("owner midpoint")),
+            Some(PropertyValue::Double(2.5625))
+        );
+        bag.validate().expect("exact author controls are valid");
+    }
+
+    #[test]
+    fn visual_world_bezier_vertical_continuous_edit_preserves_partner_value_length() {
+        let path = "test.visual.world.vertical";
+        let mut bag = overshoot_property_bag(path, 10.0);
+        let middle = Keyframe::from_preset(
+            TimelineTime::ONE,
+            PropertyValue::Double(2.0),
+            InterpolationType::ContinuousBezier,
+        );
+        for key in [
+            Keyframe::linear(TimelineTime::ZERO, PropertyValue::Double(2.0)),
+            middle,
+            Keyframe::linear(
+                TimelineTime::new(2, 1).expect("end"),
+                PropertyValue::Double(2.0),
+            ),
+        ] {
+            bag.set_keyframe(path, key).expect("key");
+        }
+        bag.update_channel_keyframe_handles(
+            path,
+            TimelineTime::ONE,
+            0,
+            KeyframeInterpolation::Bezier(ExactBezierHandle {
+                time_offset: TimelineTime::new(-1, 4).expect("in"),
+                value_offset: -2.0,
+            }),
+            KeyframeInterpolation::Bezier(ExactBezierHandle {
+                time_offset: TimelineTime::new(1, 4).expect("out"),
+                value_offset: 2.0,
+            }),
+        )
+        .expect("collinear controls");
+        let incoming = bag
+            .property(path)
+            .expect("property")
+            .channel(0)
+            .expect("channel")
+            .keyframe_at(TimelineTime::ONE)
+            .expect("middle")
+            .interp_in;
+        bag.update_channel_keyframe_handles(
+            path,
+            TimelineTime::ONE,
+            0,
+            incoming,
+            KeyframeInterpolation::Bezier(ExactBezierHandle {
+                time_offset: TimelineTime::ZERO,
+                value_offset: 3.0,
+            }),
+        )
+        .expect("vertical edit");
+        let key = bag
+            .property(path)
+            .expect("property")
+            .channel(0)
+            .expect("channel")
+            .keyframe_at(TimelineTime::ONE)
+            .expect("middle");
+        assert_eq!(
+            key.interp_in,
+            KeyframeInterpolation::Bezier(ExactBezierHandle {
+                time_offset: TimelineTime::ZERO,
+                value_offset: -2.0,
+            })
+        );
+        assert_eq!(
+            key.interp_out,
+            KeyframeInterpolation::Bezier(ExactBezierHandle {
+                time_offset: TimelineTime::ZERO,
+                value_offset: 3.0,
+            })
+        );
+        let restored: PropertyBag =
+            serde_json::from_slice(&serde_json::to_vec(&bag).expect("serialize")).expect("reopen");
+        restored.validate().expect("constraints");
+        assert_eq!(restored, bag);
+        for numerator in 0..=40 {
+            let time = TimelineTime::new(numerator, 20).expect("sample");
+            let value = bag.evaluate(path, time).and_then(|value| value.as_f64()).expect("value");
+            assert!(value.is_finite());
+            assert_eq!(restored.evaluate(path, time), bag.evaluate(path, time));
+        }
+    }
+
+    #[test]
+    fn visual_world_bezier_explicit_over_span_continuous_edit_rejects_atomically() {
+        let path = "test.visual.world.invalid_provided";
+        let mut bag = overshoot_property_bag(path, 10.0);
+        for (time, value, mode) in [
+            (TimelineTime::ZERO, 0.0, InterpolationType::Linear),
+            (TimelineTime::ONE, 1.0, InterpolationType::ContinuousBezier),
+            (
+                TimelineTime::new(2, 1).expect("end"),
+                2.0,
+                InterpolationType::Linear,
+            ),
+        ] {
+            bag.set_keyframe(
+                path,
+                Keyframe::from_preset(time, PropertyValue::Double(value), mode),
+            )
+            .expect("key");
+        }
+        let original = bag.clone();
+        let incoming = bag
+            .property(path)
+            .expect("property")
+            .channel(0)
+            .expect("channel")
+            .keyframe_at(TimelineTime::ONE)
+            .expect("middle")
+            .interp_in;
+        bag.update_channel_keyframe_handles(
+            path,
+            TimelineTime::ONE,
+            0,
+            incoming,
+            KeyframeInterpolation::Bezier(ExactBezierHandle {
+                time_offset: TimelineTime::new(2, 1).expect("beyond one-second span"),
+                value_offset: 2.0,
+            }),
+        )
+        .expect_err("an invalid supplied coordinate must not be healed by constraint projection");
+        assert_eq!(bag, original);
+    }
+
+    #[test]
+    fn visual_world_bezier_key_move_rebounds_retained_controls_without_changing_direction() {
+        let path = "test.visual.world.retained_move";
+        let mut bag = overshoot_property_bag(path, 10.0);
+        let mut middle = Keyframe::linear(TimelineTime::ONE, PropertyValue::Double(1.0));
+        let id = middle.id;
+        middle.interp_in = KeyframeInterpolation::Bezier(ExactBezierHandle {
+            time_offset: TimelineTime::new(-1, 4).expect("in"),
+            value_offset: -0.5,
+        });
+        middle.interp_out = KeyframeInterpolation::Bezier(ExactBezierHandle {
+            time_offset: TimelineTime::new(1, 4).expect("out"),
+            value_offset: 0.5,
+        });
+        for key in [
+            Keyframe::linear(TimelineTime::ZERO, PropertyValue::Double(0.0)),
+            middle,
+            Keyframe::linear(
+                TimelineTime::new(2, 1).expect("end"),
+                PropertyValue::Double(2.0),
+            ),
+        ] {
+            bag.set_keyframe(path, key).expect("key");
+        }
+        bag.edit_keyframe(
+            path,
+            id,
+            TimelineTime::new(19, 10).expect("near next key"),
+            PropertyValue::Double(1.0),
+        )
+        .expect("moving a key must admit its retained controls in the new neighbor spans");
+        let key = bag.property(path).expect("property").keyframe_by_id(id).expect("same identity");
+        assert_eq!(key.time, TimelineTime::new(19, 10).expect("target"));
+        assert_eq!(
+            key.interp_in,
+            KeyframeInterpolation::Bezier(ExactBezierHandle {
+                time_offset: TimelineTime::new(-1, 4).expect("retained incoming"),
+                value_offset: -0.5,
+            })
+        );
+        assert_eq!(
+            key.interp_out,
+            KeyframeInterpolation::Bezier(ExactBezierHandle {
+                time_offset: TimelineTime::new(1, 10).expect("bounded outgoing"),
+                value_offset: 0.2,
+            })
+        );
+        bag.validate().expect("admitted new spans");
+    }
+
+    #[test]
+    fn visual_world_bezier_persisted_constraints_reject_forged_finite_handles() {
+        for preset in [
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let path = "test.visual.world.persisted_constraint";
+            let mut bag = overshoot_property_bag(path, 10.0);
+            for (time, value) in [(0, 0.0), (1, 1.0), (2, 2.0)] {
+                bag.set_keyframe(
+                    path,
+                    Keyframe::from_preset(
+                        TimelineTime::new(time, 1).expect("owner time"),
+                        PropertyValue::Double(value),
+                        preset,
+                    ),
+                )
+                .expect("constrained key");
+            }
+            bag.validate().expect("canonical constraints");
+            bag.properties.get_mut(path).expect("property").channels[0].keyframes[1].interp_out =
+                KeyframeInterpolation::Bezier(ExactBezierHandle {
+                    time_offset: TimelineTime::new(1, 3).expect("legal time"),
+                    value_offset: 0.9,
+                });
+            let reopened: PropertyBag =
+                serde_json::from_str(&serde_json::to_string(&bag).expect("finite wire"))
+                    .expect("decode without healing");
+            assert!(
+                reopened.validate().is_err(),
+                "{preset:?} must enforce its stored constraint"
+            );
+            assert_eq!(
+                reopened, bag,
+                "validation must not repair persisted author state"
+            );
+        }
+    }
+
+    #[test]
+    fn visual_world_bezier_auto_flags_cannot_persist_broken_handles() {
+        let path = "test.visual.world.auto_flags";
+        let mut bag = overshoot_property_bag(path, 10.0);
+        bag.set_keyframe(
+            path,
+            Keyframe::from_preset(
+                TimelineTime::ZERO,
+                PropertyValue::Double(1.0),
+                InterpolationType::AutoBezier,
+            ),
+        )
+        .expect("auto key");
+        bag.update_keyframe_temporal_flags(
+            path,
+            TimelineTime::ZERO,
+            KeyframeTemporalFlags {
+                auto_bezier: true,
+                continuous: false,
+                broken_handles: true,
+            },
+        )
+        .expect("auto derives unbroken constraints");
+        assert!(
+            !bag.property(path)
+                .expect("property")
+                .keyframe_at(TimelineTime::ZERO)
+                .expect("key")
+                .temporal_flags
+                .broken_handles
+        );
+        bag.properties.get_mut(path).expect("property").channels[0].keyframes[0]
+            .temporal_flags
+            .broken_handles = true;
+        assert!(
+            bag.validate().is_err(),
+            "persisted Auto cannot claim broken manual geometry"
+        );
+    }
+
+    #[test]
     fn visual_manual_bezier_preserves_legal_overshoot_in_both_directions() {
         let path = "test.visual.overshoot";
         for time_offset in [
@@ -4609,11 +4906,11 @@ mod tests {
                 let mut bag = overshoot_property_bag(path, 4.0);
                 let mut left = Keyframe::linear(TimelineTime::ZERO, PropertyValue::Double(0.0));
                 let mut right = Keyframe::linear(TimelineTime::ONE, PropertyValue::Double(1.0));
-                left.interp_out = KeyframeInterpolation::Bezier(BezierHandle {
+                left.interp_out = KeyframeInterpolation::Bezier(ExactBezierHandle {
                     time_offset,
                     value_offset: out_value,
                 });
-                right.interp_in = KeyframeInterpolation::Bezier(BezierHandle {
+                right.interp_in = KeyframeInterpolation::Bezier(ExactBezierHandle {
                     time_offset: time_offset
                         .checked_scale(crate::TimeScale::NEGATIVE_ONE)
                         .expect("incoming"),
@@ -4675,7 +4972,7 @@ mod tests {
             time: TimelineTime::ZERO,
             channel_index: 0,
             interp_in: incoming,
-            interp_out: KeyframeInterpolation::Bezier(BezierHandle {
+            interp_out: KeyframeInterpolation::Bezier(ExactBezierHandle {
                 time_offset: TimelineTime::ONE_THIRD,
                 value_offset: 2.0,
             }),
@@ -4694,7 +4991,7 @@ mod tests {
             time: TimelineTime::ONE,
             channel_index: 0,
             interp_out: right_out,
-            interp_in: KeyframeInterpolation::Bezier(BezierHandle {
+            interp_in: KeyframeInterpolation::Bezier(ExactBezierHandle {
                 time_offset: TimelineTime::NEGATIVE_ONE_THIRD,
                 value_offset: 1.0,
             }),
@@ -4714,13 +5011,13 @@ mod tests {
             let mut bag = overshoot_property_bag(path, f64::MAX);
             let mut left = Keyframe::linear(TimelineTime::ZERO, PropertyValue::Double(0.0));
             let mut right = Keyframe::linear(TimelineTime::ONE, PropertyValue::Double(scale));
-            left.interp_out = KeyframeInterpolation::Bezier(BezierHandle {
+            left.interp_out = KeyframeInterpolation::Bezier(ExactBezierHandle {
                 time_offset: TimelineTime::ONE_THIRD,
-                value_offset: 2.0,
+                value_offset: 2.0 * scale,
             });
-            right.interp_in = KeyframeInterpolation::Bezier(BezierHandle {
+            right.interp_in = KeyframeInterpolation::Bezier(ExactBezierHandle {
                 time_offset: TimelineTime::NEGATIVE_ONE_THIRD,
-                value_offset: 1.0,
+                value_offset: scale,
             });
             for keyframe in [left, right] {
                 bag.apply_mutation(PropertyMutation::SetKeyframe { path: path.into(), keyframe })
@@ -4952,11 +5249,13 @@ mod tests {
 
     #[test]
     fn linear_interpolation() {
-        let mut track = KeyframeTrack::<f32>::constant(0.0);
-        track.set_keyframe(Keyframe::linear(tt(0), 0.0));
-        track.set_keyframe(Keyframe::linear(tt(100), 100.0));
-
-        let mid = track.evaluate(tt(50));
+        let path = "test.linear.property";
+        let mut bag = overshoot_property_bag(path, 200.0);
+        for (time, value) in [(tt(0), 0.0), (tt(100), 100.0)] {
+            bag.set_keyframe(path, Keyframe::linear(time, PropertyValue::Double(value)))
+                .expect("key");
+        }
+        let mid = bag.evaluate(path, tt(50)).and_then(|value| value.as_f64()).expect("value");
         assert!((mid - 50.0).abs() < 0.01, "Expected 50.0, got {mid}");
     }
 
@@ -5011,18 +5310,28 @@ mod tests {
 
     #[test]
     fn visual_bezier_inverts_flat_endpoint_time_tangents() {
-        let mut left = Keyframe::linear(TimelineTime::ZERO, 0.0_f64);
-        let mut right = Keyframe::linear(TimelineTime::ONE, 1.0_f64);
-        left.interp_out = KeyframeInterpolation::Bezier(BezierHandle {
+        let mut left = Keyframe::linear(TimelineTime::ZERO, PropertyValue::Double(0.0));
+        let mut right = Keyframe::linear(TimelineTime::ONE, PropertyValue::Double(1.0));
+        left.interp_out = KeyframeInterpolation::Bezier(ExactBezierHandle {
             time_offset: TimelineTime::ZERO,
             value_offset: 1.0 / 3.0,
         });
-        right.interp_in = KeyframeInterpolation::Bezier(BezierHandle {
+        right.interp_in = KeyframeInterpolation::Bezier(ExactBezierHandle {
             time_offset: TimelineTime::NEGATIVE_ONE,
             value_offset: -1.0 / 3.0,
         });
-        let track = KeyframeTrack::from_parts(0.0, vec![left, right]);
-        let evaluated = track.evaluate(TimelineTime::new(1, 1_000_000_000).expect("exact sample"));
+        let path = "test.flat.time.inversion";
+        let mut bag = overshoot_property_bag(path, 10.0);
+        for key in [left, right] {
+            bag.set_keyframe(path, key).expect("legal key");
+        }
+        let evaluated = bag
+            .evaluate(
+                path,
+                TimelineTime::new(1, 1_000_000_000).expect("exact sample"),
+            )
+            .and_then(|value| value.as_f64())
+            .expect("value");
         assert!((evaluated - 0.001).abs() <= 64.0 * f64::EPSILON,
             "The legal x=t^3, y=t curve requires actual inversion even at a flat endpoint: {evaluated}");
     }
@@ -5259,7 +5568,7 @@ mod tests {
         let KeyframeInterpolation::Bezier(handle) = first.interp_out else {
             panic!("Bezier control");
         };
-        assert!((handle.value_offset - 1.0 / 9.0).abs() <= 8.0 * f64::EPSILON, "weighted intermediate overflow must not silently flatten a nonzero endpoint tangent: {}", handle.value_offset);
+        assert!((handle.value_offset / (0.9 * f64::MAX) - 1.0 / 9.0).abs() <= 8.0 * f64::EPSILON, "weighted intermediate overflow must not silently flatten a nonzero endpoint tangent: {}", handle.value_offset);
     }
 
     #[test]
@@ -5356,11 +5665,11 @@ mod tests {
             id: edited_id,
             time: tt(10),
             value: PropertyValue::Float(0.5),
-            interp_in: KeyframeInterpolation::Bezier(BezierHandle {
+            interp_in: KeyframeInterpolation::Bezier(ExactBezierHandle {
                 time_offset: ht(-0.2),
                 value_offset: -0.1,
             }),
-            interp_out: KeyframeInterpolation::Bezier(BezierHandle {
+            interp_out: KeyframeInterpolation::Bezier(ExactBezierHandle {
                 time_offset: ht(0.3),
                 value_offset: 0.2,
             }),
@@ -5410,11 +5719,11 @@ mod tests {
             id: KeyframeId::new(),
             time: tt(10),
             value: PropertyValue::Float(0.5),
-            interp_in: KeyframeInterpolation::Bezier(BezierHandle {
+            interp_in: KeyframeInterpolation::Bezier(ExactBezierHandle {
                 time_offset: ht(-0.2),
                 value_offset: -0.1,
             }),
-            interp_out: KeyframeInterpolation::Bezier(BezierHandle {
+            interp_out: KeyframeInterpolation::Bezier(ExactBezierHandle {
                 time_offset: ht(0.3),
                 value_offset: 0.2,
             }),
@@ -6460,31 +6769,40 @@ mod tests {
 
     #[test]
     fn bezier_interpolation_uses_control_points() {
-        let mut track = KeyframeTrack::<f32>::constant(0.0);
-        track.set_keyframe(Keyframe {
-            id: KeyframeId::new(),
-            time: tt(0),
-            value: 0.0,
-            interp_in: KeyframeInterpolation::Linear,
-            interp_out: KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: TimelineTime::ZERO,
-                value_offset: 0.0,
-            }),
-            temporal_flags: KeyframeTemporalFlags::default(),
-        });
-        track.set_keyframe(Keyframe {
-            id: KeyframeId::new(),
-            time: tt(100),
-            value: 100.0,
-            interp_in: KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: TimelineTime::ZERO,
-                value_offset: 0.0,
-            }),
-            interp_out: KeyframeInterpolation::Linear,
-            temporal_flags: KeyframeTemporalFlags::default(),
-        });
+        let path = "test.control.point.midpoint";
+        let mut bag = overshoot_property_bag(path, 200.0);
+        bag.set_keyframe(
+            path,
+            Keyframe {
+                id: KeyframeId::new(),
+                time: tt(0),
+                value: PropertyValue::Double(0.0),
+                interp_in: KeyframeInterpolation::Linear,
+                interp_out: KeyframeInterpolation::Bezier(ExactBezierHandle {
+                    time_offset: TimelineTime::ZERO,
+                    value_offset: 0.0,
+                }),
+                temporal_flags: KeyframeTemporalFlags::default(),
+            },
+        )
+        .expect("key");
+        bag.set_keyframe(
+            path,
+            Keyframe {
+                id: KeyframeId::new(),
+                time: tt(100),
+                value: PropertyValue::Double(100.0),
+                interp_in: KeyframeInterpolation::Bezier(ExactBezierHandle {
+                    time_offset: TimelineTime::ZERO,
+                    value_offset: 0.0,
+                }),
+                interp_out: KeyframeInterpolation::Linear,
+                temporal_flags: KeyframeTemporalFlags::default(),
+            },
+        )
+        .expect("key");
 
-        let mid = track.evaluate(tt(50));
+        let mid = bag.evaluate(path, tt(50)).and_then(|value| value.as_f64()).expect("value");
         assert!(
             (mid - 50.0).abs() < 0.05,
             "Expected midpoint to remain stable, got {mid}"
@@ -6815,11 +7133,11 @@ mod tests {
             path: "transform.position".to_owned(),
             time: tt(3),
             channel_index: 0,
-            interp_in: KeyframeInterpolation::Bezier(BezierHandle {
+            interp_in: KeyframeInterpolation::Bezier(ExactBezierHandle {
                 time_offset: ht(-0.01),
                 value_offset: -0.5,
             }),
-            interp_out: KeyframeInterpolation::Bezier(BezierHandle {
+            interp_out: KeyframeInterpolation::Bezier(ExactBezierHandle {
                 time_offset: ht(0.01),
                 value_offset: 0.5,
             }),
@@ -7069,13 +7387,21 @@ mod tests {
             id: KeyframeId::new(),
             time,
             value: PropertyValue::Float(0.75),
-            interp_in: KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: ht(-0.25),
-                value_offset: -0.1,
+            interp_in: KeyframeInterpolation::Bezier(ExactBezierHandle {
+                time_offset: time
+                    .checked_sub(previous_time)
+                    .expect("incoming span")
+                    .checked_scale(crate::TimeScale::new(-1, 4).expect("quarter"))
+                    .expect("incoming offset"),
+                value_offset: -0.1 * (0.75 - 0.25),
             }),
-            interp_out: KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: ht(0.3),
-                value_offset: 0.15,
+            interp_out: KeyframeInterpolation::Bezier(ExactBezierHandle {
+                time_offset: next_time
+                    .checked_sub(time)
+                    .expect("outgoing span")
+                    .checked_scale(crate::TimeScale::new(3, 10).expect("influence"))
+                    .expect("outgoing offset"),
+                value_offset: 0.15 * (0.95_f32 as f64 - 0.75),
             }),
             temporal_flags: KeyframeTemporalFlags {
                 auto_bezier: false,
@@ -7200,11 +7526,11 @@ mod tests {
             .unwrap();
             let selected = bag.property(path).unwrap().keyframe_at(tt(5)).unwrap();
             assert!(
-                matches!(selected.interp_in, KeyframeInterpolation::Bezier(_)),
+                selected.interp_in.is_bezier(),
                 "explicit {preset:?} must retain incoming intent before a neighbor exists"
             );
             assert!(
-                matches!(selected.interp_out, KeyframeInterpolation::Bezier(_)),
+                selected.interp_out.is_bezier(),
                 "explicit {preset:?} must retain outgoing intent before a neighbor exists"
             );
             for (time, value) in [(tt(0), 0.0), (tt(10), 1.0)] {
@@ -7216,11 +7542,8 @@ mod tests {
             }
             let stored = bag.property(path).unwrap().keyframe_at(tt(5)).unwrap();
             assert_eq!(stored.id, selected.id);
-            assert!(matches!(stored.interp_in, KeyframeInterpolation::Bezier(_)));
-            assert!(matches!(
-                stored.interp_out,
-                KeyframeInterpolation::Bezier(_)
-            ));
+            assert!(stored.interp_in.is_bezier());
+            assert!(stored.interp_out.is_bezier());
             bag.validate().unwrap();
             let reopened: PropertyBag =
                 serde_json::from_str(&serde_json::to_string(&bag).unwrap()).unwrap();
@@ -7294,13 +7617,13 @@ mod tests {
                 id: KeyframeId::new(),
                 time,
                 value: PropertyValue::Float(0.5),
-                interp_in: KeyframeInterpolation::Bezier(BezierHandle {
-                    time_offset: ht(-0.2),
-                    value_offset: -0.15,
+                interp_in: KeyframeInterpolation::Bezier(ExactBezierHandle {
+                    time_offset: ht(-0.04),
+                    value_offset: -0.075,
                 }),
-                interp_out: KeyframeInterpolation::Bezier(BezierHandle {
-                    time_offset: ht(0.45),
-                    value_offset: 0.25,
+                interp_out: KeyframeInterpolation::Bezier(ExactBezierHandle {
+                    time_offset: ht(0.09),
+                    value_offset: 0.125,
                 }),
                 temporal_flags: KeyframeTemporalFlags::default(),
             },
@@ -7330,8 +7653,8 @@ mod tests {
         let KeyframeInterpolation::Bezier(out_handle) = stored.interp_out else {
             panic!("expected bezier out");
         };
-        assert!((in_handle.time_offset.to_f64().abs() - 0.2).abs() < 1e-6);
-        assert!((out_handle.time_offset.to_f64() - 0.45).abs() < 1e-6);
+        assert!((in_handle.time_offset.to_f64().abs() - 0.04).abs() < 1e-6);
+        assert!((out_handle.time_offset.to_f64() - 0.09).abs() < 1e-6);
         assert!(stored.temporal_flags.continuous);
         assert!(!stored.temporal_flags.broken_handles);
     }
@@ -7416,13 +7739,7 @@ mod tests {
             .cloned()
             .expect("stored ease-in keyframe");
         assert_eq!(ease_in.interp_in, KeyframeInterpolation::Linear);
-        assert_eq!(
-            ease_in.interp_out,
-            KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: TimelineTime::ONE_THIRD,
-                value_offset: 0.0,
-            })
-        );
+        assert_eq!(ease_in.interp_out, KeyframeInterpolation::DefaultBezier);
 
         bag.apply_mutation(PropertyMutation::UpdateKeyframeInterpolation {
             path: "transform.opacity".to_string(),
@@ -7436,13 +7753,7 @@ mod tests {
             .and_then(|channel| channel.keyframes().iter().find(|keyframe| keyframe.time == end))
             .cloned()
             .expect("stored ease-out keyframe");
-        assert_eq!(
-            ease_out.interp_in,
-            KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: TimelineTime::NEGATIVE_ONE_THIRD,
-                value_offset: 0.0,
-            })
-        );
+        assert_eq!(ease_out.interp_in, KeyframeInterpolation::DefaultBezier);
         assert_eq!(ease_out.interp_out, KeyframeInterpolation::Linear);
     }
 
@@ -7479,7 +7790,10 @@ mod tests {
             .and_then(|property| property.channel(0))
             .and_then(|channel| channel.keyframes().iter().find(|keyframe| keyframe.time == time))
             .expect("stored keyframe");
-        assert_eq!(stored.temporal_flags, flags);
+        assert_eq!(
+            stored.temporal_flags,
+            KeyframeTemporalFlags { continuous: false, ..flags }
+        );
         assert_eq!(stored.interp_in, KeyframeInterpolation::Linear);
         assert_eq!(stored.interp_out, KeyframeInterpolation::Linear);
     }
@@ -7507,11 +7821,11 @@ mod tests {
             path: "transform.position".to_string(),
             time,
             channel_index: 0,
-            interp_in: KeyframeInterpolation::Bezier(BezierHandle {
+            interp_in: KeyframeInterpolation::Bezier(ExactBezierHandle {
                 time_offset: ht(-0.3),
                 value_offset: -0.1,
             }),
-            interp_out: KeyframeInterpolation::Bezier(BezierHandle {
+            interp_out: KeyframeInterpolation::Bezier(ExactBezierHandle {
                 time_offset: ht(0.3),
                 value_offset: 0.1,
             }),
@@ -7556,8 +7870,10 @@ mod tests {
             .and_then(|channel| channel.keyframe_at(middle))
             .cloned()
             .expect("middle keyframe");
-        let new_out =
-            KeyframeInterpolation::Bezier(BezierHandle { time_offset: ht(0.3), value_offset: 0.4 });
+        let new_out = KeyframeInterpolation::Bezier(ExactBezierHandle {
+            time_offset: ht(0.06),
+            value_offset: 0.2,
+        });
         bag.apply_mutation(PropertyMutation::UpdateChannelKeyframeHandles {
             path: "transform.opacity".to_owned(),
             time: middle,
@@ -7583,16 +7899,27 @@ mod tests {
     }
 
     #[test]
-    fn manual_bezier_preset_starts_with_incoming_left_and_outgoing_right() {
-        let keyframe =
-            Keyframe::from_preset(tt(5), PropertyValue::Float(0.5), InterpolationType::Bezier);
+    fn manual_bezier_preset_derives_controls_in_each_adjacent_owner_span() {
+        let middle =
+            Keyframe::from_preset(tt(5), PropertyValue::Double(0.5), InterpolationType::Bezier);
+        assert_eq!(middle.interp_in, KeyframeInterpolation::DefaultBezier);
+        assert_eq!(middle.interp_out, KeyframeInterpolation::DefaultBezier);
+        let path = "test.default.owner.controls";
+        let mut bag = overshoot_property_bag(path, 10.0);
+        for key in [
+            Keyframe::linear(tt(0), PropertyValue::Double(0.0)),
+            middle,
+            Keyframe::linear(tt(10), PropertyValue::Double(1.0)),
+        ] {
+            bag.set_keyframe(path, key).expect("key");
+        }
         assert_eq!(
-            handle_for_in(keyframe.interp_in).time_offset,
-            TimelineTime::NEGATIVE_ONE_THIRD
+            bag.evaluate(path, TimelineTime::new(1, 10).expect("left midpoint")),
+            Some(PropertyValue::Double(0.3125))
         );
         assert_eq!(
-            handle_for_out(keyframe.interp_out).time_offset,
-            TimelineTime::ONE_THIRD
+            bag.evaluate(path, TimelineTime::new(3, 10).expect("right midpoint")),
+            Some(PropertyValue::Double(0.6875))
         );
     }
 
@@ -7619,12 +7946,12 @@ mod tests {
                 id: KeyframeId::new(),
                 time: mid,
                 value: PropertyValue::Float(0.5),
-                interp_in: KeyframeInterpolation::Bezier(BezierHandle {
-                    time_offset: ht(-0.25),
+                interp_in: KeyframeInterpolation::Bezier(ExactBezierHandle {
+                    time_offset: ht(-0.05),
                     value_offset: -0.1,
                 }),
-                interp_out: KeyframeInterpolation::Bezier(BezierHandle {
-                    time_offset: ht(0.25),
+                interp_out: KeyframeInterpolation::Bezier(ExactBezierHandle {
+                    time_offset: ht(0.05),
                     value_offset: 0.1,
                 }),
                 temporal_flags: KeyframeTemporalFlags {
@@ -7654,7 +7981,7 @@ mod tests {
             .and_then(|property| property.channel(0))
             .and_then(|channel| channel.keyframes().iter().find(|keyframe| keyframe.time == mid))
             .expect("stored keyframe");
-        assert!(matches!(stored.interp_in, KeyframeInterpolation::Bezier(_)));
+        assert!(stored.interp_in.is_bezier());
         assert!(matches!(
             stored.interp_out,
             KeyframeInterpolation::Bezier(_)
@@ -7686,12 +8013,12 @@ mod tests {
                 id: KeyframeId::new(),
                 time: mid,
                 value: PropertyValue::Float(1.0),
-                interp_in: KeyframeInterpolation::Bezier(BezierHandle {
-                    time_offset: ht(-0.2),
+                interp_in: KeyframeInterpolation::Bezier(ExactBezierHandle {
+                    time_offset: ht(-0.04),
                     value_offset: -0.3,
                 }),
-                interp_out: KeyframeInterpolation::Bezier(BezierHandle {
-                    time_offset: ht(0.4),
+                interp_out: KeyframeInterpolation::Bezier(ExactBezierHandle {
+                    time_offset: ht(0.112),
                     value_offset: 0.4,
                 }),
                 temporal_flags: KeyframeTemporalFlags {
@@ -7806,8 +8133,8 @@ mod tests {
             .expect("channel");
         let first = channel.keyframes().iter().find(|keyframe| keyframe.time == start).unwrap();
         let last = channel.keyframes().iter().find(|keyframe| keyframe.time == end).unwrap();
-        assert!(matches!(first.interp_out, KeyframeInterpolation::Bezier(_)));
-        assert!(matches!(last.interp_in, KeyframeInterpolation::Bezier(_)));
+        assert!(first.interp_out.is_bezier());
+        assert!(last.interp_in.is_bezier());
         let before_start = bag
             .evaluate(
                 "transform.opacity",

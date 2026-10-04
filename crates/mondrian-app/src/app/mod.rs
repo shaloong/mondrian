@@ -444,7 +444,7 @@ pub struct AppState {
     /// navigation, author generations, and project-wide Undo/Redo.
     pub(crate) authoring: Option<AuthoringSession>,
     pub(crate) active_parameter_gesture: Option<parameter_gesture::ActiveParameterGesture>,
-    pub(super) parameter_gesture_command: Option<mondrian_core::AuthoringGestureId>,
+    pub(super) parameter_gesture_command: Option<parameter_gesture::ParameterGestureCommand>,
     /// Kernel-backed exclusive authority for the open Project runtime.
     ///
     /// Background persistence requests clone this same lease; Project

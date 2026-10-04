@@ -32,14 +32,14 @@ curve when admission fails. Regression coverage includes ascending/descending
 full finite intervals, manual/auto/continuous exact Bezier curves, nonuniform
 visual endpoints, small-value unit invariance and subnormal exact tangents.
 
-Visual numeric channels and generic keyframe tracks evaluate author progress in
-`f64`; `Interpolatable::lerp` accepts `f64` progress, with narrowing reserved for
-declared Float value types. `TimelineTime::distance_from_f64` subtracts rational
+Visual numeric channels evaluate author values in `f64`, with narrowing reserved
+for declared Float value types. The unused generic `KeyframeTrack` and
+`Interpolatable` APIs are removed; numeric channels are the sole visual curve
+authoring path. `TimelineTime::distance_from_f64` subtracts rational
 coordinates through integer cross products before floating projection, including
 derived distances that cannot fit a persisted rational. Tangent spans use the
 same projection without an absolute epsilon floor. Bezier time inversion keeps
-a bracket during Newton iteration and falls back to bounded bisection for flat
-endpoint tangents; exact one-third time handles bypass inversion. Regression
+a bounded bisection bracket for flat endpoint tangents; exact one-third time handles bypass inversion. Regression
 coverage includes ordinary one-third Double evaluation, translated 48 kHz spans
 and the legal `x=t^3, y=t` endpoint case.
 
@@ -599,21 +599,37 @@ partially accepted edit of its other coordinate.
 
 ### Visual author handle admission
 
-Typed visual controls have one admission rule at insertion, handle mutation,
-and persisted property validation: value offsets are finite; incoming normalized
-time is in [-1,0], outgoing time in [0,1], including vertical and boundary
-controls. Coordinate rejection occurs before any author state changes. Complete
-key and handle edits normalize and validate a cloned candidate, then publish it;
-a failure also preserves enabled state, sibling channels, and original identities.
-Real tests retain the original NaN admission failures and cover both sides,
-infinities, wrong temporal sides, out-of-segment time, raw persisted validation,
-finite serialized reopen, legal edge controls, and duplicate-identity rejection.
-Value writes no longer accept unused lossy Vec2 handle overrides; the explicit
-typed geometry mutation owns handle editing and existing exact handles remain
-untouched during a value write. No clamping or field migration accepts bad input.
-This admission repair does not yet converge normalized visual controls with
-absolute numeric audio controls or implement temporal handle UI/live preview.
+Visual and exact audio controls share `ExactBezierHandle`: an exact owner-time
+seconds offset and an absolute parameter-value offset. Normalized time fractions
+exist only inside the shared numeric execution solver; value control points are
+owner value plus offset, including excursions between equal-valued endpoints.
+`DefaultBezier` retains flat one-third-span intent without storing a fabricated
+one-third-second coordinate. It remains meaningful before neighbors exist.
+
+Both paths share de Casteljau evaluation, time inversion, shape-preserving Auto
+endpoint derivation, and Continuous direction/partner-length constraints. Visual
+numeric channel constraints adapt to Core's exact curve normalizer rather than
+owning a second slope algorithm. Public visual edits admit cloned candidates.
+Explicit supplied controls must be finite, point toward their temporal side,
+have representable value control points, and fit every existing adjacent span
+before constraint projection. Time/topology edits shorten retained controls along
+their direction when a new span requires it. Unchanged sibling channel storage
+remains shared. Persisted validation rejects forged Auto/Continuous controls
+without repairing author state. No old normalized-control alias or migration is
+provided in the alpha model. Complete temporal-handle interaction remains a
+separate UI task.
 
 Explicit visual Bezier and ContinuousBezier preset selection retains controls on both temporal sides, including currently unconnected endpoint sides. Existing Bezier controls survive the mode change. Later key insertion therefore preserves the selected segment intent instead of producing an unintended single-sided Ease preset. This is canonical author state and round-trips with stable key identity.
 
 Sparse typed-coordinate decoding distinguishes absent fields from supplied values through deserialize_present_coordinate. TimelineTime and PropertyValue retain their own nonnullable admission; explicit null cannot silently become a missing axis. Exact Bezier time edits and App canonical curve Move actions share this seam. Floating handle coordinates still use the finite-coordinate decoder. App Move targets retain rational time and declared scalar value types, with owner interval and property schema admission before author publication.
+
+### Absolute gesture candidate source
+
+Editor Session offers current-state and original-gesture candidate execution.
+Original candidates borrow the existing bounded history restore point, gated by
+the same gesture identity, Sequence and author-generation lease. No duplicate
+origin store is added. Each candidate validates and commits against the current
+author state with monotonic revisions; net-zero completion preserves the prior
+Undo/Redo branch and budget. App chooses original candidates only for absolute
+visual numeric positional gestures, resolves omitted targets against current
+coordinates, and prepares mutations inside the chosen candidate.

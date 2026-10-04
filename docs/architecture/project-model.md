@@ -808,3 +808,13 @@ writer against an existing Unicode `.mdp`. Rejection preserves the original
 bytes, leaves no sibling temporary archive, and the original file still reopens
 with unchanged typed effect state and midpoint evaluation. This qualifies
 canonical document admission/publication, not plugin or LUT rendering.
+
+### Numeric curve control persistence
+
+Visual channels persist the same exact owner-time seconds and absolute
+parameter-value offsets as audio numeric controls. `DefaultBezier` persists flat
+one-third-span intent for unconnected endpoints. Project validation rejects
+wrong-side, over-span, nonfinite/unrepresentable, and forged constrained controls
+before archive publication. The alpha format has no old normalized handle
+compatibility layer. Canonical control coordinates, mode and key identity remain
+author data across durable save/reopen.

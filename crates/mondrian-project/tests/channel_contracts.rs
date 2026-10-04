@@ -9,6 +9,94 @@ use mondrian_project::{read_project_document_from_archive, save_project_archive,
 use mondrian_timeline::Clip;
 
 #[test]
+fn world_bezier_equal_endpoint_excursion_survives_durable_archive_reopen() {
+    use mondrian_core::automation::{ExactBezierHandle, KeyframeInterpolation};
+    let parameter_id = ParameterId::new_static("test.archive.world_bezier");
+    let mut document: ProjectDocument =
+        serde_json::from_str(include_str!("fixtures/current/project.json"))
+            .expect("canonical fixture");
+    let mut effect = EffectNode::new(EffectType::Plugin("test.archive.world_bezier".to_owned()));
+    effect.define_property(
+        PropertyDescriptor::new("amount", "Amount", PropertyValue::Double(2.0))
+            .with_parameter_id(parameter_id.clone())
+            .with_numeric_contract(
+                ParameterUnit::Unitless,
+                ParameterNumericContract::closed(
+                    0.0,
+                    10.0,
+                    None,
+                    ParameterInvalidValuePolicy::Reject,
+                )
+                .expect("range"),
+            ),
+    );
+    let mut left = Keyframe::linear(
+        TimelineTime::new(2, 1).expect("left"),
+        PropertyValue::Double(2.0),
+    );
+    left.interp_out = KeyframeInterpolation::Bezier(ExactBezierHandle {
+        time_offset: TimelineTime::new(2, 1).expect("two seconds"),
+        value_offset: 4.0,
+    });
+    let mut right = Keyframe::linear(
+        TimelineTime::new(8, 1).expect("right"),
+        PropertyValue::Double(2.0),
+    );
+    right.interp_in = KeyframeInterpolation::Bezier(ExactBezierHandle {
+        time_offset: TimelineTime::new(-2, 1).expect("minus two seconds"),
+        value_offset: 4.0,
+    });
+    for keyframe in [left, right] {
+        effect
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: "amount".to_owned(),
+                keyframe,
+            })
+            .expect("world author coordinates");
+    }
+    let mut clip = Clip::new(
+        AssetId::new(),
+        TimelineTime::ZERO,
+        TimelineTime::new(9, 1).expect("nine seconds"),
+    )
+    .expect("clip");
+    clip.add_effect_node(effect);
+    let expected = clip.effects[0].clone();
+    document.sequences.active_mut().expect("sequence").video_tracks[0]
+        .add_clip(clip)
+        .expect("clip admission");
+    let root = std::env::temp_dir().join(format!("mondrian-world-曲线-{}", AssetId::new()));
+    std::fs::create_dir_all(&root).expect("owned fixture");
+    let database = root.join("index.db");
+    std::fs::write(&database, b"sqlite placeholder").expect("opaque library fixture");
+    let archive = root.join("世界坐标.mdp");
+    save_project_archive(&document, &database, &archive).expect("durable save");
+    let reopened = read_project_document_from_archive(&archive).expect("fresh reopen");
+    reopened.validate().expect("canonical world coordinates");
+    let actual =
+        &reopened.sequences.active().expect("sequence").video_tracks[0].clips[0].effects[0];
+    assert_eq!(
+        actual, &expected,
+        "exact controls and key identities survive"
+    );
+    for sample in 0_i32..=24 {
+        let time = TimelineTime::new(i64::from(8 + sample), 4).expect("quarter seconds");
+        let t = f64::from(sample) / 24.0;
+        // Independent Bernstein polynomial with control values [2,6,6,2].
+        let expected_value = 2.0 + 12.0 * t * (1.0 - t);
+        let Some(PropertyValue::Double(value)) = actual.evaluate_parameter(&parameter_id, time)
+        else {
+            panic!("Double parameter");
+        };
+        assert!(
+            (value - expected_value).abs() <= 16.0 * f64::EPSILON,
+            "sample {sample}: {value} versus {expected_value}"
+        );
+    }
+    std::fs::remove_dir_all(root).expect("remove owned fixture");
+}
+
+#[test]
 fn asymmetric_channel_contracts_and_keys_survive_a_durable_archive_reopen() {
     let vector = |x, y| {
         PropertyValue::from_channel_values(
@@ -159,7 +247,7 @@ fn precise_compound_types_defaults_and_keys_survive_durable_archive_reopen() {
 
 #[test]
 fn invalid_visual_handle_document_cannot_replace_a_durable_archive() {
-    use mondrian_core::automation::{BezierHandle, KeyframeInterpolation};
+    use mondrian_core::automation::{ExactBezierHandle, KeyframeInterpolation};
     let parameter_id = ParameterId::new_static("test.archive.visual.handle");
     let mut document: ProjectDocument =
         serde_json::from_str(include_str!("fixtures/current/project.json"))
@@ -218,7 +306,7 @@ fn invalid_visual_handle_document_cannot_replace_a_durable_archive() {
             *control,
             serde_json::to_value(KeyframeInterpolation::Linear).expect("linear shape")
         );
-        *control = serde_json::to_value(KeyframeInterpolation::Bezier(BezierHandle {
+        *control = serde_json::to_value(KeyframeInterpolation::Bezier(ExactBezierHandle {
             time_offset,
             value_offset: 0.25,
         }))

@@ -5803,6 +5803,51 @@ mod tests {
                         ))
                         .expect("fixture key");
                 }
+                if invalidation == 7 {
+                    use mondrian_core::automation::{
+                        ExactBezierHandle, KeyframeInterpolation, PropertyMutation,
+                    };
+                    let clip =
+                        state.active_sequence().expect("fixture").find_clip(clip_id).expect("Clip");
+                    let span = clip
+                        .clip_time_out()
+                        .expect("end")
+                        .checked_sub(clip.clip_time_in)
+                        .expect("span");
+                    let time = clip
+                        .clip_time_in
+                        .checked_add(
+                            span.checked_scale(mondrian_core::TimeScale::new(1, 2).expect("half"))
+                                .expect("half span"),
+                        )
+                        .expect("middle");
+                    let offset = span
+                        .checked_scale(
+                            mondrian_core::TimeScale::new(49, 100).expect("near segment extent"),
+                        )
+                        .expect("world handle");
+                    state
+                        .mutate_clip_property(
+                            crate::app::SelectedClipRef { track_id, clip_id, is_video_track: true },
+                            PropertyMutation::UpdateChannelKeyframeHandles {
+                                path: mondrian_timeline::clip::Transform2D::OPACITY_PATH.to_owned(),
+                                time,
+                                channel_index: 0,
+                                interp_in: KeyframeInterpolation::Bezier(ExactBezierHandle {
+                                    time_offset: offset
+                                        .checked_scale(mondrian_core::TimeScale::NEGATIVE_ONE)
+                                        .expect("incoming"),
+                                    value_offset: -0.2,
+                                }),
+                                interp_out: KeyframeInterpolation::Bezier(ExactBezierHandle {
+                                    time_offset: offset,
+                                    value_offset: 0.2,
+                                }),
+                            },
+                            "world control fixture",
+                        )
+                        .expect("legal near-span manual controls");
+                }
             }
             let mut host = AppUiHost::new_with_preferences_path(
                 state,

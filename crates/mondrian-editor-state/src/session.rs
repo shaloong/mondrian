@@ -807,6 +807,32 @@ impl AuthoringSession {
         description: impl Into<String>,
         edit: impl FnOnce(&mut Sequence) -> Result<T>,
     ) -> Result<(T, Option<AuthoringCommit>)> {
+        self.edit_sequence_gesture_candidate(gesture, sequence_id, description, edit, false)
+    }
+
+    /// Apply an absolute interaction target to its original author snapshot.
+    ///
+    /// The existing bounded history restore point supplies the candidate; no
+    /// second origin is retained. Validation, author generations, stale leases,
+    /// cancellation and Undo/Redo follow the same live-commit contract.
+    pub fn edit_sequence_from_gesture_origin<T>(
+        &mut self,
+        gesture: mondrian_core::AuthoringGestureId,
+        sequence_id: SequenceId,
+        description: impl Into<String>,
+        edit: impl FnOnce(&mut Sequence) -> Result<T>,
+    ) -> Result<(T, Option<AuthoringCommit>)> {
+        self.edit_sequence_gesture_candidate(gesture, sequence_id, description, edit, true)
+    }
+
+    fn edit_sequence_gesture_candidate<T>(
+        &mut self,
+        gesture: mondrian_core::AuthoringGestureId,
+        sequence_id: SequenceId,
+        description: impl Into<String>,
+        edit: impl FnOnce(&mut Sequence) -> Result<T>,
+        from_origin: bool,
+    ) -> Result<(T, Option<AuthoringCommit>)> {
         if !self.sequence_gesture_is_current(gesture, sequence_id) {
             return Err(session_error(
                 "edit_sequence_in_gesture",
@@ -818,7 +844,18 @@ impl AuthoringSession {
             .sequence(sequence_id)
             .cloned()
             .ok_or_else(|| session_error("edit_sequence_in_gesture", "Sequence does not exist"))?;
-        let mut after = before.clone();
+        let mut after = if from_origin {
+            match group {
+                Some(group) => self
+                    .history
+                    .pending_sequence_origin(group, sequence_id)?
+                    .cloned()
+                    .unwrap_or_else(|| before.clone()),
+                None => before.clone(),
+            }
+        } else {
+            before.clone()
+        };
         let value = edit(&mut after)?;
         let commit = self
             .prepare_sequence_candidate(description, before, after, group)?

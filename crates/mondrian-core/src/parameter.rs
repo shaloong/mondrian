@@ -475,7 +475,8 @@ impl ExactAutomationCurve {
         Ok(())
     }
 
-    fn normalize_constrained_tangents(&mut self) -> Result<(), AutomationError> {
+    /// Normalize numeric constraints for domain-owned channel admission.
+    pub(crate) fn normalize_constrained_tangents(&mut self) -> Result<(), AutomationError> {
         for index in 0..self.keyframes.len() {
             if self.keyframes[index].tangent_mode == ExactAutomationTangentMode::Manual {
                 continue;
@@ -566,7 +567,8 @@ impl ExactAutomationCurve {
         Ok(())
     }
 
-    fn initialize_continuous_constraint(&mut self, index: usize) {
+    /// Project initial paired controls onto their continuous constraint.
+    pub(crate) fn initialize_continuous_constraint(&mut self, index: usize) {
         let key = &mut self.keyframes[index];
         if continuous_handles_are_collinear(key.in_handle, key.out_handle) {
             return;
@@ -604,7 +606,20 @@ impl ExactAutomationCurve {
         let current = &self.keyframes[index];
         let previous = index.checked_sub(1).map(|position| &self.keyframes[position]);
         let next = self.keyframes.get(index + 1);
-        let slope = constrained_slope(current.tangent_mode, previous, current, next)?;
+        let slope = if current.tangent_mode == ExactAutomationTangentMode::Auto && index == 0 {
+            endpoint_constrained_slope(current, next, self.keyframes.get(2), false)?
+        } else if current.tangent_mode == ExactAutomationTangentMode::Auto
+            && index + 1 == self.keyframes.len()
+        {
+            endpoint_constrained_slope(
+                current,
+                previous,
+                index.checked_sub(2).map(|position| &self.keyframes[position]),
+                true,
+            )?
+        } else {
+            constrained_slope(current.tangent_mode, previous, current, next)?
+        };
         let incoming = previous
             .map(|keyframe| tangent_handle(keyframe.time, current.time, slope, true))
             .transpose()?;
@@ -877,7 +892,8 @@ fn validate_handle_time(
     Ok(())
 }
 
-fn align_continuous_partner(
+/// Align the opposite owner-space handle while retaining its independent length.
+pub(crate) fn align_continuous_partner(
     edited: ExactBezierHandle,
     partner: ExactBezierHandle,
 ) -> ExactBezierHandle {
@@ -902,7 +918,8 @@ fn align_continuous_partner(
     }
 }
 
-fn bound_continuous_handle(
+/// Shorten a retained numeric control to its new owner span without rotating it.
+pub(crate) fn bound_continuous_handle(
     handle: ExactBezierHandle,
     duration: TimelineTime,
     incoming: bool,
@@ -972,6 +989,69 @@ fn validate_keyframe(keyframe: &ExactAutomationKeyframe) -> Result<(), Automatio
 struct ConstrainedSlope {
     value: f64,
     value_scale: f64,
+}
+
+fn endpoint_constrained_slope(
+    current: &ExactAutomationKeyframe,
+    adjacent: Option<&ExactAutomationKeyframe>,
+    second: Option<&ExactAutomationKeyframe>,
+    incoming: bool,
+) -> Result<ConstrainedSlope, AutomationError> {
+    let Some(adjacent) = adjacent else {
+        return Ok(ConstrainedSlope { value: 0.0, value_scale: 1.0 });
+    };
+    let primary_span = (if incoming {
+        current.time.checked_sub(adjacent.time)?
+    } else {
+        adjacent.time.checked_sub(current.time)?
+    })
+    .to_f64();
+    let secondary_span = second
+        .map(|key| {
+            if incoming {
+                adjacent.time.checked_sub(key.time)
+            } else {
+                key.time.checked_sub(adjacent.time)
+            }
+        })
+        .transpose()?
+        .map(|span| span.to_f64());
+    let slopes = |scale| {
+        let difference =
+            |later, earlier| crate::automation::scaled_numeric_difference(later, earlier, scale);
+        let primary = (if incoming {
+            difference(current.value, adjacent.value)
+        } else {
+            difference(adjacent.value, current.value)
+        }) / primary_span;
+        let secondary = second.zip(secondary_span).map(|(key, span)| {
+            (if incoming {
+                difference(adjacent.value, key.value)
+            } else {
+                difference(key.value, adjacent.value)
+            }) / span
+        });
+        (primary, secondary)
+    };
+    let (primary, secondary) = slopes(1.0);
+    let value =
+        crate::automation::endpoint_auto_slope(primary, secondary, primary_span, secondary_span);
+    if primary.is_finite() && secondary.is_none_or(f64::is_finite) && value.is_finite() {
+        return Ok(ConstrainedSlope { value, value_scale: 1.0 });
+    }
+    let value_scale = std::iter::once(current)
+        .chain(std::iter::once(adjacent))
+        .chain(second)
+        .map(|key| key.value.abs())
+        .fold(0.0_f64, f64::max);
+    let value_scale = if value_scale == 0.0 { 1.0 } else { value_scale };
+    let (primary, secondary) = slopes(value_scale);
+    let value =
+        crate::automation::endpoint_auto_slope(primary, secondary, primary_span, secondary_span);
+    if !value.is_finite() {
+        return Err(AutomationError::NonFiniteValue);
+    }
+    Ok(ConstrainedSlope { value, value_scale })
 }
 
 fn constrained_slope(
@@ -1130,7 +1210,7 @@ fn bezier_value(
     let target = time.checked_sub(left.time)?.to_f64() / span;
     let outgoing_third = TimeScale::new(3, 1)?;
     let incoming_third = TimeScale::new(-3, 1)?;
-    if left.out_handle.is_none_or(|handle| {
+    let uniform_time = left.out_handle.is_none_or(|handle| {
         handle
             .time_offset
             .checked_scale(outgoing_third)
@@ -1140,49 +1220,13 @@ fn bezier_value(
             .time_offset
             .checked_scale(incoming_third)
             .is_ok_and(|offset| offset == duration)
-    }) {
-        return Ok(cubic_numeric_value(left.value, y1, y2, right.value, target));
-    }
-    let mut low = 0.0;
-    let mut high = 1.0;
-    for _ in 0..48 {
-        let candidate = (low + high) * 0.5;
-        let sample = cubic(0.0, x1, x2, 1.0, candidate);
-        if sample == target {
-            return Ok(cubic_numeric_value(
-                left.value,
-                y1,
-                y2,
-                right.value,
-                candidate,
-            ));
-        }
-        if sample < target {
-            low = candidate;
-        } else {
-            high = candidate;
-        }
-    }
-    let t = (low + high) * 0.5;
-    Ok(cubic_numeric_value(left.value, y1, y2, right.value, t))
-}
-
-fn cubic_numeric_value(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {
-    use crate::automation::interpolate_numeric_value;
-    let left = interpolate_numeric_value(p0, p1, t);
-    let middle = interpolate_numeric_value(p1, p2, t);
-    let right = interpolate_numeric_value(p2, p3, t);
-    let left = interpolate_numeric_value(left, middle, t);
-    let right = interpolate_numeric_value(middle, right, t);
-    interpolate_numeric_value(left, right, t)
-}
-
-fn cubic(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {
-    let one_minus = 1.0 - t;
-    one_minus * one_minus * one_minus * p0
-        + 3.0 * one_minus * one_minus * t * p1
-        + 3.0 * one_minus * t * t * p2
-        + t * t * t * p3
+    });
+    Ok(crate::numeric_bezier::evaluate_numeric_bezier(
+        target,
+        [x1, x2],
+        [left.value, y1, y2, right.value],
+        uniform_time,
+    ))
 }
 
 #[cfg(test)]
@@ -1386,6 +1430,42 @@ mod tests {
             let expected = numerator as f64 / 16.0;
             assert!((evaluated / scale - expected).abs() <= 64.0 * f64::EPSILON, "an overflowing reciprocal must not flatten a representable subnormal tangent: expected {expected}, got {}", evaluated / scale);
         }
+    }
+
+    #[test]
+    fn auto_endpoints_retain_nonuniform_neighbor_shape_at_full_value_scale() {
+        let mut curve = ExactAutomationCurve::new(
+            ParameterId::new_static("test.numeric.auto_endpoint_shape"),
+            0.0,
+        )
+        .expect("curve");
+        let first = ExactAutomationKeyframe::linear(TimelineTime::ZERO, -f64::MAX);
+        for key in [
+            first.clone(),
+            ExactAutomationKeyframe::linear(
+                TimelineTime::new(2, 1).expect("second"),
+                -0.1 * f64::MAX,
+            ),
+            ExactAutomationKeyframe::linear(
+                TimelineTime::new(3, 1).expect("third"),
+                0.8 * f64::MAX,
+            ),
+        ] {
+            curve.set_keyframe(key).expect("finite key");
+        }
+        curve
+            .set_keyframe_interpolation(first.id, InterpolationType::AutoBezier)
+            .expect("auto");
+        let handle = curve.keyframes[0].out_handle.expect("outgoing control");
+        assert_eq!(
+            handle.time_offset,
+            TimelineTime::new(2, 3).expect("one third span")
+        );
+        // Secants are .45*MAX and .9*MAX over spans 2 and 1. The one-sided
+        // shape-preserving derivative is (5*.45 - 2*.9)/3 = .15*MAX.
+        // Multiplying by the 2/3-second handle length yields .1*MAX.
+        assert!((handle.value_offset / f64::MAX - 0.1).abs() <= 8.0 * f64::EPSILON);
+        curve.validate().expect("admitted constraints");
     }
 
     #[test]

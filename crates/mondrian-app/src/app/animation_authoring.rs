@@ -97,17 +97,30 @@ impl AppState {
         address: AnimationParameterAddress,
         edit: ClipNumericCurveEdit,
     ) -> Result<ClipNumericCurveEditOutcome> {
-        let (selection, clip) = numeric_curve_target(self, clip_id)?;
-        let prepared = prepare_curve_edit(&clip.intrinsic_parameter_bag(), clip, &address, edit)?;
-        if prepared.mutations.is_empty() {
-            return Ok(ClipNumericCurveEditOutcome {
-                changed: false,
-                keyframe_id: prepared.keyframe_id,
-            });
-        }
-
-        self.mutate_clip_properties(selection, prepared.mutations, "调整关键帧")?;
-        Ok(ClipNumericCurveEditOutcome { changed: true, keyframe_id: prepared.keyframe_id })
+        let (_, clip) = numeric_curve_target(self, clip_id)?;
+        let (edit, source_key) =
+            complete_curve_targets(&clip.intrinsic_parameter_bag(), clip, &address, edit)?;
+        let generation = self.project_author_generation();
+        let keyframe_id = self.commit_active_sequence_edit("调整关键帧", |sequence| {
+            let clip = sequence
+                .find_clip_mut(clip_id)
+                .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
+            let prepared = prepare_resolved_curve_edit(
+                &clip.intrinsic_parameter_bag(),
+                clip,
+                &address,
+                edit,
+                source_key,
+            )?;
+            for mutation in prepared.mutations {
+                clip.apply_property_mutation(mutation)?;
+            }
+            Ok(prepared.keyframe_id)
+        })?;
+        Ok(ClipNumericCurveEditOutcome {
+            changed: self.project_author_generation() != generation,
+            keyframe_id,
+        })
     }
 
     /// Return whether one stable-identity numeric curve edit would commit.
@@ -133,38 +146,41 @@ impl AppState {
         address: AnimationParameterAddress,
         edit: ClipNumericCurveEdit,
     ) -> Result<ClipNumericCurveEditOutcome> {
-        let (selection, clip) = numeric_curve_target(self, clip_id)?;
+        let (_, clip) = numeric_curve_target(self, clip_id)?;
         let effect =
             clip.effects.iter().find(|effect| effect.id == effect_id).ok_or_else(|| {
                 curve_error(format!(
                     "Effect {effect_id} does not belong to Clip {clip_id}"
                 ))
             })?;
-        let prepared = prepare_curve_edit(&effect.properties, clip, &address, edit)?;
-        if prepared.mutations.is_empty() {
-            return Ok(ClipNumericCurveEditOutcome {
-                changed: false,
-                keyframe_id: prepared.keyframe_id,
-            });
-        }
-        let sequence_id =
-            self.active_sequence_id().ok_or_else(|| curve_error("no active Sequence"))?;
-        self.commit_sequence_edit(sequence_id, "调整特效关键帧", |sequence| {
+        let (edit, source_key) = complete_curve_targets(&effect.properties, clip, &address, edit)?;
+        let generation = self.project_author_generation();
+        let keyframe_id = self.commit_active_sequence_edit("调整特效关键帧", |sequence| {
             let clip = sequence
-                .find_clip_mut(selection.clip_id)
+                .find_clip_mut(clip_id)
                 .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
-            let effect =
-                clip.effects.iter_mut().find(|effect| effect.id == effect_id).ok_or_else(|| {
+            let index =
+                clip.effects.iter().position(|effect| effect.id == effect_id).ok_or_else(|| {
                     curve_error(format!(
                         "Effect {effect_id} does not belong to Clip {clip_id}"
                     ))
                 })?;
+            let prepared = prepare_resolved_curve_edit(
+                &clip.effects[index].properties,
+                clip,
+                &address,
+                edit,
+                source_key,
+            )?;
             for mutation in prepared.mutations {
-                effect.apply_property_mutation(mutation)?;
+                clip.effects[index].apply_property_mutation(mutation)?;
             }
-            Ok(sequence.id)
+            Ok(prepared.keyframe_id)
         })?;
-        Ok(ClipNumericCurveEditOutcome { changed: true, keyframe_id: prepared.keyframe_id })
+        Ok(ClipNumericCurveEditOutcome {
+            changed: self.project_author_generation() != generation,
+            keyframe_id,
+        })
     }
 
     /// Return whether an Effect curve edit would commit, including lock and stale-ID checks.
@@ -314,6 +330,94 @@ fn numeric_curve_target(
     ))
 }
 
+// Resolve identity and omitted axes against the current author state before
+// deriving an absolute gesture candidate from its original geometry.
+fn complete_curve_targets(
+    properties: &PropertyBag,
+    clip: &mondrian_timeline::Clip,
+    address: &AnimationParameterAddress,
+    edit: ClipNumericCurveEdit,
+) -> Result<(ClipNumericCurveEdit, Option<Keyframe<PropertyValue>>)> {
+    let (_, property) = properties
+        .property_by_address(address)
+        .ok_or_else(|| curve_error("curve parameter is not owned by this target"))?;
+    match edit {
+        ClipNumericCurveEdit::Move { keyframe_id, time, value } => {
+            let key = property.keyframe_by_id(keyframe_id).ok_or_else(|| {
+                curve_error(format!("keyframe {keyframe_id} is stale or incomplete"))
+            })?;
+            Ok((
+                ClipNumericCurveEdit::Move {
+                    keyframe_id,
+                    time: Some(time.unwrap_or(key.time)),
+                    value: Some(value.unwrap_or_else(|| key.value.clone())),
+                },
+                Some(key),
+            ))
+        }
+        ClipNumericCurveEdit::Upsert { keyframe_id: None, point } => {
+            let time =
+                numeric_curve_author_time(numeric_curve_owner_range(clip)?, point.time_ratio)?;
+            Ok((
+                ClipNumericCurveEdit::Upsert {
+                    keyframe_id: property.keyframe_at(time).map(|key| key.id),
+                    point,
+                },
+                None,
+            ))
+        }
+        edit => Ok((edit, None)),
+    }
+}
+
+// A valid current key may have been inserted after the gesture began. Carry its
+// author metadata into the origin candidate at the requested final position.
+fn prepare_resolved_curve_edit(
+    properties: &PropertyBag,
+    clip: &mondrian_timeline::Clip,
+    address: &AnimationParameterAddress,
+    edit: ClipNumericCurveEdit,
+    source_key: Option<Keyframe<PropertyValue>>,
+) -> Result<PreparedCurveEdit> {
+    if let ClipNumericCurveEdit::Move {
+        keyframe_id,
+        time: Some(time),
+        value: Some(ref value),
+    } = edit
+        && let Some(mut key) = source_key
+        && key.id == keyframe_id
+    {
+        let (path, property) = properties
+            .property_by_address(address)
+            .ok_or_else(|| curve_error("curve parameter is not owned by this target"))?;
+        if property.keyframe_by_id(keyframe_id).is_none() {
+            let range = numeric_curve_owner_range(clip)?;
+            if time < range.start || time > range.start.checked_add(range.duration)? {
+                return Err(curve_error("curve move time is outside the owner interval"));
+            }
+            // Reuse collision admission before retaining the complete current key.
+            let mut prepared =
+                prepare_key_position_edit(property, path, Some(keyframe_id), time, value.clone())?;
+            key.time = time;
+            key.value = value.clone();
+            prepared.mutations =
+                vec![PropertyMutation::SetKeyframe { path: path.to_owned(), keyframe: key }];
+            return Ok(prepared);
+        }
+    }
+    prepare_curve_edit(properties, clip, address, edit)
+}
+
+fn numeric_curve_owner_range(
+    clip: &mondrian_timeline::Clip,
+) -> Result<mondrian_core::TimelineTimeRange> {
+    mondrian_core::TimelineTimeRange::new(
+        clip.clip_time_in,
+        clip.clip_time_out()?.checked_sub(clip.clip_time_in)?,
+    )
+    .map_err(Into::into)
+}
+
 fn prepare_curve_edit(
     properties: &PropertyBag,
     clip: &mondrian_timeline::Clip,
@@ -326,10 +430,7 @@ fn prepare_curve_edit(
             address.animation_track_id, address.parameter_id, clip.id
         ))
     })?;
-    let range = mondrian_core::TimelineTimeRange::new(
-        clip.clip_time_in,
-        clip.clip_time_out()?.checked_sub(clip.clip_time_in)?,
-    )?;
+    let range = numeric_curve_owner_range(clip)?;
     prepare_property_curve_edit(path, property, range, address, edit)
 }
 
@@ -446,26 +547,22 @@ fn prepare_property_curve_edit(
                 InterpolationType::Bezier => {
                     !keyframe.temporal_flags.auto_bezier
                         && !keyframe.temporal_flags.continuous
-                        && matches!(
-                            keyframe.interp_in,
-                            mondrian_core::automation::KeyframeInterpolation::Bezier(_)
-                        )
-                        && matches!(
-                            keyframe.interp_out,
-                            mondrian_core::automation::KeyframeInterpolation::Bezier(_)
-                        )
+                        && keyframe.interp_in.is_bezier()
+                        && keyframe.interp_out.is_bezier()
                 }
                 InterpolationType::EaseIn => matches!(
                     (keyframe.interp_in, keyframe.interp_out),
                     (
                         mondrian_core::automation::KeyframeInterpolation::Linear,
                         mondrian_core::automation::KeyframeInterpolation::Bezier(_)
+                            | mondrian_core::automation::KeyframeInterpolation::DefaultBezier
                     )
                 ),
                 InterpolationType::EaseOut => matches!(
                     (keyframe.interp_in, keyframe.interp_out),
                     (
-                        mondrian_core::automation::KeyframeInterpolation::Bezier(_),
+                        mondrian_core::automation::KeyframeInterpolation::Bezier(_)
+                            | mondrian_core::automation::KeyframeInterpolation::DefaultBezier,
                         mondrian_core::automation::KeyframeInterpolation::Linear
                     )
                 ),
@@ -646,7 +743,7 @@ fn curve_error(reason: impl Into<String>) -> MondrianError {
 mod tests {
     use super::*;
     use mondrian_core::automation::{
-        BezierHandle, KeyframeInterpolation, KeyframeTemporalFlags, PropertyHost,
+        ExactBezierHandle, KeyframeInterpolation, KeyframeTemporalFlags, PropertyHost,
     };
     use mondrian_core::{AssetId, Rational};
     use mondrian_effects::{EffectNodeExt, EffectType};
@@ -1114,11 +1211,11 @@ mod tests {
             id: middle_id,
             time: tt(10, time_base),
             value: PropertyValue::Float(0.5),
-            interp_in: KeyframeInterpolation::Bezier(BezierHandle {
+            interp_in: KeyframeInterpolation::Bezier(ExactBezierHandle {
                 time_offset: TimelineTime::from_f64_quantized(-0.2, 1_000_000).expect("handle"),
                 value_offset: -0.1,
             }),
-            interp_out: KeyframeInterpolation::Bezier(BezierHandle {
+            interp_out: KeyframeInterpolation::Bezier(ExactBezierHandle {
                 time_offset: TimelineTime::from_f64_quantized(0.3, 1_000_000).expect("handle"),
                 value_offset: 0.2,
             }),
@@ -1176,6 +1273,8 @@ mod tests {
         assert_eq!(restored.value, middle.value);
         assert_eq!(restored.interp_in, middle.interp_in);
         assert_eq!(restored.interp_out, middle.interp_out);
+        assert!(state.redo_timeline().expect("redo"));
+        assert_eq!(opacity_key(&state, selection, middle_id), edited);
     }
 
     #[test]

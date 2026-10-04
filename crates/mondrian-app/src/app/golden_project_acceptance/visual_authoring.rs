@@ -718,7 +718,7 @@ impl From<KeyframeInterpolation> for KeyframeInterpolationKind {
         match value {
             KeyframeInterpolation::Hold => Self::Hold,
             KeyframeInterpolation::Linear => Self::Linear,
-            KeyframeInterpolation::Bezier(_) => Self::Bezier,
+            KeyframeInterpolation::Bezier(_) | KeyframeInterpolation::DefaultBezier => Self::Bezier,
         }
     }
 }

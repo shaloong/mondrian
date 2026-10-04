@@ -385,8 +385,15 @@ impl AppState {
                 reason: "当前没有打开的项目".to_owned(),
             }
         })?;
-        let (value, commit) = if let Some(gesture) = self.parameter_gesture_command {
-            session.edit_sequence_in_gesture(gesture, sequence_id, description, edit)?
+        let (value, commit) = if let Some(command) = self.parameter_gesture_command {
+            use super::parameter_gesture::ParameterGestureCommand;
+            match command {
+                ParameterGestureCommand::Current(gesture) => {
+                    session.edit_sequence_in_gesture(gesture, sequence_id, description, edit)?
+                }
+                ParameterGestureCommand::CurveOrigin(gesture) => session
+                    .edit_sequence_from_gesture_origin(gesture, sequence_id, description, edit)?,
+            }
         } else {
             session.edit_sequence(sequence_id, description, edit)?
         };

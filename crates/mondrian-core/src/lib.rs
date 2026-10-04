@@ -33,6 +33,7 @@ pub mod icc;
 pub mod mask_data;
 pub mod media_contract;
 pub mod native_path;
+mod numeric_bezier;
 pub mod ocio;
 pub mod parameter;
 pub mod picture;

@@ -3261,6 +3261,33 @@ Visual temporal graphs now retain an immutable canonical AnimatedProperty snapsh
 
 Curve preview receives the same Begin/Edit/Finish/Cancel lifecycle as author commands. Its derived canonical candidate advances in command order, since Continuous Bezier normalization can change control geometry after each position edit. Begin retains the candidate for rollback, Cancel restores it, and sampled lines retain the widget rollback behavior. This transient projection never publishes project state or history; the author session remains the sole mutation seam. Nonzero manual/continuous controls and multiple moves are compared exactly with real author results, alongside insertion and deletion.
 
-Numeric curve Move actions carry absolute TimelineTime and typed PropertyValue targets; omitted axes explicitly retain current author coordinates. UI pointer movement supplies both targets, retaining the original canonical coordinate whenever its projected axis is unchanged or the pointer returns to its origin. Only changed axes use the shared App viewport-to-author mapping, avoiding needless quantization or scalar type conversion. The immutable original model stays separate from the evolving derived display candidate. The actual author gesture test restores an exact one-third-second key and its value, returns the complete author state to the origin, and leaves no Undo entry. Old normalized Move fields are removed from the alpha command schema.
+Numeric curve Move actions carry absolute TimelineTime and typed PropertyValue targets; omitted axes explicitly retain current author coordinates. UI pointer movement supplies both targets, retaining the original canonical coordinate whenever its projected axis is unchanged or the pointer returns to its origin. Only changed axes use the shared App viewport-to-author mapping, avoiding needless quantization or scalar type conversion. Each absolute positional gesture update derives its candidate from the immutable original world geometry. Derived display candidates are output, not the next update's author source. The actual author gesture test restores an exact one-third-second key and its value, returns the complete author state to the origin, and leaves no Undo entry. Old normalized Move fields are removed from the alpha command schema.
 
 The Host qualification routes an Inspector curve through actual pointer capture, multiple live updates, return to the original grab point and release. Numeric keyframe and structured transfer curves must restore the original author state before release, finish without changing Undo/Redo diagnostics, preserve an existing Redo branch, and retire both pointer capture and the author gesture lease. This test supplements the exact one-third-second coordinate regression in the parameter authoring path.
+
+### Canonical numeric handle coordinates
+
+App curve point edits retain Core's exact owner-time/value handle offsets.
+Visual and audio numeric evaluation now use the shared Core cubic solver and
+constraints; the UI owns no normalized persisted handle geometry. Manual point
+edits retain legal controls, and time edits bound retained controls to new spans
+without rotating their direction. The author session remains the only commit and
+Undo/Redo seam. Temporal handle drag widgets are still pending; this change does
+not claim their interaction acceptance.
+
+Absolute visual numeric Move/Upsert gestures use the Session-owned original
+history snapshot. A handle shortened near a neighbor is recomputed from its
+original direction and extent at every target, so returning to the grab point
+restores complete geometry. Sparse Move axes resolve against current author
+coordinates before candidate derivation. Insertion identity remains reserved and
+stable. Relative mode/remove/value operations retain current-state semantics.
+The captured widget derives positional preview from its Begin snapshot using the
+same Core preparation. No extra author snapshot is retained by App.
+
+Numeric curve gestures distinguish time-addressed insert operations from stable-identity
+position updates. Time-addressed insertions accumulate in the current author candidate;
+stable-identity drag samples derive from the Session-owned gesture origin to avoid
+progressively shortening manual controls. A key created during the gesture is resolved
+against current author state before preparing its final position, retaining its identity
+and complete author metadata. Finish retains one reversible history entry; cancel
+restores the original Sequence through the same authoring session.

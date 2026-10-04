@@ -1671,6 +1671,28 @@ impl AuthoringHistory {
         self.pending.as_ref().is_some_and(|pending| pending.entry.group == Some(group))
     }
 
+    /// Borrow the existing restore point for an absolute, generation-leased edit.
+    pub(crate) fn pending_sequence_origin(
+        &self,
+        group: crate::session::AuthoringHistoryGroup,
+        sequence: SequenceId,
+    ) -> Result<Option<&Sequence>> {
+        let Some(pending) =
+            self.pending.as_ref().filter(|pending| pending.entry.group == Some(group))
+        else {
+            return Ok(None);
+        };
+        match &pending.entry.command {
+            AuthoringCommand::Sequence { sequence_id, before, .. } if *sequence_id == sequence => {
+                Ok(Some(before.value()))
+            }
+            _ => Err(authoring_error(
+                "sequence_gesture_origin",
+                "restore point has a different owner",
+            )),
+        }
+    }
+
     /// Accept the staged command or release a net-zero interaction without branching.
     pub(crate) fn finish_pending_group(
         &mut self,

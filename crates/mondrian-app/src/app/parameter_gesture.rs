@@ -131,6 +131,15 @@ pub(crate) struct ActiveParameterGesture {
     target: ParameterGestureTarget,
 }
 
+/// Candidate source for one authorized live command.
+#[derive(Clone, Copy)]
+pub(crate) enum ParameterGestureCommand {
+    /// A mutation relative to the current author state.
+    Current(AuthoringGestureId),
+    /// An absolute positional curve target relative to the interaction origin.
+    CurveOrigin(AuthoringGestureId),
+}
+
 impl ParameterGestureEdit {
     /// Extract only canonical parameter edits from a widget action.
     pub(crate) fn from_action(action: &Action) -> Option<Self> {
@@ -457,7 +466,25 @@ impl AppState {
         {
             return Ok(());
         }
-        self.parameter_gesture_command = Some(id);
+        use super::product_action::ClipCurveEditPayload;
+        let positional = match &edit {
+            ParameterGestureEdit::ClipCurve(edit) => matches!(
+                edit.edit,
+                ClipCurveEditPayload::Move { .. }
+                    | ClipCurveEditPayload::Upsert { keyframe_id: Some(_), .. }
+            ),
+            ParameterGestureEdit::EffectCurve(edit) => matches!(
+                edit.edit,
+                ClipCurveEditPayload::Move { .. }
+                    | ClipCurveEditPayload::Upsert { keyframe_id: Some(_), .. }
+            ),
+            _ => false,
+        };
+        self.parameter_gesture_command = Some(if positional {
+            ParameterGestureCommand::CurveOrigin(id)
+        } else {
+            ParameterGestureCommand::Current(id)
+        });
         let result = self.dispatch_product_action(edit.into_product());
         self.parameter_gesture_command = None;
         if result.is_err() {
@@ -477,6 +504,7 @@ fn gesture_error(reason: impl Into<String>) -> MondrianError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::product_action::{ClipCurveEditPayload, ClipNormalizedCurvePointPayload};
     use mondrian_core::automation::{ParameterValueWrite, PropertyValue};
     use mondrian_core::{
         mask_data::{MaskComponent, MaskEvaluation, MASK_PROP_OPACITY},
@@ -580,56 +608,228 @@ mod tests {
         edit
     }
 
+    fn numeric_curve_fixture(
+        owner: TestOwner,
+    ) -> (
+        AppState,
+        ParameterCurveGestureTarget,
+        ParameterGestureEdit,
+        ParameterGestureEdit,
+    ) {
+        let (state, value_edit) = fixture(owner);
+        let (target, curve_edit) = match &value_edit {
+            ParameterGestureEdit::Clip(value) => {
+                let parameter = value.writes[0].parameter().clone();
+                (
+                    ParameterCurveGestureTarget::Clip {
+                        clip_id: value.clip_id,
+                        parameter: parameter.clone(),
+                    },
+                    ParameterGestureEdit::ClipCurve(ClipEditNumericCurvePayload {
+                        clip_id: value.clip_id,
+                        parameter,
+                        edit: ClipCurveEditPayload::Upsert {
+                            keyframe_id: None,
+                            point: ClipNormalizedCurvePointPayload {
+                                time_ratio: 0.5,
+                                value_ratio: 0.8,
+                            },
+                        },
+                    }),
+                )
+            }
+            ParameterGestureEdit::Effect(value) => {
+                let parameter = value.write.parameter().clone();
+                (
+                    ParameterCurveGestureTarget::Effect {
+                        clip_id: value.clip_id,
+                        effect_id: value.effect_id,
+                        parameter: parameter.clone(),
+                    },
+                    ParameterGestureEdit::EffectCurve(VisualEffectEditNumericCurvePayload {
+                        clip_id: value.clip_id,
+                        effect_id: value.effect_id,
+                        parameter,
+                        edit: ClipCurveEditPayload::Upsert {
+                            keyframe_id: None,
+                            point: ClipNormalizedCurvePointPayload {
+                                time_ratio: 0.5,
+                                value_ratio: 0.8,
+                            },
+                        },
+                    }),
+                )
+            }
+            _ => panic!("numeric fixture"),
+        };
+        (state, target, curve_edit, value_edit)
+    }
+
+    fn with_curve_payload(
+        mut edit: ParameterGestureEdit,
+        payload: super::super::product_action::ClipCurveEditPayload,
+    ) -> ParameterGestureEdit {
+        match &mut edit {
+            ParameterGestureEdit::ClipCurve(edit) => edit.edit = payload,
+            ParameterGestureEdit::EffectCurve(edit) => edit.edit = payload,
+            _ => panic!("visual numeric curve fixture"),
+        }
+        edit
+    }
+
+    fn curve_property(
+        state: &AppState,
+        target: &ParameterCurveGestureTarget,
+    ) -> mondrian_core::automation::AnimatedProperty {
+        match target {
+            ParameterCurveGestureTarget::Clip { clip_id, parameter } => state
+                .active_sequence()
+                .expect("Sequence")
+                .find_clip(*clip_id)
+                .expect("Clip")
+                .intrinsic_parameter_bag()
+                .property_by_address(parameter)
+                .expect("property")
+                .1
+                .clone(),
+            ParameterCurveGestureTarget::Effect { clip_id, effect_id, parameter } => state
+                .active_sequence()
+                .expect("Sequence")
+                .find_clip(*clip_id)
+                .expect("Clip")
+                .effects
+                .iter()
+                .find(|effect| effect.id == *effect_id)
+                .expect("Effect")
+                .properties
+                .property_by_address(parameter)
+                .expect("property")
+                .1
+                .clone(),
+            _ => panic!("visual curve fixture"),
+        }
+    }
+
+    #[test]
+    fn curve_origin_candidate_time_upserts_retain_each_distinct_key() {
+        for owner in [TestOwner::Clip, TestOwner::Effect] {
+            let (mut state, target, edit, _) = numeric_curve_fixture(owner);
+            let original = state.active_sequence().expect("origin").clone();
+            let id = AuthoringGestureId::new();
+            state
+                .dispatch_action(
+                    ParameterGestureAction::BeginCurve { gesture_id: id, target: target.clone() }
+                        .action(),
+                )
+                .expect("begin");
+            for ratio in [0.25, 0.75] {
+                state
+                    .dispatch_action(
+                        ParameterGestureAction::Update {
+                            gesture_id: id,
+                            edit: with_curve_payload(
+                                edit.clone(),
+                                ClipCurveEditPayload::Upsert {
+                                    keyframe_id: None,
+                                    point: ClipNormalizedCurvePointPayload {
+                                        time_ratio: ratio,
+                                        value_ratio: 0.8,
+                                    },
+                                },
+                            ),
+                        }
+                        .action(),
+                    )
+                    .expect("time-addressed insertion");
+            }
+            assert_eq!(
+                curve_property(&state, &target).keyframe_times(),
+                vec![
+                    TimelineTime::new(1, 4).expect("quarter"),
+                    TimelineTime::new(3, 4).expect("three quarters")
+                ],
+                "time-addressed inserts are cumulative author operations"
+            );
+            state
+                .dispatch_action(ParameterGestureAction::Finish { gesture_id: id }.action())
+                .expect("finish");
+            assert!(state.undo_timeline().expect("one Undo"));
+            assert!(state
+                .active_sequence()
+                .expect("restored")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(state.redo_timeline().expect("Redo"));
+            assert_eq!(curve_property(&state, &target).keyframe_times().len(), 2);
+        }
+    }
+
+    #[test]
+    fn curve_origin_candidate_move_admits_a_key_created_in_the_same_gesture() {
+        use crate::app::product_action::ClipCurveEditPayload;
+        for owner in [TestOwner::Clip, TestOwner::Effect] {
+            let (mut state, target, edit, _) = numeric_curve_fixture(owner);
+            let original = state.active_sequence().expect("origin").clone();
+            let id = AuthoringGestureId::new();
+            state
+                .dispatch_action(
+                    ParameterGestureAction::BeginCurve { gesture_id: id, target: target.clone() }
+                        .action(),
+                )
+                .expect("begin");
+            state
+                .dispatch_action(
+                    ParameterGestureAction::Update { gesture_id: id, edit: edit.clone() }.action(),
+                )
+                .expect("insert");
+            let key = curve_property(&state, &target)
+                .keyframe_at(TimelineTime::new(1, 2).expect("half"))
+                .expect("inserted key");
+            state
+                .dispatch_action(
+                    ParameterGestureAction::Update {
+                        gesture_id: id,
+                        edit: with_curve_payload(
+                            edit,
+                            ClipCurveEditPayload::Move {
+                                keyframe_id: key.id,
+                                time: Some(TimelineTime::new(3, 4).expect("new time")),
+                                value: None,
+                            },
+                        ),
+                    }
+                    .action(),
+                )
+                .expect("move a key created during this same interaction");
+            let property = curve_property(&state, &target);
+            assert_eq!(
+                property.keyframe_times(),
+                vec![TimelineTime::new(3, 4).expect("new time")]
+            );
+            let moved = property.keyframe_by_id(key.id).expect("retained identity");
+            assert_eq!(
+                moved.value, key.value,
+                "omitted value retains the current authored scalar"
+            );
+            state
+                .dispatch_action(ParameterGestureAction::Finish { gesture_id: id }.action())
+                .expect("finish");
+            assert!(state.undo_timeline().expect("Undo"));
+            assert!(state
+                .active_sequence()
+                .expect("restored")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(state.redo_timeline().expect("Redo"));
+            assert_eq!(
+                curve_property(&state, &target).keyframe_by_id(key.id).expect("stable Redo"),
+                moved
+            );
+        }
+    }
+
     #[test]
     fn deferred_numeric_curve_gestures_share_exact_owner_history_and_undo_redo() {
-        use crate::app::product_action::{ClipCurveEditPayload, ClipNormalizedCurvePointPayload};
         for owner in [TestOwner::Clip, TestOwner::Effect] {
-            let (mut state, value_edit) = fixture(owner);
-            let (target, curve_edit) = match &value_edit {
-                ParameterGestureEdit::Clip(value) => {
-                    let parameter = value.writes[0].parameter().clone();
-                    (
-                        ParameterCurveGestureTarget::Clip {
-                            clip_id: value.clip_id,
-                            parameter: parameter.clone(),
-                        },
-                        ParameterGestureEdit::ClipCurve(ClipEditNumericCurvePayload {
-                            clip_id: value.clip_id,
-                            parameter,
-                            edit: ClipCurveEditPayload::Upsert {
-                                keyframe_id: None,
-                                point: ClipNormalizedCurvePointPayload {
-                                    time_ratio: 0.5,
-                                    value_ratio: 0.8,
-                                },
-                            },
-                        }),
-                    )
-                }
-                ParameterGestureEdit::Effect(value) => {
-                    let parameter = value.write.parameter().clone();
-                    (
-                        ParameterCurveGestureTarget::Effect {
-                            clip_id: value.clip_id,
-                            effect_id: value.effect_id,
-                            parameter: parameter.clone(),
-                        },
-                        ParameterGestureEdit::EffectCurve(VisualEffectEditNumericCurvePayload {
-                            clip_id: value.clip_id,
-                            effect_id: value.effect_id,
-                            parameter,
-                            edit: ClipCurveEditPayload::Upsert {
-                                keyframe_id: None,
-                                point: ClipNormalizedCurvePointPayload {
-                                    time_ratio: 0.5,
-                                    value_ratio: 0.8,
-                                },
-                            },
-                        }),
-                    )
-                }
-                _ => panic!("numeric fixture"),
-            };
+            let (mut state, target, curve_edit, value_edit) = numeric_curve_fixture(owner);
             let original = state.active_sequence().expect("origin").clone();
             let before = state.authoring_history().expect("history").diagnostics();
             let id = AuthoringGestureId::new();

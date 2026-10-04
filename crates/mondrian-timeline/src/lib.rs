@@ -87,7 +87,7 @@ pub use insert_edit::{
     InsertEditPlacement, InsertEditRequest, InsertSplitOutcome, InsertTimelineStatePolicy,
     InsertTransitionPolicy,
 };
-pub use keyframe::{InterpolationType, Keyframe, KeyframeTrack};
+pub use keyframe::{InterpolationType, Keyframe};
 pub use overwrite_edit::{
     apply_overwrite_conflicts, apply_sequence_track_conflicts_for_focus_group,
     apply_track_conflicts_for_focus_group, resolve_track_conflicts, resolve_track_overlaps,
