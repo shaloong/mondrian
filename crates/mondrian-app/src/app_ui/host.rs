@@ -1225,13 +1225,10 @@ impl AppUiHost {
         if persistence_changed {
             let project_path_after_persistence =
                 self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
-            if project_path_after_persistence.is_some()
-                && project_path_after_persistence != project_path_before_persistence
+            if project_path_after_persistence != project_path_before_persistence
+                && let Some(path) = project_path_after_persistence
             {
-                if let Some(path) = project_path_after_persistence {
-                    self.record_recent_project(path);
-                }
-                self.refresh_recovery_candidates();
+                self.record_recent_project(path);
             }
         }
         let (project_close_changed, quit_requested) = self.poll_quiescing_project_close();
@@ -1809,11 +1806,13 @@ impl AppUiHost {
             }
             let current_project_path =
                 self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
-            if current_project_path.is_some() && current_project_path != previous_project_path {
-                if let Some(path) = current_project_path {
-                    self.record_recent_project(path);
-                }
-                self.refresh_recovery_candidates();
+            // Recovery choices are consumed by Welcome. Closing the Project
+            // refreshes them before returning there; Open and Save As do not
+            // need to scan every other Project's runtime while in Workspace.
+            if current_project_path != previous_project_path
+                && let Some(path) = current_project_path
+            {
+                self.record_recent_project(path);
             }
         } else if let Err(err) = &result {
             self.set_unreported_action_error_status(previous_status_hint, err);
@@ -4641,6 +4640,72 @@ mod tests {
         );
 
         cleanup_project_file(&project_file);
+        let _ = std::fs::remove_file(preferences_path);
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn host_returning_to_welcome_discovers_recovery_created_during_workspace() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let project_file = create_project_file("recovery-return-workspace");
+        let recovery_project = create_project_file("recovery-created-during-workspace");
+        let preferences_path = temp_preferences_path("recovery-return-preferences");
+        let mut host = AppUiHost::new_with_preferences_path(
+            AppState::new(),
+            AppUiPreferences::default(),
+            preferences_path.clone(),
+        );
+        let pending = PendingUiActions::default();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+        pending.push(
+            crate::app::ui_actions::app_shell_open_recent_project_action(
+                crate::app::ui_actions::AppShellOpenRecentProjectPayload {
+                    project_file: project_file.clone(),
+                },
+            ),
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert_eq!(host.mode(), AppUiMode::Workspace);
+
+        // Another Project can acquire recovery evidence while Welcome is hidden.
+        let mut autosave_state = AppState::new();
+        autosave_state
+            .open_project_file(recovery_project.clone())
+            .expect("recovery Project");
+        let sequence_id = autosave_state.active_sequence_id().expect("active Sequence");
+        autosave_state
+            .rename_sequence(sequence_id, "New Recovery Edit")
+            .expect("author edit");
+        let autosave_file = autosave_state.write_autosave_snapshot(2, 7).expect("autosave");
+
+        pending.push(Action::CloseProject);
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        if host.pending_close_action.is_some() {
+            pending.push(crate::app::ui_actions::app_shell_pending_close_discard_action());
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        }
+        assert!(!poll_host_until_project_close_finishes(&mut host));
+        host.refresh_if_dirty(bounds);
+        assert_eq!(host.mode(), AppUiMode::Startup);
+        assert!(
+            host.recovery_candidates
+                .iter()
+                .any(|candidate| candidate.autosave_file == autosave_file),
+            "Welcome must discover the newly created recovery candidate"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (state, ui_shutdown) = host.into_app_state_until(deadline);
+        assert!(ui_shutdown.all_resources_released(), "{ui_shutdown:#?}");
+        let app_shutdown = state.shutdown_for_endurance(deadline);
+        assert!(app_shutdown.all_resources_released(), "{app_shutdown:#?}");
+        let autosave_shutdown = autosave_state.shutdown_for_endurance(deadline);
+        assert!(
+            autosave_shutdown.all_resources_released(),
+            "{autosave_shutdown:#?}"
+        );
+        cleanup_project_file(&project_file);
+        cleanup_project_file(&recovery_project);
         let _ = std::fs::remove_file(preferences_path);
     }
 
