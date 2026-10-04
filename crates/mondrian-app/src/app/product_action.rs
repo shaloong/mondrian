@@ -2562,24 +2562,24 @@ pub struct ClipNormalizedCurvePointPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClipCurveEditPayload {
-    /// Move only the dimensions changed by an existing-key interaction.
+    /// Move supplied exact author coordinates of an existing complete key.
     Move {
         /// Existing complete key's stable identity.
         keyframe_id: KeyframeId,
-        /// Changed normalized time; `None` retains exact author time.
+        /// Absolute owner time; omission retains the current exact author time.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
-            deserialize_with = "mondrian_core::deserialize_present_finite_coordinate"
+            deserialize_with = "mondrian_core::deserialize_present_coordinate"
         )]
-        time_ratio: Option<f64>,
-        /// Changed normalized value; `None` retains exact author value.
+        time: Option<TimelineTime>,
+        /// Absolute typed author value; omission retains the current author value.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
-            deserialize_with = "mondrian_core::deserialize_present_finite_coordinate"
+            deserialize_with = "mondrian_core::deserialize_present_coordinate"
         )]
-        value_ratio: Option<f64>,
+        value: Option<mondrian_core::automation::PropertyValue>,
     },
     /// Insert a key, or edit one existing complete key.
     Upsert {

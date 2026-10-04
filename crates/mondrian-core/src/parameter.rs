@@ -117,7 +117,7 @@ pub struct ExactBezierHandleEdit {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_present_time_coordinate"
+        deserialize_with = "deserialize_present_coordinate"
     )]
     pub time_offset: Option<TimelineTime>,
     /// Replacement parameter offset, when the value axis changed.
@@ -148,13 +148,16 @@ where
     Ok(Some(value))
 }
 
-fn deserialize_present_time_coordinate<'de, D>(
-    deserializer: D,
-) -> Result<Option<TimelineTime>, D::Error>
+/// Decode a supplied typed coordinate without interpreting it as omission.
+///
+/// Use with Serde's `default` for absent fields. The coordinate type retains its
+/// normal admission rules; nonnullable author time and value types reject null.
+pub fn deserialize_present_coordinate<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
+    T: Deserialize<'de>,
 {
-    TimelineTime::deserialize(deserializer).map(Some)
+    T::deserialize(deserializer).map(Some)
 }
 
 /// Interpolation used from one keyframe to the following keyframe.

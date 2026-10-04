@@ -8292,12 +8292,13 @@ fn live_visual_curve_samples_equal_real_author_results() {
                         );
                     }
                 }
-                let mut preview_model = model.clone();
+                let mut preview_source = model.curve_source.clone();
                 if operation == 0 {
                     let intermediate =
                         CurveEdit::Move { index: 1, point: CurvePoint::new(0.55, 0.65) };
                     let predicted = property_panels::preview_numeric_curve_points(
-                        &mut preview_model,
+                        &model,
+                        &mut preview_source,
                         intermediate,
                     )
                     .unwrap();
@@ -8326,9 +8327,12 @@ fn live_visual_curve_samples_equal_real_author_results() {
                     },
                     _ => CurveEdit::Delete { index: 1 },
                 };
-                let display =
-                    property_panels::preview_numeric_curve_points(&mut preview_model, edit)
-                        .unwrap();
+                let display = property_panels::preview_numeric_curve_points(
+                    &model,
+                    &mut preview_source,
+                    edit,
+                )
+                .unwrap();
                 state
                     .dispatch_action(
                         inspector_curve_edit_action(Some(selection), &model, edit).unwrap(),
@@ -8346,6 +8350,100 @@ fn live_visual_curve_samples_equal_real_author_results() {
             }
         }
     }
+}
+
+#[test]
+fn live_visual_curve_return_to_origin_restores_exact_author_coordinates() {
+    use crate::app::parameter_gesture::{
+        ParameterCurveGestureTarget, ParameterGestureAction, ParameterGestureEdit,
+    };
+    use mondrian_core::automation::{Keyframe, PropertyMutation};
+    let mut sequence = mondrian_timeline::Sequence::new("Exact curve gesture origin");
+    let mut clip =
+        Clip::new_basic_title("Title", "Arial", TimelineTime::ZERO, TimelineTime::ONE).unwrap();
+    let clip_id = clip.id;
+    let key = Keyframe::linear(TimelineTime::new(1, 3).unwrap(), PropertyValue::Float(0.8));
+    let key_id = key.id;
+    clip.transform
+        .apply_property_mutation(PropertyMutation::SetKeyframe {
+            path: Transform2D::OPACITY_PATH.to_owned(),
+            keyframe: key.clone(),
+        })
+        .unwrap();
+    let selection = SelectedClipRef {
+        track_id: sequence.video_tracks[0].id,
+        is_video_track: true,
+        clip_id,
+    };
+    sequence.video_tracks[0].add_clip(clip).unwrap();
+    let mut state = crate::app::AppState::new();
+    state.test_set_sequence(Some(sequence));
+    state.select_clip_by_id(clip_id).unwrap();
+    let original = state.active_sequence().unwrap().clone();
+    let model = opacity_curve_model_for_clip(
+        state.active_sequence().unwrap().find_clip(clip_id).unwrap(),
+        TimelineTime::ZERO,
+    )
+    .unwrap();
+    let index = model
+        .keys
+        .iter()
+        .position(|candidate| candidate.keyframe_id == Some(key_id))
+        .unwrap();
+    let gesture_id = mondrian_core::AuthoringGestureId::new();
+    state
+        .dispatch_action(
+            ParameterGestureAction::BeginCurve {
+                gesture_id,
+                target: ParameterCurveGestureTarget::Clip {
+                    clip_id,
+                    parameter: model.property.clone(),
+                },
+            }
+            .action(),
+        )
+        .unwrap();
+    for point in [CurvePoint::new(0.6, 0.7), model.keys[index].point] {
+        let action =
+            inspector_curve_edit_action(Some(selection), &model, CurveEdit::Move { index, point })
+                .unwrap();
+        state
+            .dispatch_action(
+                ParameterGestureAction::Update {
+                    gesture_id,
+                    edit: ParameterGestureEdit::from_action(&action).unwrap(),
+                }
+                .action(),
+            )
+            .unwrap();
+    }
+    let restored = state
+        .active_sequence()
+        .unwrap()
+        .find_clip(clip_id)
+        .unwrap()
+        .transform
+        .to_property_bag()
+        .property(Transform2D::OPACITY_PATH)
+        .unwrap()
+        .keyframe_by_id(key_id)
+        .unwrap();
+    assert_eq!(
+        restored.time, key.time,
+        "returning to the grab point must restore the exact one-third-second author time"
+    );
+    assert_eq!(
+        restored.value, key.value,
+        "returning to the grab point must restore the original value"
+    );
+    state
+        .dispatch_action(ParameterGestureAction::Finish { gesture_id }.action())
+        .unwrap();
+    assert!(state.active_sequence().unwrap().author_state_eq_ignoring_revision(&original));
+    assert!(
+        !state.undo_timeline().unwrap(),
+        "a gesture returning to its origin must leave no Undo entry"
+    );
 }
 
 #[test]
@@ -8410,8 +8508,8 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
                 payload.edit,
                 ClipCurveEditPayload::Move {
                     keyframe_id,
-                    time_ratio: Some(f64::from(0.6_f32)),
-                    value_ratio: Some(f64::from(0.7_f32)),
+                    time: Some(TimelineTime::new(3, 5).unwrap()),
+                    value: Some(PropertyValue::Float(0.7)),
                 }
             );
         }

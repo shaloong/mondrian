@@ -2552,20 +2552,21 @@ fn numeric_curve_editor(
         })
         .collect();
     let display_points = model.display_points.clone();
-    let mut preview_model = model.clone();
+    let preview_model = model.clone();
+    let mut preview_source = preview_model.curve_source.clone();
     let mut preview_origin = None;
     let editor = CurveEditor::with_points(points)
         .with_preview_projection(move |event| match event {
             CurveGestureEvent::Begin(_) => {
-                preview_origin = Some(preview_model.curve_source.clone());
+                preview_origin = Some(preview_source.clone());
                 None
             }
             CurveGestureEvent::Edit { edit, .. } => {
-                preview_numeric_curve_points(&mut preview_model, edit)
+                preview_numeric_curve_points(&preview_model, &mut preview_source, edit)
             }
             CurveGestureEvent::Cancel(_) => {
                 if let Some(origin) = preview_origin.take() {
-                    preview_model.curve_source = origin;
+                    preview_source = origin;
                 }
                 None
             }
@@ -2607,13 +2608,12 @@ fn numeric_curve_editor(
 
 /// Derive graph samples through the same canonical preparation as the author action.
 pub(super) fn preview_numeric_curve_points(
-    model: &mut InspectorCurveModel,
+    model: &InspectorCurveModel,
+    source: &mut std::sync::Arc<mondrian_core::automation::AnimatedProperty>,
     edit: CurveEdit,
 ) -> Option<Vec<CurvePoint>> {
     let edit = numeric_curve_edit_payload(model, edit)?;
-    let property =
-        crate::app::preview_numeric_curve_edit(&model.curve_source, model.owner_range, &edit)
-            .ok()?;
+    let property = crate::app::preview_numeric_curve_edit(source, model.owner_range, &edit).ok()?;
     let display = (0..=128)
         .map(|index| {
             let time = model
@@ -2634,7 +2634,7 @@ pub(super) fn preview_numeric_curve_points(
             ))
         })
         .collect::<Option<Vec<_>>>()?;
-    model.curve_source = std::sync::Arc::new(property);
+    *source = std::sync::Arc::new(property);
     Some(display)
 }
 
@@ -2651,11 +2651,22 @@ fn numeric_curve_edit_payload(
             let key = model.keys.get(index)?;
             let projected = inspector_curve_point_payload(point);
             if let Some(keyframe_id) = key.keyframe_id {
-                ClipCurveEditPayload::Move {
-                    keyframe_id,
-                    time_ratio: (point.x != key.point.x).then_some(projected.time_ratio),
-                    value_ratio: (point.y != key.point.y).then_some(projected.value_ratio),
-                }
+                let time = if point.x == key.point.x {
+                    model.curve_source.keyframe_by_id(keyframe_id)?.time
+                } else {
+                    crate::app::numeric_curve_author_time(model.owner_range, projected.time_ratio)
+                        .ok()?
+                };
+                let value = if point.y == key.point.y {
+                    model.curve_source.keyframe_by_id(keyframe_id)?.value
+                } else {
+                    crate::app::numeric_curve_author_value(
+                        &model.curve_source,
+                        projected.value_ratio,
+                    )
+                    .ok()?
+                };
+                ClipCurveEditPayload::Move { keyframe_id, time: Some(time), value: Some(value) }
             } else {
                 ClipCurveEditPayload::Upsert { keyframe_id: None, point: projected }
             }

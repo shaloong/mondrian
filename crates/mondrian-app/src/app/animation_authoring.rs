@@ -1,6 +1,6 @@
 //! Stable-identity authoring for Clip-owned numeric automation.
 //!
-//! UI Adapters submit one normalized control-point intent. This module resolves
+//! UI Adapters submit normalized insertions or exact typed move targets. This module resolves
 //! the current property path and keyframe time from stable identities, prepares
 //! the smallest exact mutation set, and commits it through one Author
 //! Transaction. Widgets never replace an entire curve or infer author identity
@@ -47,10 +47,10 @@ pub enum ClipNumericCurveEdit {
     Move {
         /// Stable identity of the existing complete key.
         keyframe_id: KeyframeId,
-        /// Changed normalized time, or exact original time when absent.
-        time_ratio: Option<f64>,
-        /// Changed normalized value, or exact original value when absent.
-        value_ratio: Option<f64>,
+        /// Absolute owner time; absence retains the current exact time.
+        time: Option<TimelineTime>,
+        /// Absolute typed author value; absence retains the current value.
+        value: Option<PropertyValue>,
     },
     /// Insert a key, or edit the key with the supplied stable identity.
     Upsert {
@@ -497,38 +497,25 @@ fn prepare_property_curve_edit(
             };
             Ok(PreparedCurveEdit { mutations: vec![mutation], keyframe_id })
         }
-        ClipNumericCurveEdit::Move { keyframe_id, time_ratio, value_ratio } => {
-            NormalizedCurvePoint::new(time_ratio.unwrap_or(0.0), value_ratio.unwrap_or(0.0))?;
+        ClipNumericCurveEdit::Move { keyframe_id, time, value } => {
             let keyframe = property.keyframe_by_id(keyframe_id).ok_or_else(|| {
                 curve_error(format!(
                     "keyframe {keyframe_id} is stale or is not a complete key"
                 ))
             })?;
-            let target_time = time_ratio
-                .map(|ratio| curve_time(range, ratio))
-                .transpose()?
-                .unwrap_or(keyframe.time);
-            let target_value = value_ratio
-                .map(|ratio| {
-                    let value = numeric
-                        .soft_range
-                        .value_at_normalized_position(ratio)
-                        .ok_or_else(|| curve_error("invalid normalized value coordinate"))?;
-                    curve_value(value_type, value)
-                })
-                .transpose()?
-                .unwrap_or(keyframe.value);
+            if let Some(time) = time {
+                let end = range.start.checked_add(range.duration)?;
+                if time < range.start || time > end {
+                    return Err(curve_error("curve move time is outside the owner interval"));
+                }
+            }
+            let target_time = time.unwrap_or(keyframe.time);
+            let target_value = value.unwrap_or(keyframe.value);
             prepare_key_position_edit(property, path, Some(keyframe_id), target_time, target_value)
         }
         ClipNumericCurveEdit::Upsert { keyframe_id, point } => {
-            let target_time = curve_time(range, point.time_ratio)?;
-            let target_value = curve_value(
-                value_type,
-                numeric
-                    .soft_range
-                    .value_at_normalized_position(point.value_ratio)
-                    .ok_or_else(|| curve_error("invalid normalized value coordinate"))?,
-            )?;
+            let target_time = numeric_curve_author_time(range, point.time_ratio)?;
+            let target_value = numeric_curve_author_value(property, point.value_ratio)?;
 
             prepare_key_position_edit(property, path, keyframe_id, target_time, target_value)
         }
@@ -596,13 +583,38 @@ fn schema_interpolation(interpolation: InterpolationType) -> ParameterInterpolat
     }
 }
 
-fn curve_time(range: mondrian_core::TimelineTimeRange, ratio: f64) -> Result<TimelineTime> {
+/// Map a changed viewport time through the canonical owner interval.
+pub(crate) fn numeric_curve_author_time(
+    range: mondrian_core::TimelineTimeRange,
+    ratio: f64,
+) -> Result<TimelineTime> {
+    NormalizedCurvePoint::new(ratio, 0.0)?;
     let ratio = TimelineTime::from_f64_quantized(ratio, CURVE_QUANTIZATION_DENOMINATOR)?;
     let scale = TimeScale::try_from(ratio)?;
     range
         .start
         .checked_add(range.duration.checked_scale(scale)?)
         .map_err(Into::into)
+}
+
+/// Map a changed viewport value through the numeric schema and declared author type.
+pub(crate) fn numeric_curve_author_value(
+    property: &mondrian_core::automation::AnimatedProperty,
+    ratio: f64,
+) -> Result<PropertyValue> {
+    NormalizedCurvePoint::new(0.0, ratio)?;
+    let numeric = property
+        .descriptor
+        .schema
+        .numeric
+        .as_ref()
+        .and_then(|contracts| contracts.first())
+        .ok_or_else(|| curve_error("curve parameter has no numeric editor range"))?;
+    let value = numeric
+        .soft_range
+        .value_at_normalized_position(ratio)
+        .ok_or_else(|| curve_error("invalid normalized value coordinate"))?;
+    curve_value(property.value_type(), value)
 }
 
 fn curve_value(value_type: PropertyValueType, value: f64) -> Result<PropertyValue> {
@@ -1192,15 +1204,26 @@ mod tests {
         let history = state.authoring_history().expect("history").diagnostics();
         for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             for invalid_time in [true, false] {
-                let action = clip_edit_numeric_curve_action(ClipEditNumericCurvePayload {
+                let mut action = clip_edit_numeric_curve_action(ClipEditNumericCurvePayload {
                     clip_id: selection.clip_id,
                     parameter: address.clone(),
                     edit: ClipCurveEditPayload::Move {
                         keyframe_id,
-                        time_ratio: Some(if invalid_time { invalid } else { 0.75 }),
-                        value_ratio: Some(if invalid_time { 0.75 } else { invalid }),
+                        time: Some(TimelineTime::new(1, 2).expect("valid owner time")),
+                        value: Some(PropertyValue::Float(if invalid_time {
+                            0.75
+                        } else {
+                            invalid as f32
+                        })),
                     },
                 });
+                if invalid_time {
+                    let mondrian_editor_state::Action::Custom { payload, .. } = &mut action else {
+                        panic!("typed curve action");
+                    };
+                    payload["edit"]["time"] =
+                        serde_json::to_value(invalid).expect("invalid supplied wire coordinate");
+                }
                 assert!(state.dispatch_action(action).is_err(),
                     "A supplied invalid axis must not be decoded as omission while the other axis commits");
                 assert!(state
@@ -1243,25 +1266,32 @@ mod tests {
                 .edit_clip_numeric_curve(
                     selection.clip_id,
                     address.clone(),
-                    ClipNumericCurveEdit::Move { keyframe_id, time_ratio: None, value_ratio: None }
+                    ClipNumericCurveEdit::Move { keyframe_id, time: None, value: None }
                 )
                 .expect("unchanged move")
                 .changed
         );
+        for invalid in [TimelineTime::new(-1, 10).unwrap(), TimelineTime::ONE] {
+            state
+                .edit_clip_numeric_curve(
+                    selection.clip_id,
+                    address.clone(),
+                    ClipNumericCurveEdit::Move { keyframe_id, time: Some(invalid), value: None },
+                )
+                .expect_err("time outside the owner interval rejects");
+        }
         for invalid in [f64::NAN, f64::INFINITY, -0.1, 1.1] {
-            for horizontal in [true, false] {
-                state
-                    .edit_clip_numeric_curve(
-                        selection.clip_id,
-                        address.clone(),
-                        ClipNumericCurveEdit::Move {
-                            keyframe_id,
-                            time_ratio: horizontal.then_some(invalid),
-                            value_ratio: (!horizontal).then_some(invalid),
-                        },
-                    )
-                    .expect_err("invalid changed axis rejects");
-            }
+            state
+                .edit_clip_numeric_curve(
+                    selection.clip_id,
+                    address.clone(),
+                    ClipNumericCurveEdit::Move {
+                        keyframe_id,
+                        time: None,
+                        value: Some(PropertyValue::Float(invalid as f32)),
+                    },
+                )
+                .expect_err("invalid supplied numeric value rejects");
         }
         state
             .edit_clip_numeric_curve(
@@ -1269,8 +1299,8 @@ mod tests {
                 address,
                 ClipNumericCurveEdit::Move {
                     keyframe_id: KeyframeId::new(),
-                    time_ratio: None,
-                    value_ratio: Some(0.5),
+                    time: None,
+                    value: Some(PropertyValue::Float(0.5)),
                 },
             )
             .expect_err("stale key rejects");

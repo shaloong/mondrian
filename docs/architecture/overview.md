@@ -615,3 +615,5 @@ This admission repair does not yet converge normalized visual controls with
 absolute numeric audio controls or implement temporal handle UI/live preview.
 
 Explicit visual Bezier and ContinuousBezier preset selection retains controls on both temporal sides, including currently unconnected endpoint sides. Existing Bezier controls survive the mode change. Later key insertion therefore preserves the selected segment intent instead of producing an unintended single-sided Ease preset. This is canonical author state and round-trips with stable key identity.
+
+Sparse typed-coordinate decoding distinguishes absent fields from supplied values through deserialize_present_coordinate. TimelineTime and PropertyValue retain their own nonnullable admission; explicit null cannot silently become a missing axis. Exact Bezier time edits and App canonical curve Move actions share this seam. Floating handle coordinates still use the finite-coordinate decoder. App Move targets retain rational time and declared scalar value types, with owner interval and property schema admission before author publication.

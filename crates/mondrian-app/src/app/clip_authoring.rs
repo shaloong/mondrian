@@ -248,13 +248,11 @@ pub(super) fn numeric_curve_edit_from_payload(
     edit: &ClipCurveEditPayload,
 ) -> Result<ClipNumericCurveEdit> {
     match edit {
-        ClipCurveEditPayload::Move { keyframe_id, time_ratio, value_ratio } => {
-            Ok(ClipNumericCurveEdit::Move {
-                keyframe_id: *keyframe_id,
-                time_ratio: *time_ratio,
-                value_ratio: *value_ratio,
-            })
-        }
+        ClipCurveEditPayload::Move { keyframe_id, time, value } => Ok(ClipNumericCurveEdit::Move {
+            keyframe_id: *keyframe_id,
+            time: *time,
+            value: value.clone(),
+        }),
         ClipCurveEditPayload::Upsert { keyframe_id, point } => Ok(ClipNumericCurveEdit::Upsert {
             keyframe_id: *keyframe_id,
             point: NormalizedCurvePoint::new(point.time_ratio, point.value_ratio)?,
