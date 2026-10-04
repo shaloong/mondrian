@@ -3250,3 +3250,5 @@ Visual value adapters call the Core value-write seam without a Vec2 handle
 argument. Handles remain typed author geometry, edited through the separate
 Core mutation; value input retains stored control precision. The Inspector test
 caller follows this same API, without an unused optional override.
+
+Audio automation curves treat unauthored viewport endpoints as value-editable boundaries. A vertical boundary drag inserts a canonical key at the fixed owner time through the same author action as other curve edits; an unchanged boundary creates no automation. Existing keys retain stable identity and unchanged exact coordinates. Endpoint acceptance covers author-session Undo/Redo and a real Unicode .mdp archive with a SQLite library, followed by fresh projection from the reopened document.

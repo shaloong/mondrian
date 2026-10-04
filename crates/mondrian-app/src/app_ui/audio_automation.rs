@@ -30,7 +30,7 @@ pub(crate) struct AudioAutomationViewport {
     pub(crate) range: TimelineTimeRange,
 }
 
-/// One editable key or read-only boundary anchor in a normalized viewport.
+/// One authored key or virtual boundary that becomes a key when its value is edited.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AudioAutomationCurveKeyModel {
     pub(crate) keyframe: Option<ExactAutomationKeyframe>,
@@ -302,13 +302,25 @@ pub(crate) fn audio_automation_curve_edit_action(
         }
         CurveEdit::Move { index, point } => {
             let key = model.keys.get(index)?;
-            let mut keyframe = key.keyframe.clone()?;
-            if point.x != key.point.x {
-                keyframe.time = denormalized_time(model.viewport.range, point.x)?;
-            }
-            if point.y != key.point.y {
-                keyframe.value = denormalized_value(model, point.y)?;
-            }
+            let keyframe = if let Some(keyframe) = &key.keyframe {
+                let mut keyframe = keyframe.clone();
+                if point.x != key.point.x {
+                    keyframe.time = denormalized_time(model.viewport.range, point.x)?;
+                }
+                if point.y != key.point.y {
+                    keyframe.value = denormalized_value(model, point.y)?;
+                }
+                keyframe
+            } else {
+                if point.y == key.point.y {
+                    return None;
+                }
+                let time = denormalized_time(model.viewport.range, key.point.x)?;
+                let value = denormalized_value(model, point.y)?;
+                let mut keyframe = ExactAutomationKeyframe::linear(time, value);
+                keyframe.interpolation_to_next = model.insert_interpolation;
+                keyframe
+            };
             AudioAutomationEdit::UpsertKeyframe { keyframe }
         }
         CurveEdit::Delete { index } => AudioAutomationEdit::RemoveKeyframe {
@@ -495,6 +507,94 @@ mod tests {
                 .active_sequence()
                 .expect("Redo state")
                 .author_state_eq_ignoring_revision(&after));
+        }
+    }
+
+    #[test]
+    fn dragging_virtual_audio_boundaries_authors_real_endpoint_keys() {
+        for index in [0, 1] {
+            let sequence = Sequence::new("Boundary automation");
+            let target = AudioAutomationTarget::ChannelFader {
+                owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+            };
+            let viewport = AudioAutomationViewport {
+                domain: AuthoringTimeDomain::Sequence(sequence.id),
+                range: TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE).unwrap(),
+            };
+            let model = project_audio_automation(&sequence, target.clone(), viewport).unwrap();
+            assert_eq!(model.keys.len(), 2);
+            assert!(model.keys[index].keyframe.is_none());
+            assert!(
+                audio_automation_curve_edit_action(
+                    &model,
+                    CurveEdit::Move { index, point: model.keys[index].point },
+                )
+                .is_none(),
+                "an unchanged virtual boundary must not create automation"
+            );
+            let point = CurvePoint::new(model.keys[index].point.x, 0.25);
+            let action =
+                audio_automation_curve_edit_action(&model, CurveEdit::Move { index, point })
+                    .expect(
+                        "boundary drag must author a key, not leave an uncommitted widget point",
+                    );
+            let Some(ProductAction::Audio(AudioProductAction::EditAutomation(request))) =
+                ProductAction::decode_external(&action).unwrap()
+            else {
+                panic!("expected canonical audio author action");
+            };
+            let AudioAutomationEdit::UpsertKeyframe { keyframe } = &request.edit else {
+                panic!("expected boundary key insertion");
+            };
+            let id = keyframe.id;
+            assert_eq!(
+                keyframe.time,
+                if index == 0 {
+                    TimelineTime::ZERO
+                } else {
+                    TimelineTime::ONE
+                }
+            );
+            let before = sequence.clone();
+            let mut state = crate::app::AppState::new();
+            state.test_set_sequence(Some(sequence));
+            state.dispatch_action(action).expect("canonical endpoint transaction");
+            let committed = state.active_sequence().unwrap().clone();
+            assert!(state.undo_timeline().unwrap());
+            assert!(state.active_sequence().unwrap().author_state_eq_ignoring_revision(&before));
+            assert!(state.redo_timeline().unwrap());
+            assert!(state.active_sequence().unwrap().author_state_eq_ignoring_revision(&committed));
+            let directory = std::env::temp_dir()
+                .join(format!("mondrian-audio-boundary-{}", uuid::Uuid::new_v4()));
+            let library = mondrian_assets::AssetLibrary::open(directory.join("library")).unwrap();
+            let archive = directory.join("音频 端点.mdp");
+            let document = mondrian_project::ProjectDocument::new(
+                "Boundary automation",
+                mondrian_timeline::SequenceCollection::new(committed),
+                mondrian_core::ProjectColorEnvironment::default(),
+                mondrian_timeline::SequenceSettings::default(),
+                mondrian_core::ProjectSettings::default(),
+            );
+            mondrian_project::save_project_archive(&document, &library.database_path(), &archive)
+                .unwrap();
+            let reopened =
+                mondrian_project::load_project_archive(&archive, &directory.join("reopened.db"))
+                    .unwrap();
+            assert_eq!(reopened.document, document);
+            let after = project_audio_automation(
+                &reopened.document.sequences.sequences[0],
+                target,
+                viewport,
+            )
+            .unwrap();
+            let authored = after
+                .keys
+                .iter()
+                .find(|key| key.keyframe.as_ref().is_some_and(|key| key.id == id))
+                .unwrap();
+            assert_eq!(authored.point, point);
+            drop(library);
+            std::fs::remove_dir_all(directory).unwrap();
         }
     }
 
