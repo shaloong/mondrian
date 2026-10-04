@@ -116,7 +116,7 @@ pub enum AutomationSegmentInterpolation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ExactAutomationTangentMode {
-    /// Preserve explicitly authored handles, including legacy curves.
+    /// Preserve independently authored handles.
     #[default]
     Manual,
     /// Recompute monotone tangents when neighboring keys move or change.
@@ -140,8 +140,7 @@ pub struct ExactAutomationKeyframe {
     pub in_handle: Option<ExactBezierHandle>,
     /// Outgoing Bezier handle used by this segment.
     pub out_handle: Option<ExactBezierHandle>,
-    /// Sticky tangent constraint; absent in older project files means manual.
-    #[serde(default)]
+    /// Explicit persistent constraint on the authored handles.
     pub tangent_mode: ExactAutomationTangentMode,
 }
 
@@ -273,11 +272,17 @@ impl ExactAutomationCurve {
                 return Err(AutomationError::UnsupportedInterpolationPreset);
             }
         };
+        let previous_mode = candidate.keyframes[index].tangent_mode;
         candidate.keyframes[index].interpolation_to_next = segment;
         candidate.keyframes[index].tangent_mode = mode;
         if mode != ExactAutomationTangentMode::Manual && index > 0 {
             candidate.keyframes[index - 1].interpolation_to_next =
                 AutomationSegmentInterpolation::Bezier;
+        }
+        if mode == ExactAutomationTangentMode::Continuous
+            && previous_mode != ExactAutomationTangentMode::Continuous
+        {
+            candidate.initialize_continuous_constraint(index);
         }
         candidate.normalize_constrained_tangents()?;
         candidate.validate()?;
@@ -304,11 +309,106 @@ impl ExactAutomationCurve {
             if self.keyframes[index].tangent_mode == ExactAutomationTangentMode::Manual {
                 continue;
             }
+            if self.keyframes[index].tangent_mode == ExactAutomationTangentMode::Continuous {
+                self.normalize_continuous_handles(index)?;
+                continue;
+            }
             let (incoming, outgoing) = self.constrained_handles(index)?;
             self.keyframes[index].in_handle = incoming;
             self.keyframes[index].out_handle = outgoing;
         }
         Ok(())
+    }
+
+    fn normalize_continuous_handles(&mut self, index: usize) -> Result<(), AutomationError> {
+        let current = &self.keyframes[index];
+        let previous = index.checked_sub(1).map(|position| &self.keyframes[position]);
+        let next = self.keyframes.get(index + 1);
+        let needs_incoming = previous.is_some() && current.in_handle.is_none();
+        let needs_outgoing = next.is_some() && current.out_handle.is_none();
+        let (mut incoming, mut outgoing) = (current.in_handle, current.out_handle);
+        if needs_incoming || needs_outgoing {
+            let authored = incoming.or(outgoing).filter(|handle| !handle.time_offset.is_zero());
+            let slope = if let Some(handle) = authored {
+                let span = handle.time_offset.to_f64();
+                let slope = handle.value_offset / span;
+                if slope.is_finite() {
+                    ConstrainedSlope { value: slope, value_scale: 1.0 }
+                } else {
+                    ConstrainedSlope {
+                        value: handle.value_offset.signum() / span,
+                        value_scale: handle.value_offset.abs(),
+                    }
+                }
+            } else {
+                constrained_slope(
+                    ExactAutomationTangentMode::Continuous,
+                    previous,
+                    current,
+                    next,
+                )?
+            };
+            if needs_incoming {
+                incoming = previous
+                    .map(|key| tangent_handle(key.time, current.time, slope, true))
+                    .transpose()?;
+            }
+            if needs_outgoing {
+                outgoing = next
+                    .map(|key| tangent_handle(current.time, key.time, slope, false))
+                    .transpose()?;
+            }
+        }
+        incoming = match previous {
+            Some(key) => incoming
+                .map(|handle| {
+                    bound_continuous_handle(handle, current.time.checked_sub(key.time)?, true)
+                })
+                .transpose()?,
+            None => None,
+        };
+        outgoing = match next {
+            Some(key) => outgoing
+                .map(|handle| {
+                    bound_continuous_handle(handle, key.time.checked_sub(current.time)?, false)
+                })
+                .transpose()?,
+            None => None,
+        };
+        self.keyframes[index].in_handle = incoming;
+        self.keyframes[index].out_handle = outgoing;
+        Ok(())
+    }
+
+    fn initialize_continuous_constraint(&mut self, index: usize) {
+        let key = &mut self.keyframes[index];
+        if continuous_handles_are_collinear(key.in_handle, key.out_handle) {
+            return;
+        }
+        let handles = [key.in_handle, key.out_handle];
+        let scale = handles
+            .iter()
+            .flatten()
+            .map(|handle| handle.value_offset.abs())
+            .fold(0.0_f64, f64::max);
+        let (sum, count) = handles
+            .iter()
+            .flatten()
+            .filter(|handle| !handle.time_offset.is_zero())
+            .fold((0.0, 0_u32), |(sum, count), handle| {
+                (
+                    sum + (handle.value_offset / scale) / handle.time_offset.to_f64(),
+                    count + 1,
+                )
+            });
+        let slope = if count == 0 {
+            0.0
+        } else {
+            sum / f64::from(count)
+        };
+        for handle in [&mut key.in_handle, &mut key.out_handle].into_iter().flatten() {
+            handle.value_offset = (slope * handle.time_offset.to_f64()) * scale;
+        }
     }
 
     fn constrained_handles(
@@ -355,9 +455,18 @@ impl ExactAutomationCurve {
             {
                 return Err(AutomationError::InvalidConstrainedTangent);
             }
-            let (incoming, outgoing) = self.constrained_handles(index)?;
-            if keyframe.in_handle != incoming || keyframe.out_handle != outgoing {
-                return Err(AutomationError::InvalidConstrainedTangent);
+            if keyframe.tangent_mode == ExactAutomationTangentMode::Continuous {
+                if (index > 0 && keyframe.in_handle.is_none())
+                    || (index + 1 < self.keyframes.len() && keyframe.out_handle.is_none())
+                    || !continuous_handles_are_collinear(keyframe.in_handle, keyframe.out_handle)
+                {
+                    return Err(AutomationError::InvalidConstrainedTangent);
+                }
+            } else {
+                let (incoming, outgoing) = self.constrained_handles(index)?;
+                if keyframe.in_handle != incoming || keyframe.out_handle != outgoing {
+                    return Err(AutomationError::InvalidConstrainedTangent);
+                }
             }
         }
         Ok(())
@@ -527,6 +636,58 @@ pub enum AutomationError {
     /// Exact-time arithmetic failed.
     #[error(transparent)]
     Time(#[from] TimelineTimeError),
+}
+
+fn bound_continuous_handle(
+    handle: ExactBezierHandle,
+    duration: TimelineTime,
+    incoming: bool,
+) -> Result<ExactBezierHandle, AutomationError> {
+    let magnitude = if incoming {
+        handle.time_offset.checked_scale(TimeScale::NEGATIVE_ONE)?
+    } else {
+        handle.time_offset
+    };
+    if magnitude <= duration {
+        return Ok(handle);
+    }
+    let time_offset = if incoming {
+        duration.checked_scale(TimeScale::NEGATIVE_ONE)?
+    } else {
+        duration
+    };
+    Ok(ExactBezierHandle {
+        time_offset,
+        value_offset: handle.value_offset * (duration.to_f64() / magnitude.to_f64()),
+    })
+}
+
+fn continuous_handles_are_collinear(
+    incoming: Option<ExactBezierHandle>,
+    outgoing: Option<ExactBezierHandle>,
+) -> bool {
+    let (Some(incoming), Some(outgoing)) = (incoming, outgoing) else {
+        return true;
+    };
+    let incoming_time = incoming.time_offset.to_f64();
+    let outgoing_time = outgoing.time_offset.to_f64();
+    let time_scale = incoming_time.abs().max(outgoing_time.abs());
+    let value_scale = incoming.value_offset.abs().max(outgoing.value_offset.abs());
+    if value_scale == 0.0 {
+        return true;
+    }
+    let incoming_value = incoming.value_offset / value_scale;
+    let outgoing_value = outgoing.value_offset / value_scale;
+    if time_scale == 0.0 {
+        return incoming_value * outgoing_value <= 0.0;
+    }
+    let incoming_time = incoming_time / time_scale;
+    let outgoing_time = outgoing_time / time_scale;
+    let left = incoming_time * outgoing_value;
+    let right = outgoing_time * incoming_value;
+    let tolerance = 64.0 * f64::EPSILON * left.abs().max(right.abs());
+    (left - right).abs() <= tolerance
+        && incoming_time * outgoing_time + incoming_value * outgoing_value <= 0.0
 }
 
 fn validate_keyframe(keyframe: &ExactAutomationKeyframe) -> Result<(), AutomationError> {
@@ -947,7 +1108,208 @@ mod tests {
     }
 
     #[test]
-    fn continuous_tangent_stays_collinear_and_legacy_keys_remain_manual() {
+    fn continuous_tangent_extraction_bounds_length_without_changing_direction() {
+        let mut curve = ExactAutomationCurve::new(
+            ParameterId::new_static("test.audio.continuous.extract"),
+            0.0,
+        )
+        .expect("curve");
+        let middle = ExactAutomationKeyframe::linear(TimelineTime::ONE, 2.0);
+        for key in [
+            ExactAutomationKeyframe::linear(TimelineTime::ZERO, 0.0),
+            middle.clone(),
+            ExactAutomationKeyframe::linear(TimelineTime::new(3, 1).expect("last time"), 3.0),
+        ] {
+            curve.set_keyframe(key).expect("key");
+        }
+        curve
+            .set_keyframe_interpolation(middle.id, InterpolationType::ContinuousBezier)
+            .expect("mode");
+        let mut edited = curve.keyframes[1].clone();
+        edited.in_handle = Some(ExactBezierHandle {
+            time_offset: TimelineTime::new(-1, 5).expect("in length"),
+            value_offset: -0.8,
+        });
+        edited.out_handle = Some(ExactBezierHandle {
+            time_offset: TimelineTime::new(2, 5).expect("out length"),
+            value_offset: 1.6,
+        });
+        curve.set_keyframe(edited.clone()).expect("authored handles");
+        curve
+            .extract_time_range(
+                TimelineTimeRange::new(
+                    TimelineTime::new(11, 10).expect("cut start"),
+                    TimelineTime::new(19, 10).expect("cut duration"),
+                )
+                .expect("cut range"),
+            )
+            .expect("atomic extraction");
+        let actual = &curve.keyframes[1];
+        assert_eq!(actual.id, middle.id);
+        assert_eq!(actual.in_handle, edited.in_handle);
+        assert_eq!(
+            actual.out_handle,
+            Some(ExactBezierHandle {
+                time_offset: TimelineTime::new(1, 10).expect("bounded length"),
+                value_offset: 0.4,
+            })
+        );
+        assert_eq!(curve.validate(), Ok(()));
+        let encoded = serde_json::to_string(&curve).expect("encode");
+        let restored: ExactAutomationCurve =
+            serde_json::from_str(&encoded).expect("current schema");
+        assert_eq!(restored, curve);
+        assert_eq!(restored.validate(), Ok(()));
+        for numerator in 0..=22 {
+            let time = TimelineTime::new(numerator, 20).expect("sample");
+            assert_eq!(restored.evaluate(time), curve.evaluate(time));
+        }
+    }
+
+    #[test]
+    fn continuous_tangent_missing_partner_retains_authored_direction() {
+        let mut curve = ExactAutomationCurve::new(
+            ParameterId::new_static("test.audio.continuous.partner"),
+            0.0,
+        )
+        .expect("curve");
+        let mut middle = ExactAutomationKeyframe::linear(TimelineTime::ONE, 2.0);
+        middle.tangent_mode = ExactAutomationTangentMode::Continuous;
+        middle.interpolation_to_next = AutomationSegmentInterpolation::Bezier;
+        middle.out_handle = Some(ExactBezierHandle {
+            time_offset: TimelineTime::new(2, 5).expect("out length"),
+            value_offset: 1.6,
+        });
+        for key in [
+            ExactAutomationKeyframe::linear(TimelineTime::ZERO, 0.0),
+            ExactAutomationKeyframe::linear(TimelineTime::new(3, 1).expect("last time"), 3.0),
+            middle.clone(),
+        ] {
+            curve.set_keyframe(key).expect("key");
+        }
+        let actual = &curve.keyframes[1];
+        assert_eq!(actual.out_handle, middle.out_handle);
+        let incoming = actual.in_handle.expect("filled partner");
+        assert!(
+            (incoming.value_offset / incoming.time_offset.to_f64() - 4.0).abs()
+                <= 32.0 * f64::EPSILON
+        );
+        assert_eq!(curve.validate(), Ok(()));
+    }
+
+    #[test]
+    fn continuous_mode_converts_broken_manual_tangents_without_losing_lengths() {
+        let mut curve = ExactAutomationCurve::new(
+            ParameterId::new_static("test.audio.continuous.convert"),
+            0.0,
+        )
+        .expect("curve");
+        let mut middle = ExactAutomationKeyframe::linear(TimelineTime::ONE, 2.0);
+        middle.interpolation_to_next = AutomationSegmentInterpolation::Bezier;
+        middle.in_handle = Some(ExactBezierHandle {
+            time_offset: TimelineTime::new(-1, 5).expect("in length"),
+            value_offset: -0.4,
+        });
+        middle.out_handle = Some(ExactBezierHandle {
+            time_offset: TimelineTime::new(2, 5).expect("out length"),
+            value_offset: 1.6,
+        });
+        for key in [
+            ExactAutomationKeyframe::linear(TimelineTime::ZERO, 0.0),
+            middle.clone(),
+            ExactAutomationKeyframe::linear(TimelineTime::new(3, 1).expect("last time"), 3.0),
+        ] {
+            curve.set_keyframe(key).expect("key");
+        }
+        assert_eq!(
+            curve.set_keyframe_interpolation(middle.id, InterpolationType::ContinuousBezier),
+            Ok(()),
+            "Mode conversion must establish the constraint on valid manual handles"
+        );
+        let actual = &curve.keyframes[1];
+        assert_eq!(
+            actual.in_handle.expect("incoming").time_offset,
+            middle.in_handle.expect("authored incoming").time_offset
+        );
+        assert_eq!(
+            actual.out_handle.expect("outgoing").time_offset,
+            middle.out_handle.expect("authored outgoing").time_offset
+        );
+        assert_eq!(curve.validate(), Ok(()));
+    }
+
+    #[test]
+    fn continuous_tangent_rejects_noncollinear_replacement_atomically() {
+        let mut curve = ExactAutomationCurve::new(
+            ParameterId::new_static("test.audio.continuous.invalid"),
+            0.0,
+        )
+        .expect("curve");
+        let middle = ExactAutomationKeyframe::linear(TimelineTime::ONE, 2.0);
+        for key in [
+            ExactAutomationKeyframe::linear(TimelineTime::ZERO, 0.0),
+            middle.clone(),
+            ExactAutomationKeyframe::linear(TimelineTime::new(3, 1).expect("last time"), 3.0),
+        ] {
+            curve.set_keyframe(key).expect("key");
+        }
+        curve
+            .set_keyframe_interpolation(middle.id, InterpolationType::ContinuousBezier)
+            .expect("mode");
+        let before = curve.clone();
+        let mut invalid = curve.keyframes[1].clone();
+        invalid.out_handle.as_mut().expect("out").value_offset *= 2.0;
+        assert_eq!(
+            curve.set_keyframe(invalid),
+            Err(AutomationError::InvalidConstrainedTangent)
+        );
+        assert_eq!(curve, before);
+    }
+
+    #[test]
+    fn continuous_keyframe_requires_explicit_current_tangent_mode() {
+        let key = ExactAutomationKeyframe::linear(TimelineTime::ONE, 1.0);
+        let mut encoded = serde_json::to_value(key).expect("encode");
+        encoded.as_object_mut().expect("object").remove("tangent_mode");
+        assert!(serde_json::from_value::<ExactAutomationKeyframe>(encoded).is_err(),
+            "Alpha project keys must express their current constraint rather than admit an old schema");
+    }
+
+    #[test]
+    fn continuous_tangent_preserves_manually_authored_collinear_handles() {
+        let mut curve = ExactAutomationCurve::new(
+            ParameterId::new_static("test.audio.continuous.authored"),
+            0.0,
+        )
+        .expect("curve");
+        let middle = ExactAutomationKeyframe::linear(TimelineTime::ONE, 2.0);
+        for key in [
+            ExactAutomationKeyframe::linear(TimelineTime::ZERO, 0.0),
+            middle.clone(),
+            ExactAutomationKeyframe::linear(TimelineTime::new(3, 1).expect("last time"), 3.0),
+        ] {
+            curve.set_keyframe(key).expect("key");
+        }
+        curve
+            .set_keyframe_interpolation(middle.id, InterpolationType::ContinuousBezier)
+            .expect("continuous mode");
+        let mut edited = curve.keyframes[1].clone();
+        edited.in_handle = Some(ExactBezierHandle {
+            time_offset: TimelineTime::new(-1, 5).expect("incoming length"),
+            value_offset: -0.8,
+        });
+        edited.out_handle = Some(ExactBezierHandle {
+            time_offset: TimelineTime::new(2, 5).expect("outgoing length"),
+            value_offset: 1.6,
+        });
+        curve.set_keyframe(edited.clone()).expect("valid collinear author edit");
+        assert_eq!(curve.keyframes[1], edited,
+            "Continuous mode must retain the author's slope and independent handle lengths rather than recalculate Auto tangents");
+        assert_eq!(curve.validate(), Ok(()));
+    }
+
+    #[test]
+    fn continuous_tangent_stays_collinear() {
         let mut curve =
             ExactAutomationCurve::new(ParameterId::new_static("test.audio.continuous"), 0.0)
                 .expect("curve");
@@ -966,12 +1328,6 @@ mod tests {
         let incoming_slope = incoming.value_offset / incoming.time_offset.to_f64();
         let outgoing_slope = outgoing.value_offset / outgoing.time_offset.to_f64();
         assert!((incoming_slope - outgoing_slope).abs() < 1.0e-10);
-
-        let mut legacy = serde_json::to_value(selected).expect("serialize keyframe");
-        legacy.as_object_mut().expect("object").remove("tangent_mode");
-        let restored: ExactAutomationKeyframe =
-            serde_json::from_value(legacy).expect("deserialize legacy keyframe");
-        assert_eq!(restored.tangent_mode, ExactAutomationTangentMode::Manual);
     }
 
     #[test]

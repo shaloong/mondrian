@@ -43,6 +43,16 @@ endpoint tangents; exact one-third time handles bypass inversion. Regression
 coverage includes ordinary one-third Double evaluation, translated 48 kHz spans
 and the legal `x=t^3, y=t` endpoint case.
 
+Exact automation distinguishes automatic tangent derivation from continuous
+authored geometry. Auto regenerates its canonical handles from neighboring
+secants. Continuous retains a valid authored slope and independent handle time
+lengths; entering the mode aligns existing broken manual tangents, missing
+partners inherit the authored direction, and shortened editorial segments bound
+handles along that direction. Validation checks scaled collinearity and opposing
+orientation rather than requiring Continuous to equal Auto-derived handles.
+Invalid replacements remain atomic. Current alpha keys explicitly serialize
+their tangent mode; no missing-field fallback admits an older curve schema.
+
 Core owns the shared `ParameterValueWrite` algebra: complete typed values or
 sparse numeric components at a stable `AnimationParameterAddress`. Clip, Effect
 and Mask adapters supply exact owner-local time to `PropertyBag::prepare_parameter_write`;
