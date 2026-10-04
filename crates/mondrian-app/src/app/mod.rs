@@ -239,6 +239,7 @@ mod preview_worker_lifecycle;
 pub mod product_action;
 mod project_library_generation;
 mod project_lifecycle;
+mod project_open;
 mod project_packaging;
 #[cfg(any(test, feature = "validation"))]
 pub use project_lifecycle::PreparedEnduranceProjectFixture;
@@ -443,6 +444,7 @@ pub struct AppState {
     /// While present, the Authoring Session remains readable for projection,
     /// but no new product Action may mutate or enqueue work against it.
     pending_project_close: Option<project_lifecycle::PendingProjectClose>,
+    pending_project_open: Option<project_lifecycle::PendingProjectOpen>,
     /// Fail-closed lifecycle fault after a quiescence protocol violation.
     /// The in-memory Project is retained for diagnosis; mutation and further
     /// persistence remain disabled because worker ownership is unproven.
@@ -651,6 +653,7 @@ impl AppState {
             project_persistence: ProjectPersistenceService::new(),
             portable_package_export: None,
             pending_project_close: None,
+            pending_project_open: None,
             project_close_fault: None,
             manual_project_file_destination: None,
             manual_project_file_applied_request: None,

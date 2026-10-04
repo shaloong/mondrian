@@ -1171,7 +1171,13 @@ impl AppUiHost {
             Some(&window_preview_snapshot),
             Some(self.waveform_service.source()),
         );
-        TreeWalker::layout(self.active_root_mut(), bounds);
+        // `bounds` belongs to the currently active native Window. A mode
+        // transition replaces that Window; its publication lays out this root
+        // once using the replacement's actual bounds. Laying out Workspace in
+        // Welcome bounds here is both stale geometry and duplicate work.
+        if !mode_changed {
+            TreeWalker::layout(self.active_root_mut(), bounds);
+        }
     }
 
     pub fn has_transient_interaction(&self) -> bool {
@@ -1207,6 +1213,7 @@ impl AppUiHost {
         let project_path_before_persistence =
             self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
         let persistence_changed = self.app_state.borrow_mut().poll_project_persistence();
+        let project_open_changed = self.app_state.borrow_mut().poll_project_open().is_some();
         let native_audio_catalog_changed =
             self.app_state.borrow_mut().poll_native_audio_catalog_restore();
         let openfx_catalog_changed = self.app_state.borrow_mut().poll_openfx_catalog();
@@ -1225,7 +1232,7 @@ impl AppUiHost {
                     .set_status_hint(format!("插件已安装，但无法保存重启恢复信息：{error}"), true);
             }
         }
-        if persistence_changed {
+        if persistence_changed || project_open_changed {
             let project_path_after_persistence =
                 self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
             if project_path_after_persistence != project_path_before_persistence
@@ -1238,7 +1245,7 @@ impl AppUiHost {
         // A quiescing Project remains readable for UI projection, but no
         // Project-scoped worker result may commit while its Session admission
         // is frozen. Final close invalidates their generations in one place.
-        let project_execution_frozen = self.app_state.borrow().project_close_blocks_actions();
+        let project_execution_frozen = self.app_state.borrow().project_lifecycle_blocks_actions();
         let (
             media_imports_changed,
             media_asset_mutations_changed,
@@ -1276,6 +1283,7 @@ impl AppUiHost {
         let full_model_changed = native_audio_catalog_changed
             || openfx_catalog_changed
             || persistence_changed
+            || project_open_changed
             || project_close_changed
             || media_imports_changed
             || media_asset_mutations_changed
@@ -1363,7 +1371,9 @@ impl AppUiHost {
     pub(crate) fn next_execution_resource_observation_deadline(&self) -> Instant {
         let resource_deadline =
             self.app_state.borrow().next_execution_resource_observation_deadline();
-        let resource_deadline = if self.quiescing_close_action.is_some() {
+        let resource_deadline = if self.quiescing_close_action.is_some()
+            || self.app_state.borrow().has_pending_project_open()
+        {
             resource_deadline.min(Instant::now() + Duration::from_millis(16))
         } else {
             resource_deadline
@@ -1468,6 +1478,7 @@ impl AppUiHost {
         platform: &dyn PlatformService,
     ) -> AppUiShellCommands {
         let mut commands = AppUiShellCommands::default();
+        let window_mode = self.mode;
         let actions = pending_actions.take_all();
         if actions.is_empty() {
             self.refresh_if_dirty(bounds);
@@ -1563,7 +1574,7 @@ impl AppUiHost {
         }
 
         self.refresh_if_dirty(bounds);
-        if needs_layout {
+        if needs_layout && self.mode == window_mode {
             TreeWalker::layout(self.active_root_mut(), bounds);
         }
         commands
@@ -4175,6 +4186,10 @@ mod tests {
 
         assert_eq!(commands, AppUiShellCommands::default());
         assert_eq!(host.mode(), AppUiMode::Workspace);
+        assert!(host.viewer_presentation_geometry().is_none());
+        let workspace_bounds = Rect::new(0.0, 0.0, 1408.0, 736.0);
+        TreeWalker::layout(host.active_root_mut(), workspace_bounds);
+        assert!(host.viewer_presentation_geometry().is_some());
         assert!(!host.startup.has_modal());
         assert!(host.app_state().has_open_project());
         assert_eq!(
@@ -4609,7 +4624,20 @@ mod tests {
             host.drain_pending_actions(&pending, Rect::new(0.0, 0.0, 1280.0, 720.0), &platform);
 
         assert_eq!(commands, AppUiShellCommands::default());
+        assert_eq!(host.mode(), AppUiMode::Startup);
+        assert!(host.app_state().has_pending_project_open());
+        poll_host_background_tasks_until(&mut host, "verified Project installation", |state| {
+            !state.has_pending_project_open()
+        });
         assert_eq!(host.mode(), AppUiMode::Workspace);
+        assert!(
+            !host.root().hit_test(Point::new(10.0, 10.0)),
+            "Open must not lay out Workspace in the retired Welcome bounds"
+        );
+        let workspace_bounds = Rect::new(0.0, 0.0, 1408.0, 736.0);
+        TreeWalker::layout(host.active_root_mut(), workspace_bounds);
+        assert!(host.root().hit_test(Point::new(1400.0, 730.0)));
+        assert!(host.viewer_presentation_geometry().is_some());
         assert_eq!(
             host.app_state().current_project_path(),
             Some(project_file.as_path())
@@ -4649,6 +4677,11 @@ mod tests {
             ),
         );
         host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert_eq!(host.mode(), AppUiMode::Startup);
+        assert!(host.app_state().has_pending_project_open());
+        poll_host_background_tasks_until(&mut host, "verified Project installation", |state| {
+            !state.has_pending_project_open()
+        });
         assert_eq!(host.mode(), AppUiMode::Workspace);
 
         // Another Project can acquire recovery evidence while Welcome is hidden.
@@ -4721,6 +4754,11 @@ mod tests {
         );
 
         assert_eq!(commands, AppUiShellCommands::default());
+        assert_eq!(host.mode(), AppUiMode::Startup);
+        assert!(host.app_state().has_pending_project_open());
+        poll_host_background_tasks_until(&mut host, "verified Project installation", |state| {
+            !state.has_pending_project_open()
+        });
         assert_eq!(host.mode(), AppUiMode::Workspace);
         assert_eq!(
             host.app_state().current_project_path(),

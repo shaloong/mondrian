@@ -4,6 +4,7 @@
 //! SQLite backup, and atomically publishes an `.mdp` archive on a dedicated
 //! worker. Window and command Adapters only submit intent and poll completions.
 
+use super::project_open::{PreparedProductProjectOpen, ProjectOpenPreparation, ProjectOpenTicket};
 use super::project_recovery::{
     prepare_recovery_archive_target, publish_recovery_point, RecoveryManifestPublicationFailure,
     RecoveryPointPublication,
@@ -510,8 +511,17 @@ struct ProjectPersistenceBarrierAcknowledgement {
     admission_generation: ProjectPersistenceGeneration,
 }
 
+struct ProjectOpenRequest {
+    preparation: ProjectOpenPreparation,
+    cancelled: Arc<AtomicBool>,
+    result_tx: SyncSender<Result<PreparedProductProjectOpen, String>>,
+    #[cfg(test)]
+    worker_gate: Option<TestPersistenceWorkerGate>,
+}
+
 enum ProjectPersistenceWorkerMessage {
     Request(Box<ProjectPersistenceRequest>),
+    PrepareOpen(ProjectOpenRequest),
     Barrier(ProjectPersistenceBarrier),
     Shutdown,
 }
@@ -609,6 +619,41 @@ impl ProjectPersistenceService {
             #[cfg(test)]
             next_worker_io_failure: None,
         }
+    }
+
+    /// Prepare a validated candidate on the same bounded FIFO as durable saves.
+    /// No Authoring Session or UI authority crosses the worker boundary.
+    pub(super) fn prepare_open(
+        &mut self,
+        preparation: ProjectOpenPreparation,
+    ) -> Result<ProjectOpenTicket, String> {
+        if self.shutdown_requested {
+            return Err("Project persistence admission is shut down".to_owned());
+        }
+        if let Some(error) = &self.startup_error {
+            return Err(error.clone());
+        }
+        self.reserve_request_queue_slot()?;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (result_tx, result_rx) = mpsc::sync_channel(1);
+        let request = ProjectOpenRequest {
+            preparation,
+            cancelled: Arc::clone(&cancelled),
+            result_tx,
+            #[cfg(test)]
+            worker_gate: self.next_request_gate.take(),
+        };
+        self.pending.fetch_add(1, Ordering::AcqRel);
+        if self
+            .worker_tx
+            .send(ProjectPersistenceWorkerMessage::PrepareOpen(request))
+            .is_err()
+        {
+            self.queued.fetch_sub(1, Ordering::AcqRel);
+            self.pending.fetch_sub(1, Ordering::AcqRel);
+            return Err("Project preparation worker is unavailable".to_owned());
+        }
+        Ok(ProjectOpenTicket { result_rx, cancelled })
     }
 
     /// Submit an immutable save request without waiting for filesystem I/O.
@@ -1283,6 +1328,25 @@ fn persistence_worker(
                 }
                 pending.fetch_sub(1, Ordering::AcqRel);
                 let _ = completion_tx.send(completion);
+            }
+            ProjectPersistenceWorkerMessage::PrepareOpen(request) => {
+                queued.fetch_sub(1, Ordering::AcqRel);
+                #[cfg(test)]
+                if let Some(gate) = request.worker_gate {
+                    gate.wait();
+                }
+                let result = request
+                    .preparation
+                    .prepare(&request.cancelled)
+                    .map_err(|error| format!("{error:#}"));
+                if result.is_err() && !request.cancelled.load(Ordering::Acquire) {
+                    saturating_atomic_add(&cumulative_failures, 1);
+                }
+                // The App's pending-open ticket accounts for an uninstalled
+                // candidate held by the result channel. Worker work ends only
+                // after preparation, publication, or failed-delivery rollback.
+                let _ = request.result_tx.send(result);
+                pending.fetch_sub(1, Ordering::AcqRel);
             }
             ProjectPersistenceWorkerMessage::Barrier(barrier) => {
                 let acknowledgement = ProjectPersistenceBarrierAcknowledgement {

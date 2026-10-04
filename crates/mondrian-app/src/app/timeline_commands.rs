@@ -485,7 +485,7 @@ impl AppState {
     }
 
     pub fn close_project(&mut self) -> anyhow::Result<()> {
-        if self.project_close_blocks_actions() {
+        if self.project_lifecycle_blocks_actions() {
             anyhow::bail!("Project close is already active or fail-closed");
         }
         self.stop().map_err(|error| anyhow::anyhow!(error.to_string()))?;

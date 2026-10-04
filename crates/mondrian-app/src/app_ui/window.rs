@@ -8958,7 +8958,9 @@ fn publish_active_window_session(
 ) -> Result<(), mondrian_playback::PlaybackError> {
     // These are the only Host-visible candidate mutations. Callers first place
     // an activated GPU generation in an outer active-session owner so a panic
-    // here cannot strand it in a temporary candidate Drop.
+    // here cannot strand it in a temporary candidate Drop. A mode transition
+    // projects the new root without laying it out in the retired Window; only
+    // these actual activated Window bounds may establish its geometry.
     TreeWalker::layout(host.active_root_mut(), bounds);
     host.set_display_output_snapshot(session.display_snapshot.as_ref());
     host.clear_viewer_cpu_fallback();

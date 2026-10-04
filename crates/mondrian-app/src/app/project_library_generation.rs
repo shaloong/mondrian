@@ -176,6 +176,13 @@ pub(super) fn retained_project_runtime_lease(
         .find_map(|generation| generation.reusable_lease(project_id, runtime_root))
 }
 
+/// Capture lease capabilities for a worker preparation without cloning author state.
+pub(super) fn retained_runtime_leases(
+    retired: &[RetiredProjectLibraryGeneration],
+) -> impl Iterator<Item = Arc<ProjectRuntimeLease>> + '_ {
+    retired.iter().map(|generation| Arc::clone(&generation.lease))
+}
+
 /// Remove retired generations whose final strong `AssetLibrary` reference is gone.
 pub(super) fn collect_retired_project_libraries(
     retired: &mut Vec<RetiredProjectLibraryGeneration>,

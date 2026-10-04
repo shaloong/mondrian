@@ -121,6 +121,18 @@ requests. Candidate failure resumes the exact paused generation; success
 retires it. Completions bind Session ID, request ID, persistence generation, and
 scalar lease identity without retaining Library or Lease ownership.
 
+Interactive Open is a non-blocking App-owned handoff. The same bounded
+persistence FIFO prepares the archive, runtime lease, and uninstalled Library
+candidate outside the UI thread, after the exact source Session's save barrier.
+The old Session stays readable while author actions and Project-scoped result
+publication are frozen. Only App creates and installs the replacement Session;
+queue admission is never successful-open evidence. Headless acceptance waits
+for that same product intent's typed terminal result. Close/Quit cancels an Open
+candidate, consumes its actual preparation result and rollback, then retires
+the already-quiesced source Session under the original shutdown deadline. The
+pending App ticket accounts for candidate ownership even after worker execution
+ends, and consuming shutdown records its release explicitly.
+
 Manual publication additionally binds one Session-scoped destination revision.
 Save As advances it only after queue admission, and later ordinary Save reuses
 that destination while publication is in flight. A stale destination,
