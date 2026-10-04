@@ -5958,6 +5958,15 @@ fn steady_prefetch_reserves_immediate_picture_then_cold_source_transition() {
 
 #[test]
 fn cold_activation_does_not_restart_a_shared_source_before_its_near_prefix_is_resident() {
+    assert_cold_activation_cursor_coverage(false);
+}
+
+#[test]
+fn cold_activation_keeps_a_held_sample_until_its_last_timeline_use() {
+    assert_cold_activation_cursor_coverage(true);
+}
+
+fn assert_cold_activation_cursor_coverage(hold_old_sample: bool) {
     let (mut state, root) = state_with_sequential_invalid_video_assets();
     let overlay_path = root.join("overlay.mp4");
     std::fs::write(&overlay_path, b"invalid fixture").expect("fixture");
@@ -5969,9 +5978,14 @@ fn cold_activation_does_not_restart_a_shared_source_before_its_near_prefix_is_re
     let mut sequence = state.active_sequence().expect("sequence").clone();
     let tb = sequence.time_base();
     for position in [0, 48] {
-        sequence.video_tracks[1]
-            .add_clip(Clip::new(overlay, tt(position, tb), tt(48, tb)).expect("overlay"))
-            .expect("insert overlay");
+        let mut clip = Clip::new(overlay, tt(position, tb), tt(48, tb)).expect("overlay");
+        if hold_old_sample && position == 0 {
+            clip.replace_source_time_map(mondrian_timeline::ClipSourceTimeMap::hold(
+                mondrian_core::SourceSampleTarget::covering(tt(24, tb)),
+            ))
+            .expect("hold old cursor sample");
+        }
+        sequence.video_tracks[1].add_clip(clip).expect("insert overlay");
     }
     state.test_set_sequence(Some(sequence));
     state.play().expect("play");
@@ -6071,7 +6085,82 @@ fn cold_activation_does_not_restart_a_shared_source_before_its_near_prefix_is_re
     let retained = service.future_media_window.borrow().diagnostics();
     assert_eq!(retained.retained_cold_activation_frame, Some(48));
     assert_eq!(retained.retained_cold_activation_media_frames, 2);
-    assert_eq!(retained.retained_cold_preparation_media_frames, window);
+    assert_eq!(
+        retained.retained_cold_preparation_media_frames,
+        if hold_old_sample { 1 } else { window }
+    );
+    assert_eq!(
+        service.future_media_window.borrow_mut().cold_activation(current + 2, 96),
+        Some(Some(48))
+    );
+    assert_eq!(
+        service
+            .future_media_window
+            .borrow()
+            .diagnostics()
+            .retained_cold_preparation_media_frames,
+        if hold_old_sample { 1 } else { window - 1 },
+        "release only samples whose last Timeline use has been consumed"
+    );
+    if hold_old_sample {
+        assert_eq!(
+            service.future_media_window.borrow_mut().cold_activation(47, 96),
+            Some(Some(48))
+        );
+        service.frame_store.borrow_mut().reconfigure(PreviewFrameStoreAdapterConfig {
+            media_entry_capacity: 3,
+            media_byte_budget: 640 * 1024 * 1024,
+            media_resource_unit_budget: 4,
+            current_media_working_set_entry_limit: 8,
+            current_media_working_set_byte_limit: 640 * 1024 * 1024,
+            current_media_working_set_resource_unit_limit: 8,
+            viewer_entry_capacity: 4,
+            viewer_byte_budget: 1_024,
+            failure_entry_capacity: 6,
+        });
+        assert!(service.frame_store.borrow_mut().media_frame(last).is_some());
+        assert_eq!(
+            service.frame_store.borrow().media_prefetch_headroom().entries,
+            0,
+            "the held old picture and both activation inputs still own all three slots"
+        );
+    } else {
+        let continuation = future_media_prefix_keys_for_state(&service, &state, 48, 1, resolution);
+        assert_eq!(
+            continuation.len(),
+            2,
+            "the next picture needs both new samples"
+        );
+        assert_eq!(
+            service.future_media_window.borrow_mut().cold_activation(current + 3, 96),
+            Some(Some(48))
+        );
+        service.frame_store.borrow_mut().reconfigure(PreviewFrameStoreAdapterConfig {
+            media_entry_capacity: window + 2,
+            media_byte_budget: 640 * 1024 * 1024,
+            media_resource_unit_budget: 4,
+            current_media_working_set_entry_limit: window + 2,
+            current_media_working_set_byte_limit: 640 * 1024 * 1024,
+            current_media_working_set_resource_unit_limit: 8,
+            viewer_entry_capacity: 4,
+            viewer_byte_budget: 1_024,
+            failure_entry_capacity: 6,
+        });
+        for key in continuation {
+            assert!(admit_test_media_frame(
+                &mut service.frame_store.borrow_mut(),
+                key,
+                test_media_frame(7),
+                MediaPreviewRequestPriority::Prefetch,
+            ));
+        }
+        assert!(near
+            .iter()
+            .filter(|key| key.asset_id == overlay)
+            .skip(2)
+            .chain(activation.iter())
+            .all(|key| service.frame_store.borrow_mut().media_frame(key).is_some()));
+    }
     assert_eq!(
         service.future_media_window.borrow_mut().cold_activation(48, 96),
         None

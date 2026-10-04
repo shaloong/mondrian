@@ -149,11 +149,18 @@ struct FutureMediaColdActivationMemo {
 
 struct FutureMediaColdActivationResidency {
     activation_frame: i64,
-    frames: Vec<MediaPreviewFrame>,
+    frames: Vec<FutureMediaResidentFrame>,
     preparation_guards: Vec<(MediaPreviewKey, MediaPreviewFrame)>,
-    source_coverage_guards: Vec<MediaPreviewFrame>,
-    cursor_coverage_guards: Vec<MediaPreviewFrame>,
+    source_coverage_guards: Vec<FutureMediaResidentFrame>,
+    cursor_coverage_guards: Vec<FutureMediaResidentFrame>,
     preparation_work_keys: Vec<MediaPreviewKey>,
+}
+
+struct FutureMediaResidentFrame {
+    key: MediaPreviewKey,
+    /// Last accepted forward Timeline coordinate using this physical sample.
+    through_frame: i64,
+    _frame: MediaPreviewFrame,
 }
 
 #[derive(Clone, Copy)]
@@ -281,6 +288,16 @@ impl FutureMediaWindowCache {
         horizon_frame: i64,
     ) -> Option<Option<i64>> {
         let memo = self.cold_activation?;
+        if let Some(residency) = self.cold_activation_residency.as_mut() {
+            // A prepared restart has moved the decoder cursor. Keep every
+            // still-needed old sample, including repeated uses at unlike
+            // source/Timeline cadences, but release coverage already consumed
+            // by the authoritative current coordinate. GPU submissions retain
+            // their own input leases until actual completion.
+            residency
+                .cursor_coverage_guards
+                .retain(|guard| guard.through_frame >= current_frame);
+        }
         match memo.activation_frame {
             // Once the distinct source owns its exact residency, crossing the
             // ordinary prefetch-window edge must not turn that one activation
@@ -312,7 +329,7 @@ impl FutureMediaWindowCache {
     fn retain_cold_activation_residency(
         &mut self,
         activation_frame: i64,
-        frames: Vec<MediaPreviewFrame>,
+        frames: Vec<FutureMediaResidentFrame>,
     ) {
         if frames.is_empty()
             || self.cold_activation.and_then(|memo| memo.activation_frame) != Some(activation_frame)
@@ -339,8 +356,8 @@ impl FutureMediaWindowCache {
         &mut self,
         activation_frame: i64,
         preparation_guards: Vec<(MediaPreviewKey, MediaPreviewFrame)>,
-        source_coverage_guards: Vec<MediaPreviewFrame>,
-        cursor_coverage_guards: Vec<MediaPreviewFrame>,
+        source_coverage_guards: Vec<FutureMediaResidentFrame>,
+        cursor_coverage_guards: Vec<FutureMediaResidentFrame>,
         preparation_work_keys: Vec<MediaPreviewKey>,
     ) {
         if (preparation_guards.is_empty()
@@ -621,7 +638,7 @@ struct FutureMediaPrefixPlan {
     first_media_frame: Option<Arc<[PlannedFutureMediaRequest]>>,
     /// Physical guards that keep accepted near-term resident frames non-evictable
     /// until every planned missing request has transferred into Broker ownership.
-    resident_guards: Vec<MediaPreviewFrame>,
+    resident_guards: Vec<FutureMediaResidentFrame>,
     requests: Vec<PlannedFutureMediaRequest>,
     ready_media_frames: usize,
     preservable_media_frames: usize,
@@ -636,24 +653,21 @@ impl FutureMediaPrefixPlan {
         &mut self,
         nearest: &[PlannedFutureMediaRequest],
         resident_keys: &mut HashSet<MediaPreviewKey>,
-        resident_recency_order: &mut Vec<MediaPreviewKey>,
     ) {
         // The closest complete picture and the candidate missing picture
         // retain their complete resident closures. Intermediate inputs on
         // another owner stay ordinary evictable Store entries. The cold
         // owner's separate source coverage will acquire its own exact guards.
-        debug_assert_eq!(self.resident_guards.len(), resident_recency_order.len());
         let guards = std::mem::take(&mut self.resident_guards);
-        let keys = std::mem::take(resident_recency_order);
         resident_keys.clear();
-        for (guard, key) in guards.into_iter().zip(keys) {
+        for guard in guards {
+            let key = &guard.key;
             let closest = self
                 .first_media_frame
                 .as_ref()
-                .is_some_and(|requests| requests.iter().any(|request| request.key == key));
-            if closest || nearest.iter().any(|request| request.key == key) {
+                .is_some_and(|requests| requests.iter().any(|request| request.key == *key));
+            if closest || nearest.iter().any(|request| request.key == *key) {
                 resident_keys.insert(key.clone());
-                resident_recency_order.push(key);
                 self.resident_guards.push(guard);
             }
         }
@@ -1906,7 +1920,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let mut plan = FutureMediaPrefixPlan::default();
         let mut accepted_keys = self.scheduler.pending_keys().into_iter().collect::<HashSet<_>>();
         let mut resident_keys = HashSet::new();
-        let mut resident_recency_order = Vec::new();
         let mut ready_prefix = true;
         let mut remaining_jobs = max_new_jobs;
         let runtime_scale = snapshot.transport().runtime_scale();
@@ -1969,11 +1982,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 plan.first_media_frame = Some(Arc::clone(&requests));
             }
             if matches!(scope, FutureMediaPrefixScope::FirstMissingFrame) {
-                plan.retain_frontier_guards(
-                    &requests,
-                    &mut resident_keys,
-                    &mut resident_recency_order,
-                );
+                plan.retain_frontier_guards(&requests, &mut resident_keys);
             }
 
             let mut trial_resident_guards = Vec::new();
@@ -2039,9 +2048,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 // can consume any of its grant.
                 break;
             }
+            for guard in &mut plan.resident_guards {
+                if requests.iter().any(|request| request.key == guard.key) {
+                    guard.through_frame = guard.through_frame.max(frame);
+                }
+            }
             for (key, guard) in trial_resident_guards {
-                resident_recency_order.push(key);
-                plan.resident_guards.push(guard);
+                plan.resident_guards.push(FutureMediaResidentFrame {
+                    key,
+                    through_frame: frame,
+                    _frame: guard,
+                });
             }
             for request in missing {
                 accepted_keys.insert(request.key.clone());
@@ -2060,13 +2077,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         if matches!(scope, FutureMediaPrefixScope::FirstMissingFrame) && ready_prefix {
             // With no missing picture, only the closest complete closure is
             // needed here; source coverage protects the blocked worker's inputs.
-            plan.retain_frontier_guards(&[], &mut resident_keys, &mut resident_recency_order);
+            plan.retain_frontier_guards(&[], &mut resident_keys);
         }
         // Near-to-far lookup necessarily touches the Store LRU in the wrong
         // direction. Re-touch the accepted prefix far-to-near so later
         // pressure prefers the nearest complete dependency closure.
-        for key in resident_recency_order.iter().rev() {
-            let _ = self.frame_store.borrow_mut().media_frame(key);
+        for guard in plan.resident_guards.iter().rev() {
+            let _ = self.frame_store.borrow_mut().media_frame(&guard.key);
         }
         plan
     }
