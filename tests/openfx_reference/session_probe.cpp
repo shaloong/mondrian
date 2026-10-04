@@ -121,6 +121,28 @@ OfxStatus compoundCalculus(OfxParamHandle parameter, bool integral, double start
 }
 template<class T, int N>
 bool compoundSuite(OfxParamHandle parameter, const CompoundParameter& definition, bool creating, bool rendering, double time) {
+  if (mode() == "compound_constant_animatable" || mode() == "compound_frame_sample") {
+    const bool sampled = mode() == "compound_frame_sample";
+    unsigned int keys = 999;
+    const auto countStatus = gParamHost->paramGetNumKeys(parameter, &keys);
+    if (sampled ? countStatus != kOfxStatErrMissingHostFeature || keys != 999
+                : countStatus != kOfxStatOK || keys != 0) { return false; }
+    for (unsigned int key : {0U, 1U, std::numeric_limits<unsigned int>::max()}) {
+      double keyTime = -999;
+      if (gParamHost->paramGetKeyTime(parameter, key, &keyTime) !=
+          (sampled ? kOfxStatErrMissingHostFeature : kOfxStatErrBadIndex) || keyTime != -999) { return false; }
+    }
+    for (int direction : {-2, -1, 0, 1, 2}) {
+      int keyIndex = 999;
+      const auto status = gParamHost->paramGetKeyIndex(parameter, time, direction, &keyIndex);
+      if (sampled ? status != kOfxStatErrMissingHostFeature || keyIndex != 999
+                  : status != kOfxStatFailed || keyIndex != -1) { return false; }
+    }
+    for (double invalid : {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
+      int keyIndex = 999;
+      if (gParamHost->paramGetKeyIndex(parameter, invalid, 0, &keyIndex) != kOfxStatErrValue || keyIndex != 999) { return false; }
+    }
+  }
   std::array<double, 4> saved{};
   if (readCompound<T, N>(parameter, rendering, time, saved) != kOfxStatOK ||
       (creating && saved != definition.defaults)) { return false; }

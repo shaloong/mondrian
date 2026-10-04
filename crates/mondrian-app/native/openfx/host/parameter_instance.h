@@ -7,6 +7,29 @@
 
 namespace MondrianOpenFx {
 
+  OfxStatus parameterKeyCount(const FilterEffectInstance& effect, const std::string& name, unsigned int& count);
+  OfxStatus parameterKeyTime(const FilterEffectInstance& effect, const std::string& name);
+  OfxStatus parameterKeyIndex(const FilterEffectInstance& effect, const std::string& name, OfxTime time, int& index);
+
+  // Read-only key queries share the same binding authority as value queries.
+  template<class SdkInstance>
+  class ParameterQueryInstance : public SdkInstance {
+  protected:
+    FilterEffectInstance* _effect;
+  public:
+    ParameterQueryInstance(OFX::Host::Param::Descriptor& descriptor, FilterEffectInstance* effect)
+        : SdkInstance(descriptor, effect), _effect(effect) {}
+    OfxStatus getNumKeys(unsigned int& count) const override {
+      return parameterKeyCount(*_effect, this->getName(), count);
+    }
+    OfxStatus getKeyTime(int, OfxTime&) const override {
+      return parameterKeyTime(*_effect, this->getName());
+    }
+    OfxStatus getKeyIndex(OfxTime time, int, int& index) const override {
+      return parameterKeyIndex(*_effect, this->getName(), time, index);
+    }
+  };
+
   class PushbuttonParameter : public OFX::Host::Param::PushbuttonInstance {
   protected:
     FilterEffectInstance*   _effect;
@@ -15,9 +38,8 @@ namespace MondrianOpenFx {
     PushbuttonParameter(FilterEffectInstance* effect, const std::string& name, OFX::Host::Param::Descriptor& descriptor);
   };
 
-  class IntegerParameter : public OFX::Host::Param::IntegerInstance {
+  class IntegerParameter : public ParameterQueryInstance<OFX::Host::Param::IntegerInstance> {
   protected:
-    FilterEffectInstance*   _effect;
     OFX::Host::Param::Descriptor& _descriptor;
     int _value;
   public:
@@ -28,9 +50,8 @@ namespace MondrianOpenFx {
     OfxStatus set(OfxTime time, int);
   };
 
-  class DoubleParameter : public OFX::Host::Param::DoubleInstance {
+  class DoubleParameter : public ParameterQueryInstance<OFX::Host::Param::DoubleInstance> {
   protected:
-    FilterEffectInstance*   _effect;
     OFX::Host::Param::Descriptor& _descriptor;
     double _value;
   public:
@@ -43,9 +64,8 @@ namespace MondrianOpenFx {
     OfxStatus integrate(OfxTime time1, OfxTime time2, double&);
   };
 
-  class BooleanParameter : public OFX::Host::Param::BooleanInstance {
+  class BooleanParameter : public ParameterQueryInstance<OFX::Host::Param::BooleanInstance> {
   protected:
-    FilterEffectInstance*   _effect;
     OFX::Host::Param::Descriptor& _descriptor;
     bool _value;
   public:
@@ -56,9 +76,8 @@ namespace MondrianOpenFx {
     OfxStatus set(OfxTime time, bool);
   };
 
-  class ChoiceParameter : public OFX::Host::Param::ChoiceInstance {
+  class ChoiceParameter : public ParameterQueryInstance<OFX::Host::Param::ChoiceInstance> {
   protected:
-    FilterEffectInstance*   _effect;
     int _value;
   public:
     ChoiceParameter(FilterEffectInstance* effect,  const std::string& name, OFX::Host::Param::Descriptor& descriptor);
@@ -68,8 +87,7 @@ namespace MondrianOpenFx {
     OfxStatus set(OfxTime time, int);
   };
 
-  class StrChoiceParameter : public OFX::Host::Param::StringInstance {
-    FilterEffectInstance* _effect;
+  class StrChoiceParameter : public ParameterQueryInstance<OFX::Host::Param::StringInstance> {
     std::string _value;
     bool contains(const std::string& value) const;
   public:
@@ -80,8 +98,7 @@ namespace MondrianOpenFx {
     OfxStatus set(OfxTime time, const char*) override;
   };
 
-  class StringParameter : public OFX::Host::Param::StringInstance {
-    FilterEffectInstance* _effect;
+  class StringParameter : public ParameterQueryInstance<OFX::Host::Param::StringInstance> {
     std::string _value;
   public:
     StringParameter(FilterEffectInstance* effect, OFX::Host::Param::Descriptor& descriptor);
@@ -112,11 +129,11 @@ namespace MondrianOpenFx {
   template<class SdkInstance, class T, size_t N> class NumericTupleParameter;
 
   template<class SdkInstance, class T>
-  class NumericTupleParameter<SdkInstance, T, 2> : public SdkInstance {
+  class NumericTupleParameter<SdkInstance, T, 2> : public ParameterQueryInstance<SdkInstance> {
     NumericTupleState<T, 2> _value;
   public:
     NumericTupleParameter(FilterEffectInstance* effect, OFX::Host::Param::Descriptor& descriptor)
-        : SdkInstance(descriptor, effect), _value(effect, descriptor) {}
+        : ParameterQueryInstance<SdkInstance>(descriptor, effect), _value(effect, descriptor) {}
     OfxStatus get(T& x, T& y) override { return _value.read({&x, &y}); }
     OfxStatus get(OfxTime time, T& x, T& y) override { return _value.read(time, {&x, &y}); }
     OfxStatus set(T x, T y) override { return _value.write({x, y}); }
@@ -128,11 +145,11 @@ namespace MondrianOpenFx {
   };
 
   template<class SdkInstance, class T>
-  class NumericTupleParameter<SdkInstance, T, 3> : public SdkInstance {
+  class NumericTupleParameter<SdkInstance, T, 3> : public ParameterQueryInstance<SdkInstance> {
     NumericTupleState<T, 3> _value;
   public:
     NumericTupleParameter(FilterEffectInstance* effect, OFX::Host::Param::Descriptor& descriptor)
-        : SdkInstance(descriptor, effect), _value(effect, descriptor) {}
+        : ParameterQueryInstance<SdkInstance>(descriptor, effect), _value(effect, descriptor) {}
     OfxStatus get(T& x, T& y, T& z) override { return _value.read({&x, &y, &z}); }
     OfxStatus get(OfxTime time, T& x, T& y, T& z) override { return _value.read(time, {&x, &y, &z}); }
     OfxStatus set(T x, T y, T z) override { return _value.write({x, y, z}); }
@@ -144,11 +161,11 @@ namespace MondrianOpenFx {
   };
 
   template<class SdkInstance, class T>
-  class NumericTupleParameter<SdkInstance, T, 4> : public SdkInstance {
+  class NumericTupleParameter<SdkInstance, T, 4> : public ParameterQueryInstance<SdkInstance> {
     NumericTupleState<T, 4> _value;
   public:
     NumericTupleParameter(FilterEffectInstance* effect, OFX::Host::Param::Descriptor& descriptor)
-        : SdkInstance(descriptor, effect), _value(effect, descriptor) {}
+        : ParameterQueryInstance<SdkInstance>(descriptor, effect), _value(effect, descriptor) {}
     OfxStatus get(T& x, T& y, T& z, T& w) override { return _value.read({&x, &y, &z, &w}); }
     OfxStatus get(OfxTime time, T& x, T& y, T& z, T& w) override { return _value.read(time, {&x, &y, &z, &w}); }
     OfxStatus set(T x, T y, T z, T w) override { return _value.write({x, y, z, w}); }

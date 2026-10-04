@@ -279,3 +279,10 @@ SDK assertions through the actual product executable and resident protocol.
 Set the corresponding probe mode before each target. They send all six compound
 bindings and verify exact output and worker reuse across two renders at frame zero.
 They do not qualify seeking with animated snapshots.
+
+Both query-authority modes also assert SDK key count, indexed lookup and search
+semantics. Constant bindings report zero keys, BadIndex for every indexed lookup,
+and Failed/-1 for searches in either direction. Sample-only bindings retain output
+sentinels and report MissingHostFeature. Nonfinite searches reject with Value and
+retain the index sentinel. These are empty/snapshot-absent contracts, not animated
+key enumeration qualification.

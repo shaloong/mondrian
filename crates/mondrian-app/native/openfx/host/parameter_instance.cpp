@@ -33,6 +33,23 @@
 
 namespace MondrianOpenFx {
 
+  OfxStatus parameterKeyCount(const FilterEffectInstance& effect, const std::string& name, unsigned int& count) {
+    if (!effect.frameState().constantParameter(name)) { return kOfxStatErrMissingHostFeature; }
+    count = 0;
+    return kOfxStatOK;
+  }
+
+  OfxStatus parameterKeyTime(const FilterEffectInstance& effect, const std::string& name) {
+    return effect.frameState().constantParameter(name) ? kOfxStatErrBadIndex : kOfxStatErrMissingHostFeature;
+  }
+
+  OfxStatus parameterKeyIndex(const FilterEffectInstance& effect, const std::string& name, OfxTime time, int& index) {
+    if (!std::isfinite(time)) { return kOfxStatErrValue; }
+    if (!effect.frameState().constantParameter(name)) { return kOfxStatErrMissingHostFeature; }
+    index = -1;
+    return kOfxStatFailed;
+  }
+
   //
   // IntegerParameter
   //
@@ -40,7 +57,7 @@ namespace MondrianOpenFx {
   IntegerParameter::IntegerParameter(FilterEffectInstance* effect,
                                        const std::string& name,
                                        OFX::Host::Param::Descriptor& descriptor)
-    : OFX::Host::Param::IntegerInstance(descriptor, effect), _effect(effect), _descriptor(descriptor), _value(descriptor.getProperties().getIntProperty(kOfxParamPropDefault))
+    : ParameterQueryInstance<OFX::Host::Param::IntegerInstance>(descriptor, effect), _descriptor(descriptor), _value(descriptor.getProperties().getIntProperty(kOfxParamPropDefault))
   {
   }
 
@@ -76,7 +93,7 @@ namespace MondrianOpenFx {
   DoubleParameter::DoubleParameter(FilterEffectInstance* effect,
                                      const std::string& name,
                                      OFX::Host::Param::Descriptor& descriptor)
-    : OFX::Host::Param::DoubleInstance(descriptor, effect), _effect(effect), _descriptor(descriptor), _value(descriptor.getProperties().getDoubleProperty(kOfxParamPropDefault))
+    : ParameterQueryInstance<OFX::Host::Param::DoubleInstance>(descriptor, effect), _descriptor(descriptor), _value(descriptor.getProperties().getDoubleProperty(kOfxParamPropDefault))
   {
   }
 
@@ -146,7 +163,7 @@ namespace MondrianOpenFx {
   BooleanParameter::BooleanParameter(FilterEffectInstance* effect,
                                        const std::string& name,
                                        OFX::Host::Param::Descriptor& descriptor)
-    : OFX::Host::Param::BooleanInstance(descriptor, effect), _effect(effect), _descriptor(descriptor), _value(descriptor.getProperties().getIntProperty(kOfxParamPropDefault) != 0)
+    : ParameterQueryInstance<OFX::Host::Param::BooleanInstance>(descriptor, effect), _descriptor(descriptor), _value(descriptor.getProperties().getIntProperty(kOfxParamPropDefault) != 0)
   {
   }
 
@@ -181,7 +198,7 @@ namespace MondrianOpenFx {
   ChoiceParameter::ChoiceParameter(FilterEffectInstance* effect,
                                      const std::string& name,
                                      OFX::Host::Param::Descriptor& descriptor)
-    : OFX::Host::Param::ChoiceInstance(descriptor, effect), _effect(effect),
+    : ParameterQueryInstance<OFX::Host::Param::ChoiceInstance>(descriptor, effect),
       _value(descriptor.getProperties().getIntProperty(kOfxParamPropDefault))
   {
   }
@@ -217,7 +234,7 @@ namespace MondrianOpenFx {
 
   StrChoiceParameter::StrChoiceParameter(FilterEffectInstance* effect,
       OFX::Host::Param::Descriptor& descriptor)
-    : OFX::Host::Param::StringInstance(descriptor, effect), _effect(effect),
+    : ParameterQueryInstance<OFX::Host::Param::StringInstance>(descriptor, effect),
       _value(descriptor.getProperties().getStringProperty(kOfxParamPropDefault)) {
     if (_value.empty() && getProperties().getDimension(kOfxParamPropChoiceEnum) > 0) {
       _value = getProperties().getStringProperty(kOfxParamPropChoiceEnum, 0);
@@ -255,7 +272,7 @@ namespace MondrianOpenFx {
 
   StringParameter::StringParameter(FilterEffectInstance* effect,
       OFX::Host::Param::Descriptor& descriptor)
-    : OFX::Host::Param::StringInstance(descriptor, effect), _effect(effect),
+    : ParameterQueryInstance<OFX::Host::Param::StringInstance>(descriptor, effect),
       _value(descriptor.getProperties().getStringProperty(kOfxParamPropDefault)) {}
 
   OfxStatus StringParameter::get(std::string& value) {

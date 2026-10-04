@@ -654,3 +654,9 @@ Owned SDK query-authority integration tests also execute through the product
 resident protocol, with explicit bindings for all six compound parameter types.
 They verify exact pixel output and worker reuse independently of direct FFI tests;
 their frame-zero sample coverage does not establish full animated seeking.
+
+Read-only SDK key queries use the same temporal binding authority across scalar
+and tuple parameters. Constant bindings have zero keys; indexed lookup returns
+BadIndex without changing the time output, and finite searches return Failed
+with index -1. CurrentFrame samples reject key queries requiring an absent
+snapshot. Nonfinite search times are rejected before writing the output.
