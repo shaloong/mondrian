@@ -5709,15 +5709,22 @@ mod tests {
 
     #[test]
     fn inspector_curve_capture_cannot_outlive_selection_lock_or_author_generation() {
-        inspector_curve_capture_owner_matrix(false);
+        inspector_curve_capture_owner_matrix(false, 0..7);
     }
 
     #[test]
     fn inspector_structured_curve_capture_cannot_outlive_its_author_owner() {
-        inspector_curve_capture_owner_matrix(true);
+        inspector_curve_capture_owner_matrix(true, 0..7);
     }
 
-    fn inspector_curve_capture_owner_matrix(structured: bool) {
+    #[test]
+    fn inspector_curve_return_to_grab_point_preserves_author_state_and_history_through_real_router()
+    {
+        inspector_curve_capture_owner_matrix(false, 7..8);
+        inspector_curve_capture_owner_matrix(true, 7..8);
+    }
+
+    fn inspector_curve_capture_owner_matrix(structured: bool, boundaries: std::ops::Range<usize>) {
         use crate::app::product_action::{
             ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
         };
@@ -5727,7 +5734,7 @@ mod tests {
         };
         use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
         use mondrian_ui_events::EventRouter;
-        for invalidation in 0..7 {
+        for invalidation in boundaries {
             let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
             let bounds = Rect::new(0.0, 0.0, 1280.0, 1600.0);
             let mut state = workspace_app_state_with_timed_solid();
@@ -5903,6 +5910,20 @@ mod tests {
                 WidgetTreeView::new(host.active_root_mut()).get(curve_id).is_some(),
                 "valid captured curve survives refresh"
             );
+            if invalidation == 7 {
+                router.route(
+                    UiEvent::MouseMove { position: point, modifiers: Modifiers::none() },
+                    &mut WidgetTreeView::new(host.active_root_mut()),
+                    &dispatch,
+                );
+                host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+                assert!(host
+                    .app_state()
+                    .active_sequence()
+                    .expect("returned to grab point")
+                    .author_state_eq_ignoring_revision(&original));
+                assert!(host.app_state().parameter_gesture_is_current());
+            }
             if invalidation >= 3 {
                 let terminal = match invalidation {
                     4 => UiEvent::KeyDown {
@@ -5926,7 +5947,7 @@ mod tests {
                 assert!(host.app_state().active_parameter_gesture.is_none());
                 let accepted = host.app_state().active_sequence().expect("result").clone();
                 let history = host.app_state().authoring_history().expect("history").diagnostics();
-                if invalidation == 4 {
+                if matches!(invalidation, 4 | 7) {
                     assert!(accepted.author_state_eq_ignoring_revision(&original));
                     assert_eq!(history, original_history);
                 } else {
