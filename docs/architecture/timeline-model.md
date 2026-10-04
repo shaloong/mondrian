@@ -33,6 +33,13 @@ key by stable ID before committing one property mutation.
 Manual Bezier presets initialize the incoming handle toward earlier time and
 the outgoing handle toward later time.
 
+Audio `EditHandle` carries a stable key ID, temporal side and sparse exact
+coordinate edit through the same addressed author transaction as other curve
+edits. Timeline admits the Bezier family against the definition schema and
+checks owner locks before delegating constraint geometry to Core. Repeated
+identical edits are no-ops; invalid coordinates and stale IDs cannot publish a
+Sequence candidate. UI adapters do not reconstruct a second tangent model.
+
 Color-context construction delegates target-qualified output View lookup to the
 owning Project's exact `ColorEngine`. Sequence preview and export planning never read an
 unqualified process-global OCIO default, so a failed ACES or Custom config

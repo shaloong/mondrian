@@ -663,6 +663,137 @@ mod tests {
     }
 
     #[test]
+    fn typed_handle_edit_commits_once_and_preserves_curve_after_save_reopen() {
+        use mondrian_core::{
+            BezierHandleSide, ExactAutomationKeyframe, ExactAutomationTangentMode,
+            ExactBezierHandleEdit, InterpolationType, TimelineTime,
+        };
+        let mut sequence = Sequence::new("Handle history");
+        let owner = AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id };
+        let target = AudioAutomationTarget::ChannelFader { owner };
+        let keys = [
+            ExactAutomationKeyframe::linear(TimelineTime::ZERO, -12.0),
+            ExactAutomationKeyframe::linear(TimelineTime::ONE, -6.0),
+            ExactAutomationKeyframe::linear(TimelineTime::new(2, 1).expect("last time"), 0.0),
+        ];
+        for keyframe in keys.iter().cloned() {
+            apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                },
+            )
+            .expect("fixture key");
+        }
+        apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::SetInterpolation {
+                    keyframe_id: keys[1].id,
+                    interpolation: InterpolationType::AutoBezier,
+                },
+            },
+        )
+        .expect("fixture auto");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        let curve = |state: &AppState| {
+            audio_channel_strip(state.active_sequence().expect("sequence"), owner)
+                .expect("strip")
+                .fader_automation
+                .clone()
+                .expect("curve")
+        };
+        let before = curve(&state);
+        let generation = state.project_author_generation();
+        let request = AudioAutomationEditRequest {
+            target: target.clone(),
+            edit: AudioAutomationEdit::EditHandle {
+                keyframe_id: keys[1].id,
+                side: BezierHandleSide::Outgoing,
+                edit: ExactBezierHandleEdit { time_offset: None, value_offset: Some(1.5) },
+            },
+        };
+        state
+            .dispatch_action(audio_automation_edit_action(request.clone()))
+            .expect("typed handle action");
+        let after = curve(&state);
+        assert_eq!(state.project_author_generation(), generation + 1);
+        assert_eq!(
+            after.keyframes[1].tangent_mode,
+            ExactAutomationTangentMode::Continuous
+        );
+        assert_eq!(
+            after.keyframes[1].out_handle.expect("handle").time_offset,
+            TimelineTime::new(1, 3).expect("untouched exact axis")
+        );
+        assert_eq!(
+            after.keyframes[1].out_handle.expect("handle").value_offset,
+            1.5
+        );
+        assert!(state.undo_timeline().expect("undo"));
+        assert_eq!(curve(&state), before);
+        assert!(
+            !state.can_undo_action(),
+            "one handle edit owns one history entry"
+        );
+        assert!(state.redo_timeline().expect("redo"));
+        assert_eq!(curve(&state), after);
+        let generation = state.project_author_generation();
+        state
+            .dispatch_action(audio_automation_edit_action(request))
+            .expect("noop action");
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(curve(&state), after);
+        assert!(
+            state.dispatch_action(audio_automation_edit_action(AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::EditHandle {
+                    keyframe_id: keys[1].id,
+                    side: BezierHandleSide::Outgoing,
+                    edit: ExactBezierHandleEdit {
+                        time_offset: Some(TimelineTime::new(1, 2).expect("changed time")),
+                        value_offset: Some(f64::INFINITY),
+                    },
+                },
+            })).is_err(),
+            "An invalid coordinate must not become an omitted axis and publish the other half of an edit"
+        );
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(curve(&state), after);
+        assert!(state
+            .dispatch_action(audio_automation_edit_action(AudioAutomationEditRequest {
+                target,
+                edit: AudioAutomationEdit::EditHandle {
+                    keyframe_id: mondrian_core::KeyframeId::new(),
+                    side: BezierHandleSide::Incoming,
+                    edit: ExactBezierHandleEdit { time_offset: None, value_offset: Some(0.5) },
+                },
+            }))
+            .is_err());
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(curve(&state), after);
+        let directory =
+            std::env::temp_dir().join(format!("mondrian-handle-history-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).expect("directory");
+        let project = directory.join("手柄 曲线.mdp");
+        state.save_project_file_as(project.clone()).expect("durable save");
+        drop(state);
+        let mut reopened = AppState::new();
+        reopened.open_project_file(project).expect("actual reopen");
+        let restored = curve(&reopened);
+        assert_eq!(restored, after);
+        for numerator in 0..=40 {
+            let time = TimelineTime::new(numerator, 20).expect("sample");
+            assert_eq!(restored.evaluate(time), after.evaluate(time));
+        }
+        drop(reopened);
+        std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
     fn typed_automation_action_commits_once_and_round_trips_through_undo_redo() {
         let mut state = AppState::new();
         let sequence = Sequence::new("Automation authoring");

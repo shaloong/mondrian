@@ -53,6 +53,19 @@ orientation rather than requiring Continuous to equal Auto-derived handles.
 Invalid replacements remain atomic. Current alpha keys explicitly serialize
 their tangent mode; no missing-field fallback admits an older curve schema.
 
+Sparse exact handle edits address one temporal side and retain omitted axes.
+Only a changed Auto handle becomes Continuous; no-op gestures preserve Auto.
+Core aligns the opposite side, preserves its temporal length for nonvertical
+directions and its value length for vertical directions, and admits collapsed
+zero vectors without inventing a direction. Missing partners of authored
+vertical handles are reflected as vertical vectors. Invalid, empty, absent
+segment and nonfinite edits fail before candidate publication.
+Stored constrained handle sides remain valid even when an adjacent segment is
+Linear. Explicit initial handle coordinates do not compute unused default times.
+Execution derives missing default time controls directly in normalized floating
+coordinates and checks the exact one-third fast path without constructing new
+persisted rationals, so valid tiny owner-time spans remain evaluable.
+
 Core owns the shared `ParameterValueWrite` algebra: complete typed values or
 sparse numeric components at a stable `AnimationParameterAddress`. Clip, Effect
 and Mask adapters supply exact owner-local time to `PropertyBag::prepare_parameter_write`;
@@ -566,3 +579,11 @@ while definitions can explicitly admit numeric interpolation with rounding at
 value materialization. Nonfinite double components and any invalid sparse member
 reject the entire author edit. Inline footprint accounting includes these values
 without allocating a per-value component vector in persisted author state.
+
+### Sparse coordinate admission
+
+Sparse handle edits omit unchanged coordinates on the wire. Supplied coordinates
+must decode as exact time or finite numeric values; explicit null is invalid.
+Core shares the finite coordinate decoder with visual curve action payloads, so
+JSON conversion of a nonfinite value cannot turn an invalid request into a
+partially accepted edit of its other coordinate.

@@ -17,9 +17,9 @@ use crate::audio_processor_edit::{
 use crate::sequence::Sequence;
 use mondrian_core::{
     AudioComponentEditId, AudioProcessingScopeId, AudioProcessorInstanceId, AudioRouteId,
-    AuthoringTimeDomain, ClipId, ExactAutomationCurve, ExactAutomationKeyframe, InterpolationType,
-    KeyframeId, MixBusId, ParameterId, ParameterInterpolation, ParameterNumericRange,
-    ProgramOutputId, PropertyValueType, TrackId,
+    AuthoringTimeDomain, BezierHandleSide, ClipId, ExactAutomationCurve, ExactAutomationKeyframe,
+    ExactBezierHandleEdit, InterpolationType, KeyframeId, MixBusId, ParameterId,
+    ParameterInterpolation, ParameterNumericRange, ProgramOutputId, PropertyValueType, TrackId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -75,6 +75,15 @@ pub enum AudioAutomationTarget {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AudioAutomationEdit {
+    /// Edit one Bezier handle using canonical constrained geometry.
+    EditHandle {
+        /// Stable keyframe to edit.
+        keyframe_id: KeyframeId,
+        /// Temporal side controlling the addressed segment.
+        side: BezierHandleSide,
+        /// Changed exact coordinates; omitted axes retain author values.
+        edit: ExactBezierHandleEdit,
+    },
     /// Insert, replace, or move one keyframe while preserving stable identity.
     UpsertKeyframe {
         /// Complete keyframe state in the target's owner-time domain.
@@ -454,15 +463,19 @@ pub fn apply_audio_automation_edit(
     if let Some(blocker) = inspection.edit_blocker().cloned() {
         return Err(blocker.into());
     }
-    if let AudioAutomationEdit::SetInterpolation { interpolation, .. } = &request.edit {
-        let family = match interpolation {
+    let family = match &request.edit {
+        AudioAutomationEdit::EditHandle { .. } => Some(ParameterInterpolation::Bezier),
+        AudioAutomationEdit::SetInterpolation { interpolation, .. } => Some(match interpolation {
             InterpolationType::Hold => ParameterInterpolation::Hold,
             InterpolationType::Linear => ParameterInterpolation::Linear,
             _ => ParameterInterpolation::Bezier,
-        };
-        if !inspection.allowed_interpolations().contains(&family) {
-            return Err(AudioAutomationEditError::InterpolationNotAllowed);
-        }
+        }),
+        _ => None,
+    };
+    if let Some(family) = family
+        && !inspection.allowed_interpolations().contains(&family)
+    {
+        return Err(AudioAutomationEditError::InterpolationNotAllowed);
     }
     let mut candidate = sequence.clone();
     let changed = apply_to_candidate(&mut candidate, &request.target, &request.edit)?;
@@ -783,6 +796,16 @@ fn edit_curve(
 ) -> Result<bool, AudioAutomationEditError> {
     let before = curve.clone();
     match edit {
+        AudioAutomationEdit::EditHandle { keyframe_id, side, edit } => {
+            curve.edit_keyframe_handle(*keyframe_id, *side, *edit).map_err(
+                |error| match error {
+                    mondrian_core::AutomationError::UnknownKeyframe => {
+                        AudioAutomationEditError::UnknownKeyframe(*keyframe_id)
+                    }
+                    other => invalid_automation(other),
+                },
+            )?;
+        }
         AudioAutomationEdit::UpsertKeyframe { keyframe } => {
             if curve
                 .keyframes
@@ -992,6 +1015,94 @@ mod tests {
                 domain
             );
         }
+    }
+
+    #[test]
+    fn single_handle_edit_obeys_constraints_noops_and_track_locks() {
+        let mut sequence = Sequence::new("Handle authoring");
+        let track_id = sequence.audio_tracks[0].id;
+        let target = AudioAutomationTarget::ChannelFader {
+            owner: AudioChannelStripOwner::Track { track_id },
+        };
+        let keys = [
+            ExactAutomationKeyframe::linear(TimelineTime::ZERO, -12.0),
+            ExactAutomationKeyframe::linear(TimelineTime::ONE, -6.0),
+            ExactAutomationKeyframe::linear(TimelineTime::new(2, 1).expect("time"), 0.0),
+        ];
+        for keyframe in keys.iter().cloned() {
+            apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                },
+            )
+            .expect("insert");
+        }
+        apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::SetInterpolation {
+                    keyframe_id: keys[1].id,
+                    interpolation: InterpolationType::AutoBezier,
+                },
+            },
+        )
+        .expect("auto");
+        let request = AudioAutomationEditRequest {
+            target: target.clone(),
+            edit: AudioAutomationEdit::EditHandle {
+                keyframe_id: keys[1].id,
+                side: BezierHandleSide::Outgoing,
+                edit: ExactBezierHandleEdit { time_offset: None, value_offset: Some(1.5) },
+            },
+        };
+        let restored = serde_json::from_str(&serde_json::to_string(&request).expect("encode"))
+            .expect("decode");
+        assert_eq!(request, restored);
+        assert!(apply_audio_automation_edit(&mut sequence, &request).expect("handle").changed);
+        let key = &inspect_audio_automation(&sequence, &target)
+            .expect("inspection")
+            .curve()
+            .expect("curve")
+            .keyframes[1];
+        assert_eq!(
+            key.tangent_mode,
+            mondrian_core::ExactAutomationTangentMode::Continuous
+        );
+        assert_eq!(
+            key.out_handle.expect("outgoing").time_offset,
+            TimelineTime::new(1, 3).expect("exact unchanged axis")
+        );
+        assert_eq!(key.out_handle.expect("outgoing").value_offset, 1.5);
+        assert_eq!(key.in_handle.expect("partner").value_offset, -1.5);
+        let before = sequence.clone();
+        assert!(!apply_audio_automation_edit(&mut sequence, &request).expect("noop").changed);
+        assert_eq!(sequence, before);
+        let invalid = AudioAutomationEditRequest {
+            target,
+            edit: AudioAutomationEdit::EditHandle {
+                keyframe_id: keys[1].id,
+                side: BezierHandleSide::Incoming,
+                edit: ExactBezierHandleEdit {
+                    time_offset: Some(TimelineTime::ONE),
+                    value_offset: None,
+                },
+            },
+        };
+        assert!(matches!(
+            apply_audio_automation_edit(&mut sequence, &invalid),
+            Err(AudioAutomationEditError::InvalidAutomation { .. })
+        ));
+        assert_eq!(sequence, before);
+        sequence.audio_tracks[0].is_locked = true;
+        let locked = sequence.clone();
+        assert!(matches!(
+            apply_audio_automation_edit(&mut sequence, &request),
+            Err(AudioAutomationEditError::Blocked(_))
+        ));
+        assert_eq!(sequence, locked);
     }
 
     #[test]

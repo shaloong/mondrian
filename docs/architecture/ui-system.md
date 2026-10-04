@@ -17,6 +17,13 @@ have no key identity and no menu. UI actions carry stable key IDs and resolve
 the current author time at dispatch, so a stale menu cannot silently edit a
 different key after the curve changes.
 
+Typed audio handle actions use sparse exact coordinates through the existing
+product action codec and author session. The App publishes one history entry,
+retains no-op generations, rejects stale keys without publication, and persists
+the canonical Continuous geometry through durable `.mdp` save and reopen.
+Direct handle gesture drawing and hit routing are a separate widget integration;
+the typed author action does not imply that those controls are already exposed.
+
 The status bar remains the persistent summary of current work. Its status
 history is available by clicking the bar; the App retains at most 64
 messages and the popover shows eight at a time with wheel navigation. Active
@@ -3219,3 +3226,9 @@ hard-range admission. Numeric input and keyboard stepping retain their own edito
 increment behavior. Stable-key movement preserves untouched exact time/value
 coordinates, and every resulting edit uses the existing author transaction and
 Undo/Redo path.
+
+Sparse audio handle and visual curve actions distinguish an omitted coordinate
+from a supplied invalid coordinate at product-action decoding. The former
+retains exact author state; the latter rejects the entire action before history
+or author generation advances. Product-action regression tests cover both axes,
+nonfinite values, and unchanged state/history after rejection.

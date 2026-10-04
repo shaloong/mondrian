@@ -1054,6 +1054,56 @@ mod tests {
     }
 
     #[test]
+    fn sparse_curve_product_codec_rejects_invalid_axes_without_partial_publication() {
+        use crate::app::product_action::{ClipCurveEditPayload, ClipEditNumericCurvePayload};
+        use crate::app::ui_actions::clip_edit_numeric_curve_action;
+        let (mut state, selection, _) = state_with_clip();
+        let keyframe = Keyframe::linear(
+            TimelineTime::new(1, 3).expect("third"),
+            PropertyValue::Float(0.5),
+        );
+        let keyframe_id = keyframe.id;
+        state
+            .mutate_clip_property(
+                selection,
+                PropertyMutation::SetKeyframe {
+                    path: Transform2D::OPACITY_PATH.to_owned(),
+                    keyframe,
+                },
+                "seed",
+            )
+            .expect("key");
+        let address = opacity_address(&state, selection);
+        let before = state.active_sequence().expect("before").clone();
+        let generation = state.project_author_generation();
+        let history = state.authoring_history().expect("history").diagnostics();
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for invalid_time in [true, false] {
+                let action = clip_edit_numeric_curve_action(ClipEditNumericCurvePayload {
+                    clip_id: selection.clip_id,
+                    parameter: address.clone(),
+                    edit: ClipCurveEditPayload::Move {
+                        keyframe_id,
+                        time_ratio: Some(if invalid_time { invalid } else { 0.75 }),
+                        value_ratio: Some(if invalid_time { 0.75 } else { invalid }),
+                    },
+                });
+                assert!(state.dispatch_action(action).is_err(),
+                    "A supplied invalid axis must not be decoded as omission while the other axis commits");
+                assert!(state
+                    .active_sequence()
+                    .expect("unchanged")
+                    .author_state_eq_ignoring_revision(&before));
+                assert_eq!(state.project_author_generation(), generation);
+                assert_eq!(
+                    state.authoring_history().expect("history").diagnostics(),
+                    history
+                );
+            }
+        }
+    }
+
+    #[test]
     fn sparse_curve_moves_reject_invalid_coordinates_and_preserve_noop_history() {
         let (mut state, selection, _) = state_with_clip();
         let keyframe = Keyframe::linear(

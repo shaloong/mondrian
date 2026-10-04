@@ -2567,8 +2567,18 @@ pub enum ClipCurveEditPayload {
         /// Existing complete key's stable identity.
         keyframe_id: KeyframeId,
         /// Changed normalized time; `None` retains exact author time.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "mondrian_core::deserialize_present_finite_coordinate"
+        )]
         time_ratio: Option<f64>,
         /// Changed normalized value; `None` retains exact author value.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "mondrian_core::deserialize_present_finite_coordinate"
+        )]
         value_ratio: Option<f64>,
     },
     /// Insert a key, or edit one existing complete key.

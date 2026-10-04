@@ -99,6 +99,64 @@ pub struct ExactBezierHandle {
     pub value_offset: f64,
 }
 
+/// Temporal side of a keyframe's Bezier control handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BezierHandleSide {
+    /// Handle controlling the preceding segment.
+    Incoming,
+    /// Handle controlling the following segment.
+    Outgoing,
+}
+
+/// Sparse author edit retaining every omitted exact handle coordinate.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExactBezierHandleEdit {
+    /// Replacement owner-local time offset, when the temporal axis changed.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_time_coordinate"
+    )]
+    pub time_offset: Option<TimelineTime>,
+    /// Replacement parameter offset, when the value axis changed.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_finite_coordinate"
+    )]
+    pub value_offset: Option<f64>,
+}
+
+/// Decode a supplied sparse coordinate without treating invalid input as omission.
+///
+/// Use with Serde's `default` and `skip_serializing_if = "Option::is_none"`:
+/// an absent field retains its author coordinate, while a present field must
+/// contain a finite number. Explicit null is invalid, including JSON null
+/// produced by serializing a nonfinite floating value.
+pub fn deserialize_present_finite_coordinate<'de, D>(
+    deserializer: D,
+) -> Result<Option<f64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = f64::deserialize(deserializer)?;
+    if !value.is_finite() {
+        return Err(D::Error::custom("a supplied coordinate must be finite"));
+    }
+    Ok(Some(value))
+}
+
+fn deserialize_present_time_coordinate<'de, D>(
+    deserializer: D,
+) -> Result<Option<TimelineTime>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    TimelineTime::deserialize(deserializer).map(Some)
+}
+
 /// Interpolation used from one keyframe to the following keyframe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -304,6 +362,116 @@ impl ExactAutomationCurve {
         Ok(())
     }
 
+    /// Edit one handle atomically, retaining omitted author coordinates.
+    ///
+    /// Changing an Auto handle converts it to Continuous. Continuous edits
+    /// align the opposite handle while retaining its independent temporal
+    /// length, or its value length for a vertical direction. Manual handles
+    /// remain independent. The edited segment becomes Bezier; absent segments,
+    /// empty edits and invalid coordinates are rejected without publication.
+    pub fn edit_keyframe_handle(
+        &mut self,
+        keyframe_id: KeyframeId,
+        side: BezierHandleSide,
+        edit: ExactBezierHandleEdit,
+    ) -> Result<(), AutomationError> {
+        if edit.time_offset.is_none() && edit.value_offset.is_none() {
+            return Err(AutomationError::EmptyHandleEdit);
+        }
+        let mut candidate = self.clone();
+        let index = candidate
+            .keyframes
+            .iter()
+            .position(|key| key.id == keyframe_id)
+            .ok_or(AutomationError::UnknownKeyframe)?;
+        let neighbor_index = match side {
+            BezierHandleSide::Incoming => index.checked_sub(1),
+            BezierHandleSide::Outgoing => {
+                (index + 1 < candidate.keyframes.len()).then_some(index + 1)
+            }
+        }
+        .ok_or(AutomationError::MissingBezierSegment)?;
+        let incoming = side == BezierHandleSide::Incoming;
+        let current = &candidate.keyframes[index];
+        let neighbor = &candidate.keyframes[neighbor_index];
+        let duration = if incoming {
+            current.time.checked_sub(neighbor.time)?
+        } else {
+            neighbor.time.checked_sub(current.time)?
+        };
+        let original = if incoming {
+            current.in_handle
+        } else {
+            current.out_handle
+        };
+        let baseline = match original {
+            Some(handle) => handle,
+            None => initial_segment_handle(current, neighbor, edit.time_offset)?,
+        };
+        let edited = ExactBezierHandle {
+            time_offset: edit.time_offset.unwrap_or(baseline.time_offset),
+            value_offset: edit.value_offset.unwrap_or(baseline.value_offset),
+        };
+        validate_handle_time(edited, duration, incoming)?;
+        if original == Some(edited) {
+            return Ok(());
+        }
+        let key = &mut candidate.keyframes[index];
+        if key.tangent_mode == ExactAutomationTangentMode::Auto {
+            key.tangent_mode = ExactAutomationTangentMode::Continuous;
+        }
+        if incoming {
+            key.in_handle = Some(edited);
+        } else {
+            key.out_handle = Some(edited);
+        }
+        validate_keyframe(key)?;
+        if incoming {
+            candidate.keyframes[neighbor_index].interpolation_to_next =
+                AutomationSegmentInterpolation::Bezier;
+        } else {
+            candidate.keyframes[index].interpolation_to_next =
+                AutomationSegmentInterpolation::Bezier;
+        }
+        if candidate.keyframes[index].tangent_mode == ExactAutomationTangentMode::Continuous {
+            let partner_index = if incoming {
+                (index + 1 < candidate.keyframes.len()).then_some(index + 1)
+            } else {
+                index.checked_sub(1)
+            };
+            if let Some(partner_index) = partner_index {
+                let key = &candidate.keyframes[index];
+                let partner = if incoming {
+                    key.out_handle
+                } else {
+                    key.in_handle
+                };
+                let partner = match partner {
+                    Some(handle) => handle,
+                    None => initial_segment_handle(
+                        key,
+                        &candidate.keyframes[partner_index],
+                        edited.time_offset.is_zero().then_some(TimelineTime::ZERO),
+                    )?,
+                };
+                let aligned = align_continuous_partner(edited, partner);
+                if incoming {
+                    candidate.keyframes[index].out_handle = Some(aligned);
+                    candidate.keyframes[index].interpolation_to_next =
+                        AutomationSegmentInterpolation::Bezier;
+                } else {
+                    candidate.keyframes[index].in_handle = Some(aligned);
+                    candidate.keyframes[partner_index].interpolation_to_next =
+                        AutomationSegmentInterpolation::Bezier;
+                }
+            }
+        }
+        candidate.normalize_constrained_tangents()?;
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
     fn normalize_constrained_tangents(&mut self) -> Result<(), AutomationError> {
         for index in 0..self.keyframes.len() {
             if self.keyframes[index].tangent_mode == ExactAutomationTangentMode::Manual {
@@ -327,7 +495,22 @@ impl ExactAutomationCurve {
         let needs_incoming = previous.is_some() && current.in_handle.is_none();
         let needs_outgoing = next.is_some() && current.out_handle.is_none();
         let (mut incoming, mut outgoing) = (current.in_handle, current.out_handle);
-        if needs_incoming || needs_outgoing {
+        if (needs_incoming || needs_outgoing)
+            && let Some(handle) = incoming
+                .or(outgoing)
+                .filter(|handle| handle.time_offset.is_zero() && handle.value_offset != 0.0)
+        {
+            let partner = ExactBezierHandle {
+                time_offset: TimelineTime::ZERO,
+                value_offset: -handle.value_offset,
+            };
+            if needs_incoming {
+                incoming = Some(partner);
+            }
+            if needs_outgoing {
+                outgoing = Some(partner);
+            }
+        } else if needs_incoming || needs_outgoing {
             let authored = incoming.or(outgoing).filter(|handle| !handle.time_offset.is_zero());
             let slope = if let Some(handle) = authored {
                 let span = handle.time_offset.to_f64();
@@ -461,6 +644,17 @@ impl ExactAutomationCurve {
                     || !continuous_handles_are_collinear(keyframe.in_handle, keyframe.out_handle)
                 {
                     return Err(AutomationError::InvalidConstrainedTangent);
+                }
+                if let Some(handle) = keyframe.in_handle
+                    && let Some(previous) =
+                        index.checked_sub(1).map(|position| &self.keyframes[position])
+                {
+                    validate_handle_time(handle, keyframe.time.checked_sub(previous.time)?, true)?;
+                }
+                if let Some(handle) = keyframe.out_handle
+                    && let Some(next) = self.keyframes.get(index + 1)
+                {
+                    validate_handle_time(handle, next.time.checked_sub(keyframe.time)?, false)?;
                 }
             } else {
                 let (incoming, outgoing) = self.constrained_handles(index)?;
@@ -624,6 +818,12 @@ pub enum AutomationError {
     /// Addressed keyframe is absent from this curve.
     #[error("automation keyframe identity is absent")]
     UnknownKeyframe,
+    /// The addressed temporal side has no neighboring keyframe.
+    #[error("automation handle has no corresponding segment")]
+    MissingBezierSegment,
+    /// A handle edit must specify at least one changed coordinate.
+    #[error("automation handle edit has no coordinates")]
+    EmptyHandleEdit,
     /// This preset has no defined exact numeric automation interpretation.
     #[error("interpolation preset is unsupported by exact numeric automation")]
     UnsupportedInterpolationPreset,
@@ -636,6 +836,67 @@ pub enum AutomationError {
     /// Exact-time arithmetic failed.
     #[error(transparent)]
     Time(#[from] TimelineTimeError),
+}
+
+fn initial_segment_handle(
+    current: &ExactAutomationKeyframe,
+    neighbor: &ExactAutomationKeyframe,
+    time_offset: Option<TimelineTime>,
+) -> Result<ExactBezierHandle, AutomationError> {
+    Ok(ExactBezierHandle {
+        time_offset: match time_offset {
+            Some(offset) => offset,
+            None => {
+                neighbor.time.checked_sub(current.time)?.checked_scale(TimeScale::new(1, 3)?)?
+            }
+        },
+        value_offset: crate::automation::interpolate_numeric_value(
+            current.value,
+            neighbor.value,
+            1.0 / 3.0,
+        ) - current.value,
+    })
+}
+
+fn validate_handle_time(
+    handle: ExactBezierHandle,
+    duration: TimelineTime,
+    incoming: bool,
+) -> Result<(), AutomationError> {
+    let magnitude = if incoming {
+        handle.time_offset.checked_scale(TimeScale::NEGATIVE_ONE)?
+    } else {
+        handle.time_offset
+    };
+    if magnitude.is_negative() || magnitude > duration {
+        return Err(AutomationError::InvalidBezierTimeHandle);
+    }
+    Ok(())
+}
+
+fn align_continuous_partner(
+    edited: ExactBezierHandle,
+    partner: ExactBezierHandle,
+) -> ExactBezierHandle {
+    if !edited.time_offset.is_zero() {
+        ExactBezierHandle {
+            time_offset: partner.time_offset,
+            value_offset: edited.value_offset
+                * (partner.time_offset.to_f64() / edited.time_offset.to_f64()),
+        }
+    } else if edited.value_offset != 0.0 {
+        let length = if partner.value_offset == 0.0 {
+            edited.value_offset.abs()
+        } else {
+            partner.value_offset.abs()
+        };
+        ExactBezierHandle {
+            time_offset: TimelineTime::ZERO,
+            value_offset: -edited.value_offset.signum() * length,
+        }
+    } else {
+        partner
+    }
 }
 
 fn bound_continuous_handle(
@@ -847,10 +1108,6 @@ fn bezier_value(
         return linear_value(left, right, time);
     }
     let duration = right.time.checked_sub(left.time)?;
-    let default_out = duration.checked_scale(TimeScale::new(1, 3)?)?;
-    let default_in = duration.checked_scale(TimeScale::new(-1, 3)?)?;
-    let out_time = left.out_handle.map_or(default_out, |handle| handle.time_offset);
-    let in_time = right.in_handle.map_or(default_in, |handle| handle.time_offset);
     let y1 = left.out_handle.map_or_else(
         || crate::automation::interpolate_numeric_value(left.value, right.value, 1.0 / 3.0),
         |handle| left.value + handle.value_offset,
@@ -863,10 +1120,24 @@ fn bezier_value(
         return Err(AutomationError::NonFiniteValue);
     }
     let span = duration.to_f64();
-    let x1 = out_time.to_f64() / span;
-    let x2 = 1.0 + in_time.to_f64() / span;
+    let x1 = left.out_handle.map_or(1.0 / 3.0, |handle| handle.time_offset.to_f64() / span);
+    let x2 = right.in_handle.map_or(1.0 - 1.0 / 3.0, |handle| {
+        1.0 + handle.time_offset.to_f64() / span
+    });
     let target = time.checked_sub(left.time)?.to_f64() / span;
-    if out_time == default_out && in_time == default_in {
+    let outgoing_third = TimeScale::new(3, 1)?;
+    let incoming_third = TimeScale::new(-3, 1)?;
+    if left.out_handle.is_none_or(|handle| {
+        handle
+            .time_offset
+            .checked_scale(outgoing_third)
+            .is_ok_and(|offset| offset == duration)
+    }) && right.in_handle.is_none_or(|handle| {
+        handle
+            .time_offset
+            .checked_scale(incoming_third)
+            .is_ok_and(|offset| offset == duration)
+    }) {
         return Ok(cubic_numeric_value(left.value, y1, y2, right.value, target));
     }
     let mut low = 0.0;
@@ -914,6 +1185,51 @@ fn cubic(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_handle_coordinate_codec_distinguishes_omission_from_invalid_input() {
+        for edit in [
+            ExactBezierHandleEdit { time_offset: None, value_offset: None },
+            ExactBezierHandleEdit {
+                time_offset: Some(TimelineTime::ZERO),
+                value_offset: None,
+            },
+            ExactBezierHandleEdit { time_offset: None, value_offset: Some(0.25) },
+            ExactBezierHandleEdit {
+                time_offset: Some(TimelineTime::ONE),
+                value_offset: Some(-0.25),
+            },
+        ] {
+            let encoded = serde_json::to_value(edit).expect("encode sparse edit");
+            assert_eq!(
+                encoded.get("time_offset").is_some(),
+                edit.time_offset.is_some()
+            );
+            assert_eq!(
+                encoded.get("value_offset").is_some(),
+                edit.value_offset.is_some()
+            );
+            assert_eq!(
+                serde_json::from_value::<ExactBezierHandleEdit>(encoded).expect("decode"),
+                edit
+            );
+        }
+        for encoded in [
+            serde_json::json!({ "time_offset": null, "value_offset": 0.25 }),
+            serde_json::json!({ "value_offset": null }),
+            serde_json::json!({ "value_offset": "0.25" }),
+        ] {
+            assert!(serde_json::from_value::<ExactBezierHandleEdit>(encoded).is_err());
+        }
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let edit = ExactBezierHandleEdit {
+                time_offset: Some(TimelineTime::ONE),
+                value_offset: Some(invalid),
+            };
+            let encoded = serde_json::to_value(edit).expect("encode illegal request");
+            assert!(serde_json::from_value::<ExactBezierHandleEdit>(encoded).is_err());
+        }
+    }
 
     #[test]
     fn full_finite_linear_automation_retains_convex_values() {
@@ -1163,6 +1479,347 @@ mod tests {
         for numerator in 0..=22 {
             let time = TimelineTime::new(numerator, 20).expect("sample");
             assert_eq!(restored.evaluate(time), curve.evaluate(time));
+        }
+    }
+
+    #[test]
+    fn handle_evaluation_uses_derived_default_coordinates_in_tiny_exact_spans() {
+        let mut curve =
+            ExactAutomationCurve::new(ParameterId::new_static("test.audio.handle.evaluation"), 0.0)
+                .expect("curve");
+        let mut first = ExactAutomationKeyframe::linear(TimelineTime::ZERO, 0.0);
+        first.interpolation_to_next = AutomationSegmentInterpolation::Bezier;
+        first.out_handle = Some(ExactBezierHandle {
+            time_offset: TimelineTime::ZERO,
+            value_offset: 0.25,
+        });
+        curve.set_keyframe(first).expect("first");
+        curve
+            .set_keyframe(ExactAutomationKeyframe::linear(
+                TimelineTime::new(2, i64::MAX).expect("span"),
+                1.0,
+            ))
+            .expect("last");
+        let value = curve.evaluate(TimelineTime::new(1, i64::MAX).expect("half span")).expect(
+            "Evaluation defaults are derived coordinates, not new persisted rational author values",
+        );
+        assert!(value > 0.5 && value < 1.0);
+    }
+
+    #[test]
+    fn explicit_handle_edit_needs_no_unrepresentable_default_time() {
+        let mut curve =
+            ExactAutomationCurve::new(ParameterId::new_static("test.audio.handle.tiny"), 0.0)
+                .expect("curve");
+        let first = ExactAutomationKeyframe::linear(TimelineTime::ZERO, 0.0);
+        let id = first.id;
+        curve.set_keyframe(first).expect("first");
+        curve
+            .set_keyframe(ExactAutomationKeyframe::linear(
+                TimelineTime::new(1, i64::MAX).expect("exact tiny span"),
+                1.0,
+            ))
+            .expect("last");
+        assert_eq!(
+            curve.edit_keyframe_handle(
+                id,
+                BezierHandleSide::Outgoing,
+                ExactBezierHandleEdit {
+                    time_offset: Some(TimelineTime::ZERO),
+                    value_offset: Some(0.25),
+                }
+            ),
+            Ok(()),
+            "Explicit admitted coordinates must not compute an unused default third of the span"
+        );
+        assert_eq!(
+            curve.keyframes[0].out_handle,
+            Some(ExactBezierHandle {
+                time_offset: TimelineTime::ZERO,
+                value_offset: 0.25
+            })
+        );
+        assert_eq!(curve.validate(), Ok(()));
+    }
+
+    #[test]
+    fn continuous_handle_direction_is_validated_even_with_linear_predecessor() {
+        let (mut curve, id) = handle_edit_curve();
+        curve
+            .set_keyframe_interpolation(id, InterpolationType::ContinuousBezier)
+            .expect("continuous");
+        curve.keyframes[0].interpolation_to_next = AutomationSegmentInterpolation::Linear;
+        curve.keyframes[1].in_handle = Some(ExactBezierHandle {
+            time_offset: TimelineTime::new(1, 3).expect("wrong side"),
+            value_offset: 0.0,
+        });
+        curve.keyframes[1].out_handle.as_mut().expect("outgoing").value_offset = 0.0;
+        assert_eq!(curve.validate(), Err(AutomationError::InvalidBezierTimeHandle), "Stored constrained handles must retain their temporal side independently of the predecessor's active interpolation");
+    }
+
+    #[test]
+    fn handle_edit_preserves_axes_and_converts_auto_to_continuous() {
+        let (mut curve, id) = handle_edit_curve();
+        let original = curve.keyframes[1].clone();
+        curve
+            .edit_keyframe_handle(
+                id,
+                BezierHandleSide::Outgoing,
+                ExactBezierHandleEdit {
+                    time_offset: Some(TimelineTime::new(2, 5).expect("length")),
+                    value_offset: Some(1.6),
+                },
+            )
+            .expect("handle edit");
+        let actual = &curve.keyframes[1];
+        assert_eq!(actual.tangent_mode, ExactAutomationTangentMode::Continuous);
+        assert_eq!(actual.id, original.id);
+        assert_eq!(actual.time, original.time);
+        assert_eq!(actual.value, original.value);
+        assert_eq!(
+            actual.in_handle.expect("partner").time_offset,
+            original.in_handle.expect("original partner").time_offset
+        );
+        assert!(
+            (actual.in_handle.expect("partner").value_offset + 4.0 / 3.0).abs()
+                <= 8.0 * f64::EPSILON
+        );
+        curve
+            .edit_keyframe_handle(
+                id,
+                BezierHandleSide::Outgoing,
+                ExactBezierHandleEdit { time_offset: None, value_offset: Some(0.8) },
+            )
+            .expect("vertical-only drag");
+        assert_eq!(
+            curve.keyframes[1].out_handle.expect("edited").time_offset,
+            TimelineTime::new(2, 5).expect("exact length")
+        );
+        curve
+            .edit_keyframe_handle(
+                id,
+                BezierHandleSide::Outgoing,
+                ExactBezierHandleEdit {
+                    time_offset: Some(TimelineTime::new(1, 5).expect("length")),
+                    value_offset: None,
+                },
+            )
+            .expect("horizontal-only drag");
+        assert_eq!(
+            curve.keyframes[1].out_handle.expect("edited").value_offset,
+            0.8
+        );
+        assert_eq!(curve.validate(), Ok(()));
+    }
+
+    #[test]
+    fn handle_edit_noop_keeps_auto_and_manual_edit_keeps_partner() {
+        let (mut curve, id) = handle_edit_curve();
+        let before = curve.clone();
+        curve
+            .edit_keyframe_handle(
+                id,
+                BezierHandleSide::Incoming,
+                ExactBezierHandleEdit {
+                    time_offset: None,
+                    value_offset: Some(
+                        curve.keyframes[1].in_handle.expect("incoming").value_offset,
+                    ),
+                },
+            )
+            .expect("noop");
+        assert_eq!(curve, before);
+        curve.set_keyframe_interpolation(id, InterpolationType::Bezier).expect("manual");
+        let partner = curve.keyframes[1].in_handle;
+        curve
+            .edit_keyframe_handle(
+                id,
+                BezierHandleSide::Outgoing,
+                ExactBezierHandleEdit { time_offset: None, value_offset: Some(1.0) },
+            )
+            .expect("manual edit");
+        assert_eq!(curve.keyframes[1].in_handle, partner);
+        assert_eq!(
+            curve.keyframes[1].tangent_mode,
+            ExactAutomationTangentMode::Manual
+        );
+    }
+
+    #[test]
+    fn handle_edit_vertical_and_zero_vectors_roundtrip_without_nonfinite_values() {
+        let (mut curve, id) = handle_edit_curve();
+        let partner_length = curve.keyframes[1].in_handle.expect("partner").value_offset.abs();
+        curve
+            .edit_keyframe_handle(
+                id,
+                BezierHandleSide::Outgoing,
+                ExactBezierHandleEdit {
+                    time_offset: Some(TimelineTime::ZERO),
+                    value_offset: Some(1.0),
+                },
+            )
+            .expect("vertical handle");
+        assert_eq!(
+            curve.keyframes[1].in_handle,
+            Some(ExactBezierHandle {
+                time_offset: TimelineTime::ZERO,
+                value_offset: -partner_length,
+            })
+        );
+        let restored: ExactAutomationCurve =
+            serde_json::from_str(&serde_json::to_string(&curve).expect("encode")).expect("decode");
+        assert_eq!(restored, curve);
+        for numerator in 0..=30 {
+            assert!(restored
+                .evaluate(TimelineTime::new(numerator, 10).expect("sample"))
+                .expect("evaluation")
+                .is_finite());
+        }
+        let partner = curve.keyframes[1].in_handle;
+        curve
+            .edit_keyframe_handle(
+                id,
+                BezierHandleSide::Outgoing,
+                ExactBezierHandleEdit { time_offset: None, value_offset: Some(0.0) },
+            )
+            .expect("collapsed handle");
+        assert_eq!(curve.keyframes[1].in_handle, partner);
+        assert_eq!(curve.validate(), Ok(()));
+    }
+
+    #[test]
+    fn handle_edit_invalid_requests_are_atomic() {
+        let (mut curve, id) = handle_edit_curve();
+        let before = curve.clone();
+        for (side, edit, expected) in [
+            (
+                BezierHandleSide::Outgoing,
+                ExactBezierHandleEdit { time_offset: None, value_offset: None },
+                AutomationError::EmptyHandleEdit,
+            ),
+            (
+                BezierHandleSide::Outgoing,
+                ExactBezierHandleEdit {
+                    time_offset: None,
+                    value_offset: Some(f64::INFINITY),
+                },
+                AutomationError::NonFiniteValue,
+            ),
+            (
+                BezierHandleSide::Outgoing,
+                ExactBezierHandleEdit {
+                    time_offset: Some(TimelineTime::new(-1, 5).expect("wrong side")),
+                    value_offset: None,
+                },
+                AutomationError::InvalidBezierTimeHandle,
+            ),
+            (
+                BezierHandleSide::Incoming,
+                ExactBezierHandleEdit {
+                    time_offset: Some(TimelineTime::new(-2, 1).expect("outside")),
+                    value_offset: None,
+                },
+                AutomationError::InvalidBezierTimeHandle,
+            ),
+            (
+                BezierHandleSide::Outgoing,
+                ExactBezierHandleEdit {
+                    time_offset: Some(TimelineTime::new(1, i64::MAX).expect("tiny")),
+                    value_offset: Some(f64::MAX),
+                },
+                AutomationError::NonFiniteValue,
+            ),
+        ] {
+            assert_eq!(curve.edit_keyframe_handle(id, side, edit), Err(expected));
+            assert_eq!(curve, before);
+        }
+        let edit = ExactBezierHandleEdit { time_offset: None, value_offset: Some(1.0) };
+        assert_eq!(
+            curve.edit_keyframe_handle(curve.keyframes[0].id, BezierHandleSide::Incoming, edit),
+            Err(AutomationError::MissingBezierSegment)
+        );
+        assert_eq!(
+            curve.edit_keyframe_handle(curve.keyframes[2].id, BezierHandleSide::Outgoing, edit),
+            Err(AutomationError::MissingBezierSegment)
+        );
+        assert_eq!(
+            curve.edit_keyframe_handle(KeyframeId::new(), BezierHandleSide::Outgoing, edit),
+            Err(AutomationError::UnknownKeyframe)
+        );
+        assert_eq!(curve, before);
+    }
+
+    fn handle_edit_curve() -> (ExactAutomationCurve, KeyframeId) {
+        let mut curve =
+            ExactAutomationCurve::new(ParameterId::new_static("test.audio.handles"), 0.0)
+                .expect("curve");
+        let middle = ExactAutomationKeyframe::linear(TimelineTime::ONE, 2.0);
+        for key in [
+            ExactAutomationKeyframe::linear(TimelineTime::ZERO, 0.0),
+            middle.clone(),
+            ExactAutomationKeyframe::linear(TimelineTime::new(3, 1).expect("last time"), 3.0),
+        ] {
+            curve.set_keyframe(key).expect("key");
+        }
+        curve
+            .set_keyframe_interpolation(middle.id, InterpolationType::AutoBezier)
+            .expect("auto");
+        (curve, middle.id)
+    }
+
+    #[test]
+    fn continuous_vertical_tangent_missing_partner_retains_authored_direction() {
+        for incoming in [false, true] {
+            let mut curve = ExactAutomationCurve::new(
+                ParameterId::new_static("test.audio.continuous.vertical"),
+                0.0,
+            )
+            .expect("curve");
+            let mut middle = ExactAutomationKeyframe::linear(TimelineTime::ONE, 2.0);
+            middle.tangent_mode = ExactAutomationTangentMode::Continuous;
+            middle.interpolation_to_next = AutomationSegmentInterpolation::Bezier;
+            let handle = ExactBezierHandle {
+                time_offset: TimelineTime::ZERO,
+                value_offset: if incoming { -1.0 } else { 1.0 },
+            };
+            if incoming {
+                middle.in_handle = Some(handle);
+            } else {
+                middle.out_handle = Some(handle);
+            }
+            for key in [
+                ExactAutomationKeyframe::linear(TimelineTime::ZERO, 0.0),
+                ExactAutomationKeyframe::linear(TimelineTime::new(3, 1).expect("last time"), 3.0),
+            ] {
+                curve.set_keyframe(key).expect("neighbor");
+            }
+            assert_eq!(
+                curve.set_keyframe(middle.clone()),
+                Ok(()),
+                "A legal authored vertical direction must not be replaced by neighboring secants"
+            );
+            let actual = &curve.keyframes[1];
+            assert_eq!(
+                actual.in_handle,
+                Some(ExactBezierHandle {
+                    time_offset: TimelineTime::ZERO,
+                    value_offset: -1.0,
+                })
+            );
+            assert_eq!(
+                actual.out_handle,
+                Some(ExactBezierHandle { time_offset: TimelineTime::ZERO, value_offset: 1.0 })
+            );
+            assert_eq!(curve.validate(), Ok(()));
+            let encoded = serde_json::to_string(&curve).expect("encode");
+            let restored: ExactAutomationCurve = serde_json::from_str(&encoded).expect("decode");
+            assert_eq!(restored, curve);
+            for numerator in 0..=30 {
+                let time = TimelineTime::new(numerator, 10).expect("sample");
+                let value = restored.evaluate(time).expect("evaluate vertical curve");
+                assert!(value.is_finite());
+                assert_eq!(value, curve.evaluate(time).expect("original evaluation"));
+            }
         }
     }
 
