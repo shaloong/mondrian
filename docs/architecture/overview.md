@@ -664,9 +664,12 @@ snapshot. Nonfinite search times are rejected before writing the output.
 ### Continuous automation execution queries
 
 Core prepares a read-only `PreparedPropertyQuery` from a validated canonical
-`AnimatedProperty`. `AutomationQueryTime` denotes finite owner-local seconds at
-a floating execution boundary; it is not a persisted author value or a rounding
-grid. Preparation rejects author keys that collapse to the same floating time.
+`AnimatedProperty` and an explicit positive exact time scale. `AutomationQueryTime`
+denotes a finite coordinate in that execution grid; it is not a persisted author
+value or a rounding grid. Identity scale uses owner seconds; a sequence frame rate
+uses OpenFX frames. Key times, derivatives and integrals use the configured units.
+Queries never divide a floating frame back to author seconds, preserving exact
+ordering at projected Hold boundaries. Preparation rejects author keys that collapse to the same floating time.
 Ordered union key times and complete compound values come from the frozen source.
 Exact author evaluation and prepared queries share numeric segment lowering,
 Bezier time inversion and de Casteljau value evaluation.
@@ -680,4 +683,4 @@ mean avoids unnecessary overflow. Signed areas accumulate binary significand
 products in fixed storage and round only once at publication; overflowing pieces
 can cancel without erasing a small remaining area. Integer and categorical values retain their
 canonical value conversion but do not expose floating calculus. The OpenFX
-snapshot transport and frame-unit conversion remain separate integration work.
+snapshot transport and native query dispatch remain separate integration work.

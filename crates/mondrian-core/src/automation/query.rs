@@ -7,25 +7,25 @@ use super::{
     interpolate_numeric_value, numeric_segment_control, AnimatedProperty, Keyframe,
     KeyframeInterpolation, PropertyValue, PropertyValueType,
 };
-use crate::numeric_bezier;
+use crate::{numeric_bezier, TimeScale, TimelineTime};
 
-/// Finite owner-local seconds at a floating-point execution boundary.
+/// Finite coordinate in the prepared snapshot's execution time grid.
 /// This coordinate is never persisted or quantized onto an author grid.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AutomationQueryTime(f64);
 
 impl AutomationQueryTime {
-    /// Admit a finite execution coordinate in owner-local seconds.
-    pub fn new(seconds: f64) -> Result<Self, AutomationQueryError> {
-        if seconds.is_finite() {
-            Ok(Self(seconds))
+    /// Admit a finite execution coordinate without author-time quantization.
+    pub fn new(coordinate: f64) -> Result<Self, AutomationQueryError> {
+        if coordinate.is_finite() {
+            Ok(Self(coordinate))
         } else {
             Err(AutomationQueryError::NonFiniteTime)
         }
     }
 
-    /// Owner-local seconds supplied by the execution adapter.
-    pub const fn seconds(self) -> f64 {
+    /// Coordinate supplied in the prepared snapshot's declared time grid.
+    pub const fn coordinate(self) -> f64 {
         self.0
     }
 }
@@ -36,6 +36,9 @@ pub enum AutomationQueryError {
     /// The execution coordinate contains NaN or infinity.
     #[error("automation query time must be finite")]
     NonFiniteTime,
+    /// Execution coordinates must advance in the author time direction.
+    #[error("automation query time scale must be positive")]
+    InvalidTimeScale,
     /// The author property failed canonical validation.
     #[error("automation query source is invalid")]
     InvalidSource,
@@ -60,8 +63,18 @@ pub struct PreparedPropertyQuery {
 }
 
 impl PreparedPropertyQuery {
-    /// Validate and freeze one canonical property without changing author state.
-    pub fn prepare(property: &AnimatedProperty) -> Result<Self, AutomationQueryError> {
+    /// Validate and freeze one canonical property on an explicit execution grid.
+    /// A positive exact scale declares execution units per author second (ONE
+    /// for seconds, sequence frame rate for OpenFX frames). Calculus and key
+    /// times use those same units; no floating query is divided back to seconds.
+    pub fn prepare(
+        property: &AnimatedProperty,
+        time_scale: TimeScale,
+    ) -> Result<Self, AutomationQueryError> {
+        if time_scale.numerator() <= 0 {
+            return Err(AutomationQueryError::InvalidTimeScale);
+        }
+        let factor = TimelineTime::from(time_scale).to_f64();
         property.validate().map_err(|_| AutomationQueryError::InvalidSource)?;
         let animated = property.is_enabled() && property.is_animated();
         let fallback = property
@@ -73,8 +86,11 @@ impl PreparedPropertyQuery {
                 .iter()
                 .enumerate()
                 .map(|(index, channel)| {
-                    let times =
-                        channel.keyframes().iter().map(|key| key.time.to_f64()).collect::<Vec<_>>();
+                    let times = channel
+                        .keyframes()
+                        .iter()
+                        .map(|key| key.time.to_f64() * factor)
+                        .collect::<Vec<_>>();
                     admit_projected_times(&times)?;
                     Ok(PreparedChannel {
                         times,
@@ -95,7 +111,7 @@ impl PreparedPropertyQuery {
             let times = property
                 .keyframe_times()
                 .into_iter()
-                .map(|time| time.to_f64())
+                .map(|time| time.to_f64() * factor)
                 .collect::<Vec<_>>();
             admit_projected_times(&times)?;
             times
@@ -105,7 +121,7 @@ impl PreparedPropertyQuery {
         Ok(Self { property: property.clone(), channels, key_times })
     }
 
-    /// Ordered union of all enabled channel key times, in owner-local seconds.
+    /// Ordered union of all enabled channel key times, in the execution grid.
     pub fn key_times(&self) -> &[f64] {
         &self.key_times
     }
@@ -131,7 +147,7 @@ impl PreparedPropertyQuery {
         Ok(self.property.value_from_channel_values(&values, self.property.static_value()))
     }
 
-    /// Right-hand owner-time derivatives. Before the first key and at/after the
+    /// Right-hand derivatives per execution time unit. Before the first key and at/after the
     /// last key, endpoint extension has slope zero. Hold jumps are not impulses.
     /// A vertical slope returns an error rather than an invented finite value.
     pub fn derivatives(&self, time: AutomationQueryTime) -> Result<Vec<f64>, AutomationQueryError> {
@@ -142,7 +158,7 @@ impl PreparedPropertyQuery {
         self.channels.iter().map(|channel| channel.derivative(time.0)).collect()
     }
 
-    /// Signed owner-time integrals, including endpoint extension and exact empty
+    /// Signed execution-time integrals, including endpoint extension and exact empty
     /// intervals. Cubic integration uses the shared parametric curve geometry.
     pub fn integrals(
         &self,
@@ -368,6 +384,12 @@ mod tests {
     };
     use crate::TimelineTime;
 
+    fn prepare_query(
+        property: &AnimatedProperty,
+    ) -> Result<PreparedPropertyQuery, AutomationQueryError> {
+        PreparedPropertyQuery::prepare(property, TimeScale::ONE)
+    }
+
     fn time(value: f64) -> AutomationQueryTime {
         AutomationQueryTime::new(value).expect("finite query")
     }
@@ -430,7 +452,7 @@ mod tests {
             ],
             [0.0, 1.0],
         );
-        let query = PreparedPropertyQuery::prepare(&property).expect("query");
+        let query = prepare_query(&property).expect("query");
         for step in 0..64 {
             let u = f64::from(step) / 64.0;
             close(scalar(&query, 2.0 * u), 3.0 * u * u - 2.0 * u * u * u);
@@ -466,7 +488,7 @@ mod tests {
             ],
             [0.0, 1.0],
         );
-        let query = PreparedPropertyQuery::prepare(&property).expect("query");
+        let query = prepare_query(&property).expect("query");
         for x in [0.0_f64, 0.015625, 0.0625, 0.25, 0.5625, 0.9] {
             close(scalar(&query, x), x.powf(1.5));
             close(
@@ -496,7 +518,7 @@ mod tests {
             [0.0, 1.0],
         );
         close(
-            PreparedPropertyQuery::prepare(&same)
+            prepare_query(&same)
                 .expect("query")
                 .derivatives(time(0.0))
                 .expect("finite limit")[0],
@@ -511,7 +533,7 @@ mod tests {
             ],
             [0.0, 1.0],
         );
-        let query = PreparedPropertyQuery::prepare(&vertical).expect("query");
+        let query = prepare_query(&vertical).expect("query");
         assert_eq!(
             query.derivatives(time(0.0)),
             Err(AutomationQueryError::NonFiniteResult)
@@ -529,7 +551,7 @@ mod tests {
             ],
             [0.0, 0.0],
         );
-        let query = PreparedPropertyQuery::prepare(&property).expect("query");
+        let query = prepare_query(&property).expect("query");
         close(scalar(&query, 0.5), 1.5);
         close(query.derivatives(time(0.5)).expect("peak")[0], 0.0);
         close(query.integrals(time(0.0), time(1.0)).expect("area")[0], 1.0);
@@ -549,8 +571,7 @@ mod tests {
             key.interp_in = KeyframeInterpolation::Hold;
             key.interp_out = KeyframeInterpolation::Hold;
         }
-        let query = PreparedPropertyQuery::prepare(&property(PropertyValue::Double(0.0), keys))
-            .expect("query");
+        let query = prepare_query(&property(PropertyValue::Double(0.0), keys)).expect("query");
         assert_eq!(scalar(&query, 0.999), 2.0);
         assert_eq!(scalar(&query, 1.0), 5.0);
         assert_eq!(query.derivatives(time(1.0)).expect("hold"), vec![0.0]);
@@ -584,7 +605,7 @@ mod tests {
                 InterpolationType::Linear,
             )
             .expect("third channel");
-        let query = PreparedPropertyQuery::prepare(&property).expect("query");
+        let query = prepare_query(&property).expect("query");
         assert_eq!(query.key_times(), [0.0, 1.0, 2.0]);
         assert_eq!(
             query.evaluate(time(0.5)).expect("vector"),
@@ -610,12 +631,12 @@ mod tests {
             ],
         );
         let original = property.clone();
-        let query = PreparedPropertyQuery::prepare(&property).expect("query");
+        let query = prepare_query(&property).expect("query");
         assert_eq!(property, original);
         property.set_animation_enabled(false);
         property.set_static_value(PropertyValue::Double(8.0)).expect("edit");
         assert_eq!(scalar(&query, 0.5), 2.0);
-        let disabled = PreparedPropertyQuery::prepare(&property).expect("disabled");
+        let disabled = prepare_query(&property).expect("disabled");
         assert!(disabled.key_times().is_empty());
         assert_eq!(scalar(&disabled, -500.0), 8.0);
         assert_eq!(disabled.derivatives(time(0.5)).expect("constant"), [0.0]);
@@ -627,8 +648,7 @@ mod tests {
 
     #[test]
     fn extreme_constant_intervals_and_subnormals_do_not_overflow_intermediates() {
-        let query = PreparedPropertyQuery::prepare(&property(PropertyValue::Double(0.25), vec![]))
-            .expect("query");
+        let query = prepare_query(&property(PropertyValue::Double(0.25), vec![])).expect("query");
         assert_eq!(
             query.integrals(time(-f64::MAX), time(f64::MAX)).expect("representable"),
             [f64::MAX * 0.5]
@@ -637,8 +657,7 @@ mod tests {
             query.integrals(time(f64::MAX), time(f64::MAX)).expect("empty"),
             [0.0]
         );
-        let one = PreparedPropertyQuery::prepare(&property(PropertyValue::Double(1.0), vec![]))
-            .expect("one");
+        let one = prepare_query(&property(PropertyValue::Double(1.0), vec![])).expect("one");
         assert_eq!(
             one.integrals(time(0.0), time(f64::from_bits(1))).expect("subnormal"),
             [f64::from_bits(1)]
@@ -651,7 +670,7 @@ mod tests {
 
     #[test]
     fn large_linear_slopes_and_signed_piece_cancellation_remain_finite() {
-        let query = PreparedPropertyQuery::prepare(&property(
+        let query = prepare_query(&property(
             PropertyValue::Double(0.0),
             vec![
                 Keyframe::linear(TimelineTime::ZERO, PropertyValue::Double(f64::MAX)),
@@ -683,7 +702,7 @@ mod tests {
             key.interp_out = KeyframeInterpolation::Hold;
         }
         assert_eq!(
-            PreparedPropertyQuery::prepare(&property(PropertyValue::Double(0.0), keys))
+            prepare_query(&property(PropertyValue::Double(0.0), keys))
                 .expect("query")
                 .integrals(time(0.0), time(2.0))
                 .expect("piece cancellation"),
@@ -713,7 +732,7 @@ mod tests {
             ],
         );
         assert!(matches!(
-            PreparedPropertyQuery::prepare(&property),
+            prepare_query(&property),
             Err(AutomationQueryError::TimeResolution)
         ));
     }
@@ -744,7 +763,7 @@ mod tests {
             property.set_exact_keyframe(key).expect("interpolated Integer key");
         }
         property.set_animation_enabled(true);
-        let query = PreparedPropertyQuery::prepare(&property).expect("query");
+        let query = prepare_query(&property).expect("query");
         assert_eq!(
             query.evaluate(time(0.5)).expect("integer"),
             PropertyValue::Int(2)
@@ -772,7 +791,7 @@ mod tests {
                 .expect("held Boolean");
         }
         boolean.set_animation_enabled(true);
-        let held = PreparedPropertyQuery::prepare(&boolean).expect("Boolean query");
+        let held = prepare_query(&boolean).expect("Boolean query");
         assert_eq!(
             held.evaluate(time(0.5)).expect("held"),
             PropertyValue::Bool(false)
@@ -797,7 +816,7 @@ mod tests {
             ],
             [0.0, 1.0],
         );
-        let query = PreparedPropertyQuery::prepare(&property).expect("query");
+        let query = prepare_query(&property).expect("query");
         for x in [1e-20_f64, 1e-100] {
             let expected = x.powf(1.5);
             let value = scalar(&query, x);
@@ -833,13 +852,90 @@ mod tests {
                 .collect::<Vec<_>>();
             // The two +/- large pieces each have width two; their areas cancel
             // even when each area alone exceeds the Float64 result range.
-            let query = PreparedPropertyQuery::prepare(&property(
+            let query = prepare_query(&property(
                 PropertyValue::Double(0.0),
                 std::mem::take(&mut keys),
             ))
             .expect("query");
             let area = query.integrals(time(-f64::MAX), time(f64::MAX)).expect("finite area")[0];
             assert_eq!(area, 1e-300, "pulse after cancellation, large={large}");
+        }
+    }
+
+    #[test]
+    fn explicit_frame_grid_preserves_values_and_calculus_units() {
+        let property = cubic(
+            [TimelineTime::ZERO, TimelineTime::ONE],
+            [
+                (TimelineTime::ONE_THIRD, 0.0),
+                (TimelineTime::NEGATIVE_ONE_THIRD, 0.0),
+            ],
+            [0.0, 1.0],
+        );
+        let rate = TimeScale::new(24000, 1001).expect("NTSC");
+        let fps = TimelineTime::from(rate).to_f64();
+        let frames = PreparedPropertyQuery::prepare(&property, rate).expect("frame query");
+        assert_eq!(frames.key_times(), [0.0, fps]);
+        close(scalar(&frames, fps * 0.25), 0.15625);
+        close(
+            frames.derivatives(time(fps * 0.25)).expect("per-frame slope")[0],
+            1.125 / fps,
+        );
+        close(
+            frames.integrals(time(0.0), time(fps)).expect("frame area")[0],
+            0.5 * fps,
+        );
+        close(
+            frames.integrals(time(fps), time(0.0)).expect("signed frame area")[0],
+            -0.5 * fps,
+        );
+        // Arbitrary finite SDK coordinates beyond the authored range retain
+        // endpoint values without a frame/seconds division that could overflow.
+        assert_eq!(scalar(&frames, f64::MAX), 1.0);
+        assert_eq!(
+            frames.derivatives(time(-f64::MAX)).expect("extension"),
+            [0.0]
+        );
+    }
+
+    #[test]
+    fn frame_grid_hold_boundaries_follow_native_coordinates_exactly() {
+        let rate = TimeScale::new(24000, 1001).expect("NTSC");
+        let fps = TimelineTime::from(rate).to_f64();
+        for numerator in 1..=128 {
+            let key_time = TimelineTime::new(numerator, 97).expect("author time");
+            let property = property(
+                PropertyValue::Double(0.0),
+                vec![
+                    Keyframe::from_preset(
+                        TimelineTime::ZERO,
+                        PropertyValue::Double(2.0),
+                        InterpolationType::Hold,
+                    ),
+                    Keyframe::from_preset(
+                        key_time,
+                        PropertyValue::Double(5.0),
+                        InterpolationType::Hold,
+                    ),
+                ],
+            );
+            let frames = PreparedPropertyQuery::prepare(&property, rate).expect("frame query");
+            let native_key = key_time.to_f64() * fps;
+            assert_eq!(frames.key_times(), [0.0, native_key]);
+            assert_eq!(scalar(&frames, native_key.next_down()), 2.0);
+            assert_eq!(scalar(&frames, native_key), 5.0);
+            assert_eq!(scalar(&frames, native_key.next_up()), 5.0);
+        }
+    }
+
+    #[test]
+    fn execution_grid_rejects_nonpositive_scales() {
+        let property = property(PropertyValue::Double(1.0), vec![]);
+        for scale in [TimeScale::ZERO, TimeScale::NEGATIVE_ONE] {
+            assert!(matches!(
+                PreparedPropertyQuery::prepare(&property, scale),
+                Err(AutomationQueryError::InvalidTimeScale)
+            ));
         }
     }
 }
