@@ -53,9 +53,6 @@ pub enum AppUiLocalePreference {
     EnUs,
     /// Expand translated text to expose insufficient layout space.
     Pseudo,
-    /// A preference written by a newer release falls back safely.
-    #[serde(other)]
-    Unknown,
 }
 
 impl AppUiLocalePreference {
@@ -65,7 +62,7 @@ impl AppUiLocalePreference {
             Self::ZhCn => AppUiLocale::ZhCn,
             Self::EnUs => AppUiLocale::EnUs,
             Self::Pseudo => AppUiLocale::Pseudo,
-            Self::System | Self::Unknown => match system_tag {
+            Self::System => match system_tag {
                 Some(tag)
                     if tag
                         .split(['-', '_'])

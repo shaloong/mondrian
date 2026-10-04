@@ -3232,3 +3232,16 @@ from a supplied invalid coordinate at product-action decoding. The former
 retains exact author state; the latter rejects the entire action before history
 or author generation advances. Product-action regression tests cover both axes,
 nonfinite values, and unchanged state/history after rejection.
+
+### Current machine preference schema
+
+`AppUiPreferences` admits the current schema as one document: every machine
+field is required except the optional custom workspace layout. Unknown fields
+and unknown product locale choices are rejected instead of creating a hidden
+System-language variant or filling missing required fields independently.
+The real loader uses defaults for absent, malformed, or incompatible documents
+and does not rewrite their bytes. System locale resolution still accepts an
+external desktop language tag and selects a supported product language.
+Current-schema tests use nondefault theme/language fixtures, verify exact file
+preservation on rejection, and round-trip every supported locale with no
+custom layout. This is alpha schema admission, with no field migrations.

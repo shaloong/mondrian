@@ -7,6 +7,10 @@ dropdown, and an immutable Fluent formatter for `zh-CN`, `en-US`, and a pseudo
 locale. The preference is stored in `app_ui_preferences.json`; switching it
 reprojects the dialog model without changing Project authoring state. System
 resolution supports English language tags and otherwise falls back to Chinese.
+Persisted product choices are exactly System, Chinese, English, and pseudo;
+unknown choices reject the preference document. The machine preference loader
+then selects its complete defaults without changing the rejected file. This
+keeps external OS-language selection separate from strict product schema admission.
 The initial catalogs cover the language selector, notification copy, the
 complete application menu bar, Startup screen chrome, Asset Browser chrome/cards/menus, and the Effect Browser's built-in effect names,
 categories, title, search hint, and empty state. Menu rows carry stable message IDs; locale

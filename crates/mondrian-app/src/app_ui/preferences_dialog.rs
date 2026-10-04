@@ -2577,9 +2577,7 @@ fn locale_message(locale: AppUiLocale, id: &str, fallback: &str) -> String {
 
 fn locale_label(model: &AppUiPreferencesModel) -> String {
     let (id, fallback) = match model.locale_preference {
-        AppUiLocalePreference::System | AppUiLocalePreference::Unknown => {
-            ("preferences-language-system", "跟随系统")
-        }
+        AppUiLocalePreference::System => ("preferences-language-system", "跟随系统"),
         AppUiLocalePreference::ZhCn => ("preferences-language-zh-cn", "简体中文"),
         AppUiLocalePreference::EnUs => ("preferences-language-en-us", "English"),
         AppUiLocalePreference::Pseudo => ("preferences-language-pseudo", "伪语言（布局检查）"),
@@ -2616,11 +2614,7 @@ fn locale_items(model: &AppUiPreferencesModel) -> Vec<MenuItem> {
             locale_message(model.locale, id, fallback),
             app_shell_preferences_locale_changed_action(preference),
         )
-        .checked(
-            preference == model.locale_preference
-                || preference == AppUiLocalePreference::System
-                    && model.locale_preference == AppUiLocalePreference::Unknown,
-        )
+        .checked(preference == model.locale_preference)
     })
     .collect()
 }

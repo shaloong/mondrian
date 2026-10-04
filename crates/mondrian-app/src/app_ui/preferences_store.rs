@@ -29,14 +29,14 @@ pub const MAX_NATIVE_OPENFX_BUNDLES: usize = 64;
 
 /// Versioned user preferences owned by the app UI shell.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AppUiPreferences {
-    /// Schema version for future non-compatible alpha migrations.
+    /// Identifier of the current machine preference schema; other versions are rejected.
     pub version: u32,
     /// Active product theme preference. `System` resolves to a concrete preset
     /// at runtime and is not persisted as a third theme token set.
     pub theme_preference: ThemePreference,
     /// Machine-local UI language; never persisted in a Project.
-    #[serde(default)]
     pub locale_preference: AppUiLocalePreference,
     /// Built-in workspace preset restored when the app UI shell opens.
     pub workspace_preset: WorkspacePreset,
@@ -47,30 +47,22 @@ pub struct AppUiPreferences {
     /// Explicitly selected native OpenFX bundles; project files retain effect identities.
     pub installed_openfx_bundles: Vec<PathBuf>,
     /// User overrides for app UI shell shortcut descriptors.
-    #[serde(default)]
     pub shortcut_overrides: Vec<AppUiShortcutOverride>,
     /// Persisted custom dock layout for the app UI workspace.
-    #[serde(default)]
     pub custom_workspace_layout: Option<AppUiWorkspaceLayout>,
     /// Waveform display mode for audio clips on the timeline.
-    #[serde(default)]
     pub waveform_display: WaveformDisplay,
     /// Presentation-only background visible through transparent Viewer pixels.
-    #[serde(default)]
     pub viewer_canvas_background: ViewerCanvasBackground,
     /// Machine-local professional Scopes analysis and presentation controls.
-    #[serde(default)]
     pub video_scopes: VideoScopesSettings,
     /// Runtime output-device intent. This is a user preference, never Project state.
-    #[serde(default)]
     pub audio_output_device: mondrian_media::RealtimeAudioOutputDeviceSelection,
     /// Machine-local professional output routing intent. Loading preferences
     /// never auto-acquires a DeckLink/AJA device.
-    #[serde(default)]
     pub reference_output: mondrian_reference_output::ReferenceOutputRoutingPreferences,
     /// Machine-local Viewer monitor target, ICC calibration, and HDR policy.
     /// This value never enters `.mdp` Project authoring state.
-    #[serde(default)]
     pub display_management: mondrian_core::DisplayManagementPolicy,
 }
 
@@ -437,84 +429,94 @@ mod tests {
         fs::remove_file(path).ok();
     }
 
+    fn assert_rejected_preferences_preserve_file(value: serde_json::Value) {
+        assert!(serde_json::from_value::<AppUiPreferences>(value.clone()).is_err());
+        let path = temp_preferences_path("rejected-current-schema");
+        let bytes = serde_json::to_vec(&value).expect("serialize rejected preferences");
+        fs::write(&path, &bytes).expect("write preferences fixture");
+        assert_eq!(
+            load_app_ui_preferences_from(&path),
+            AppUiPreferences::default()
+        );
+        assert_eq!(fs::read(&path).expect("read untouched preferences"), bytes);
+        fs::remove_file(path).expect("remove fixture");
+    }
+
     #[test]
-    fn future_locale_value_preserves_other_machine_preferences() {
-        let path = temp_preferences_path("future-locale");
-        let mut value = serde_json::to_value(AppUiPreferences {
+    fn current_preferences_schema_rejects_unknown_language_and_fields() {
+        let fixture = AppUiPreferences {
             theme_preference: ThemePreference::Light,
+            locale_preference: AppUiLocalePreference::EnUs,
             ..AppUiPreferences::default()
-        })
-        .expect("serialize preferences");
-        value["locale_preference"] = serde_json::Value::String("FutureLocale".to_owned());
-        fs::write(
-            &path,
-            serde_json::to_vec(&value).expect("serialize future locale"),
-        )
-        .expect("write future locale");
-        let loaded = load_app_ui_preferences_from(&path);
-        fs::remove_file(path).ok();
-        assert_eq!(loaded.theme_preference, ThemePreference::Light);
-        assert_eq!(loaded.locale_preference, AppUiLocalePreference::Unknown);
+        };
+        let mut unknown_locale = serde_json::to_value(&fixture).expect("serialize fixture");
+        unknown_locale["locale_preference"] = "FutureLocale".into();
+        assert_rejected_preferences_preserve_file(unknown_locale);
+        let mut unknown_field = serde_json::to_value(&fixture).expect("serialize fixture");
+        unknown_field["unsupported_preference"] = true.into();
+        assert_rejected_preferences_preserve_file(unknown_field);
     }
 
     #[test]
-    fn legacy_preferences_without_display_policy_restore_safe_default() {
-        let path = temp_preferences_path("legacy-display-policy");
-        let mut value = serde_json::to_value(AppUiPreferences::default())
-            .expect("serialize current preferences");
-        value.as_object_mut().expect("preferences object").remove("display_management");
-        fs::write(
-            &path,
-            serde_json::to_vec(&value).expect("serialize legacy preferences"),
-        )
-        .expect("write legacy preferences");
-
-        let loaded = load_app_ui_preferences_from(&path);
-        fs::remove_file(path).ok();
-
-        assert_eq!(
-            loaded.display_management,
-            mondrian_core::DisplayManagementPolicy::default()
-        );
+    fn current_preferences_schema_requires_machine_fields() {
+        let fixture = AppUiPreferences {
+            theme_preference: ThemePreference::Light,
+            locale_preference: AppUiLocalePreference::EnUs,
+            ..AppUiPreferences::default()
+        };
+        for field in [
+            "version",
+            "theme_preference",
+            "locale_preference",
+            "workspace_preset",
+            "recent_projects",
+            "installed_audio_plugins",
+            "installed_openfx_bundles",
+            "shortcut_overrides",
+            "waveform_display",
+            "viewer_canvas_background",
+            "video_scopes",
+            "audio_output_device",
+            "reference_output",
+            "display_management",
+        ] {
+            let mut missing = serde_json::to_value(&fixture).expect("serialize fixture");
+            missing.as_object_mut().expect("preferences object").remove(field);
+            assert_rejected_preferences_preserve_file(missing);
+        }
     }
 
     #[test]
-    fn legacy_preferences_without_reference_output_restore_disabled_routing() {
-        let path = temp_preferences_path("legacy-reference-output");
-        let mut value = serde_json::to_value(AppUiPreferences::default())
-            .expect("serialize current preferences");
-        value.as_object_mut().expect("preferences object").remove("reference_output");
-        fs::write(
-            &path,
-            serde_json::to_vec(&value).expect("serialize legacy preferences"),
-        )
-        .expect("write legacy preferences");
-
-        let loaded = load_app_ui_preferences_from(&path);
-        fs::remove_file(path).ok();
-
-        assert_eq!(
-            loaded.reference_output,
-            mondrian_reference_output::ReferenceOutputRoutingPreferences::default()
-        );
-    }
-
-    #[test]
-    fn legacy_preferences_without_scopes_controls_restore_professional_defaults() {
-        let path = temp_preferences_path("legacy-scopes-controls");
-        let mut value = serde_json::to_value(AppUiPreferences::default())
-            .expect("serialize current preferences");
-        value.as_object_mut().expect("preferences object").remove("video_scopes");
-        fs::write(
-            &path,
-            serde_json::to_vec(&value).expect("serialize legacy preferences"),
-        )
-        .expect("write legacy preferences");
-
-        let loaded = load_app_ui_preferences_from(&path);
-        fs::remove_file(path).ok();
-
-        assert_eq!(loaded.video_scopes, VideoScopesSettings::default());
+    fn current_preferences_languages_round_trip_with_optional_layout_absent() {
+        for locale in [
+            AppUiLocalePreference::System,
+            AppUiLocalePreference::ZhCn,
+            AppUiLocalePreference::EnUs,
+            AppUiLocalePreference::Pseudo,
+        ] {
+            let fixture = AppUiPreferences {
+                theme_preference: ThemePreference::Light,
+                locale_preference: locale,
+                ..AppUiPreferences::default()
+            };
+            let mut value = serde_json::to_value(&fixture).expect("serialize fixture");
+            value
+                .as_object_mut()
+                .expect("preferences object")
+                .remove("custom_workspace_layout");
+            assert_eq!(
+                serde_json::from_value::<AppUiPreferences>(value.clone()).expect("current schema"),
+                fixture
+            );
+            let path = temp_preferences_path("supported-language");
+            fs::write(
+                &path,
+                serde_json::to_vec(&value).expect("serialize fixture"),
+            )
+            .expect("write fixture");
+            assert_eq!(load_app_ui_preferences_from(&path), fixture);
+            fs::remove_file(path).expect("remove fixture");
+        }
     }
 
     #[test]
