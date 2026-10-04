@@ -96,6 +96,44 @@ impl OpenFxParameterValue {
     }
 }
 
+/// Temporal authority supplied with an OpenFX parameter value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenFxParameterQueryMode {
+    /// The supplied value is constant over the parameter time domain.
+    Constant,
+    /// Only the requested render frame has been evaluated; no curve is supplied.
+    CurrentFrame,
+}
+
+/// One immutable execution binding, distinct from descriptor animation capability.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenFxParameterBinding {
+    /// Typed value at the requested render frame.
+    pub value: OpenFxParameterValue,
+    /// Evidence governing queries outside that frame.
+    pub query_mode: OpenFxParameterQueryMode,
+}
+
+impl OpenFxParameterBinding {
+    /// Bind a value which is known to be constant across time.
+    pub fn constant(value: OpenFxParameterValue) -> Self {
+        Self {
+            value,
+            query_mode: OpenFxParameterQueryMode::Constant,
+        }
+    }
+
+    /// Bind one evaluated frame without claiming values at other times.
+    pub fn current_frame(value: OpenFxParameterValue) -> Self {
+        Self {
+            value,
+            query_mode: OpenFxParameterQueryMode::CurrentFrame,
+        }
+    }
+}
+
 /// Numeric bounds for one component, in the SDK's original component order.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenFxNumericChannel {
@@ -303,6 +341,7 @@ enum DescribeResponse {
 #[repr(C)]
 struct NativeParameter {
     name: *const c_char,
+    query_mode: c_int,
     kind: c_int,
     value: [f64; 4],
     string_value: *const c_char,
@@ -512,7 +551,7 @@ pub fn render_openfx_filter_frame(
     inspection: &OpenFxBinaryInspection,
     plugin_identifier: &str,
     timing: &OpenFxRenderTiming,
-    parameters: &BTreeMap<String, OpenFxParameterValue>,
+    parameters: &BTreeMap<String, OpenFxParameterBinding>,
     frame: &OpenFxFloatFrame,
 ) -> Result<OpenFxFloatFrame, OpenFxHostError> {
     validate_render_request(timing, parameters, frame)?;
@@ -884,7 +923,7 @@ fn write_worker_response<T: Serialize>(
 
 fn validate_render_request(
     timing: &OpenFxRenderTiming,
-    parameters: &BTreeMap<String, OpenFxParameterValue>,
+    parameters: &BTreeMap<String, OpenFxParameterBinding>,
     frame: &OpenFxFloatFrame,
 ) -> Result<(), OpenFxHostError> {
     validate_frame(frame.width, frame.height, frame.pixels.len())?;
@@ -931,7 +970,20 @@ fn validate_timing(timing: &OpenFxRenderTiming) -> Result<(), OpenFxHostError> {
 }
 
 fn validate_parameters(
+    parameters: &BTreeMap<String, OpenFxParameterBinding>,
+) -> Result<(), OpenFxHostError> {
+    validate_parameter_values(parameters.iter().map(|(name, binding)| (name, &binding.value)))
+}
+
+#[cfg(test)]
+fn validate_parameter_values_map(
     parameters: &BTreeMap<String, OpenFxParameterValue>,
+) -> Result<(), OpenFxHostError> {
+    validate_parameter_values(parameters.iter())
+}
+
+fn validate_parameter_values<'a>(
+    parameters: impl ExactSizeIterator<Item = (&'a String, &'a OpenFxParameterValue)>,
 ) -> Result<(), OpenFxHostError> {
     if parameters.len() > MAX_PARAMETERS {
         return Err(invalid("too many OpenFX parameters"));
@@ -1022,12 +1074,11 @@ fn validate_description(
         return Err(invalid("OpenFX filter display name is invalid"));
     }
     let mut names = std::collections::BTreeSet::new();
-    validate_parameters(
-        &description
+    validate_parameter_values(
+        description
             .parameters
             .iter()
-            .map(|parameter| (parameter.name.clone(), parameter.default_value.clone()))
-            .collect(),
+            .map(|parameter| (&parameter.name, &parameter.default_value)),
     )?;
     for parameter in &description.parameters {
         let name = &parameter.name;
@@ -1268,7 +1319,7 @@ mod shared_frame_tests {
             "point".into(),
             OpenFxParameterValue::Double3([0.0, f64::NAN, 0.0]),
         )]);
-        assert!(validate_parameters(&invalid).is_err());
+        assert!(validate_parameter_values_map(&invalid).is_err());
     }
 
     #[test]
@@ -1429,9 +1480,9 @@ mod shared_frame_tests {
                 OpenFxParameterValue::String("x".repeat(OPENFX_MAX_STRING_BYTES)),
             );
         }
-        assert!(validate_parameters(&values).is_ok());
+        assert!(validate_parameter_values_map(&values).is_ok());
         values.insert("extra".into(), OpenFxParameterValue::String("x".into()));
-        assert!(validate_parameters(&values).is_err());
+        assert!(validate_parameter_values_map(&values).is_err());
         valid.parameters[0].default_value = OpenFxParameterValue::Boolean(false);
         assert!(validate_description(&valid, "test.choice").is_err());
     }
@@ -1486,12 +1537,12 @@ mod shared_frame_tests {
             option.display_rank = None;
         }
         assert!(validate_description(&natural, "test.choice").is_ok());
-        assert!(validate_parameters(&BTreeMap::from([(
+        assert!(validate_parameter_values_map(&BTreeMap::from([(
             "mode".into(),
             OpenFxParameterValue::Choice(-1)
         )]))
         .is_err());
-        assert!(validate_parameters(&BTreeMap::from([(
+        assert!(validate_parameter_values_map(&BTreeMap::from([(
             "mode".into(),
             OpenFxParameterValue::Choice(0)
         )]))
@@ -1528,13 +1579,13 @@ mod shared_frame_tests {
             );
         }
         for value in ["", "bad\0key", "\n", &"x".repeat(257)] {
-            assert!(validate_parameters(&BTreeMap::from([(
+            assert!(validate_parameter_values_map(&BTreeMap::from([(
                 "mode".into(),
                 OpenFxParameterValue::StrChoice(value.into())
             )]))
             .is_err());
         }
-        assert!(validate_parameters(&BTreeMap::from([(
+        assert!(validate_parameter_values_map(&BTreeMap::from([(
             "mode".into(),
             OpenFxParameterValue::StrChoice("vendor.β".into())
         )]))
@@ -1576,7 +1627,25 @@ mod shared_frame_tests {
     #[ignore = "requires the owned SessionProbe native bundle"]
     fn native_compound_parameters_preserve_exact_defaults_and_atomic_sdk_updates() {
         const TEST: &str = "openfx_host::shared_frame_tests::native_compound_parameters_preserve_exact_defaults_and_atomic_sdk_updates";
-        if !qualification_child(TEST, &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "compound")]) {
+        qualify_native_compound_parameters(TEST, "compound");
+    }
+
+    #[test]
+    #[ignore = "requires the owned SessionProbe native bundle"]
+    fn native_animatable_constant_parameters_support_off_time_queries() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_animatable_constant_parameters_support_off_time_queries";
+        qualify_native_compound_parameters(TEST, "compound_constant_animatable");
+    }
+
+    #[test]
+    #[ignore = "requires the owned SessionProbe native bundle"]
+    fn native_frame_sample_parameters_reject_unprovided_curve_queries() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_frame_sample_parameters_reject_unprovided_curve_queries";
+        qualify_native_compound_parameters(TEST, "compound_frame_sample");
+    }
+
+    fn qualify_native_compound_parameters(test: &str, mode: &str) {
+        if !qualification_child(test, &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", mode)]) {
             return;
         }
         let path = PathBuf::from(
@@ -1676,6 +1745,13 @@ mod shared_frame_tests {
                     .iter()
                     .find(|parameter| parameter.name == *key)
                     .expect("declared tuple");
+                assert_eq!(
+                    parameter.can_animate,
+                    matches!(
+                        mode,
+                        "compound_constant_animatable" | "compound_frame_sample"
+                    )
+                );
                 let (native_kind, native_value) = parameter.default_value.native_fields();
                 assert_eq!(native_kind, *kind);
                 assert_eq!(
@@ -1693,6 +1769,7 @@ mod shared_frame_tests {
                     "asymmetric component bounds must remain distinct"
                 );
                 NativeParameter {
+                    query_mode: i32::from(mode == "compound_frame_sample"),
                     name: name.as_ptr(),
                     kind: native_kind,
                     value: native_value,
@@ -1782,6 +1859,7 @@ mod shared_frame_tests {
                 [0.25_f32; 4].iter().flat_map(|value| value.to_ne_bytes()).collect::<Vec<_>>();
             let parameters = |gain| {
                 [NativeParameter {
+                    query_mode: 0,
                     name: name.as_ptr(),
                     kind: 1,
                     value: [gain, 0.0, 0.0, 0.0],
@@ -1883,6 +1961,7 @@ mod shared_frame_tests {
         let mut input = encode(&original);
         let parameters = |gain| {
             [NativeParameter {
+                query_mode: 0,
                 name: name.as_ptr(),
                 kind: 1,
                 value: [gain, 0.0, 0.0, 0.0],

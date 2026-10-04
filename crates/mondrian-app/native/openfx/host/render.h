@@ -15,6 +15,7 @@ enum {
 
 struct MondrianOpenFxParameter {
   const char* name;
+  int query_mode; // 0: constant binding, 1: current-frame sample without a curve
   int kind; // 1: double, 2: boolean, 3: integer, 4: choice, 5: string choice, 6: string; 7: Double2D, 8: Double3D, 9: RGB, 10: RGBA, 11: Integer2D, 12: Integer3D
   double value[4];
   const char* string_value;

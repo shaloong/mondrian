@@ -7,8 +7,8 @@ use mondrian_app::openfx_adapter::inspect_openfx_binary;
 use mondrian_app::openfx_effect::register_selected_openfx_filter;
 use mondrian_app::openfx_host::{
     describe_openfx_filter, render_openfx_filter_frame, OpenFxDoubleType, OpenFxFilterSession,
-    OpenFxFloatFrame, OpenFxHostError, OpenFxParameterValue, OpenFxRenderTiming, OpenFxStringMode,
-    OPENFX_MAX_STRING_BYTES,
+    OpenFxFloatFrame, OpenFxHostError, OpenFxParameterBinding, OpenFxParameterValue,
+    OpenFxRenderTiming, OpenFxStringMode, OPENFX_MAX_STRING_BYTES,
 };
 use mondrian_core::automation::PropertyValue;
 use mondrian_core::{
@@ -18,6 +18,15 @@ use mondrian_effects::{
     apply_compiled_effect_graph_rgba_f32, instantiate_effect_node, EffectFrameContext,
     EffectNodeExt, LutPreparationCache, PreparedEffectProgram,
 };
+
+fn constant_parameters<const N: usize>(
+    values: [(String, OpenFxParameterValue); N],
+) -> BTreeMap<String, OpenFxParameterBinding> {
+    values
+        .into_iter()
+        .map(|(name, value)| (name, OpenFxParameterBinding::constant(value)))
+        .collect()
+}
 
 fn product_executable() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_mondrian"))
@@ -89,7 +98,7 @@ fn string_filter_description_preserves_all_native_modes() {
     )
     .expect("String worker");
     let worker = session.worker_process_id();
-    let authored: BTreeMap<String, OpenFxParameterValue> = BTreeMap::from([
+    let authored: BTreeMap<String, OpenFxParameterBinding> = constant_parameters([
         ("single".into(), OpenFxParameterValue::String("".into())),
         (
             "multi".into(),
@@ -112,7 +121,7 @@ fn string_filter_description_preserves_all_native_modes() {
             OpenFxParameterValue::String("{\\rtf1\\ansi changed}".into()),
         ),
     ]);
-    let boundary = BTreeMap::from([(
+    let boundary = constant_parameters([(
         "single".into(),
         OpenFxParameterValue::String("x".repeat(OPENFX_MAX_STRING_BYTES)),
     )]);
@@ -122,10 +131,12 @@ fn string_filter_description_preserves_all_native_modes() {
         assert_eq!(session.worker_process_id(), worker);
         let bytes: usize = defaults
             .iter()
-            .map(|(name, default)| match values.get(name) {
-                Some(OpenFxParameterValue::String(value)) => value.len(),
-                _ => default.len(),
-            })
+            .map(
+                |(name, default)| match values.get(name).map(|binding| &binding.value) {
+                    Some(OpenFxParameterValue::String(value)) => value.len(),
+                    _ => default.len(),
+                },
+            )
             .sum();
         let gain = 1.0 + (bytes % 11) as f32 / 10.0;
         for (actual, original) in output.pixels.iter().zip(&input.pixels) {
@@ -135,7 +146,8 @@ fn string_filter_description_preserves_all_native_modes() {
         }
     }
     for invalid in ["a\0b".to_owned(), "x".repeat(OPENFX_MAX_STRING_BYTES + 1)] {
-        let values = BTreeMap::from([("single".into(), OpenFxParameterValue::String(invalid))]);
+        let values =
+            constant_parameters([("single".into(), OpenFxParameterValue::String(invalid))]);
         assert!(session.render(&timing, &values, &input, &mut || Ok(())).is_err());
         assert_eq!(session.worker_process_id(), worker);
     }
@@ -264,7 +276,7 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
         height: 4,
         pixels: (0..16).map(|index| [index as f32 / 16.0, 0.2, 0.3, 0.4]).collect(),
     };
-    let parameters = BTreeMap::from([
+    let parameters = constant_parameters([
         ("scale".to_owned(), OpenFxParameterValue::Double(1.5)),
         (
             "scaleComponents".to_owned(),
@@ -309,7 +321,7 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
             })
             .collect(),
     };
-    let component_parameters = BTreeMap::from([
+    let component_parameters = constant_parameters([
         ("scale".to_owned(), OpenFxParameterValue::Double(0.5)),
         (
             "scaleComponents".to_owned(),
@@ -355,7 +367,7 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
     );
     assert!(matches!(rejected, Err(OpenFxHostError::Invalid(_))));
 
-    let out_of_range = BTreeMap::from([
+    let out_of_range = constant_parameters([
         ("scale".to_owned(), OpenFxParameterValue::Double(-0.5)),
         (
             "scaleComponents".to_owned(),
@@ -476,7 +488,8 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
     ] {
         timing.frame = frame;
         timing.pixel_aspect_ratio = aspect;
-        let values = BTreeMap::from([("scale".to_owned(), OpenFxParameterValue::Double(gain))]);
+        let values =
+            constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(gain))]);
         let output = preview
             .render(&timing, &values, &input, &mut checkpoint(&cancellation))
             .expect("resident render");
@@ -696,7 +709,7 @@ fn official_basic_resident_transfer_preserves_partial_blocks_and_changed_rasters
             })
             .collect(),
     };
-    let gain = BTreeMap::from([("scale".to_owned(), OpenFxParameterValue::Double(1.5))]);
+    let gain = constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(1.5))]);
     let output = session
         .render(&timing, &gain, &input, &mut || Ok(()))
         .expect("complete transfer");
@@ -1170,7 +1183,7 @@ fn integer_filter_preserves_typed_authoring_and_native_pixels() {
             &inspection,
             identifier,
             &timing,
-            &BTreeMap::from([("count".to_owned(), OpenFxParameterValue::Integer(value))]),
+            &constant_parameters([("count".to_owned(), OpenFxParameterValue::Integer(value))]),
             &input,
         )
         .expect("native integer");
@@ -1191,7 +1204,7 @@ fn integer_filter_preserves_typed_authoring_and_native_pixels() {
             &inspection,
             identifier,
             &timing,
-            &BTreeMap::from([("count".to_owned(), value)]),
+            &constant_parameters([("count".to_owned(), value)]),
             &input
         )
         .is_err());
@@ -1362,7 +1375,7 @@ fn qualify_native_discrete_filter(string_choice: bool) {
     let worker = resident.worker_process_id();
     for index in [None, Some(0), Some(2), Some(1), None] {
         let values = index
-            .map(|value| BTreeMap::from([("mode".into(), native_value(value))]))
+            .map(|value| constant_parameters([("mode".into(), native_value(value))]))
             .unwrap_or_default();
         let output = resident
             .render(&timing, &values, &input, &mut || Ok(()))
@@ -1389,7 +1402,7 @@ fn qualify_native_discrete_filter(string_choice: bool) {
         let output = resident
             .render(
                 &timing,
-                &BTreeMap::from([("calculus".into(), OpenFxParameterValue::Double(value))]),
+                &constant_parameters([("calculus".into(), OpenFxParameterValue::Double(value))]),
                 &input,
                 &mut || Ok(()),
             )
@@ -1408,7 +1421,7 @@ fn qualify_native_discrete_filter(string_choice: bool) {
             &inspection,
             identifier,
             &timing,
-            &BTreeMap::from([("mode".to_owned(), native_value(value))]),
+            &constant_parameters([("mode".to_owned(), native_value(value))]),
             &input,
         )
         .expect("native choice");
@@ -1437,7 +1450,7 @@ fn qualify_native_discrete_filter(string_choice: bool) {
             &inspection,
             identifier,
             &timing,
-            &BTreeMap::from([("mode".to_owned(), value)]),
+            &constant_parameters([("mode".to_owned(), value)]),
             &input
         )
         .is_err());

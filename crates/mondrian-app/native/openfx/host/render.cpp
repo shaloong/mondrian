@@ -226,10 +226,11 @@ struct MondrianOpenFxSession {
     std::map<std::string, const MondrianOpenFxParameter*> authored;
     for (int index = 0; index < count; ++index) {
       const auto& value = parameters[index];
-      if (!value.name || !std::all_of(value.value, value.value + 4, [](double channel) { return std::isfinite(channel); }) ||
+      if (!value.name || (value.query_mode != 0 && value.query_mode != 1) || !std::all_of(value.value, value.value + 4, [](double channel) { return std::isfinite(channel); }) ||
           !authored.emplace(value.name, &value).second ||
           !instance->getParam(value.name)) { return 4; }
     }
+    std::set<std::string> frameSamples;
     std::vector<ParameterUpdate> updates;
     size_t stringBytes = 0;
     bool changed = clipsChanged;
@@ -321,12 +322,17 @@ struct MondrianOpenFxSession {
         if (bytes > MONDRIAN_OPENFX_MAX_PARAMETER_STRING_BYTES - stringBytes) { return 4; }
         stringBytes += bytes;
       }
+      const bool frameSample = value && value->query_mode == 1;
+      if (frameSample) { frameSamples.insert(entry.first); }
+      updates.back().changed = updates.back().changed ||
+          (frame.frameSampleParameters.count(entry.first) != 0) != frameSample;
       changed = changed || updates.back().changed;
     }
     // Validation above has neither assigned values nor invoked plugin actions.
     // Once native state can change, retain failure until a complete render
     // succeeds; callback failures cannot safely reuse a partially changed instance.
     if (notify) { failed = true; }
+    frame.frameSampleParameters = std::move(frameSamples);
     const bool bracket = notify && changed;
     if (bracket && !accepted(instance->beginInstanceChangedAction(reason))) { return 4; }
     OfxStatus status = kOfxStatOK;

@@ -32,7 +32,7 @@ enum Request {
     Render {
         sequence: u64,
         timing: OpenFxRenderTiming,
-        parameters: BTreeMap<String, OpenFxParameterValue>,
+        parameters: BTreeMap<String, OpenFxParameterBinding>,
     },
     Shutdown {},
 }
@@ -254,7 +254,7 @@ impl OpenFxFilterSession {
     pub fn render(
         &mut self,
         timing: &OpenFxRenderTiming,
-        parameters: &BTreeMap<String, OpenFxParameterValue>,
+        parameters: &BTreeMap<String, OpenFxParameterBinding>,
         frame: &OpenFxFloatFrame,
         owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
     ) -> Result<OpenFxFloatFrame, OpenFxHostError> {
@@ -272,7 +272,7 @@ impl OpenFxFilterSession {
     fn render_inner(
         &mut self,
         timing: &OpenFxRenderTiming,
-        parameters: &BTreeMap<String, OpenFxParameterValue>,
+        parameters: &BTreeMap<String, OpenFxParameterBinding>,
         frame: &OpenFxFloatFrame,
         owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
     ) -> Result<OpenFxFloatFrame, OpenFxHostError> {
@@ -609,7 +609,7 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
                         let name = CString::new(name.as_str())
                             .map_err(|_| invalid("parameter name contains null"))?;
                         let text = if let OpenFxParameterValue::StrChoice(key)
-                        | OpenFxParameterValue::String(key) = value
+                        | OpenFxParameterValue::String(key) = &value.value
                         {
                             Some(
                                 CString::new(key.as_str())
@@ -625,8 +625,12 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
                     .values()
                     .zip(&strings)
                     .map(|(value, (name, text))| {
-                        let (kind, channels) = value.native_fields();
+                        let (kind, channels) = value.value.native_fields();
                         NativeParameter {
+                            query_mode: match value.query_mode {
+                                OpenFxParameterQueryMode::Constant => 0,
+                                OpenFxParameterQueryMode::CurrentFrame => 1,
+                            },
                             name: name.as_ptr(),
                             kind,
                             value: channels,

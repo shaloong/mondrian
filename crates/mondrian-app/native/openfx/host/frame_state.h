@@ -5,9 +5,18 @@
 #include "ofxPixels.h"
 #include <cstddef>
 #include <atomic>
+#include <set>
+#include <string>
 namespace MondrianOpenFx {
   struct FrameState {
     MondrianOpenFxFrameInfo info{};
+    std::set<std::string> frameSampleParameters;
+    bool constantParameter(const std::string& name) const {
+      return frameSampleParameters.count(name) == 0;
+    }
+    bool permitsParameterTime(const std::string& name, double time) const {
+      return constantParameter(name) || time == info.frame;
+    }
     const OfxRGBAColourF* input = nullptr;
     OfxRGBAColourF* output = nullptr;
     size_t pixelCount = 0;

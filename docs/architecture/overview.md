@@ -633,3 +633,19 @@ author state with monotonic revisions; net-zero completion preserves the prior
 Undo/Redo branch and budget. App chooses original candidates only for absolute
 visual numeric positional gestures, resolves omitted targets against current
 coordinates, and prepares mutations inside the chosen candidate.
+
+### OpenFX parameter query authority
+
+Execution bindings carry a typed temporal query mode independently of the SDK
+descriptor's animation capability. A Constant binding admits finite-time reads
+and canonical constant calculus even when the descriptor permits animation.
+A CurrentFrame binding contains only an evaluated sample and rejects queries
+requiring an unprovided curve; it never invents constant behavior from that sample.
+Graph preparation derives this distinction from the enabled canonical author
+property. Disabled automation and definition defaults are constant bindings.
+Native admission validates the complete value and query-mode snapshot before
+assignment, publishes modes before SDK change callbacks, and regards a mode
+change as a parameter change even when the current numeric value is identical.
+Omitted controls reset to their declared constant defaults. A finite empty
+integration interval returns zero independently of query mode. Full animated curve
+queries and key enumeration still require a canonical curve snapshot bridge.

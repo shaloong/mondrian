@@ -53,7 +53,7 @@ namespace MondrianOpenFx {
   OfxStatus IntegerParameter::get(OfxTime time, int& value)
   {
     if (!std::isfinite(time)) { return kOfxStatErrValue; }
-    return !getCanAnimate() || time == _effect->frameState().info.frame
+    return _effect->frameState().permitsParameterTime(getName(), time)
         ? get(value) : kOfxStatErrMissingHostFeature;
   }
 
@@ -89,7 +89,7 @@ namespace MondrianOpenFx {
   OfxStatus DoubleParameter::get(OfxTime time, double& d)
   {
     if (!std::isfinite(time)) { return kOfxStatErrValue; }
-    return !getCanAnimate() || time == _effect->frameState().info.frame
+    return _effect->frameState().permitsParameterTime(getName(), time)
         ? get(d) : kOfxStatErrMissingHostFeature;
   }
 
@@ -114,7 +114,7 @@ namespace MondrianOpenFx {
   OfxStatus DoubleParameter::derive(OfxTime time, double& value)
   {
     if (!std::isfinite(time)) { return kOfxStatErrValue; }
-    if (getCanAnimate()) { return kOfxStatErrMissingHostFeature; }
+    if (!_effect->frameState().constantParameter(getName())) { return kOfxStatErrMissingHostFeature; }
     value = 0.0;
     return kOfxStatOK;
   }
@@ -122,7 +122,8 @@ namespace MondrianOpenFx {
   OfxStatus DoubleParameter::integrate(OfxTime time1, OfxTime time2, double& value)
   {
     if (!std::isfinite(time1) || !std::isfinite(time2)) { return kOfxStatErrValue; }
-    if (getCanAnimate()) { return kOfxStatErrMissingHostFeature; }
+    if (time1 == time2) { value = 0.0; return kOfxStatOK; }
+    if (!_effect->frameState().constantParameter(getName())) { return kOfxStatErrMissingHostFeature; }
     double result = 0.0;
     if (_value != 0.0 && time1 != time2) {
       const double interval = time2 - time1;
@@ -158,7 +159,7 @@ namespace MondrianOpenFx {
   OfxStatus BooleanParameter::get(OfxTime time, bool& b)
   {
     if (!std::isfinite(time)) { return kOfxStatErrValue; }
-    return !getCanAnimate() || time == _effect->frameState().info.frame
+    return _effect->frameState().permitsParameterTime(getName(), time)
         ? get(b) : kOfxStatErrMissingHostFeature;
   }
 
@@ -196,7 +197,7 @@ namespace MondrianOpenFx {
   OfxStatus ChoiceParameter::get(OfxTime time, int& value)
   {
     if (!std::isfinite(time)) { return kOfxStatErrValue; }
-    return !getCanAnimate() || time == _effect->frameState().info.frame
+    return _effect->frameState().permitsParameterTime(getName(), time)
         ? get(value) : kOfxStatErrMissingHostFeature;
   }
 
@@ -239,7 +240,7 @@ namespace MondrianOpenFx {
   }
   OfxStatus StrChoiceParameter::get(OfxTime time, std::string& value) {
     if (!std::isfinite(time)) { return kOfxStatErrValue; }
-    return !getCanAnimate() || time == _effect->frameState().info.frame
+    return _effect->frameState().permitsParameterTime(getName(), time)
         ? get(value) : kOfxStatErrMissingHostFeature;
   }
   OfxStatus StrChoiceParameter::set(const char* value) {
@@ -264,7 +265,7 @@ namespace MondrianOpenFx {
   }
   OfxStatus StringParameter::get(OfxTime time, std::string& value) {
     if (!std::isfinite(time)) { return kOfxStatErrValue; }
-    return !getCanAnimate() || time == _effect->frameState().info.frame
+    return _effect->frameState().permitsParameterTime(getName(), time)
         ? get(value) : kOfxStatErrMissingHostFeature;
   }
   OfxStatus StringParameter::set(const char* value) {
@@ -315,7 +316,7 @@ namespace MondrianOpenFx {
   template<class T, size_t N>
   OfxStatus NumericTupleState<T, N>::read(OfxTime time, const std::array<T*, N>& outputs) const {
     if (!std::isfinite(time)) { return kOfxStatErrValue; }
-    if (_descriptor.getCanAnimate() && time != _effect->frameState().info.frame) {
+    if (!_effect->frameState().permitsParameterTime(_descriptor.getName(), time)) {
       return kOfxStatErrMissingHostFeature;
     }
     return read(outputs);
@@ -343,7 +344,7 @@ namespace MondrianOpenFx {
       return kOfxStatErrUnsupported;
     } else {
       if (!std::isfinite(time)) { return kOfxStatErrValue; }
-      if (_descriptor.getCanAnimate()) { return kOfxStatErrMissingHostFeature; }
+      if (!_effect->frameState().constantParameter(_descriptor.getName())) { return kOfxStatErrMissingHostFeature; }
       for (auto* output : outputs) { *output = 0; }
       return kOfxStatOK;
     }
@@ -355,7 +356,11 @@ namespace MondrianOpenFx {
       return kOfxStatErrUnsupported;
     } else {
       if (!std::isfinite(start) || !std::isfinite(end)) { return kOfxStatErrValue; }
-      if (_descriptor.getCanAnimate()) { return kOfxStatErrMissingHostFeature; }
+      if (start == end) {
+        for (auto* output : outputs) { *output = 0; }
+        return kOfxStatOK;
+      }
+      if (!_effect->frameState().constantParameter(_descriptor.getName())) { return kOfxStatErrMissingHostFeature; }
       std::array<T, N> result{};
       const double interval = end - start;
       for (size_t index = 0; index < N; ++index) {

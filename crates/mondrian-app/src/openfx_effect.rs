@@ -24,8 +24,8 @@ use sha2::{Digest, Sha256};
 use crate::openfx_adapter::OpenFxBinaryInspection;
 use crate::openfx_host::{
     describe_openfx_filter, OpenFxFilterDescription, OpenFxFilterSession, OpenFxFloatFrame,
-    OpenFxHostError, OpenFxParameterValue, OpenFxRenderTiming, OpenFxStringMode,
-    OPENFX_MAX_STRING_BYTES,
+    OpenFxHostError, OpenFxParameterBinding, OpenFxParameterValue, OpenFxRenderTiming,
+    OpenFxStringMode, OPENFX_MAX_STRING_BYTES,
 };
 
 /// A selected Filter cannot be represented by the admitted visual effect contract.
@@ -53,7 +53,7 @@ struct BoundParameter {
 #[serde(deny_unknown_fields)]
 struct OpenFxGraphParameters {
     timing: OpenFxRenderTiming,
-    values: BTreeMap<String, OpenFxParameterValue>,
+    values: BTreeMap<String, OpenFxParameterBinding>,
 }
 
 /// A definition retains only an immutable selection, never a native instance.
@@ -525,7 +525,34 @@ fn build_definition(
                     }
                     None => parameter.default_value.clone(),
                 };
-                values.insert(parameter.name.clone(), value);
+                let animated = match &parameter.parameter_id {
+                    Some(id) => {
+                        let address = effect
+                            .properties
+                            .unique_address_for_parameter_id(id)
+                            .ok_or_else(|| {
+                                invalid(format!(
+                                    "parameter `{}` has no unique author binding",
+                                    parameter.name
+                                ))
+                            })?;
+                        let (_, property) =
+                            effect.properties.property_by_address(&address).ok_or_else(|| {
+                                invalid(format!(
+                                    "parameter `{}` has no author property",
+                                    parameter.name
+                                ))
+                            })?;
+                        property.is_enabled() && property.is_animated()
+                    }
+                    None => false,
+                };
+                let binding = if animated {
+                    OpenFxParameterBinding::current_frame(value)
+                } else {
+                    OpenFxParameterBinding::constant(value)
+                };
+                values.insert(parameter.name.clone(), binding);
             }
             let params = serde_json::to_value(OpenFxGraphParameters { timing, values })
                 .map_err(|error| invalid(error.to_string()))?;
@@ -875,6 +902,93 @@ mod tests {
             .evaluate(TimelineTime::new(1, 24).expect("second frame"))
             .expect("second frame graph");
         assert_ne!(first.semantic_fingerprint(), second.semantic_fingerprint());
+        let bindings = |graph: &mondrian_effects::CompiledEffectGraph| {
+            let params = graph
+                .graph()
+                .nodes
+                .iter()
+                .find_map(|node| {
+                    use mondrian_effects::graph::EffectGraphNodeKind;
+                    match &node.kind {
+                        EffectGraphNodeKind::UnaryEffect {
+                            op: mondrian_effects::EffectRenderOp::Custom { params, .. },
+                            ..
+                        }
+                        | EffectGraphNodeKind::DomainEffect {
+                            op: mondrian_effects::EffectRenderOp::Custom { params, .. },
+                            ..
+                        } => Some(params.clone()),
+                        _ => None,
+                    }
+                })
+                .expect("compiled native processor parameters");
+            serde_json::from_value::<OpenFxGraphParameters>(params).expect("typed query bindings")
+        };
+        let static_bindings = bindings(&first);
+        assert_eq!(
+            static_bindings.values["gain"].query_mode,
+            crate::openfx_host::OpenFxParameterQueryMode::Constant
+        );
+        assert_eq!(
+            static_bindings.values["gain"].value,
+            OpenFxParameterValue::Double(1.5)
+        );
+        assert_eq!(
+            static_bindings.values["internalSwitch"].query_mode,
+            crate::openfx_host::OpenFxParameterQueryMode::Constant
+        );
+        let path = effect.properties.iter().next().expect("gain").0.to_owned();
+        for (time, value) in [
+            (TimelineTime::ZERO, 1.0),
+            (TimelineTime::new(1, 24).expect("next frame"), 2.0),
+        ] {
+            effect
+                .properties
+                .apply_mutation(mondrian_core::automation::PropertyMutation::SetKeyframe {
+                    path: path.clone(),
+                    keyframe: mondrian_core::automation::Keyframe::from_preset(
+                        time,
+                        PropertyValue::Double(value),
+                        mondrian_core::automation::InterpolationType::Linear,
+                    ),
+                })
+                .expect("author automation");
+        }
+        let compile = |effect: &mondrian_effects::EffectNode| {
+            PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+                std::slice::from_ref(effect),
+                &[],
+                &[],
+                &[],
+                WorkingColorSpace::LinearRec709,
+                frame_context,
+                &LutPreparationCache::uncached(),
+            )
+            .expect("compile author binding")
+            .evaluate(TimelineTime::ZERO)
+            .expect("evaluate author binding")
+        };
+        let animated_bindings = bindings(&compile(&effect));
+        assert_eq!(
+            animated_bindings.values["gain"].query_mode,
+            crate::openfx_host::OpenFxParameterQueryMode::CurrentFrame
+        );
+        assert_eq!(
+            animated_bindings.values["gain"].value,
+            OpenFxParameterValue::Double(1.0)
+        );
+        let mut disabled = effect.properties.property(&path).expect("gain").clone();
+        disabled.set_animation_enabled(false);
+        effect.properties.upsert(disabled);
+        let disabled_bindings = bindings(&compile(&effect));
+        assert_eq!(
+            disabled_bindings.values["gain"].query_mode,
+            crate::openfx_host::OpenFxParameterQueryMode::Constant
+        );
+        assert_eq!(
+            disabled_bindings.values["gain"].value,
+            OpenFxParameterValue::Double(1.5)
+        );
         assert!(matches!(
             PreparedEffectProgram::prepare(&[effect], &[], WorkingColorSpace::LinearRec709,),
             Err(EffectGraphBuildError::InvalidAuthorState { .. })

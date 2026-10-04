@@ -45,7 +45,7 @@ bool defineCompounds(const void* handle) {
     OfxPropertySetHandle props = nullptr;
     if (gParamHost->paramDefine(params, parameter.type, parameter.name, &props) != kOfxStatOK ||
         gPropHost->propSetString(props, kOfxPropLabel, 0, parameter.name) != kOfxStatOK ||
-        gPropHost->propSetInt(props, kOfxParamPropAnimates, 0, 0) != kOfxStatOK) { return false; }
+        gPropHost->propSetInt(props, kOfxParamPropAnimates, 0, (mode() == "compound_constant_animatable" || mode() == "compound_frame_sample") ? 1 : 0) != kOfxStatOK) { return false; }
     if ((parameter.type == std::string(kOfxParamTypeDouble2D) || parameter.type == std::string(kOfxParamTypeDouble3D)) &&
         gPropHost->propSetString(props, kOfxParamPropDoubleType, 0, kOfxParamDoubleTypePlain) != kOfxStatOK) { return false; }
     for (int index = 0; index < parameter.dimensions; ++index) {
@@ -126,7 +126,12 @@ bool compoundSuite(OfxParamHandle parameter, const CompoundParameter& definition
       (creating && saved != definition.defaults)) { return false; }
   for (double query : {-3.25, 0.0, 9.5}) {
     std::array<double, 4> actual{};
-    if (readCompound<T, N>(parameter, true, query, actual) != kOfxStatOK || actual != saved) { return false; }
+    if (mode() == "compound_frame_sample" && query != time) { actual = {-999, -999, -999, -999}; }
+    const auto sentinel = actual;
+    const auto status = readCompound<T, N>(parameter, true, query, actual);
+    if (mode() == "compound_frame_sample" && query != time) {
+      if (status != kOfxStatErrMissingHostFeature || actual != sentinel) { return false; }
+    } else if (status != kOfxStatOK || actual != saved) { return false; }
   }
   for (double query : {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
     std::array<double, 4> actual{-999, -999, -999, -999};
@@ -135,34 +140,48 @@ bool compoundSuite(OfxParamHandle parameter, const CompoundParameter& definition
     if (!rendering && writeCompound<T, N>(parameter, true, query, saved) != kOfxStatErrValue) { return false; }
   }
   if constexpr (std::is_same_v<T, double>) {
-    std::array<double, 4> derivative{};
-    if (compoundCalculus<N>(parameter, false, -3.25, 0.0, derivative) != kOfxStatOK ||
-        derivative != std::array<double, 4>{}) { return false; }
-    for (double interval : {5.0, -5.0}) {
-      std::array<double, 4> actual{}, expected{};
-      for (int index = 0; index < N; ++index) { expected[index] = saved[index] * interval; }
-      if (compoundCalculus<N>(parameter, true, 0.0, interval, actual) != kOfxStatOK || actual != expected) { return false; }
+    for (double boundary : {0.0, std::numeric_limits<double>::max(), -std::numeric_limits<double>::max()}) {
+      std::array<double, 4> zero{};
+      if (compoundCalculus<N>(parameter, true, boundary, boundary, zero) != kOfxStatOK ||
+          zero != std::array<double, 4>{}) { return false; }
     }
-    std::array<double, 4> zero{};
-    const double largest = std::numeric_limits<double>::max();
-    if (compoundCalculus<N>(parameter, true, largest, largest, zero) != kOfxStatOK ||
-        zero != std::array<double, 4>{}) { return false; }
-    for (bool integral : {false, true}) {
-      std::array<double, 4> actual{-999, -999, -999, -999};
-      const auto sentinel = actual;
-      if (compoundCalculus<N>(parameter, integral, std::numeric_limits<double>::quiet_NaN(), 1.0, actual) != kOfxStatErrValue ||
-          actual != sentinel) { return false; }
-    }
-    std::array<double, 4> huge{-999, -999, -999, -999};
-    const auto sentinel = huge;
-    const bool representable = definition.type == std::string(kOfxParamTypeRGB);
-    const auto status = compoundCalculus<N>(parameter, true, -largest, largest, huge);
-    if (representable) {
-      if (status != kOfxStatOK) { return false; }
-      for (int index = 0; index < N; ++index) {
-        if (!std::isfinite(huge[index]) || huge[index] != (saved[index] * largest) * 2.0) { return false; }
+    if (mode() == "compound_frame_sample") {
+      for (bool integral : {false, true}) {
+        std::array<double, 4> actual{-999, -999, -999, -999};
+        const auto sentinel = actual;
+        if (compoundCalculus<N>(parameter, integral, -3.25, 9.5, actual) != kOfxStatErrMissingHostFeature ||
+            actual != sentinel) { return false; }
       }
-    } else if (status != kOfxStatErrValue || huge != sentinel) { return false; }
+    } else {
+      std::array<double, 4> derivative{};
+      if (compoundCalculus<N>(parameter, false, -3.25, 0.0, derivative) != kOfxStatOK ||
+          derivative != std::array<double, 4>{}) { return false; }
+      for (double interval : {5.0, -5.0}) {
+        std::array<double, 4> actual{}, expected{};
+        for (int index = 0; index < N; ++index) { expected[index] = saved[index] * interval; }
+        if (compoundCalculus<N>(parameter, true, 0.0, interval, actual) != kOfxStatOK || actual != expected) { return false; }
+      }
+      std::array<double, 4> zero{};
+      const double largest = std::numeric_limits<double>::max();
+      if (compoundCalculus<N>(parameter, true, largest, largest, zero) != kOfxStatOK ||
+          zero != std::array<double, 4>{}) { return false; }
+      for (bool integral : {false, true}) {
+        std::array<double, 4> actual{-999, -999, -999, -999};
+        const auto sentinel = actual;
+        if (compoundCalculus<N>(parameter, integral, std::numeric_limits<double>::quiet_NaN(), 1.0, actual) != kOfxStatErrValue ||
+            actual != sentinel) { return false; }
+      }
+      std::array<double, 4> huge{-999, -999, -999, -999};
+      const auto sentinel = huge;
+      const bool representable = definition.type == std::string(kOfxParamTypeRGB);
+      const auto status = compoundCalculus<N>(parameter, true, -largest, largest, huge);
+      if (representable) {
+        if (status != kOfxStatOK) { return false; }
+        for (int index = 0; index < N; ++index) {
+          if (!std::isfinite(huge[index]) || huge[index] != (saved[index] * largest) * 2.0) { return false; }
+        }
+      } else if (status != kOfxStatErrValue || huge != sentinel) { return false; }
+    }
   }
   if (!rendering) {
     OfxPropertySetHandle props = nullptr;
@@ -609,13 +628,13 @@ OfxStatus probe(const char* action, const void* handle,
       }
     }
   }
-  if (selected == "compound" &&
+  if ((selected == "compound" || selected == "compound_constant_animatable" || selected == "compound_frame_sample") &&
       (operation == kOfxActionCreateInstance || operation == kOfxActionInstanceChanged || operation == kOfxImageEffectActionRender) &&
       !compoundValues(handle, in, operation == kOfxActionCreateInstance, operation == kOfxImageEffectActionRender)) {
     return kOfxStatFailed;
   }
   const OfxStatus result = pluginMain(action, handle, in, out);
-  if ((selected == "compound" || selected == "compound_author") && result == kOfxStatOK &&
+  if ((selected == "compound" || selected == "compound_author" || selected == "compound_constant_animatable" || selected == "compound_frame_sample") && result == kOfxStatOK &&
       operation == kOfxImageEffectActionDescribeInContext && !defineCompounds(handle)) {
     return kOfxStatFailed;
   }

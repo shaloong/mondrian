@@ -259,3 +259,16 @@ binaries do not implement this mode. Supervisor fault tests use
 `failed_helper_responses_are_bounded_and_leave_the_service_reusable` tests.
 These exercise owned-process termination, bounded responses and retry. They do
 not qualify physical network stalls or every platform's process termination.
+
+### Constant and sampled parameter time queries
+
+The owned compound probe also supports `compound_constant_animatable` and
+`compound_frame_sample`. The former changes only the descriptor's animation
+capability and requires off-frame constant reads, zero derivatives and signed
+integrals. The latter requires current-frame values to remain readable while
+unprovided off-frame values and calculus fail without changing output pointers.
+Run the ignored `native_animatable_constant_parameters_support_off_time_queries`
+and `native_frame_sample_parameters_reject_unprovided_curve_queries` App library
+tests with `MONDRIAN_OPENFX_SESSION_PROBE_BINARY` set to the rebuilt owned bundle.
+These qualify explicit binding authority; they do not qualify animated curve
+snapshots, native key enumeration or arbitrary third-party plugins.
