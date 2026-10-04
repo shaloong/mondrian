@@ -218,7 +218,8 @@ pub struct GpuTimestampSample {
     pub token: GpuTimestampToken,
     /// Hardware GPU duration across the measured encoder or complete pass scope.
     pub elapsed_us: u64,
-    /// Hardware GPU attribution between ordered Viewer stage markers.
+    /// Hardware intervals for the commands grouped by Viewer stage markers.
+    /// Pass intervals may overlap and do not partition `elapsed_us`.
     pub stages: GpuTimestampStageDurations,
 }
 
@@ -252,7 +253,11 @@ impl GpuTimestampStageMarker {
     }
 }
 
-/// Hardware GPU duration attributed to each ordered Viewer stage.
+/// Hardware GPU interval attributed to each ordered Viewer stage.
+///
+/// With pass timestamps, each nonempty stage brackets its actual passes. GPU
+/// stages may overlap, and gaps between stages are included only in the complete
+/// frame interval. These fields must not be summed to reconstruct frame time.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct GpuTimestampStageDurations {
     /// Frame start through the working composite marker.
@@ -392,31 +397,54 @@ impl GpuTimestampStageTimer {
     fn read_mapped_elapsed_us(
         &self,
         layout: GpuPassTimestampLayout,
+        pass_timestamps: bool,
     ) -> Result<(u64, GpuTimestampStageDurations), GpuTimestampReadError> {
-        // Keep realtime stage collection allocation-free; only the synchronous
-        // diagnostic interval retains the bounded raw pass counter vector.
-        let values = self.read_mapped_query_bytes(layout.query_count, |bytes| {
-            layout.boundaries.map(|index| {
-                let offset = index as usize * wgpu::QUERY_SIZE as usize;
-                u64::from_ne_bytes(
-                    bytes[offset..offset + 8].try_into().expect("eight-byte query counter"),
-                )
-            })
-        })?;
-        let segment = |start: usize, end: usize| {
-            timestamp_elapsed_us(values[start], values[end], self.timestamp_period_ns)
-        };
-        let stages = GpuTimestampStageDurations {
-            through_working_composite_us: segment(0, 1)?,
-            spatial_us: segment(1, 2)?,
-            program_output_boundary_us: segment(2, 3)?,
-            monitor_adaptation_us: segment(3, 4)?,
-            program_scopes_us: segment(4, 5)?,
-            signal_monitoring_us: segment(5, 6)?,
-            display_calibration_us: segment(6, 7)?,
-        };
-        Ok((segment(0, 7)?, stages))
+        self.read_mapped_query_bytes(layout.query_count, |bytes| {
+            timestamp_stage_durations(bytes, layout, pass_timestamps, self.timestamp_period_ns)
+        })?
     }
+}
+
+fn timestamp_stage_durations(
+    bytes: &[u8],
+    layout: GpuPassTimestampLayout,
+    pass_timestamps: bool,
+    timestamp_period_ns: f64,
+) -> Result<(u64, GpuTimestampStageDurations), GpuTimestampReadError> {
+    let counter = |index: u32| {
+        let offset = index as usize * wgpu::QUERY_SIZE as usize;
+        u64::from_ne_bytes(bytes[offset..offset + 8].try_into().expect("eight-byte query counter"))
+    };
+    let interval = |start: u32, end: u32| {
+        if !pass_timestamps {
+            return timestamp_elapsed_us(counter(start), counter(end), timestamp_period_ns);
+        }
+        if start == end {
+            return Ok(0);
+        }
+        pass_timestamp_elapsed_us(
+            (start..end).step_by(2).map(|index| [counter(index), counter(index + 1)]),
+            timestamp_period_ns,
+        )
+    };
+    let boundaries = if pass_timestamps {
+        // Zero denotes no recorded passes; all populated boundaries name an
+        // odd end-query index. Convert them to exclusive pass-pair ranges.
+        layout.boundaries.map(|index| if index == 0 { 0 } else { index + 1 })
+    } else {
+        layout.boundaries
+    };
+    let segment = |start: usize| interval(boundaries[start], boundaries[start + 1]);
+    let stages = GpuTimestampStageDurations {
+        through_working_composite_us: segment(0)?,
+        spatial_us: segment(1)?,
+        program_output_boundary_us: segment(2)?,
+        monitor_adaptation_us: segment(3)?,
+        program_scopes_us: segment(4)?,
+        signal_monitoring_us: segment(5)?,
+        display_calibration_us: segment(6)?,
+    };
+    Ok((interval(boundaries[0], boundaries[7])?, stages))
 }
 
 fn timestamp_elapsed_us(
@@ -429,6 +457,24 @@ fn timestamp_elapsed_us(
         .ok_or(GpuTimestampReadError::CounterRegression { start, end })?;
     let elapsed_us = ((ticks as f64 * timestamp_period_ns) / 1_000.0).ceil();
     Ok(elapsed_us.min(u64::MAX as f64) as u64)
+}
+
+fn pass_timestamp_elapsed_us(
+    passes: impl IntoIterator<Item = [u64; 2]>,
+    timestamp_period_ns: f64,
+) -> Result<u64, GpuTimestampReadError> {
+    let mut span: Option<(u64, u64)> = None;
+    for [start, end] in passes {
+        // A pass's own clock must not regress. Different passes can overlap
+        // and complete in a different order, including across Viewer stages.
+        timestamp_elapsed_us(start, end, timestamp_period_ns)?;
+        span = Some(match span {
+            Some((first, last)) => (first.min(start), last.max(end)),
+            None => (start, end),
+        });
+    }
+    let (first, last) = span.ok_or(GpuTimestampReadError::ShortReadback)?;
+    timestamp_elapsed_us(first, last, timestamp_period_ns)
 }
 
 /// Complete hardware interval and each actual pass's raw counter boundaries.
@@ -450,17 +496,8 @@ impl GpuTimestampPassIntervalSample {
     ) -> Result<Self, GpuTimestampReadError> {
         let pass_counters: Vec<_> =
             counters.chunks_exact(2).map(|pair| [pair[0], pair[1]]).collect();
-        let mut first_start = u64::MAX;
-        let mut last_end = 0;
-        for &[start, end] in &pass_counters {
-            // A pass's own clock must not regress, but different passes may
-            // overlap (for example vertex work alongside an earlier fragment
-            // stage). Preserve those pairs and bracket all actual pass work.
-            timestamp_elapsed_us(start, end, timestamp_period_ns)?;
-            first_start = first_start.min(start);
-            last_end = last_end.max(end);
-        }
-        let elapsed_us = timestamp_elapsed_us(first_start, last_end, timestamp_period_ns)?;
+        let elapsed_us =
+            pass_timestamp_elapsed_us(pass_counters.iter().copied(), timestamp_period_ns)?;
         Ok(Self { elapsed_us, timestamp_period_ns, pass_counters })
     }
 }
@@ -960,7 +997,8 @@ impl GpuTimestampQueryRing {
                 return Err(GpuTimestampRingError::InvalidToken);
             };
             let layout = self.slots[index].layout.ok_or(GpuTimestampRingError::InvalidToken)?;
-            let (elapsed_us, stages) = self.slots[index].timer.read_mapped_elapsed_us(layout)?;
+            let (elapsed_us, stages) =
+                self.slots[index].timer.read_mapped_elapsed_us(layout, self.pass_timestamps)?;
             self.completed.push(GpuTimestampSample { token, elapsed_us, stages });
         }
         Ok(())
@@ -1057,6 +1095,80 @@ mod tests {
             super::GpuTimestampPassIntervalSample::from_counters(vec![100, 200, 900, 150], 10.0),
             Err(super::GpuTimestampReadError::CounterRegression { start: 900, end: 150 })
         ));
+    }
+
+    #[test]
+    fn stage_pass_intervals_preserve_overlap_and_reordered_completion() {
+        use crate::gpu_command::GpuPassTimestampLayout;
+        let bytes: Vec<_> = [100_u64, 900, 150, 200, 1_000, 1_200]
+            .into_iter()
+            .flat_map(u64::to_ne_bytes)
+            .collect();
+        let layout = GpuPassTimestampLayout {
+            query_count: 6,
+            boundaries: [0, 1, 3, 3, 5, 5, 5, 5],
+        };
+        let (elapsed, stages) = super::timestamp_stage_durations(&bytes, layout, true, 1_000.0)
+            .expect("different passes can legally overlap and finish out of order");
+        assert_eq!(elapsed, 1_100);
+        assert_eq!(stages.through_working_composite_us, 800);
+        assert_eq!(stages.spatial_us, 50);
+        assert_eq!(stages.program_output_boundary_us, 0);
+        assert_eq!(stages.monitor_adaptation_us, 200);
+        assert_eq!(stages.program_scopes_us, 0);
+        assert_eq!(stages.signal_monitoring_us, 0);
+        assert_eq!(stages.display_calibration_us, 0);
+
+        // Multiple passes in one stage must also retain its longest interval,
+        // rather than using the last recorded pass's earlier completion.
+        let layout = GpuPassTimestampLayout {
+            query_count: 4,
+            boundaries: [0, 0, 3, 3, 3, 3, 3, 3],
+        };
+        let (elapsed, stages) =
+            super::timestamp_stage_durations(&bytes[..32], layout, true, 1_000.0)
+                .expect("earlier pass remains part of the complete hardware interval");
+        assert_eq!(elapsed, 800);
+        assert_eq!(stages.through_working_composite_us, 0);
+        assert_eq!(stages.spatial_us, 800);
+    }
+
+    #[test]
+    fn stage_pass_intervals_reject_a_pass_own_counter_regression() {
+        use crate::gpu_command::GpuPassTimestampLayout;
+        let bytes: Vec<_> =
+            [100_u64, 900, 200, 150].into_iter().flat_map(u64::to_ne_bytes).collect();
+        let layout = GpuPassTimestampLayout {
+            query_count: 4,
+            boundaries: [0, 1, 3, 3, 3, 3, 3, 3],
+        };
+        assert!(matches!(
+            super::timestamp_stage_durations(&bytes, layout, true, 1_000.0),
+            Err(super::GpuTimestampReadError::CounterRegression { start: 200, end: 150 })
+        ));
+    }
+
+    #[test]
+    fn encoder_stage_intervals_keep_their_ordered_boundary_contract() {
+        let bytes: Vec<_> = [0_u64, 100, 300, 600, 600, 1_000, 1_500, 2_100]
+            .into_iter()
+            .flat_map(u64::to_ne_bytes)
+            .collect();
+        let (elapsed, stages) = super::timestamp_stage_durations(
+            &bytes,
+            super::encoder_timestamp_layout(),
+            false,
+            1_000.0,
+        )
+        .unwrap();
+        assert_eq!(elapsed, 2_100);
+        assert_eq!(stages.through_working_composite_us, 100);
+        assert_eq!(stages.spatial_us, 200);
+        assert_eq!(stages.program_output_boundary_us, 300);
+        assert_eq!(stages.monitor_adaptation_us, 0);
+        assert_eq!(stages.program_scopes_us, 400);
+        assert_eq!(stages.signal_monitoring_us, 500);
+        assert_eq!(stages.display_calibration_us, 600);
     }
 
     #[test]
