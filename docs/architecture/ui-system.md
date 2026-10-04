@@ -3291,3 +3291,21 @@ progressively shortening manual controls. A key created during the gesture is re
 against current author state before preparing its final position, retaining its identity
 and complete author metadata. Finish retains one reversible history entry; cancel
 restores the original Sequence through the same authoring session.
+
+
+### Resource confirmation focus and durable history qualification
+
+The App resource-modal acceptance routes Tab and Shift+Tab through EventRouter
+while the asynchronous inspection disables Apply. Disabled controls leave the
+focus order; all remaining focus stays in the active modal. Inspection timeout
+retains the draft and restores Apply for retry. Cancel restores the suspended
+background focus. Traversal and unsuccessful inspection publish no author edit.
+
+The LUT workflow qualifies both durable snapshots around Undo: saving an undone
+binding preserves the live Session's Redo branch, while a fresh Session opens the
+unbound author value with no inherited history. The shared graph must report an
+AuthorEdit resource error for the unbound LUT, never reuse the previous compiled
+resource. Redo in the original Session restores the exact six-sample RGBA output;
+saving and reopening the bound snapshot preserves that same output. These are
+real cube/SQLite/MDP tests with deterministic chooser input, not physical native
+keyboard or picker qualification.

@@ -5815,6 +5815,162 @@ mod tests {
     }
 
     #[test]
+    fn pending_resource_modal_routes_tabs_after_apply_is_disabled_and_restores_focus() {
+        use crate::app_ui::resource_dialog::{
+            ResourceActionOutcome, ResourceEditorAction, ResourceKind, ResourceUpdate,
+        };
+        use crate::resource_inspection::PathInspectionOutcome;
+        use mondrian_ui_core::{FocusManager, TreeWalker, WidgetTree};
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let (state, clip_id, target) = async_resource_fixture();
+        let revision = state.active_sequence().expect("sequence").revision;
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+        root.layout(bounds);
+        let background = {
+            let tree = WidgetTreeView::new(&mut root);
+            TreeWalker::focus_next(&tree, WidgetId::default()).expect("background focus")
+        };
+        let mut router = EventRouter::new(root.id());
+        router.focus_manager_mut().set_focused_widget(Some(background), None);
+        let platform = FakePlatform::default();
+        root.try_handle_resource_action(
+            &ResourceEditorAction::Open { clip_id, target }.action(),
+            &state,
+            &platform,
+        )
+        .expect("open resource");
+        let id = root.modal.as_ref().and_then(ShellModal::as_resource).expect("dialog").draft.id;
+        for update in [
+            ResourceUpdate::Kind(ResourceKind::ExternalFile),
+            ResourceUpdate::Text("pending-output.cube".into()),
+        ] {
+            root.try_handle_resource_action(
+                &ResourceEditorAction::Update { id, update }.action(),
+                &state,
+                &platform,
+            )
+            .expect("update draft");
+        }
+        root.layout(bounds);
+        let scope = root.keyboard_focus_scope().expect("modal scope");
+        let apply = root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .expect("dialog")
+            .child(8)
+            .expect("apply")
+            .id();
+        let actions = std::cell::RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        // Reach Apply through actual traversal so the router suspends background focus.
+        for _ in 0..24 {
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+                &mut WidgetTreeView::new(&mut root),
+                &dispatch,
+            );
+            if router.focus_manager().focused_widget() == Some(apply) {
+                break;
+            }
+        }
+        assert_eq!(router.focus_manager().focused_widget(), Some(apply));
+        let ResourceActionOutcome::Inspect(request) = root
+            .try_handle_resource_action(
+                &ResourceEditorAction::Confirm { id }.action(),
+                &state,
+                &platform,
+            )
+            .expect("confirm")
+        else {
+            panic!("inspection required");
+        };
+        assert!(!root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .expect("pending dialog")
+            .child(8)
+            .expect("disabled apply")
+            .can_focus());
+        for modifiers in [Modifiers::none(), Modifiers::shift()] {
+            for _ in 0..24 {
+                let mut tree = WidgetTreeView::new(&mut root);
+                assert_eq!(
+                    router.route(
+                        UiEvent::KeyDown { key: KeyCode::Tab, modifiers },
+                        &mut tree,
+                        &dispatch,
+                    ),
+                    EventResult::Handled
+                );
+                let focused = router.focus_manager().focused_widget().expect("modal focus");
+                assert_ne!(
+                    focused, apply,
+                    "pending confirmation must leave the focus order"
+                );
+                assert!(tree.get(focused).expect("live focus").can_focus());
+                let mut ancestor = Some(focused);
+                while ancestor.is_some() && ancestor != Some(scope) {
+                    ancestor = ancestor.and_then(|widget| tree.parent_id(widget));
+                }
+                assert_eq!(ancestor, Some(scope), "pending Tab escaped the modal");
+            }
+        }
+        assert!(
+            actions.borrow().is_empty(),
+            "traversal must not dispatch resource edits"
+        );
+        assert_eq!(
+            state.active_sequence().expect("sequence").revision,
+            revision
+        );
+        assert!(!state.can_undo_action());
+        assert!(root
+            .finish_resource_inspection(request.ticket, PathInspectionOutcome::TimedOut, &state,)
+            .is_none());
+        assert!(root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .expect("retryable dialog")
+            .child(8)
+            .expect("apply")
+            .can_focus());
+        for _ in 0..24 {
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::shift() },
+                &mut WidgetTreeView::new(&mut root),
+                &dispatch,
+            );
+            if router.focus_manager().focused_widget() == Some(apply) {
+                break;
+            }
+        }
+        assert_eq!(
+            router.focus_manager().focused_widget(),
+            Some(apply),
+            "timeout must permit retry"
+        );
+        root.try_handle_resource_action(
+            &ResourceEditorAction::Cancel { id }.action(),
+            &state,
+            &platform,
+        )
+        .expect("cancel pending draft");
+        router.route(
+            UiEvent::KeyUp { key: KeyCode::Tab, modifiers: Modifiers::none() },
+            &mut WidgetTreeView::new(&mut root),
+            &dispatch,
+        );
+        assert_eq!(router.focus_manager().focused_widget(), Some(background));
+        assert!(!state.can_undo_action());
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
     fn resource_inspection_rejects_edited_cancelled_locked_and_replaced_drafts() {
         use crate::app_ui::resource_dialog::{
             ResourceActionOutcome, ResourceEditorAction, ResourceKind, ResourceUpdate,
@@ -7190,6 +7346,52 @@ mod tests {
             state.asset_library().expect("library").list_assets().expect("assets").len(),
             0,
             "binding a LUT must not import library media"
+        );
+        assert!(state.undo_timeline().expect("Undo before save"));
+        let assert_unbound_lut = |state: &AppState| {
+            let clip = state.active_sequence().expect("sequence").find_clip(clip_id).expect("clip");
+            let error = mondrian_effects::compile_clip_effect_graph(
+                &clip.effects,
+                &[],
+                TimelineTime::ZERO,
+                WorkingColorSpace::LinearRec709,
+            )
+            .expect_err("an unbound LUT must not reuse the previous compiled resource");
+            assert!(
+                matches!(error, mondrian_effects::EffectGraphBuildError::ResourceUnavailable {
+                effect_id: owner, parameter_id: ref parameter, recovery: mondrian_effects::EffectResourceRecovery::AuthorEdit, ..
+            } if owner == effect_id && parameter == &EffectType::Lut3D.parameter_id("path").expect("path parameter"))
+            );
+        };
+        assert_unbound_lut(&state);
+        let undone_project = directory.join("撤销状态.mdp");
+        state
+            .save_project_file_as(undone_project.clone())
+            .expect("save undone author state");
+        assert!(
+            state.can_redo_action(),
+            "saving must preserve the live Redo branch"
+        );
+        let mut undone_reopened = AppState::new();
+        undone_reopened
+            .open_project_file(undone_project)
+            .expect("reopen undone snapshot");
+        assert_eq!(
+            resource(&undone_reopened),
+            PropertyValue::Resource(ParameterResourceReference::Unbound)
+        );
+        assert_unbound_lut(&undone_reopened);
+        assert!(!undone_reopened.can_undo_action());
+        assert!(
+            !undone_reopened.can_redo_action(),
+            "a fresh Session must not resurrect old history"
+        );
+        drop(undone_reopened);
+        assert!(state.redo_timeline().expect("Redo after durable save"));
+        assert_eq!(
+            execute_lut(&state),
+            before_save,
+            "Redo must restore the resource and exact pixels after saving an undone snapshot"
         );
         root.refresh_from_app_state(&state);
         assert!(route(&mut root, &state, open).is_none());
