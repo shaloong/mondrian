@@ -77,36 +77,39 @@ pub struct KeyframeTemporalFlags {
     pub broken_handles: bool,
 }
 
+/// Values evaluated with double-precision progress derived from author time.
 pub trait Interpolatable: Clone + std::fmt::Debug + Send + Sync {
-    fn lerp(a: &Self, b: &Self, t: f32) -> Self;
+    /// Interpolate values without narrowing progress for double-precision types.
+    fn lerp(a: &Self, b: &Self, t: f64) -> Self;
 }
 
 impl Interpolatable for f32 {
-    fn lerp(a: &Self, b: &Self, t: f32) -> Self {
-        a + (b - a) * t
+    fn lerp(a: &Self, b: &Self, t: f64) -> Self {
+        a + (b - a) * t as f32
     }
 }
 
 impl Interpolatable for f64 {
-    fn lerp(a: &Self, b: &Self, t: f32) -> Self {
-        interpolate_numeric_value(*a, *b, f64::from(t))
+    fn lerp(a: &Self, b: &Self, t: f64) -> Self {
+        interpolate_numeric_value(*a, *b, t)
     }
 }
 
 impl Interpolatable for Vec2 {
-    fn lerp(a: &Self, b: &Self, t: f32) -> Self {
-        Vec2::lerp(*a, *b, t)
+    fn lerp(a: &Self, b: &Self, t: f64) -> Self {
+        Vec2::lerp(*a, *b, t as f32)
     }
 }
 
 impl Interpolatable for Vec3 {
-    fn lerp(a: &Self, b: &Self, t: f32) -> Self {
-        Vec3::lerp(*a, *b, t)
+    fn lerp(a: &Self, b: &Self, t: f64) -> Self {
+        Vec3::lerp(*a, *b, t as f32)
     }
 }
 
 impl Interpolatable for [f32; 4] {
-    fn lerp(a: &Self, b: &Self, t: f32) -> Self {
+    fn lerp(a: &Self, b: &Self, t: f64) -> Self {
+        let t = t as f32;
         [
             a[0] + (b[0] - a[0]) * t,
             a[1] + (b[1] - a[1]) * t,
@@ -117,8 +120,8 @@ impl Interpolatable for [f32; 4] {
 }
 
 impl Interpolatable for Color {
-    fn lerp(a: &Self, b: &Self, t: f32) -> Self {
-        a.lerp(*b, t)
+    fn lerp(a: &Self, b: &Self, t: f64) -> Self {
+        a.lerp(*b, t as f32)
     }
 }
 
@@ -1491,44 +1494,42 @@ impl PropertyValueType {
 }
 
 impl Interpolatable for PropertyValue {
-    fn lerp(a: &Self, b: &Self, t: f32) -> Self {
+    fn lerp(a: &Self, b: &Self, t: f64) -> Self {
         match (a, b) {
             (Self::Float(a), Self::Float(b)) => Self::Float(f32::lerp(a, b, t)),
             (Self::Double(a), Self::Double(b)) => Self::Double(f64::lerp(a, b, t)),
             (Self::DoubleVec2(a), Self::DoubleVec2(b)) => {
                 Self::DoubleVec2(std::array::from_fn(|index| {
-                    a[index] * (1.0 - f64::from(t)) + b[index] * f64::from(t)
+                    interpolate_numeric_value(a[index], b[index], t)
                 }))
             }
             (Self::DoubleVec3(a), Self::DoubleVec3(b)) => {
                 Self::DoubleVec3(std::array::from_fn(|index| {
-                    a[index] * (1.0 - f64::from(t)) + b[index] * f64::from(t)
+                    interpolate_numeric_value(a[index], b[index], t)
                 }))
             }
             (Self::DoubleRgb(a), Self::DoubleRgb(b)) => {
                 Self::DoubleRgb(std::array::from_fn(|index| {
-                    a[index] * (1.0 - f64::from(t)) + b[index] * f64::from(t)
+                    interpolate_numeric_value(a[index], b[index], t)
                 }))
             }
             (Self::DoubleColor(a), Self::DoubleColor(b)) => {
                 Self::DoubleColor(std::array::from_fn(|index| {
-                    a[index] * (1.0 - f64::from(t)) + b[index] * f64::from(t)
+                    interpolate_numeric_value(a[index], b[index], t)
                 }))
             }
             (Self::IntVec2(a), Self::IntVec2(b)) => Self::IntVec2(std::array::from_fn(|index| {
-                (f64::from(a[index]) * (1.0 - f64::from(t)) + f64::from(b[index]) * f64::from(t))
-                    .round() as i32
+                (f64::from(a[index]) * (1.0 - t) + f64::from(b[index]) * t).round() as i32
             })),
             (Self::IntVec3(a), Self::IntVec3(b)) => Self::IntVec3(std::array::from_fn(|index| {
-                (f64::from(a[index]) * (1.0 - f64::from(t)) + f64::from(b[index]) * f64::from(t))
-                    .round() as i32
+                (f64::from(a[index]) * (1.0 - t) + f64::from(b[index]) * t).round() as i32
             })),
             (Self::Int(a), Self::Int(b)) => {
-                Self::Int((*a as f64 + (*b - *a) as f64 * t as f64).round() as i64)
+                Self::Int((*a as f64 + (*b - *a) as f64 * t).round() as i64)
             }
-            (Self::Vec2(a), Self::Vec2(b)) => Self::Vec2(Vec2::lerp(*a, *b, t)),
-            (Self::Vec3(a), Self::Vec3(b)) => Self::Vec3(Vec3::lerp(*a, *b, t)),
-            (Self::Color(a), Self::Color(b)) => Self::Color(a.lerp(*b, t)),
+            (Self::Vec2(a), Self::Vec2(b)) => Self::Vec2(Vec2::lerp(*a, *b, t as f32)),
+            (Self::Vec3(a), Self::Vec3(b)) => Self::Vec3(Vec3::lerp(*a, *b, t as f32)),
+            (Self::Color(a), Self::Color(b)) => Self::Color(a.lerp(*b, t as f32)),
             (Self::Vec4(a), Self::Vec4(b)) => Self::Vec4(<[f32; 4]>::lerp(a, b, t)),
             _ => a.clone(),
         }
@@ -3954,12 +3955,12 @@ fn evaluate_numeric_channel(channel: &AnimationChannel, time: TimelineTime, fall
     }
 }
 
-fn normalize_time(t: TimelineTime, start: TimelineTime, end: TimelineTime) -> f32 {
-    let total = end.to_f64() - start.to_f64();
+fn normalize_time(t: TimelineTime, start: TimelineTime, end: TimelineTime) -> f64 {
+    let total = end.distance_from_f64(start);
     if total <= 0.0 {
         return 0.0;
     }
-    ((t.to_f64() - start.to_f64()) / total) as f32
+    t.distance_from_f64(start) / total
 }
 
 fn quantize_handle_time(value: f32) -> Result<TimelineTime> {
@@ -3973,11 +3974,11 @@ fn quantize_handle_time(value: f32) -> Result<TimelineTime> {
 
 enum SegmentProgress {
     Hold,
-    Progress(f32),
+    Progress(f64),
 }
 
 fn segment_progress(
-    t: f32,
+    t: f64,
     interp_out: KeyframeInterpolation,
     interp_in: KeyframeInterpolation,
 ) -> SegmentProgress {
@@ -4657,6 +4658,108 @@ mod tests {
                     expected,
                     "finite convex visual values must not overflow during evaluation"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn visual_bezier_inverts_flat_endpoint_time_tangents() {
+        let mut left = Keyframe::linear(TimelineTime::ZERO, 0.0_f64);
+        let mut right = Keyframe::linear(TimelineTime::ONE, 1.0_f64);
+        left.interp_out = KeyframeInterpolation::Bezier(BezierHandle {
+            time_offset: TimelineTime::ZERO,
+            value_offset: 1.0 / 3.0,
+        });
+        right.interp_in = KeyframeInterpolation::Bezier(BezierHandle {
+            time_offset: TimelineTime::NEGATIVE_ONE,
+            value_offset: -1.0 / 3.0,
+        });
+        let track = KeyframeTrack::from_parts(0.0, vec![left, right]);
+        let evaluated = track.evaluate(TimelineTime::new(1, 1_000_000_000).expect("exact sample"));
+        assert!((evaluated - 0.001).abs() <= 64.0 * f64::EPSILON,
+            "The legal x=t^3, y=t curve requires actual inversion even at a flat endpoint: {evaluated}");
+    }
+
+    #[test]
+    fn visual_tangent_time_delta_retains_exact_sample_span() {
+        let origin = TimelineTime::new(100_000, 1).expect("origin");
+        let step = TimelineTime::new(1, 48_000).expect("sample span");
+        let end = origin.checked_add(step).expect("translated end");
+        let actual = interp::time_delta(end, origin);
+        assert!((actual / step.to_f64() - 1.0).abs() <= 8.0 * f64::EPSILON,
+            "Tangent spans must subtract exact author coordinates before floating projection: {actual}");
+    }
+
+    #[test]
+    fn double_visual_curve_retains_exact_rational_progress() {
+        let path = "test.precise.visual";
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            path,
+            "Precise parameter",
+            PropertyValue::Double(0.0),
+        ));
+        for (time, value) in [(TimelineTime::ZERO, 0.0), (TimelineTime::ONE, 1.0)] {
+            bag.apply_mutation(PropertyMutation::SetKeyframe {
+                path: path.into(),
+                keyframe: Keyframe::linear(time, PropertyValue::Double(value)),
+            })
+            .expect("canonical key mutation");
+        }
+        let evaluated = bag
+            .evaluate(path, TimelineTime::ONE_THIRD)
+            .and_then(|value| value.as_f64())
+            .expect("canonical evaluation");
+        assert!(
+            (evaluated - 1.0 / 3.0).abs() <= 64.0 * f64::EPSILON,
+            "Double author values must not narrow their interpolation progress: {evaluated}"
+        );
+    }
+
+    #[test]
+    fn visual_curve_evaluation_is_invariant_under_author_time_translation() {
+        for interpolation in [InterpolationType::Linear, InterpolationType::AutoBezier] {
+            for origin in [
+                TimelineTime::ZERO,
+                TimelineTime::new(100_000, 1).expect("origin"),
+            ] {
+                let path = "test.translated.visual";
+                let step = TimelineTime::new(1, 48_000).expect("sample duration");
+                let middle = origin.checked_add(step).expect("middle key");
+                let end = middle.checked_add(step).expect("last key");
+                let mut bag = PropertyBag::default();
+                bag.define(PropertyDescriptor::new(
+                    path,
+                    "Sample-accurate parameter",
+                    PropertyValue::Double(0.0),
+                ));
+                for (time, value) in [(origin, 0.0), (middle, 0.5), (end, 1.0)] {
+                    bag.apply_mutation(PropertyMutation::SetKeyframe {
+                        path: path.into(),
+                        keyframe: Keyframe::linear(time, PropertyValue::Double(value)),
+                    })
+                    .expect("canonical key mutation");
+                }
+                for time in [origin, middle, end] {
+                    bag.apply_mutation(PropertyMutation::UpdateKeyframeInterpolation {
+                        path: path.into(),
+                        time,
+                        interpolation,
+                    })
+                    .expect("interpolation");
+                }
+                for (offset, expected) in [
+                    (TimelineTime::new(1, 96_000).expect("first sample"), 0.25),
+                    (TimelineTime::new(1, 32_000).expect("second sample"), 0.75),
+                ] {
+                    let time = origin.checked_add(offset).expect("translated evaluation time");
+                    let evaluated = bag
+                        .evaluate(path, time)
+                        .and_then(|value| value.as_f64())
+                        .expect("canonical evaluation");
+                    assert!((evaluated - expected).abs() <= 64.0 * f64::EPSILON,
+                        "Exact local progress must survive time translation: {interpolation:?} at {origin:?}, expected {expected}, got {evaluated}");
+                }
             }
         }
     }

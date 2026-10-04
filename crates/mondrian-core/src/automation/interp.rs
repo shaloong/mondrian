@@ -106,34 +106,54 @@ pub(crate) fn extract_handle(interpolation: KeyframeInterpolation) -> Option<Vec
     }
 }
 
-pub(crate) fn solve_bezier_t(x: f32, cp_out: BezierHandle, cp_in: BezierHandle) -> f32 {
+pub(crate) fn solve_bezier_t(x: f64, cp_out: BezierHandle, cp_in: BezierHandle) -> f64 {
     let x = x.clamp(0.0, 1.0);
-    let p1 = Vec2::new(
-        cp_out.time_offset.to_f64() as f32,
-        cp_out.value_offset as f32,
-    );
-    let p2 = Vec2::new(
-        (1.0 + cp_in.time_offset.to_f64()) as f32,
-        (1.0 + cp_in.value_offset) as f32,
-    );
+    let p1 = [cp_out.time_offset.to_f64(), cp_out.value_offset];
+    let p2 = [1.0 + cp_in.time_offset.to_f64(), 1.0 + cp_in.value_offset];
 
-    let sample_curve_x = |t: f32| cubic_bezier(0.0, p1.x, p2.x, 1.0, t);
-    let sample_curve_y = |t: f32| cubic_bezier(0.0, p1.y, p2.y, 1.0, t);
-    let sample_curve_derivative_x = |t: f32| cubic_bezier_derivative(0.0, p1.x, p2.x, 1.0, t);
+    let sample_curve_x = |t: f64| cubic_bezier(0.0, p1[0], p2[0], 1.0, t);
+    let sample_curve_y = |t: f64| cubic_bezier(0.0, p1[1], p2[1], 1.0, t);
+    let sample_curve_derivative_x = |t: f64| cubic_bezier_derivative(0.0, p1[0], p2[0], 1.0, t);
+
+    if cp_out.time_offset == TimelineTime::ONE_THIRD
+        && cp_in.time_offset == TimelineTime::NEGATIVE_ONE_THIRD
+    {
+        return sample_curve_y(x).clamp(0.0, 1.0);
+    }
 
     let mut t = x;
+    let mut low = 0.0;
+    let mut high = 1.0;
     for _ in 0..8 {
         let error = sample_curve_x(t) - x;
-        if error.abs() < 1.0e-5 {
-            break;
+        if error == 0.0 {
+            return sample_curve_y(t).clamp(0.0, 1.0);
+        }
+        if error < 0.0 {
+            low = t;
+        } else {
+            high = t;
         }
 
         let derivative = sample_curve_derivative_x(t);
-        if derivative.abs() < 1.0e-5 {
+        let candidate = t - error / derivative;
+        if !candidate.is_finite() || candidate <= low || candidate >= high {
             break;
         }
+        t = candidate;
+    }
 
-        t = (t - error / derivative).clamp(0.0, 1.0);
+    for _ in 0..56 {
+        t = (low + high) * 0.5;
+        let sample = sample_curve_x(t);
+        if sample == x || t == low || t == high {
+            return sample_curve_y(t).clamp(0.0, 1.0);
+        }
+        if sample < x {
+            low = t;
+        } else {
+            high = t;
+        }
     }
 
     sample_curve_y(t).clamp(0.0, 1.0)
@@ -435,8 +455,8 @@ pub(crate) fn monotone_in_handle(slope: f64, dt: f64, dv: f64) -> BezierHandle {
     }
 }
 
-fn time_delta(later: TimelineTime, earlier: TimelineTime) -> f64 {
-    (later.to_f64() - earlier.to_f64()).max(f64::EPSILON)
+pub(super) fn time_delta(later: TimelineTime, earlier: TimelineTime) -> f64 {
+    later.distance_from_f64(earlier)
 }
 
 fn normalized_positive_handle(value: TimelineTime) -> TimelineTime {
@@ -455,12 +475,12 @@ fn normalized_handle_magnitude(value: TimelineTime) -> f64 {
     normalized_positive_handle(value).to_f64()
 }
 
-pub(crate) fn cubic_bezier(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
+pub(crate) fn cubic_bezier(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {
     let u = 1.0 - t;
     u * u * u * p0 + 3.0 * u * u * t * p1 + 3.0 * u * t * t * p2 + t * t * t * p3
 }
 
-pub(crate) fn cubic_bezier_derivative(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
+pub(crate) fn cubic_bezier_derivative(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {
     let u = 1.0 - t;
     3.0 * u * u * (p1 - p0) + 6.0 * u * t * (p2 - p1) + 3.0 * t * t * (p3 - p2)
 }

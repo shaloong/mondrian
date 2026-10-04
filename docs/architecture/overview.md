@@ -32,6 +32,17 @@ curve when admission fails. Regression coverage includes ascending/descending
 full finite intervals, manual/auto/continuous exact Bezier curves, nonuniform
 visual endpoints, small-value unit invariance and subnormal exact tangents.
 
+Visual numeric channels and generic keyframe tracks evaluate author progress in
+`f64`; `Interpolatable::lerp` accepts `f64` progress, with narrowing reserved for
+declared Float value types. `TimelineTime::distance_from_f64` subtracts rational
+coordinates through integer cross products before floating projection, including
+derived distances that cannot fit a persisted rational. Tangent spans use the
+same projection without an absolute epsilon floor. Bezier time inversion keeps
+a bracket during Newton iteration and falls back to bounded bisection for flat
+endpoint tangents; exact one-third time handles bypass inversion. Regression
+coverage includes ordinary one-third Double evaluation, translated 48 kHz spans
+and the legal `x=t^3, y=t` endpoint case.
+
 Core owns the shared `ParameterValueWrite` algebra: complete typed values or
 sparse numeric components at a stable `AnimationParameterAddress`. Clip, Effect
 and Mask adapters supply exact owner-local time to `PropertyBag::prepare_parameter_write`;
