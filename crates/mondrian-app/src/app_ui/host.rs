@@ -1136,16 +1136,16 @@ impl AppUiHost {
     pub fn refresh_if_dirty(&mut self, bounds: Rect) {
         let full_refresh = self.ui_dirty.replace(false);
         let preview_refresh = self.preview_dirty.replace(false);
-        if !full_refresh {
+        let next_mode = mode_for_app_state(&self.app_state.borrow());
+        let mode_changed = next_mode != self.mode;
+        if !full_refresh && !mode_changed {
             if preview_refresh && self.mode == AppUiMode::Workspace {
                 self.refresh_preview_state_without_rebuild();
                 self.sync_playback_feedback_from_viewer();
             }
-            self.sync_mode_from_app_state(bounds);
             return;
         }
-        let next_mode = mode_for_app_state(&self.app_state.borrow());
-        if next_mode == self.mode && widget_tree_has_transient_interaction(self.active_root()) {
+        if !mode_changed && widget_tree_has_transient_interaction(self.active_root()) {
             self.ui_dirty.set(true);
             if preview_refresh && self.mode == AppUiMode::Workspace {
                 self.refresh_preview_state_without_rebuild();
@@ -1153,6 +1153,10 @@ impl AppUiHost {
             }
             return;
         }
+        // A mode transition projects the same App state as a dirty refresh.
+        // Select its active root first and refresh/layout once, rather than
+        // rebuilding Workspace again through a second mode-sync path.
+        self.mode = next_mode;
         self.normalize_asset_folder_selection();
         self.asset_thumbnails
             .set_color_context(self.app_state.borrow().thumbnail_color_context().ok());
@@ -1167,7 +1171,6 @@ impl AppUiHost {
             Some(&window_preview_snapshot),
             Some(self.waveform_service.source()),
         );
-        self.sync_mode_from_app_state(bounds);
         TreeWalker::layout(self.active_root_mut(), bounds);
     }
 
@@ -1564,25 +1567,6 @@ impl AppUiHost {
             TreeWalker::layout(self.active_root_mut(), bounds);
         }
         commands
-    }
-
-    fn sync_mode_from_app_state(&mut self, bounds: Rect) {
-        let next = mode_for_app_state(&self.app_state.borrow());
-        if self.mode != next {
-            self.mode = next;
-            self.refresh_window_preview_state();
-            let window_preview_state = self.window_preview_state.borrow().clone();
-            let window_preview_snapshot =
-                WindowPreviewSnapshot::new(&window_preview_state, &self.preview_service);
-            self.root.refresh_from_app_state_with_preferences_thumbnails_and_preview(
-                &self.app_state.borrow(),
-                &self.preferences,
-                Some(&self.asset_thumbnails),
-                Some(&window_preview_snapshot),
-                Some(self.waveform_service.source()),
-            );
-            TreeWalker::layout(self.active_root_mut(), bounds);
-        }
     }
 
     fn refresh_transport_state_without_preview(&mut self) {
