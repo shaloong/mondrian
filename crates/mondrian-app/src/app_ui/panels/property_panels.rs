@@ -1819,10 +1819,27 @@ pub(super) fn audio_automation_curve_control(
             )
         })
         .collect();
-    let preview_model = model.clone();
+    let mut preview_model = model.clone();
+    let mut preview_origin = None;
     let editor = CurveEditor::with_points(model.points())
-        .with_preview_projection(move |edit| {
-            crate::app_ui::audio_automation::preview_audio_curve_edit(&preview_model, edit)
+        .with_preview_projection(move |event| match event {
+            CurveGestureEvent::Begin(_) => {
+                preview_origin = Some(preview_model.source_curve.clone());
+                None
+            }
+            CurveGestureEvent::Edit { edit, .. } => {
+                crate::app_ui::audio_automation::preview_audio_curve_edit(&mut preview_model, edit)
+            }
+            CurveGestureEvent::Cancel(_) => {
+                if let Some(origin) = preview_origin.take() {
+                    preview_model.source_curve = origin;
+                }
+                None
+            }
+            CurveGestureEvent::Finish(_) => {
+                preview_origin = None;
+                None
+            }
         })
         .with_point_policies(model.point_policies())
         .with_display_points(model.display_points.clone())
@@ -2535,9 +2552,28 @@ fn numeric_curve_editor(
         })
         .collect();
     let display_points = model.display_points.clone();
-    let preview_model = model.clone();
+    let mut preview_model = model.clone();
+    let mut preview_origin = None;
     let editor = CurveEditor::with_points(points)
-        .with_preview_projection(move |edit| preview_numeric_curve_points(&preview_model, edit))
+        .with_preview_projection(move |event| match event {
+            CurveGestureEvent::Begin(_) => {
+                preview_origin = Some(preview_model.curve_source.clone());
+                None
+            }
+            CurveGestureEvent::Edit { edit, .. } => {
+                preview_numeric_curve_points(&mut preview_model, edit)
+            }
+            CurveGestureEvent::Cancel(_) => {
+                if let Some(origin) = preview_origin.take() {
+                    preview_model.curve_source = origin;
+                }
+                None
+            }
+            CurveGestureEvent::Finish(_) => {
+                preview_origin = None;
+                None
+            }
+        })
         .with_point_policies(point_policies)
         .with_display_points(display_points)
         .with_point_context_menus(interpolation_menus)
@@ -2571,14 +2607,14 @@ fn numeric_curve_editor(
 
 /// Derive graph samples through the same canonical preparation as the author action.
 pub(super) fn preview_numeric_curve_points(
-    model: &InspectorCurveModel,
+    model: &mut InspectorCurveModel,
     edit: CurveEdit,
 ) -> Option<Vec<CurvePoint>> {
     let edit = numeric_curve_edit_payload(model, edit)?;
     let property =
         crate::app::preview_numeric_curve_edit(&model.curve_source, model.owner_range, &edit)
             .ok()?;
-    (0..=128)
+    let display = (0..=128)
         .map(|index| {
             let time = model
                 .owner_range
@@ -2597,7 +2633,9 @@ pub(super) fn preview_numeric_curve_points(
                 model.value_range.normalized_position(value)? as f32,
             ))
         })
-        .collect()
+        .collect::<Option<Vec<_>>>()?;
+    model.curve_source = std::sync::Arc::new(property);
+    Some(display)
 }
 
 fn numeric_curve_edit_payload(

@@ -351,7 +351,7 @@ fn audio_curve_edit_intent(
 }
 
 pub(crate) fn preview_audio_curve_edit(
-    model: &AudioAutomationCurveModel,
+    model: &mut AudioAutomationCurveModel,
     edit: CurveEdit,
 ) -> Option<Vec<CurvePoint>> {
     let intent = audio_curve_edit_intent(model, edit)?;
@@ -364,7 +364,7 @@ pub(crate) fn preview_audio_curve_edit(
     let range =
         mondrian_core::automation::ParameterNumericRange::new(model.view_min, model.view_max)
             .ok()?;
-    (0..=DISPLAY_SEGMENTS)
+    let display = (0..=DISPLAY_SEGMENTS)
         .map(|index| {
             let time = model
                 .viewport
@@ -392,7 +392,9 @@ pub(crate) fn preview_audio_curve_edit(
                 range.normalized_position(value)? as f32,
             ))
         })
-        .collect()
+        .collect::<Option<Vec<_>>>()?;
+    model.source_curve = curve;
+    Some(display)
 }
 
 fn denormalized_time(range: TimelineTimeRange, ratio: f32) -> Option<TimelineTime> {
@@ -623,7 +625,7 @@ mod tests {
                 },
                 CurveEdit::Delete { index: 0 },
             ] {
-                let display = preview_audio_curve_edit(&model, edit).unwrap();
+                let display = preview_audio_curve_edit(&mut model.clone(), edit).unwrap();
                 let mut authored = sequence.clone();
                 mondrian_timeline::apply_audio_automation_edit(
                     &mut authored,

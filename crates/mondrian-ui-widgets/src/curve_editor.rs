@@ -144,8 +144,9 @@ pub enum CurveGestureEvent {
 /// Adapter for explicit local curve draft ownership and committed edits.
 pub type CurveGestureAction = dyn Fn(CurveGestureEvent) -> Option<Action>;
 
-/// Derive display samples for one current edit using the owner's canonical evaluator.
-pub type CurvePreviewProjection = dyn Fn(CurveEdit) -> Option<Vec<CurvePoint>>;
+/// Project gesture lifecycle and edits using the owner's canonical evaluator.
+/// Only `Edit` results replace display samples; boundaries maintain projection state.
+pub type CurvePreviewProjection = dyn FnMut(CurveGestureEvent) -> Option<Vec<CurvePoint>>;
 
 /// Adapter for complete live curve values and their authoring boundaries.
 pub type CurveValueEditAction = dyn Fn(ValueEdit, &[CurvePoint]) -> Option<Action>;
@@ -346,10 +347,12 @@ impl CurveEditor {
     }
 
     /// Paint samples derived by the owner's canonical curve evaluator during edits.
-    /// Cancel restores the samples present before the pointer gesture began.
+    /// Lifecycle events let the projection restore its derived snapshot on cancel.
+    /// The widget also restores samples present before the pointer gesture began.
+    /// Only edit events can replace the sampled display.
     pub fn with_preview_projection(
         mut self,
-        project: impl Fn(CurveEdit) -> Option<Vec<CurvePoint>> + 'static,
+        project: impl FnMut(CurveGestureEvent) -> Option<Vec<CurvePoint>> + 'static,
     ) -> Self {
         self.preview_projection = Some(Box::new(project));
         self
@@ -526,9 +529,9 @@ impl CurveEditor {
     }
 
     fn dispatch_gesture(&mut self, event: CurveGestureEvent, ctx: &mut EventContext) {
-        if let CurveGestureEvent::Edit { edit, .. } = event
-            && let Some(project) = &self.preview_projection
-            && let Some(points) = project(edit)
+        let points = self.preview_projection.as_mut().and_then(|project| project(event));
+        if matches!(event, CurveGestureEvent::Edit { .. })
+            && let Some(points) = points
         {
             self.set_display_points(points);
             ctx.request_repaint();
@@ -1738,6 +1741,8 @@ mod tests {
         let mut shortcut = DummyShortcut;
         let mut tooltip = DummyTooltip;
         let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        let projected_events = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let projected = projected_events.clone();
         let mut editor = CurveEditor::with_points(vec![
             CurvePoint::new(0.0, 0.0),
             CurvePoint::new(0.5, 0.5),
@@ -1748,13 +1753,19 @@ mod tests {
             CurvePoint::new(0.5, 0.5),
             CurvePoint::new(1.0, 1.0),
         ])
-        .with_preview_projection(|edit| match edit {
-            CurveEdit::Move { point, .. } => Some(vec![
-                CurvePoint::new(0.0, 0.0),
-                point,
-                CurvePoint::new(1.0, 1.0),
-            ]),
-            _ => None,
+        .with_preview_projection(move |event| {
+            projected.borrow_mut().push(event);
+            match event {
+                CurveGestureEvent::Edit { edit: CurveEdit::Move { point, .. }, .. } => Some(vec![
+                    CurvePoint::new(0.0, 0.0),
+                    point,
+                    CurvePoint::new(1.0, 1.0),
+                ]),
+                CurveGestureEvent::Cancel(_) => {
+                    Some(vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 0.0)])
+                }
+                _ => None,
+            }
         })
         .on_gesture(move |event| {
             captured.borrow_mut().push(event);
@@ -1809,6 +1820,11 @@ mod tests {
         assert_eq!(
             events.borrow().last().copied(),
             Some(CurveGestureEvent::Cancel(id))
+        );
+        assert_eq!(
+            *projected_events.borrow(),
+            *events.borrow(),
+            "projection must receive the same Begin, Edit and Cancel lifecycle as authoring"
         );
         assert!(!editor.has_active_pointer_interaction());
     }
