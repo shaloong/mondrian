@@ -613,3 +613,5 @@ typed geometry mutation owns handle editing and existing exact handles remain
 untouched during a value write. No clamping or field migration accepts bad input.
 This admission repair does not yet converge normalized visual controls with
 absolute numeric audio controls or implement temporal handle UI/live preview.
+
+Explicit visual Bezier and ContinuousBezier preset selection retains controls on both temporal sides, including currently unconnected endpoint sides. Existing Bezier controls survive the mode change. Later key insertion therefore preserves the selected segment intent instead of producing an unintended single-sided Ease preset. This is canonical author state and round-trips with stable key identity.

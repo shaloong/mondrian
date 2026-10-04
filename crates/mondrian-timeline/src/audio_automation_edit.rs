@@ -790,6 +790,21 @@ fn edit_owned_curve(
     Ok(changed)
 }
 
+/// Derive one candidate curve using the same edit semantics as author transactions.
+///
+/// This immutable projection does not publish state, advance generations, or write history.
+/// It validates both the supplied snapshot and the resulting candidate.
+pub fn preview_audio_automation_curve_edit(
+    curve: &ExactAutomationCurve,
+    edit: &AudioAutomationEdit,
+) -> Result<ExactAutomationCurve, AudioAutomationEditError> {
+    curve.validate().map_err(invalid_automation)?;
+    let mut candidate = curve.clone();
+    edit_curve(&mut candidate, edit)?;
+    candidate.validate().map_err(invalid_automation)?;
+    Ok(candidate)
+}
+
 fn edit_curve(
     curve: &mut ExactAutomationCurve,
     edit: &AudioAutomationEdit,

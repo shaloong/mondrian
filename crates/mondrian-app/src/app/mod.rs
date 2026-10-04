@@ -102,6 +102,7 @@ pub(crate) fn tt(frame: i64, time_base: Rational) -> TimelineTime {
 
 mod action_handler;
 mod animation_authoring;
+pub(crate) use animation_authoring::preview_numeric_curve_edit;
 mod animation_state;
 mod audio_authoring;
 mod audio_idle_warmup;

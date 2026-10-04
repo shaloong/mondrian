@@ -1605,3 +1605,5 @@ Generic Inspector choices therefore use the same English/Chinese/pseudo catalog.
 Scalar audio automation and exact integer processor values consume channel zero
 of their validated canonical schema. Core enforces complete contract cardinality
 and atomic normalization for every full or sparse property write.
+
+Audio curve preview derives an immutable candidate through preview_audio_automation_curve_edit, which shares the production edit implementation and validates the input and result. This projection never publishes a transaction, generation, or history entry. The UI samples Core prepared segments once per edit and preserves owner-time and stable key identity; author admission and notifications remain in the author session.

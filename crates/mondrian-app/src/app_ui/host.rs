@@ -5592,11 +5592,12 @@ mod tests {
         host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
         assert_eq!(router.captured(), Some(curve_id));
         assert!(
-            host.app_state()
+            !host
+                .app_state()
                 .active_sequence()
-                .expect("draft")
+                .expect("live drag")
                 .author_state_eq_ignoring_revision(&before),
-            "audio drag remains a local draft until release"
+            "audio drag must update authoritative preview before release"
         );
 
         assert!(host.app_state().parameter_gesture_is_current());
@@ -5886,13 +5887,13 @@ mod tests {
                 continue;
             }
             assert_eq!(router.captured(), Some(curve_id));
-            assert_eq!(
-                host.app_state()
+            assert!(
+                !host
+                    .app_state()
                     .active_sequence()
                     .expect("pending")
                     .author_state_eq_ignoring_revision(&original),
-                !structured,
-                "numeric keys remain local; transfer curves retain live output"
+                "numeric and transfer curves update author output during capture"
             );
             assert!(
                 host.app_state().parameter_gesture_is_current(),

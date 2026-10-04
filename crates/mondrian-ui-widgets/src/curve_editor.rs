@@ -100,7 +100,7 @@ impl CurvePointPolicy {
 /// Adapter that maps the current curve points to an editor [`Action`].
 pub type CurveChangeAction = dyn Fn(&[CurvePoint]) -> Option<Action>;
 
-/// One committed control-point edit.
+/// One control-point author intent.
 ///
 /// The index is ephemeral and valid only for the curve snapshot supplied to
 /// this widget. Domain Adapters map it to their stable point or keyframe
@@ -108,7 +108,14 @@ pub type CurveChangeAction = dyn Fn(&[CurvePoint]) -> Option<Action>;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CurveEdit {
     /// Insert a new point between existing neighbors.
-    Insert { index: usize, point: CurvePoint },
+    Insert {
+        /// Stable identity reserved for all author updates of this inserted point.
+        keyframe_id: mondrian_core::KeyframeId,
+        /// Position in the supplied point snapshot.
+        index: usize,
+        /// Current normalized author coordinates.
+        point: CurvePoint,
+    },
     /// Move an existing point without changing its identity.
     Move { index: usize, point: CurvePoint },
     /// Delete one existing interior point.
@@ -118,24 +125,27 @@ pub enum CurveEdit {
 /// Adapter that maps one committed point edit to an editor [`Action`].
 pub type CurveEditAction = dyn Fn(CurveEdit) -> Option<Action>;
 
-/// Lifecycle of a local pointer curve draft and its atomic committed edits.
+/// Lifecycle of a pointer curve gesture with live author updates and one history entry.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CurveGestureEvent {
     /// Open a pointer draft without committing author state.
     Begin(mondrian_core::AuthoringGestureId),
-    /// Commit one edit; keyboard edits have no pointer gesture identity.
+    /// Apply the current coordinates; keyboard edits have no pointer gesture identity.
     Edit {
         gesture_id: Option<mondrian_core::AuthoringGestureId>,
         edit: CurveEdit,
     },
     /// Accept the pointer draft after its optional edit.
     Finish(mondrian_core::AuthoringGestureId),
-    /// Discard the pointer draft without an incremental edit.
+    /// Restore the pointer gesture's original author state.
     Cancel(mondrian_core::AuthoringGestureId),
 }
 
 /// Adapter for explicit local curve draft ownership and committed edits.
 pub type CurveGestureAction = dyn Fn(CurveGestureEvent) -> Option<Action>;
+
+/// Derive display samples for one current edit using the owner's canonical evaluator.
+pub type CurvePreviewProjection = dyn Fn(CurveEdit) -> Option<Vec<CurvePoint>>;
 
 /// Adapter for complete live curve values and their authoring boundaries.
 pub type CurveValueEditAction = dyn Fn(ValueEdit, &[CurvePoint]) -> Option<Action>;
@@ -146,6 +156,7 @@ struct CurvePointDrag {
     origin: CurvePoint,
     pointer_origin: Point,
     inserted: bool,
+    keyframe_id: mondrian_core::KeyframeId,
 }
 
 /// Interactive normalized curve editor.
@@ -157,6 +168,8 @@ pub struct CurveEditor {
     point_insertion_limit: Option<usize>,
     point_policies: Vec<CurvePointPolicy>,
     display_points: Option<Vec<CurvePoint>>,
+    preview_projection: Option<Box<CurvePreviewProjection>>,
+    drag_display_origin: Option<Option<Vec<CurvePoint>>>,
     selected: Option<usize>,
     dragging: Option<CurvePointDrag>,
     drag_value_origin: Option<(Vec<CurvePoint>, Vec<CurvePointPolicy>)>,
@@ -196,6 +209,8 @@ impl CurveEditor {
             point_insertion_limit: None,
             point_policies: Vec::new(),
             display_points: None,
+            preview_projection: None,
+            drag_display_origin: None,
             selected: None,
             dragging: None,
             drag_value_origin: None,
@@ -317,7 +332,7 @@ impl CurveEditor {
     /// Dispatch pointer lifecycle boundaries and atomic edits instead of `on_edit`.
     /// Pointer drafts begin before release and emit Finish or Cancel once; keyboard
     /// edits carry no pointer identity. This replaces both value and incremental
-    /// edit callbacks, keeping a pointer draft local until acceptance.
+    /// edit callbacks. Current coordinates reach the author during capture.
     pub fn on_gesture<F, R>(mut self, action: F) -> Self
     where
         F: Fn(CurveGestureEvent) -> R + 'static,
@@ -327,6 +342,16 @@ impl CurveEditor {
         self.on_change = None;
         self.on_value_edit = None;
         self.on_gesture = Some(Box::new(move |event| action(event).into()));
+        self
+    }
+
+    /// Paint samples derived by the owner's canonical curve evaluator during edits.
+    /// Cancel restores the samples present before the pointer gesture began.
+    pub fn with_preview_projection(
+        mut self,
+        project: impl Fn(CurveEdit) -> Option<Vec<CurvePoint>> + 'static,
+    ) -> Self {
+        self.preview_projection = Some(Box::new(project));
         self
     }
 
@@ -469,6 +494,17 @@ impl CurveEditor {
             return false;
         }
         self.dispatch_change(ctx);
+        if self.on_gesture.is_some()
+            && let Some(drag) = self.dragging
+        {
+            self.dispatch_gesture(
+                CurveGestureEvent::Edit {
+                    gesture_id: self.gesture,
+                    edit: self.drag_author_edit(drag),
+                },
+                ctx,
+            );
+        }
         ctx.request_repaint();
         true
     }
@@ -489,7 +525,14 @@ impl CurveEditor {
         }
     }
 
-    fn dispatch_gesture(&self, event: CurveGestureEvent, ctx: &mut EventContext) {
+    fn dispatch_gesture(&mut self, event: CurveGestureEvent, ctx: &mut EventContext) {
+        if let CurveGestureEvent::Edit { edit, .. } = event
+            && let Some(project) = &self.preview_projection
+            && let Some(points) = project(edit)
+        {
+            self.set_display_points(points);
+            ctx.request_repaint();
+        }
         if let Some(callback) = &self.on_gesture
             && let Some(action) = callback(event)
         {
@@ -498,6 +541,11 @@ impl CurveEditor {
     }
 
     fn end_gesture(&mut self, cancel: bool, ctx: &mut EventContext) {
+        if let Some(origin) = self.drag_display_origin.take()
+            && cancel
+        {
+            self.display_points = origin;
+        }
         if let Some(id) = self.gesture.take() {
             if let Some(action) = &self.on_value_edit
                 && let Some(action) = action(
@@ -523,7 +571,7 @@ impl CurveEditor {
         }
     }
 
-    fn dispatch_edit(&self, edit: CurveEdit, ctx: &mut EventContext) {
+    fn dispatch_edit(&mut self, edit: CurveEdit, ctx: &mut EventContext) {
         self.dispatch_gesture(
             CurveGestureEvent::Edit { gesture_id: self.gesture, edit },
             ctx,
@@ -566,6 +614,7 @@ impl CurveEditor {
             self.end_gesture(true, ctx);
         }
         if self.on_gesture.is_some() {
+            self.drag_display_origin = Some(self.display_points.clone());
             let id = mondrian_core::AuthoringGestureId::new();
             self.gesture = Some(id);
             self.dispatch_gesture(CurveGestureEvent::Begin(id), ctx);
@@ -575,7 +624,33 @@ impl CurveEditor {
             origin: self.points[index],
             pointer_origin,
             inserted,
+            keyframe_id: mondrian_core::KeyframeId::new(),
         });
+        if inserted
+            && self.on_gesture.is_some()
+            && let Some(drag) = self.dragging
+        {
+            self.dispatch_gesture(
+                CurveGestureEvent::Edit {
+                    gesture_id: self.gesture,
+                    edit: self.drag_author_edit(drag),
+                },
+                ctx,
+            );
+        }
+    }
+
+    fn drag_author_edit(&self, drag: CurvePointDrag) -> CurveEdit {
+        let point = self.points[drag.index];
+        if drag.inserted || !self.point_policies[drag.index].deletable {
+            CurveEdit::Insert {
+                keyframe_id: drag.keyframe_id,
+                index: drag.index,
+                point,
+            }
+        } else {
+            CurveEdit::Move { index: drag.index, point }
+        }
     }
 
     fn commit_drag_edit(&mut self, ctx: &mut EventContext) {
@@ -585,12 +660,24 @@ impl CurveEditor {
         let point = self.points.get(drag.index).copied();
         if drag.inserted {
             if let Some(point) = point {
-                self.dispatch_edit(CurveEdit::Insert { index: drag.index, point }, ctx);
+                self.dispatch_edit(
+                    CurveEdit::Insert {
+                        keyframe_id: drag.keyframe_id,
+                        index: drag.index,
+                        point,
+                    },
+                    ctx,
+                );
             }
         } else if let Some(point) = point
             && drag.origin != point
         {
-            self.dispatch_edit(CurveEdit::Move { index: drag.index, point }, ctx);
+            let edit = if self.on_gesture.is_some() {
+                self.drag_author_edit(drag)
+            } else {
+                CurveEdit::Move { index: drag.index, point }
+            };
+            self.dispatch_edit(edit, ctx);
         }
         self.end_gesture(false, ctx);
     }
@@ -1046,7 +1133,7 @@ mod tests {
 
     fn curve_edit_action(edit: CurveEdit) -> Action {
         let name = match edit {
-            CurveEdit::Insert { index, point } => {
+            CurveEdit::Insert { index, point, .. } => {
                 format!("insert:{index}:{:.4},{:.4}", point.x, point.y)
             }
             CurveEdit::Move { index, point } => {
@@ -1206,7 +1293,7 @@ mod tests {
                 &mut ctx,
             );
             assert!(editor.points().iter().all(|point| point.y == 0.5));
-            assert_eq!(events.borrow().len(), 1, "draft stays local");
+            assert_eq!(events.borrow().len(), [1, 2, 2, 3, 3][mode], "live updates");
             let cancel = mode == 2 || mode == 4;
             let terminal = if cancel {
                 UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() }
@@ -1222,19 +1309,19 @@ mod tests {
             if cancel || mode == 0 {
                 assert_eq!(editor.points(), original);
                 assert_eq!(
-                    events.borrow().as_slice(),
-                    &[
-                        CurveGestureEvent::Begin(id),
-                        if cancel {
-                            CurveGestureEvent::Cancel(id)
-                        } else {
-                            CurveGestureEvent::Finish(id)
-                        }
-                    ]
+                    events.borrow().last().copied(),
+                    Some(if cancel {
+                        CurveGestureEvent::Cancel(id)
+                    } else {
+                        CurveGestureEvent::Finish(id)
+                    })
                 );
             } else {
-                assert_eq!(events.borrow().len(), 3);
-                assert_eq!(events.borrow()[2], CurveGestureEvent::Finish(id));
+                assert_eq!(events.borrow().len(), if mode == 3 { 5 } else { 4 });
+                assert_eq!(
+                    events.borrow().last().copied(),
+                    Some(CurveGestureEvent::Finish(id))
+                );
                 assert!(
                     matches!(events.borrow()[1], CurveGestureEvent::Edit { gesture_id: Some(edit_id), .. } if edit_id == id)
                 );
@@ -1244,10 +1331,28 @@ mod tests {
                     assert!(editor.points()[1].x > 0.5);
                 }
             }
+            let count = events.borrow().len();
+            assert_eq!(count, [2, 4, 3, 5, 4][mode]);
+            if mode >= 3 {
+                let recorded = events.borrow();
+                let mut inserted_id = None;
+                for event in &recorded[1..count - 1] {
+                    let CurveGestureEvent::Edit {
+                        gesture_id: Some(edit_id),
+                        edit: CurveEdit::Insert { keyframe_id, point, .. },
+                    } = event
+                    else {
+                        panic!("insert preview must retain one point identity");
+                    };
+                    assert_eq!(*edit_id, id);
+                    assert_eq!(point.y, 0.5);
+                    assert_eq!(*keyframe_id, *inserted_id.get_or_insert(*keyframe_id));
+                }
+            }
             editor.event(&UiEvent::FocusLost, &mut ctx);
             assert_eq!(
                 events.borrow().len(),
-                if cancel || mode == 0 { 2 } else { 3 },
+                count,
                 "terminal event is published once"
             );
         }
@@ -1625,6 +1730,90 @@ mod tests {
     }
 
     #[test]
+    fn author_gesture_emits_current_key_position_before_pointer_release() {
+        let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let captured = events.clone();
+        let dispatch = |_: Action| {};
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .with_display_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .with_preview_projection(|edit| match edit {
+            CurveEdit::Move { point, .. } => Some(vec![
+                CurvePoint::new(0.0, 0.0),
+                point,
+                CurvePoint::new(1.0, 1.0),
+            ]),
+            _ => None,
+        })
+        .on_gesture(move |event| {
+            captured.borrow_mut().push(event);
+            None
+        });
+        editor.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+        let initial_display = editor.display_points.clone();
+        let start = editor.to_screen(editor.points()[1]);
+        editor.event(
+            &UiEvent::MouseDown {
+                position: start,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let CurveGestureEvent::Begin(id) = events.borrow()[0] else {
+            panic!("pointer drag must open the author gesture");
+        };
+        for position in [
+            Point::new(start.x + 8.0, start.y - 5.0),
+            Point::new(start.x + 18.0, start.y - 12.0),
+        ] {
+            editor.event(
+                &UiEvent::MouseMove { position, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+            assert_eq!(
+                events.borrow().last().copied(),
+                Some(CurveGestureEvent::Edit {
+                    gesture_id: Some(id),
+                    edit: CurveEdit::Move { index: 1, point: editor.points()[1] },
+                }),
+                "current author coordinates must reach preview while the pointer is held",
+            );
+            assert_eq!(
+                editor.display_points.as_ref().unwrap()[1],
+                editor.points()[1]
+            );
+            assert!(ctx.requests.repaint);
+        }
+        assert_ne!(editor.display_points, initial_display);
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(
+            editor.display_points, initial_display,
+            "cancel must restore the exact sampled line"
+        );
+        assert_eq!(editor.points()[1], CurvePoint::new(0.5, 0.5));
+        assert_eq!(
+            events.borrow().last().copied(),
+            Some(CurveGestureEvent::Cancel(id))
+        );
+        assert!(!editor.has_active_pointer_interaction());
+    }
+
+    #[test]
     fn committed_drag_emits_one_incremental_edit_only_on_release() {
         let actions = RefCell::new(Vec::new());
         let dispatch = |action: Action| actions.borrow_mut().push(action);
@@ -1715,6 +1904,7 @@ mod tests {
         assert_eq!(
             actions.borrow().as_slice(),
             &[curve_edit_action(CurveEdit::Insert {
+                keyframe_id: mondrian_core::KeyframeId::new(),
                 index: 1,
                 point: inserted,
             })]
@@ -1829,7 +2019,7 @@ mod tests {
     }
 
     #[test]
-    fn curve_gesture_lifecycle_keeps_drafts_local_and_finishes_or_cancels_once() {
+    fn curve_gesture_lifecycle_updates_author_and_finishes_or_cancels_once() {
         for finish in 0..6 {
             let events = std::rc::Rc::new(RefCell::new(Vec::new()));
             let recorded = std::rc::Rc::clone(&events);
@@ -1871,8 +2061,8 @@ mod tests {
             }
             assert_eq!(
                 events.borrow().len(),
-                1,
-                "pointer and keyboard changes remain in the local captured draft"
+                if finish == 0 { 1 } else { 3 },
+                "pointer and keyboard changes publish current coordinates"
             );
             let terminal = match finish {
                 2 => UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
@@ -1908,10 +2098,7 @@ mod tests {
             }
             let events = events.borrow();
             if finish == 2 || finish == 4 {
-                assert_eq!(
-                    events.as_slice(),
-                    &[CurveGestureEvent::Begin(id), CurveGestureEvent::Cancel(id)]
-                );
+                assert_eq!(events.last().copied(), Some(CurveGestureEvent::Cancel(id)));
                 assert_eq!(editor.points()[1], CurvePoint::new(0.5, 0.5));
             } else if finish == 0 {
                 assert_eq!(
@@ -1919,11 +2106,11 @@ mod tests {
                     &[CurveGestureEvent::Begin(id), CurveGestureEvent::Finish(id)]
                 );
             } else {
-                assert_eq!(events.len(), 3);
+                assert_eq!(events.len(), 5);
                 assert!(
                     matches!(events[1], CurveGestureEvent::Edit { gesture_id: Some(edit_id), .. } if edit_id == id)
                 );
-                assert_eq!(events[2], CurveGestureEvent::Finish(id));
+                assert_eq!(events[4], CurveGestureEvent::Finish(id));
                 if finish == 5 {
                     assert_eq!(editor.points().len(), 2);
                 }

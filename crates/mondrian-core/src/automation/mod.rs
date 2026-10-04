@@ -2626,6 +2626,9 @@ impl AnimatedProperty {
         Ok(())
     }
 
+    /// Select one key's interpolation preset, retaining existing Bezier controls.
+    /// Explicit Bezier presets also retain both currently unconnected temporal sides,
+    /// so adding a neighbor cannot discard the selected interpolation intent.
     pub fn update_keyframe_interpolation(
         &mut self,
         time: TimelineTime,
@@ -2645,31 +2648,21 @@ impl AnimatedProperty {
         for channel in &mut self.channels {
             if let Some(index) = channel.keyframes.iter().position(|keyframe| keyframe.time == time)
             {
-                let has_prev = index > 0;
-                let has_next = index + 1 < channel.keyframes.len();
                 let existing = &mut channel.keyframes[index];
                 let (default_in, default_out, temporal_flags) = interpolation_defaults(normalized);
                 match normalized {
                     InterpolationType::Bezier | InterpolationType::ContinuousBezier => {
-                        existing.interp_in = if has_prev {
-                            match existing.interp_in {
-                                KeyframeInterpolation::Bezier(handle) => {
-                                    KeyframeInterpolation::Bezier(handle)
-                                }
-                                _ => default_in,
+                        existing.interp_in = match existing.interp_in {
+                            KeyframeInterpolation::Bezier(handle) => {
+                                KeyframeInterpolation::Bezier(handle)
                             }
-                        } else {
-                            existing.interp_in
+                            _ => default_in,
                         };
-                        existing.interp_out = if has_next {
-                            match existing.interp_out {
-                                KeyframeInterpolation::Bezier(handle) => {
-                                    KeyframeInterpolation::Bezier(handle)
-                                }
-                                _ => default_out,
+                        existing.interp_out = match existing.interp_out {
+                            KeyframeInterpolation::Bezier(handle) => {
+                                KeyframeInterpolation::Bezier(handle)
                             }
-                        } else {
-                            existing.interp_out
+                            _ => default_out,
                         };
                         existing.temporal_flags = temporal_flags;
                     }
@@ -7179,6 +7172,60 @@ mod tests {
             })
             .expect_err("expected collision");
         assert!(err.to_string().contains("关键帧时间冲突"));
+    }
+
+    #[test]
+    fn visual_bezier_endpoint_preset_retains_future_segment_intent() {
+        for preset in [
+            InterpolationType::Bezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let mut bag = PropertyBag::default();
+            let path = "endpoint.curve";
+            bag.define(PropertyDescriptor::new(
+                path,
+                "Endpoint",
+                PropertyValue::Float(0.0),
+            ));
+            bag.apply_mutation(PropertyMutation::SetKeyframe {
+                path: path.to_owned(),
+                keyframe: Keyframe::linear(tt(5), PropertyValue::Float(0.5)),
+            })
+            .unwrap();
+            bag.apply_mutation(PropertyMutation::UpdateKeyframeInterpolation {
+                path: path.to_owned(),
+                time: tt(5),
+                interpolation: preset,
+            })
+            .unwrap();
+            let selected = bag.property(path).unwrap().keyframe_at(tt(5)).unwrap();
+            assert!(
+                matches!(selected.interp_in, KeyframeInterpolation::Bezier(_)),
+                "explicit {preset:?} must retain incoming intent before a neighbor exists"
+            );
+            assert!(
+                matches!(selected.interp_out, KeyframeInterpolation::Bezier(_)),
+                "explicit {preset:?} must retain outgoing intent before a neighbor exists"
+            );
+            for (time, value) in [(tt(0), 0.0), (tt(10), 1.0)] {
+                bag.apply_mutation(PropertyMutation::SetKeyframe {
+                    path: path.to_owned(),
+                    keyframe: Keyframe::linear(time, PropertyValue::Float(value)),
+                })
+                .unwrap();
+            }
+            let stored = bag.property(path).unwrap().keyframe_at(tt(5)).unwrap();
+            assert_eq!(stored.id, selected.id);
+            assert!(matches!(stored.interp_in, KeyframeInterpolation::Bezier(_)));
+            assert!(matches!(
+                stored.interp_out,
+                KeyframeInterpolation::Bezier(_)
+            ));
+            bag.validate().unwrap();
+            let reopened: PropertyBag =
+                serde_json::from_str(&serde_json::to_string(&bag).unwrap()).unwrap();
+            assert_eq!(reopened, bag);
+        }
     }
 
     #[test]

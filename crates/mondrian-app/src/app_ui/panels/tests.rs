@@ -8177,6 +8177,132 @@ fn panel_domain_accents_use_theme_tokens() {
 }
 
 #[test]
+fn live_visual_curve_samples_equal_real_author_results() {
+    use crate::app::product_action::{ClipCurveEditPayload, ClipEditNumericCurvePayload};
+    for interpolation in [
+        InterpolationType::Hold,
+        InterpolationType::Linear,
+        InterpolationType::Bezier,
+        InterpolationType::AutoBezier,
+        InterpolationType::ContinuousBezier,
+    ] {
+        for operation in 0..3 {
+            let mut sequence = mondrian_timeline::Sequence::new("Visual sample acceptance");
+            let clip =
+                Clip::new_basic_title("Title", "Arial", TimelineTime::ZERO, TimelineTime::ONE)
+                    .unwrap();
+            let clip_id = clip.id;
+            let selection = SelectedClipRef {
+                track_id: sequence.video_tracks[0].id,
+                is_video_track: true,
+                clip_id,
+            };
+            sequence.video_tracks[0].add_clip(clip).unwrap();
+            let mut state = crate::app::AppState::new();
+            state.test_set_sequence(Some(sequence));
+            state.select_clip_by_id(clip_id).unwrap();
+            let initial = opacity_curve_model_for_clip(
+                state.active_sequence().unwrap().find_clip(clip_id).unwrap(),
+                TimelineTime::ZERO,
+            )
+            .unwrap();
+            for (x, y) in [(0.0, 0.2), (0.5, 0.8), (1.0, 0.4)] {
+                let keyframe_id = KeyframeId::new();
+                state
+                    .dispatch_action(
+                        inspector_curve_edit_action(
+                            Some(selection),
+                            &initial,
+                            CurveEdit::Insert {
+                                keyframe_id,
+                                index: 1,
+                                point: CurvePoint::new(x, y),
+                            },
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                let current = opacity_curve_model_for_clip(
+                    state.active_sequence().unwrap().find_clip(clip_id).unwrap(),
+                    TimelineTime::ZERO,
+                )
+                .unwrap();
+                if current
+                    .keys
+                    .iter()
+                    .find(|key| key.keyframe_id == Some(keyframe_id))
+                    .unwrap()
+                    .interpolation
+                    != Some(interpolation)
+                {
+                    state
+                        .dispatch_action(clip_edit_numeric_curve_action(
+                            ClipEditNumericCurvePayload {
+                                clip_id,
+                                parameter: initial.property.clone(),
+                                edit: ClipCurveEditPayload::SetInterpolation {
+                                    keyframe_id,
+                                    interpolation,
+                                },
+                            },
+                        ))
+                        .unwrap();
+                }
+            }
+            let model = opacity_curve_model_for_clip(
+                state.active_sequence().unwrap().find_clip(clip_id).unwrap(),
+                TimelineTime::ZERO,
+            )
+            .unwrap();
+            assert_eq!(model.keys[1].interpolation, Some(interpolation));
+            if operation == 0 {
+                let intermediate = CurveEdit::Move { index: 1, point: CurvePoint::new(0.55, 0.65) };
+                let predicted =
+                    property_panels::preview_numeric_curve_points(&model, intermediate).unwrap();
+                state
+                    .dispatch_action(
+                        inspector_curve_edit_action(Some(selection), &model, intermediate).unwrap(),
+                    )
+                    .unwrap();
+                let current = opacity_curve_model_for_clip(
+                    state.active_sequence().unwrap().find_clip(clip_id).unwrap(),
+                    TimelineTime::ZERO,
+                )
+                .unwrap();
+                assert_eq!(
+                    predicted, current.display_points,
+                    "intermediate preview must match author state"
+                );
+            }
+            let edit = match operation {
+                0 => CurveEdit::Move { index: 1, point: CurvePoint::new(0.6, 0.7) },
+                1 => CurveEdit::Insert {
+                    keyframe_id: KeyframeId::new(),
+                    index: 1,
+                    point: CurvePoint::new(0.25, 0.3),
+                },
+                _ => CurveEdit::Delete { index: 1 },
+            };
+            let display = property_panels::preview_numeric_curve_points(&model, edit).unwrap();
+            state
+                .dispatch_action(
+                    inspector_curve_edit_action(Some(selection), &model, edit).unwrap(),
+                )
+                .unwrap();
+            let authored = opacity_curve_model_for_clip(
+                state.active_sequence().unwrap().find_clip(clip_id).unwrap(),
+                TimelineTime::ZERO,
+            )
+            .unwrap();
+            assert_eq!(
+                display, authored.display_points,
+                "canonical sample mismatch for {interpolation:?}/{edit:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
     let selection = SelectedClipRef {
         track_id: TrackId::new(),
@@ -8189,6 +8315,15 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
         parameter_id: mondrian_core::ParameterId::new_static("mondrian.transform.opacity"),
     };
     let model = InspectorCurveModel {
+        curve_source: std::sync::Arc::new(
+            Transform2D::identity()
+                .to_property_bag()
+                .property(Transform2D::OPACITY_PATH)
+                .expect("fixture property")
+                .clone(),
+        ),
+        owner_range: mondrian_core::TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE)
+            .expect("fixture owner interval"),
         value_range: mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0)
             .expect("range"),
         property: property.clone(),
@@ -8239,6 +8374,15 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
 
     let boundary_keyframe_id = KeyframeId::new();
     let boundary_model = InspectorCurveModel {
+        curve_source: std::sync::Arc::new(
+            Transform2D::identity()
+                .to_property_bag()
+                .property(Transform2D::OPACITY_PATH)
+                .expect("fixture property")
+                .clone(),
+        ),
+        owner_range: mondrian_core::TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE)
+            .expect("fixture owner interval"),
         value_range: mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0)
             .expect("range"),
         property: property.clone(),
@@ -9032,6 +9176,15 @@ fn inspector_actions_without_selection_produce_no_command() {
         None
     );
     let curve_model = InspectorCurveModel {
+        curve_source: std::sync::Arc::new(
+            Transform2D::identity()
+                .to_property_bag()
+                .property(Transform2D::OPACITY_PATH)
+                .expect("fixture property")
+                .clone(),
+        ),
+        owner_range: mondrian_core::TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE)
+            .expect("fixture owner interval"),
         value_range: mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0)
             .expect("range"),
         property: AnimationParameterAddress {
@@ -9045,7 +9198,11 @@ fn inspector_actions_without_selection_produce_no_command() {
         inspector_curve_edit_action(
             None,
             &curve_model,
-            CurveEdit::Insert { index: 0, point: CurvePoint::new(0.0, 1.0) },
+            CurveEdit::Insert {
+                keyframe_id: mondrian_core::KeyframeId::new(),
+                index: 0,
+                point: CurvePoint::new(0.0, 1.0)
+            },
         ),
         None
     );

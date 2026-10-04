@@ -2103,6 +2103,10 @@ pub struct InspectorCurveKeyModel {
 /// Stable author target plus editable keys and read-only evaluated samples.
 #[derive(Debug, Clone)]
 pub struct InspectorCurveModel {
+    /// Immutable canonical property used solely to derive current display samples.
+    pub(crate) curve_source: std::sync::Arc<mondrian_core::automation::AnimatedProperty>,
+    /// Exact owner-local interval represented by the normalized graph.
+    pub(crate) owner_range: mondrian_core::TimelineTimeRange,
     /// Stable property instance and definition identity.
     pub property: AnimationParameterAddress,
     /// Canonical visible value interval, including fixed-value intervals.
@@ -4140,6 +4144,8 @@ fn numeric_curve_model_for_property(
         .collect::<Option<Vec<_>>>()?;
 
     Some(InspectorCurveModel {
+        curve_source: std::sync::Arc::new(property.clone()),
+        owner_range: mondrian_core::TimelineTimeRange::new(start_tick, duration_ticks).ok()?,
         property: property.address(),
         value_range: numeric.soft_range,
         keys: keys.into_values().collect(),

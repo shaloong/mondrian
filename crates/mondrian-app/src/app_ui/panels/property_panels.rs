@@ -1819,7 +1819,11 @@ pub(super) fn audio_automation_curve_control(
             )
         })
         .collect();
+    let preview_model = model.clone();
     let editor = CurveEditor::with_points(model.points())
+        .with_preview_projection(move |edit| {
+            crate::app_ui::audio_automation::preview_audio_curve_edit(&preview_model, edit)
+        })
         .with_point_policies(model.point_policies())
         .with_display_points(model.display_points.clone())
         .with_point_context_menus(interpolation_menus)
@@ -2531,7 +2535,9 @@ fn numeric_curve_editor(
         })
         .collect();
     let display_points = model.display_points.clone();
+    let preview_model = model.clone();
     let editor = CurveEditor::with_points(points)
+        .with_preview_projection(move |edit| preview_numeric_curve_points(&preview_model, edit))
         .with_point_policies(point_policies)
         .with_display_points(display_points)
         .with_point_context_menus(interpolation_menus)
@@ -2563,13 +2569,44 @@ fn numeric_curve_editor(
     })
 }
 
+/// Derive graph samples through the same canonical preparation as the author action.
+pub(super) fn preview_numeric_curve_points(
+    model: &InspectorCurveModel,
+    edit: CurveEdit,
+) -> Option<Vec<CurvePoint>> {
+    let edit = numeric_curve_edit_payload(model, edit)?;
+    let property =
+        crate::app::preview_numeric_curve_edit(&model.curve_source, model.owner_range, &edit)
+            .ok()?;
+    (0..=128)
+        .map(|index| {
+            let time = model
+                .owner_range
+                .start
+                .checked_add(
+                    model
+                        .owner_range
+                        .duration
+                        .checked_scale(TimeScale::new(index, 128).ok()?)
+                        .ok()?,
+                )
+                .ok()?;
+            let value = property.evaluate(time).as_f64()?;
+            Some(CurvePoint::new(
+                index as f32 / 128.0,
+                model.value_range.normalized_position(value)? as f32,
+            ))
+        })
+        .collect()
+}
+
 fn numeric_curve_edit_payload(
     model: &InspectorCurveModel,
     edit: CurveEdit,
 ) -> Option<ClipCurveEditPayload> {
     let edit = match edit {
-        CurveEdit::Insert { point, .. } => ClipCurveEditPayload::Upsert {
-            keyframe_id: None,
+        CurveEdit::Insert { keyframe_id, point, .. } => ClipCurveEditPayload::Upsert {
+            keyframe_id: Some(keyframe_id),
             point: inspector_curve_point_payload(point),
         },
         CurveEdit::Move { index, point } => {
