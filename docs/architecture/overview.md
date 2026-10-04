@@ -580,6 +580,15 @@ value materialization. Nonfinite double components and any invalid sparse member
 reject the entire author edit. Inline footprint accounting includes these values
 without allocating a per-value component vector in persisted author state.
 
+### Visual Bezier value progress
+
+Visual Bezier evaluation constrains the temporal parameter to its segment,
+but retains the authored cubic value progress outside the endpoint interval.
+Manual and Continuous curves can therefore express overshoot; the Parameter
+Schema owns value admission rather than an endpoint clamp in the time solver.
+Regression tests exercise real PropertyBag authoring, both overshoot directions,
+default and nondefault temporal controls, and serialized evaluation equivalence.
+
 ### Sparse coordinate admission
 
 Sparse handle edits omit unchanged coordinates on the wire. Supplied coordinates

@@ -4392,6 +4392,165 @@ impl crate::AuthoringFootprint for PropertyBag {
 mod tests {
     use super::*;
 
+    fn overshoot_property_bag(path: &str, bound: f64) -> PropertyBag {
+        let mut bag = PropertyBag::default();
+        bag.define(
+            PropertyDescriptor::new(path, "Overshoot", PropertyValue::Double(0.0))
+                .with_numeric_contract(
+                    ParameterUnit::Unitless,
+                    ParameterNumericContract::closed(
+                        -bound,
+                        bound,
+                        None,
+                        ParameterInvalidValuePolicy::Reject,
+                    )
+                    .expect("wide legal range"),
+                ),
+        );
+        bag
+    }
+
+    #[test]
+    fn visual_manual_bezier_preserves_legal_overshoot_in_both_directions() {
+        let path = "test.visual.overshoot";
+        for time_offset in [
+            TimelineTime::ONE_THIRD,
+            TimelineTime::new(1, 4).expect("quarter"),
+        ] {
+            for (out_value, in_value, expected) in [(2.0, 1.0, 1.625), (-1.0, -2.0, -0.625)] {
+                let mut bag = overshoot_property_bag(path, 4.0);
+                let mut left = Keyframe::linear(TimelineTime::ZERO, PropertyValue::Double(0.0));
+                let mut right = Keyframe::linear(TimelineTime::ONE, PropertyValue::Double(1.0));
+                left.interp_out = KeyframeInterpolation::Bezier(BezierHandle {
+                    time_offset,
+                    value_offset: out_value,
+                });
+                right.interp_in = KeyframeInterpolation::Bezier(BezierHandle {
+                    time_offset: time_offset
+                        .checked_scale(crate::TimeScale::NEGATIVE_ONE)
+                        .expect("incoming"),
+                    value_offset: in_value,
+                });
+                for keyframe in [left, right] {
+                    bag.apply_mutation(PropertyMutation::SetKeyframe {
+                        path: path.into(),
+                        keyframe,
+                    })
+                    .expect("author legal control points");
+                }
+                let middle = TimelineTime::new(1, 2).expect("middle");
+                assert_eq!(
+                    bag.evaluate(path, middle),
+                    Some(PropertyValue::Double(expected)),
+                    "Bezier controls must retain legal overshoot beyond the two endpoint values"
+                );
+                let restored: PropertyBag = serde_json::from_str(
+                    &serde_json::to_string(&bag).expect("serialize authored curve"),
+                )
+                .expect("restore authored curve");
+                assert_eq!(restored.evaluate(path, middle), bag.evaluate(path, middle));
+            }
+        }
+    }
+
+    #[test]
+    fn visual_continuous_bezier_preserves_authored_overshoot() {
+        let path = "test.visual.continuous_overshoot";
+        let mut bag = overshoot_property_bag(path, 4.0);
+        for (time, value) in [
+            (TimelineTime::NEGATIVE_ONE, -1.0),
+            (TimelineTime::ZERO, 0.0),
+            (TimelineTime::ONE, 1.0),
+        ] {
+            bag.apply_mutation(PropertyMutation::SetKeyframe {
+                path: path.into(),
+                keyframe: Keyframe::linear(time, PropertyValue::Double(value)),
+            })
+            .expect("author keys");
+        }
+        bag.apply_mutation(PropertyMutation::UpdateKeyframeInterpolation {
+            path: path.into(),
+            time: TimelineTime::ZERO,
+            interpolation: InterpolationType::ContinuousBezier,
+        })
+        .expect("continuous constraint");
+        let incoming = bag
+            .property(path)
+            .expect("property")
+            .channel(0)
+            .expect("channel")
+            .keyframe_at(TimelineTime::ZERO)
+            .expect("middle key")
+            .interp_in;
+        bag.apply_mutation(PropertyMutation::UpdateChannelKeyframeHandles {
+            path: path.into(),
+            time: TimelineTime::ZERO,
+            channel_index: 0,
+            interp_in: incoming,
+            interp_out: KeyframeInterpolation::Bezier(BezierHandle {
+                time_offset: TimelineTime::ONE_THIRD,
+                value_offset: 2.0,
+            }),
+        })
+        .expect("author continuous tangent");
+        let right_out = bag
+            .property(path)
+            .expect("property")
+            .channel(0)
+            .expect("channel")
+            .keyframe_at(TimelineTime::ONE)
+            .expect("right key")
+            .interp_out;
+        bag.apply_mutation(PropertyMutation::UpdateChannelKeyframeHandles {
+            path: path.into(),
+            time: TimelineTime::ONE,
+            channel_index: 0,
+            interp_out: right_out,
+            interp_in: KeyframeInterpolation::Bezier(BezierHandle {
+                time_offset: TimelineTime::NEGATIVE_ONE_THIRD,
+                value_offset: 1.0,
+            }),
+        })
+        .expect("author right control point");
+        assert_eq!(
+            bag.evaluate(path, TimelineTime::new(1, 2).expect("sample")),
+            Some(PropertyValue::Double(1.625)),
+            "Continuous constraint must not clip valid overshoot"
+        );
+    }
+
+    #[test]
+    fn full_finite_visual_bezier_overshoot_stays_finite() {
+        let path = "test.visual.scaled_overshoot";
+        for scale in [f64::MAX * 0.5, 1.0e-300] {
+            let mut bag = overshoot_property_bag(path, f64::MAX);
+            let mut left = Keyframe::linear(TimelineTime::ZERO, PropertyValue::Double(0.0));
+            let mut right = Keyframe::linear(TimelineTime::ONE, PropertyValue::Double(scale));
+            left.interp_out = KeyframeInterpolation::Bezier(BezierHandle {
+                time_offset: TimelineTime::ONE_THIRD,
+                value_offset: 2.0,
+            });
+            right.interp_in = KeyframeInterpolation::Bezier(BezierHandle {
+                time_offset: TimelineTime::NEGATIVE_ONE_THIRD,
+                value_offset: 1.0,
+            });
+            for keyframe in [left, right] {
+                bag.apply_mutation(PropertyMutation::SetKeyframe { path: path.into(), keyframe })
+                    .expect("finite control points within the declared range");
+            }
+            let evaluated = bag
+                .evaluate(path, TimelineTime::new(1, 2).expect("sample"))
+                .and_then(|value| value.as_f64())
+                .expect("numeric value");
+            assert!(evaluated.is_finite());
+            assert_eq!(
+                evaluated,
+                1.625 * scale,
+                "Legal overshoot must retain its physical value scale"
+            );
+        }
+    }
+
     #[test]
     fn numeric_range_mapping_keeps_finite_monotonic_values_and_exact_endpoints() {
         let almost_max = f64::from_bits(f64::MAX.to_bits() - 1);

@@ -118,7 +118,7 @@ pub(crate) fn solve_bezier_t(x: f64, cp_out: BezierHandle, cp_in: BezierHandle) 
     if cp_out.time_offset == TimelineTime::ONE_THIRD
         && cp_in.time_offset == TimelineTime::NEGATIVE_ONE_THIRD
     {
-        return sample_curve_y(x).clamp(0.0, 1.0);
+        return sample_curve_y(x);
     }
 
     let mut t = x;
@@ -127,7 +127,7 @@ pub(crate) fn solve_bezier_t(x: f64, cp_out: BezierHandle, cp_in: BezierHandle) 
     for _ in 0..8 {
         let error = sample_curve_x(t) - x;
         if error == 0.0 {
-            return sample_curve_y(t).clamp(0.0, 1.0);
+            return sample_curve_y(t);
         }
         if error < 0.0 {
             low = t;
@@ -147,7 +147,7 @@ pub(crate) fn solve_bezier_t(x: f64, cp_out: BezierHandle, cp_in: BezierHandle) 
         t = (low + high) * 0.5;
         let sample = sample_curve_x(t);
         if sample == x || t == low || t == high {
-            return sample_curve_y(t).clamp(0.0, 1.0);
+            return sample_curve_y(t);
         }
         if sample < x {
             low = t;
@@ -156,7 +156,7 @@ pub(crate) fn solve_bezier_t(x: f64, cp_out: BezierHandle, cp_in: BezierHandle) 
         }
     }
 
-    sample_curve_y(t).clamp(0.0, 1.0)
+    sample_curve_y(t)
 }
 
 pub fn interpolation_mode_from_keyframe(
