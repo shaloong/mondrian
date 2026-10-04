@@ -272,3 +272,10 @@ and `native_frame_sample_parameters_reject_unprovided_curve_queries` App library
 tests with `MONDRIAN_OPENFX_SESSION_PROBE_BINARY` set to the rebuilt owned bundle.
 These qualify explicit binding authority; they do not qualify animated curve
 snapshots, native key enumeration or arbitrary third-party plugins.
+
+The integration targets `product_worker_preserves_animatable_constant_query_authority`
+and `product_worker_preserves_current_frame_query_authority` exercise those same
+SDK assertions through the actual product executable and resident protocol.
+Set the corresponding probe mode before each target. They send all six compound
+bindings and verify exact output and worker reuse across two renders at frame zero.
+They do not qualify seeking with animated snapshots.

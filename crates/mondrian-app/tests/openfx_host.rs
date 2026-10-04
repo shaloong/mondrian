@@ -33,6 +33,89 @@ fn product_executable() -> &'static Path {
 }
 
 #[test]
+#[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and mode compound_constant_animatable"]
+fn product_worker_preserves_animatable_constant_query_authority() {
+    qualify_product_compound_query_authority(false);
+}
+
+#[test]
+#[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and mode compound_frame_sample"]
+fn product_worker_preserves_current_frame_query_authority() {
+    qualify_product_compound_query_authority(true);
+}
+
+fn qualify_product_compound_query_authority(sampled: bool) {
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
+        if sampled {
+            "compound_frame_sample"
+        } else {
+            "compound_constant_animatable"
+        }
+    );
+    let binary =
+        PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));
+    let inspection = inspect_openfx_binary(product_executable(), &binary).expect("inspect");
+    let identifier = "uk.co.thefoundry.BasicGainPlugin";
+    let description =
+        describe_openfx_filter(product_executable(), &inspection, identifier).expect("describe");
+    let parameters = description
+        .parameters
+        .iter()
+        .filter(|parameter| {
+            matches!(
+                parameter.name.as_str(),
+                "point2" | "point3" | "rgb" | "rgba" | "integer2" | "integer3"
+            )
+        })
+        .map(|parameter| {
+            assert!(parameter.can_animate);
+            let value = parameter.default_value.clone();
+            let binding = if sampled {
+                OpenFxParameterBinding::current_frame(value)
+            } else {
+                OpenFxParameterBinding::constant(value)
+            };
+            (parameter.name.clone(), binding)
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(parameters.len(), 6);
+    let input = OpenFxFloatFrame {
+        width: 2,
+        height: 2,
+        pixels: vec![[-0.25, 0.5, 2.0, 0.25]; 4],
+    };
+    let timing = OpenFxRenderTiming {
+        frame: 0.0,
+        frame_rate: 24.0,
+        first_frame: 0.0,
+        last_frame: 10.0,
+        pixel_aspect_ratio: 1.0,
+    };
+    let cancellation = mondrian_core::ExecutionCancellationToken::new();
+    let mut session = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        identifier,
+        input.width,
+        input.height,
+        &mut checkpoint(&cancellation),
+    )
+    .expect("prepare actual product worker");
+    let worker = session.worker_process_id();
+    // Instance creation and both renders run the SDK probe's independent
+    // off-time reads, calculus and unchanged-output-on-failure assertions.
+    // Repeating the same snapshot also exercises reuse without change callbacks.
+    for _ in 0..2 {
+        let output = session
+            .render(&timing, &parameters, &input, &mut checkpoint(&cancellation))
+            .expect("query authority survives the product protocol");
+        assert_eq!(output, input);
+        assert_eq!(session.worker_process_id(), worker);
+    }
+}
+
+#[test]
 #[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and probe mode strings"]
 fn string_filter_description_preserves_all_native_modes() {
     let binary =

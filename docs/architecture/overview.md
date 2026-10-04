@@ -649,3 +649,8 @@ change as a parameter change even when the current numeric value is identical.
 Omitted controls reset to their declared constant defaults. A finite empty
 integration interval returns zero independently of query mode. Full animated curve
 queries and key enumeration still require a canonical curve snapshot bridge.
+
+Owned SDK query-authority integration tests also execute through the product
+resident protocol, with explicit bindings for all six compound parameter types.
+They verify exact pixel output and worker reuse independently of direct FFI tests;
+their frame-zero sample coverage does not establish full animated seeking.
