@@ -621,7 +621,13 @@ point phase plus uncertainty at physical commit; generic late grace cannot
 authorize publication beyond the hard A/V phase budget. The same
 pending deadline participates in the Engine's next-wake result, so a scheduler
 cannot sleep until the successor frame boundary after phase authority has
-expired. The next-wake result also retains its typed reason (`PrimingDeadline`,
+expired without first observing that deadline. A clock tick records that
+observation for the exact demand identity. An unavailable result then waits on
+its producer notification or the ordinary Clock wake instead of rescheduling
+the same expired timer at zero delay. The demand and ticket retain their
+original deadline and grace; terminal classification, GPU completion ownership,
+and retirement deadlines are unchanged. A new demand identity independently
+rearms its presentation wake. The next-wake result also retains its typed reason (`PrimingDeadline`,
 `PresentationDeadline`, `FrameBoundary`, or `AudioDevicePoll`) so a host may
 select a suitable wait primitive without reconstructing Engine timing policy.
 

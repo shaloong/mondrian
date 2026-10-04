@@ -2089,6 +2089,49 @@ fn audio_clock_wake_does_not_sleep_past_the_projected_video_boundary() {
 }
 
 #[test]
+fn expired_presentation_wake_is_consumed_without_renewing_the_demand_deadline() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).unwrap();
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+    let demand = engine.pending_frame_demand().expect("pending picture");
+    let deadline = demand.deadline.expect("timed picture");
+    assert_eq!(deadline, ts(20));
+    assert_eq!(
+        engine.next_wake(deadline).unwrap().unwrap().after(),
+        Duration::ZERO
+    );
+
+    engine.tick(deadline).unwrap();
+    for _ in 0..100 {
+        assert_eq!(engine.pending_frame_demand(), Some(demand));
+        assert!(engine.next_wake(deadline).unwrap().unwrap().after() > Duration::ZERO);
+        engine.tick(deadline).unwrap();
+    }
+    let ticket = FramePresentationTicket::for_demand(demand, FramePresentationQuality::Ready);
+    let delivery = ticket.complete_at(ts(21));
+    assert_eq!(delivery.kind(), FrameDeliveryKind::Degraded);
+    let beyond_grace = deadline
+        .checked_add(Duration::from_nanos(demand.late_presentation_grace_ns + 1))
+        .unwrap();
+    assert_eq!(
+        ticket.complete_at(beyond_grace).kind(),
+        FrameDeliveryKind::Late
+    );
+    assert!(engine.observe_frame_delivery(delivery).unwrap().accepted());
+
+    engine.tick(ts(40)).unwrap();
+    let successor = engine.pending_frame_demand().expect("next picture");
+    assert_ne!(successor.identity(), demand.identity());
+    let successor_deadline = successor.deadline.unwrap();
+    assert_eq!(
+        engine.next_wake(successor_deadline).unwrap().unwrap().after(),
+        Duration::ZERO
+    );
+    engine.tick(successor_deadline).unwrap();
+    assert!(engine.next_wake(successor_deadline).unwrap().unwrap().after() > Duration::ZERO);
+}
+
+#[test]
 fn invalid_recovery_policy_is_rejected_at_the_interface() {
     let result = PlaybackEngine::new(
         Rational::new(1, 25),

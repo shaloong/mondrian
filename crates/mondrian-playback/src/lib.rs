@@ -882,6 +882,10 @@ pub struct PlaybackEngine {
     consecutive_healthy: usize,
     next_demand_sequence: u64,
     active_demand: Option<FrameDemand>,
+    /// The exact pending demand whose deadline wake a clock tick has handled.
+    /// Completion still uses the immutable demand deadline; an unavailable
+    /// result must not keep scheduling an already-observed timer at zero delay.
+    observed_presentation_deadline: Option<FrameDemandIdentity>,
     terminal_delivery: Option<(PlaybackEpoch, u64, FrameDemandSequence)>,
     priming_current_presentable: bool,
     video_preroll_observation: Option<VideoPrerollObservation>,
@@ -934,6 +938,7 @@ impl PlaybackEngine {
             consecutive_healthy: 0,
             next_demand_sequence: 1,
             active_demand: None,
+            observed_presentation_deadline: None,
             terminal_delivery: None,
             priming_current_presentable: false,
             video_preroll_observation: None,
@@ -1283,6 +1288,12 @@ impl PlaybackEngine {
         match self.state {
             TransportState::Playing | TransportState::Recovering => {
                 self.refresh_frame_demand_if_target_changed(now)?;
+                if let Some(demand) = self
+                    .pending_frame_demand()
+                    .filter(|demand| demand.deadline.is_some_and(|deadline| now >= deadline))
+                {
+                    self.observed_presentation_deadline = Some(demand.identity());
+                }
             }
             TransportState::Ended => {
                 self.refresh_untimed_frame_demand_if_target_changed()?;
@@ -1297,7 +1308,10 @@ impl PlaybackEngine {
     /// Priming exposes its bounded fallback deadline even after the current
     /// Frame Demand has received a terminal non-presentable delivery. Running
     /// playback exposes the earlier of the pending presentation phase
-    /// deadline and its normal Clock wake. Audio Device playback retains a
+    /// deadline until a tick observes it, and its normal Clock wake. An expired
+    /// result still waits for its producer's completion notification; observing
+    /// its wake does not renew the demand or alter terminal classification.
+    /// Audio Device playback retains a
     /// bounded polling fallback because a callback sample may arrive earlier.
     pub fn time_until_next_wake(
         &self,
@@ -1341,15 +1355,16 @@ impl PlaybackEngine {
         ) {
             return Ok(None);
         }
-        let presentation_wake =
-            self.pending_frame_demand().and_then(|demand| demand.deadline).map(|deadline| {
-                PlaybackWake {
-                    after: deadline
-                        .duration_since_origin()
-                        .checked_sub(now.duration_since_origin())
-                        .unwrap_or(Duration::ZERO),
-                    reason: PlaybackWakeReason::PresentationDeadline,
-                }
+        let presentation_wake = self
+            .pending_frame_demand()
+            .filter(|demand| self.observed_presentation_deadline != Some(demand.identity()))
+            .and_then(|demand| demand.deadline)
+            .map(|deadline| PlaybackWake {
+                after: deadline
+                    .duration_since_origin()
+                    .checked_sub(now.duration_since_origin())
+                    .unwrap_or(Duration::ZERO),
+                reason: PlaybackWakeReason::PresentationDeadline,
             });
         let phase_ns = self.clock_phase_reference_ns(now)?;
         let remaining_phase_ns = self.phase_ns_until_next_frame_change(phase_ns)?;
