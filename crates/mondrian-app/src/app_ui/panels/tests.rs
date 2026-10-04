@@ -6293,7 +6293,6 @@ fn inspector_numeric_slider_keeps_decimal_endpoint_in_author_precision() {
                 TimelineTime::ZERO,
                 &channel_values,
                 InterpolationType::Linear,
-                None,
             )
             .expect("Reject admits UI endpoint");
         authored.validate().expect("physical value stays within exact bounds");

@@ -96,16 +96,6 @@ pub(crate) fn handle_for_in(interpolation: KeyframeInterpolation) -> BezierHandl
     }
 }
 
-pub(crate) fn extract_handle(interpolation: KeyframeInterpolation) -> Option<Vec2> {
-    match interpolation {
-        KeyframeInterpolation::Bezier(handle) => Some(Vec2::new(
-            handle.time_offset.to_f64() as f32,
-            handle.value_offset as f32,
-        )),
-        _ => None,
-    }
-}
-
 pub(crate) fn solve_bezier_t(x: f64, cp_out: BezierHandle, cp_in: BezierHandle) -> f64 {
     let x = x.clamp(0.0, 1.0);
     let p1 = [cp_out.time_offset.to_f64(), cp_out.value_offset];

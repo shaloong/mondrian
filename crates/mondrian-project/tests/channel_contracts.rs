@@ -156,3 +156,99 @@ fn precise_compound_types_defaults_and_keys_survive_durable_archive_reopen() {
     );
     std::fs::remove_dir_all(&root).expect("remove owned fixture");
 }
+
+#[test]
+fn invalid_visual_handle_document_cannot_replace_a_durable_archive() {
+    use mondrian_core::automation::{BezierHandle, KeyframeInterpolation};
+    let parameter_id = ParameterId::new_static("test.archive.visual.handle");
+    let mut document: ProjectDocument =
+        serde_json::from_str(include_str!("fixtures/current/project.json"))
+            .expect("current canonical fixture");
+    let mut effect = EffectNode::new(EffectType::Plugin("test.archive.visual.handle".to_owned()));
+    effect.define_property(
+        PropertyDescriptor::new("amount", "Amount", PropertyValue::Double(0.0))
+            .with_parameter_id(parameter_id.clone())
+            .with_numeric_contract(
+                ParameterUnit::Unitless,
+                ParameterNumericContract::closed(
+                    0.0,
+                    1.0,
+                    None,
+                    ParameterInvalidValuePolicy::Reject,
+                )
+                .expect("bounded value contract"),
+            ),
+    );
+    for (time, value) in [(TimelineTime::ZERO, 0.0), (TimelineTime::ONE, 1.0)] {
+        effect
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: "amount".to_owned(),
+                keyframe: Keyframe::linear(time, PropertyValue::Double(value)),
+            })
+            .expect("legal author keys");
+    }
+    let mut clip = Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("clip");
+    clip.add_effect_node(effect);
+    let expected = clip.effects[0].clone();
+    let authored_path = expected
+        .properties
+        .iter()
+        .find(|(_, property)| property.descriptor.parameter_id() == &parameter_id)
+        .expect("stable parameter address")
+        .0
+        .to_owned();
+    document.sequences.active_mut().expect("sequence").video_tracks[0]
+        .add_clip(clip)
+        .expect("clip admission");
+    let root = std::env::temp_dir().join(format!("mondrian-visual-handle-{}", AssetId::new()));
+    std::fs::create_dir_all(&root).expect("owned directory");
+    let database = root.join("index.db");
+    std::fs::write(&database, b"sqlite placeholder").expect("library fixture");
+    let archive = root.join("曲线验收.mdp");
+    save_project_archive(&document, &database, &archive).expect("durable baseline");
+    let bytes = std::fs::read(&archive).expect("baseline bytes");
+    for time_offset in [
+        TimelineTime::NEGATIVE_ONE_THIRD,
+        TimelineTime::new(2, 1).expect("two"),
+    ] {
+        let mut effect_json = serde_json::to_value(&expected).expect("serialize effect");
+        let control = &mut effect_json["properties"]["properties"][&authored_path]["channels"][0]
+            ["keyframes"][0]["interp_out"];
+        assert_eq!(
+            *control,
+            serde_json::to_value(KeyframeInterpolation::Linear).expect("linear shape")
+        );
+        *control = serde_json::to_value(KeyframeInterpolation::Bezier(BezierHandle {
+            time_offset,
+            value_offset: 0.25,
+        }))
+        .expect("finite but invalid temporal control");
+        let mut invalid = document.clone();
+        invalid.sequences.active_mut().expect("sequence").video_tracks[0].clips[0].effects[0] =
+            serde_json::from_value(effect_json).expect("raw document decode");
+        assert!(
+            invalid.validate().is_err(),
+            "invalid persisted handle must reject"
+        );
+        assert!(
+            save_project_archive(&invalid, &database, &archive).is_err(),
+            "invalid snapshot cannot publish"
+        );
+        assert_eq!(std::fs::read(&archive).expect("retained archive"), bytes);
+        let reopened =
+            read_project_document_from_archive(&archive).expect("valid archive still reopens");
+        let restored =
+            &reopened.sequences.active().expect("sequence").video_tracks[0].clips[0].effects[0];
+        assert_eq!(restored, &expected);
+        assert_eq!(
+            restored.evaluate_parameter(&parameter_id, TimelineTime::new(1, 2).expect("half")),
+            Some(PropertyValue::Double(0.5))
+        );
+        assert_eq!(
+            std::fs::read_dir(&root).expect("owned directory").count(),
+            2,
+            "failed save leaves no temporary archive"
+        );
+    }
+    std::fs::remove_dir_all(root).expect("remove owned fixture");
+}

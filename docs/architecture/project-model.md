@@ -799,3 +799,12 @@ same `test`/`validation` compilation boundary. Ordinary project lifecycle and
 the default `mondrian` product entrypoint do not depend on the optional
 qualification modules. The CI platform matrix builds that default entrypoint
 explicitly, independently of the validation binaries and test configuration.
+
+Visual property validation rejects nonfinite controls and normalized time controls
+on the wrong side or outside their segment before a document can execute or
+publish. The channel-contract integration test injects finite invalid serialized
+controls into an otherwise valid canonical document, then calls the real archive
+writer against an existing Unicode `.mdp`. Rejection preserves the original
+bytes, leaves no sibling temporary archive, and the original file still reopens
+with unchanged typed effect state and midpoint evaluation. This qualifies
+canonical document admission/publication, not plugin or LUT rendering.

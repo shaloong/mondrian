@@ -3245,3 +3245,8 @@ external desktop language tag and selects a supported product language.
 Current-schema tests use nondefault theme/language fixtures, verify exact file
 preservation on rejection, and round-trip every supported locale with no
 custom layout. This is alpha schema admission, with no field migrations.
+
+Visual value adapters call the Core value-write seam without a Vec2 handle
+argument. Handles remain typed author geometry, edited through the separate
+Core mutation; value input retains stored control precision. The Inspector test
+caller follows this same API, without an unused optional override.

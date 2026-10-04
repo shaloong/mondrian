@@ -596,3 +596,20 @@ must decode as exact time or finite numeric values; explicit null is invalid.
 Core shares the finite coordinate decoder with visual curve action payloads, so
 JSON conversion of a nonfinite value cannot turn an invalid request into a
 partially accepted edit of its other coordinate.
+
+### Visual author handle admission
+
+Typed visual controls have one admission rule at insertion, handle mutation,
+and persisted property validation: value offsets are finite; incoming normalized
+time is in [-1,0], outgoing time in [0,1], including vertical and boundary
+controls. Coordinate rejection occurs before any author state changes. Complete
+key and handle edits normalize and validate a cloned candidate, then publish it;
+a failure also preserves enabled state, sibling channels, and original identities.
+Real tests retain the original NaN admission failures and cover both sides,
+infinities, wrong temporal sides, out-of-segment time, raw persisted validation,
+finite serialized reopen, legal edge controls, and duplicate-identity rejection.
+Value writes no longer accept unused lossy Vec2 handle overrides; the explicit
+typed geometry mutation owns handle editing and existing exact handles remain
+untouched during a value write. No clamping or field migration accepts bad input.
+This admission repair does not yet converge normalized visual controls with
+absolute numeric audio controls or implement temporal handle UI/live preview.

@@ -2098,6 +2098,11 @@ impl AnimatedProperty {
                         "enum keyframe does not address a declared option",
                     ));
                 }
+                validate_visual_handle_coordinates(
+                    &self.descriptor.path,
+                    keyframe.interp_in,
+                    keyframe.interp_out,
+                )?;
                 self.ensure_interpolation_allowed(channel_keyframe_interpolation_type(keyframe))?;
             }
         }
@@ -2341,7 +2346,6 @@ impl AnimatedProperty {
                 time,
                 self.static_value.clone(),
                 self.default_interpolation()?,
-                None,
             )?;
         }
         Ok(())
@@ -2367,12 +2371,12 @@ impl AnimatedProperty {
         Ok(())
     }
 
+    /// Write a property value without replacing authored temporal geometry.
     pub fn write_value(
         &mut self,
         time: TimelineTime,
         value: PropertyValue,
         interpolation: InterpolationType,
-        handles: Option<(Option<Vec2>, Option<Vec2>)>,
     ) -> Result<()> {
         let value = self.normalize_value(value)?;
         let channel_values = self.value_to_channel_values(&value)?;
@@ -2381,34 +2385,45 @@ impl AnimatedProperty {
             && self.descriptor.schema.is_animatable
             && !self.channels.is_empty()
         {
-            self.write_channels(time, &updates, interpolation, handles)
+            self.write_channels(time, &updates, interpolation)
         } else {
             self.static_value = value;
             Ok(())
         }
     }
 
+    /// Insert or replace a complete typed key only after validating its candidate.
+    ///
+    /// Invalid handle coordinates and normalization failures leave every channel
+    /// and the animation-enabled state unchanged.
     pub fn set_exact_keyframe(&mut self, mut keyframe: Keyframe<PropertyValue>) -> Result<()> {
-        keyframe.value = self.normalize_value(keyframe.value)?;
-        self.ensure_interpolation_allowed(keyframe_interpolation_type(&keyframe))?;
-        let channel_values = self.value_to_channel_values(&keyframe.value)?;
+        validate_visual_handle_coordinates(
+            &self.descriptor.path,
+            keyframe.interp_in,
+            keyframe.interp_out,
+        )?;
+        let mut candidate = self.clone();
+        keyframe.value = candidate.normalize_value(keyframe.value)?;
+        candidate.ensure_interpolation_allowed(keyframe_interpolation_type(&keyframe))?;
+        let channel_values = candidate.value_to_channel_values(&keyframe.value)?;
         validate_channel_updates(
-            self.channel_count(),
+            candidate.channel_count(),
             &channel_values
                 .iter()
                 .enumerate()
                 .map(|(index, value)| (index, *value))
                 .collect::<Vec<_>>(),
-            &self.descriptor.path,
+            &candidate.descriptor.path,
         )?;
 
-        self.animation_enabled = true;
+        candidate.animation_enabled = true;
         for (index, value) in channel_values.into_iter().enumerate() {
-            let channel =
-                self.channels.get_mut(index).ok_or_else(|| MondrianError::WorkflowStepFailed {
+            let channel = candidate.channels.get_mut(index).ok_or_else(|| {
+                MondrianError::WorkflowStepFailed {
                     step_id: "property_set_exact_keyframe".to_string(),
-                    reason: format!("属性通道不存在: {}[{index}]", self.descriptor.path),
-                })?;
+                    reason: format!("属性通道不存在: {}[{index}]", candidate.descriptor.path),
+                }
+            })?;
             channel.set_keyframe(Keyframe {
                 id: keyframe.id,
                 time: keyframe.time,
@@ -2418,7 +2433,9 @@ impl AnimatedProperty {
                 temporal_flags: keyframe.temporal_flags,
             });
         }
-        self.normalize_channels();
+        candidate.normalize_channels();
+        candidate.validate()?;
+        *self = candidate;
         Ok(())
     }
 
@@ -2491,12 +2508,12 @@ impl AnimatedProperty {
         Ok(())
     }
 
+    /// Write selected numeric channels, retaining existing exact handles and identities.
     pub fn write_channels(
         &mut self,
         time: TimelineTime,
         channel_values: &[(usize, f64)],
         interpolation: InterpolationType,
-        handles: Option<(Option<Vec2>, Option<Vec2>)>,
     ) -> Result<()> {
         validate_channel_updates(
             self.value_type().channel_count(),
@@ -2522,29 +2539,7 @@ impl AnimatedProperty {
                     }
                 })?;
                 let existing = channel.keyframes.iter().find(|keyframe| keyframe.time == time);
-                let (control_in, control_out) = handles.unwrap_or_else(|| {
-                    (
-                        existing.and_then(|keyframe| extract_handle(keyframe.interp_in)),
-                        existing.and_then(|keyframe| extract_handle(keyframe.interp_out)),
-                    )
-                });
-                let (default_in, default_out, default_flags) = interpolation_defaults(normalized);
-                let interp_in = if let Some(handle) = control_in {
-                    KeyframeInterpolation::Bezier(BezierHandle {
-                        time_offset: quantize_handle_time(handle.x.clamp(-1.0, 0.0))?,
-                        value_offset: handle.y as f64,
-                    })
-                } else {
-                    default_in
-                };
-                let interp_out = if let Some(handle) = control_out {
-                    KeyframeInterpolation::Bezier(BezierHandle {
-                        time_offset: quantize_handle_time(handle.x.clamp(0.0, 1.0))?,
-                        value_offset: handle.y as f64,
-                    })
-                } else {
-                    default_out
-                };
+                let (interp_in, interp_out, default_flags) = interpolation_defaults(normalized);
                 channel.set_keyframe(Keyframe {
                     id: existing.map(|keyframe| keyframe.id).unwrap_or_else(KeyframeId::new),
                     time,
@@ -2699,6 +2694,7 @@ impl AnimatedProperty {
         Ok(())
     }
 
+    /// Atomically replace one channel's typed handles and admit the resulting constraints.
     pub fn update_channel_keyframe_handles(
         &mut self,
         time: TimelineTime,
@@ -2707,10 +2703,15 @@ impl AnimatedProperty {
         interp_out: KeyframeInterpolation,
     ) -> Result<()> {
         self.ensure_interpolation_allowed(ParameterInterpolation::Bezier)?;
-        let channel = self.channels.get_mut(channel_index).ok_or_else(|| {
+        validate_visual_handle_coordinates(&self.descriptor.path, interp_in, interp_out)?;
+        let mut candidate = self.clone();
+        let channel = candidate.channels.get_mut(channel_index).ok_or_else(|| {
             MondrianError::WorkflowStepFailed {
                 step_id: "property_update_channel_keyframe_handles".to_string(),
-                reason: format!("属性通道不存在: {}[{channel_index}]", self.descriptor.path),
+                reason: format!(
+                    "属性通道不存在: {}[{channel_index}]",
+                    candidate.descriptor.path
+                ),
             }
         })?;
 
@@ -2720,7 +2721,7 @@ impl AnimatedProperty {
                     step_id: "property_update_channel_keyframe_handles".to_string(),
                     reason: format!(
                         "关键帧不存在: {}[{channel_index}] @ {}",
-                        self.descriptor.path, time
+                        candidate.descriptor.path, time
                     ),
                 },
             )?;
@@ -2762,7 +2763,7 @@ impl AnimatedProperty {
             }
         }
         if cleared_auto {
-            for channel in &mut self.channels {
+            for channel in &mut candidate.channels {
                 if let Some(other) =
                     channel.keyframes.iter_mut().find(|candidate| candidate.time == time)
                 {
@@ -2770,7 +2771,9 @@ impl AnimatedProperty {
                 }
             }
         }
-        self.normalize_channels();
+        candidate.normalize_channels();
+        candidate.validate()?;
+        *self = candidate;
         Ok(())
     }
 
@@ -3119,11 +3122,11 @@ impl AnimatedProperty {
             PropertyMutation::WriteValue { path, time, value, interpolation } => {
                 self.ensure_path(&path)?;
                 ensure_value_compatible(&path, &self.descriptor.schema.default_value, &value)?;
-                self.write_value(time, value, interpolation, None)
+                self.write_value(time, value, interpolation)
             }
             PropertyMutation::WriteChannels { path, time, channel_values, interpolation } => {
                 self.ensure_path(&path)?;
-                self.write_channels(time, &channel_values, interpolation, None)
+                self.write_channels(time, &channel_values, interpolation)
             }
             PropertyMutation::RemoveProperty { path } => {
                 self.ensure_path(&path)?;
@@ -3516,7 +3519,7 @@ impl PropertyBag {
     ) -> Result<()> {
         let property = self.require_property_mut(path)?;
         ensure_value_compatible(path, &property.descriptor.schema.default_value, &value)?;
-        property.write_value(time, value, interpolation, None)
+        property.write_value(time, value, interpolation)
     }
 
     pub fn write_channels(
@@ -3527,7 +3530,7 @@ impl PropertyBag {
         interpolation: InterpolationType,
     ) -> Result<()> {
         let property = self.require_property_mut(path)?;
-        property.write_channels(time, channel_values, interpolation, None)
+        property.write_channels(time, channel_values, interpolation)
     }
 
     pub fn remove_keyframe(&mut self, path: &str, time: TimelineTime) -> Result<()> {
@@ -3860,6 +3863,34 @@ fn parameter_value_error(path: &str, reason: &str) -> MondrianError {
     }
 }
 
+fn validate_visual_handle_coordinates(
+    path: &str,
+    interp_in: KeyframeInterpolation,
+    interp_out: KeyframeInterpolation,
+) -> Result<()> {
+    for (interpolation, min, max) in [
+        (interp_in, TimelineTime::NEGATIVE_ONE, TimelineTime::ZERO),
+        (interp_out, TimelineTime::ZERO, TimelineTime::ONE),
+    ] {
+        let KeyframeInterpolation::Bezier(handle) = interpolation else {
+            continue;
+        };
+        if !handle.value_offset.is_finite() {
+            return Err(parameter_value_error(
+                path,
+                "Bezier value coordinates must be finite",
+            ));
+        }
+        if handle.time_offset < min || handle.time_offset > max {
+            return Err(parameter_value_error(
+                path,
+                "Bezier time coordinates must remain on their temporal side within the segment",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn keyframe_interpolation_type(keyframe: &Keyframe<PropertyValue>) -> ParameterInterpolation {
     interpolation_type_from_parts(
         keyframe.interp_in,
@@ -3961,15 +3992,6 @@ fn normalize_time(t: TimelineTime, start: TimelineTime, end: TimelineTime) -> f6
         return 0.0;
     }
     t.distance_from_f64(start) / total
-}
-
-fn quantize_handle_time(value: f32) -> Result<TimelineTime> {
-    TimelineTime::from_f64_quantized(f64::from(value), 1_000_000).map_err(|error| {
-        MondrianError::WorkflowStepFailed {
-            step_id: "automation_handle_time".to_string(),
-            reason: error.to_string(),
-        }
-    })
 }
 
 enum SegmentProgress {
@@ -4408,6 +4430,179 @@ mod tests {
                 ),
         );
         bag
+    }
+
+    fn visual_handle_admission_fixture(path: &str) -> PropertyBag {
+        let mut bag = overshoot_property_bag(path, 4.0);
+        for (time, value) in [(TimelineTime::ZERO, 0.0), (TimelineTime::ONE, 1.0)] {
+            bag.set_keyframe(path, Keyframe::linear(time, PropertyValue::Double(value)))
+                .expect("valid author keys");
+        }
+        bag
+    }
+
+    fn invalid_visual_handles() -> Vec<(bool, BezierHandle)> {
+        let mut cases = Vec::new();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for incoming in [false, true] {
+                cases.push((
+                    incoming,
+                    BezierHandle {
+                        time_offset: if incoming {
+                            TimelineTime::NEGATIVE_ONE_THIRD
+                        } else {
+                            TimelineTime::ONE_THIRD
+                        },
+                        value_offset: value,
+                    },
+                ));
+            }
+        }
+        for (incoming, time_offset) in [
+            (false, TimelineTime::NEGATIVE_ONE_THIRD),
+            (false, TimelineTime::new(2, 1).expect("two")),
+            (true, TimelineTime::ONE_THIRD),
+            (true, TimelineTime::new(-2, 1).expect("negative two")),
+        ] {
+            cases.push((incoming, BezierHandle { time_offset, value_offset: 0.25 }));
+        }
+        cases
+    }
+
+    #[test]
+    fn visual_handle_admission_rejects_invalid_keyframe_insert_atomically() {
+        let path = "test.visual.handle.admission";
+        for (incoming, handle) in invalid_visual_handles() {
+            let mut bag = visual_handle_admission_fixture(path);
+            let before = bag.clone();
+            let mut key = Keyframe::linear(
+                TimelineTime::new(1, 2).expect("half"),
+                PropertyValue::Double(0.5),
+            );
+            if incoming {
+                key.interp_in = KeyframeInterpolation::Bezier(handle);
+            } else {
+                key.interp_out = KeyframeInterpolation::Bezier(handle);
+            }
+            assert!(
+                bag.apply_mutation(PropertyMutation::SetKeyframe {
+                    path: path.into(),
+                    keyframe: key
+                })
+                .is_err(),
+                "invalid handle must reject before insertion: {handle:?}"
+            );
+            assert_eq!(bag, before);
+        }
+    }
+
+    #[test]
+    fn visual_handle_admission_rejects_invalid_pair_edit_atomically() {
+        let path = "test.visual.handle.admission";
+        for (incoming, handle) in invalid_visual_handles() {
+            let mut bag = visual_handle_admission_fixture(path);
+            let before = bag.clone();
+            let invalid = KeyframeInterpolation::Bezier(handle);
+            let (interp_in, interp_out) = if incoming {
+                (invalid, KeyframeInterpolation::Linear)
+            } else {
+                (KeyframeInterpolation::Linear, invalid)
+            };
+            assert!(
+                bag.update_channel_keyframe_handles(
+                    path,
+                    TimelineTime::ZERO,
+                    0,
+                    interp_in,
+                    interp_out
+                )
+                .is_err(),
+                "invalid edit must reject atomically: {handle:?}"
+            );
+            assert_eq!(bag, before);
+        }
+    }
+
+    #[test]
+    fn visual_handle_admission_retains_legal_vertical_and_segment_edge_controls() {
+        let path = "test.visual.handle.admission";
+        for (time_in, time_out) in [
+            (TimelineTime::ZERO, TimelineTime::ZERO),
+            (TimelineTime::NEGATIVE_ONE, TimelineTime::ONE),
+            (TimelineTime::NEGATIVE_ONE_THIRD, TimelineTime::ONE_THIRD),
+        ] {
+            let mut bag = visual_handle_admission_fixture(path);
+            let interp_in = KeyframeInterpolation::Bezier(BezierHandle {
+                time_offset: time_in,
+                value_offset: -0.25,
+            });
+            let interp_out = KeyframeInterpolation::Bezier(BezierHandle {
+                time_offset: time_out,
+                value_offset: 0.25,
+            });
+            bag.update_channel_keyframe_handles(path, TimelineTime::ZERO, 0, interp_in, interp_out)
+                .expect("legal boundary controls");
+            let key = bag
+                .property(path)
+                .expect("property")
+                .keyframe_at(TimelineTime::ZERO)
+                .expect("key");
+            assert_eq!((key.interp_in, key.interp_out), (interp_in, interp_out));
+            let restored: PropertyBag =
+                serde_json::from_slice(&serde_json::to_vec(&bag).expect("serialize"))
+                    .expect("decode");
+            restored.validate().expect("legal persisted controls");
+            assert_eq!(restored, bag);
+            assert_eq!(
+                restored.evaluate(path, TimelineTime::new(1, 2).expect("half")),
+                bag.evaluate(path, TimelineTime::new(1, 2).expect("half"))
+            );
+        }
+    }
+
+    #[test]
+    fn visual_handle_admission_candidate_failure_keeps_original_property() {
+        let path = "test.visual.handle.admission";
+        let mut bag = visual_handle_admission_fixture(path);
+        let before = bag.clone();
+        let mut key = bag
+            .property(path)
+            .expect("property")
+            .keyframe_at(TimelineTime::ZERO)
+            .expect("key");
+        key.time = TimelineTime::new(1, 2).expect("half");
+        key.value = PropertyValue::Double(0.5);
+        assert!(
+            bag.set_keyframe(path, key).is_err(),
+            "a new time cannot reuse an existing identity"
+        );
+        assert_eq!(bag, before);
+        bag.validate().expect("original state stays executable");
+    }
+
+    #[test]
+    fn visual_handle_admission_rejects_invalid_persisted_coordinates() {
+        let path = "test.visual.handle.admission";
+        for (incoming, handle) in invalid_visual_handles() {
+            let mut bag = visual_handle_admission_fixture(path);
+            let key = &mut bag.properties.get_mut(path).expect("property").channels[0].keyframes[0];
+            if incoming {
+                key.interp_in = KeyframeInterpolation::Bezier(handle);
+            } else {
+                key.interp_out = KeyframeInterpolation::Bezier(handle);
+            }
+            assert!(
+                bag.validate().is_err(),
+                "invalid persisted control cannot become executable: {handle:?}"
+            );
+            if handle.value_offset.is_finite() {
+                let restored: PropertyBag = serde_json::from_slice(
+                    &serde_json::to_vec(&bag).expect("finite serialized handle"),
+                )
+                .expect("raw document decode");
+                assert!(restored.validate().is_err());
+            }
+        }
     }
 
     #[test]
@@ -5559,7 +5754,7 @@ mod tests {
                 assert_eq!(reopened, property);
                 property.enable_animation(tt(0)).expect("enable");
                 property
-                    .write_channels(tt(1), &[(0, sign * 0.2)], InterpolationType::Linear, None)
+                    .write_channels(tt(1), &[(0, sign * 0.2)], InterpolationType::Linear)
                     .expect("exact channel endpoint");
                 assert_eq!(
                     property.channel(0).expect("channel").keyframes[1].value,
@@ -5590,7 +5785,7 @@ mod tests {
         let before = unbounded.clone();
         assert!(
             unbounded
-                .write_channels(tt(0), &[(0, f64::MAX)], InterpolationType::Linear, None)
+                .write_channels(tt(0), &[(0, f64::MAX)], InterpolationType::Linear)
                 .is_err(),
             "finite channels must not publish infinite Float values"
         );
@@ -5672,24 +5867,14 @@ mod tests {
         );
         let before_rejection = property.clone();
         assert!(property
-            .write_channels(
-                tt(5),
-                &[(0, -1.0), (1, 31.0)],
-                InterpolationType::Linear,
-                None
-            )
+            .write_channels(tt(5), &[(0, -1.0), (1, 31.0)], InterpolationType::Linear)
             .is_err());
         assert_eq!(
             property, before_rejection,
             "all channel bounds validate before any key mutation"
         );
         property
-            .write_channels(
-                tt(5),
-                &[(0, -1.0), (1, 25.0)],
-                InterpolationType::Linear,
-                None,
-            )
+            .write_channels(tt(5), &[(0, -1.0), (1, 25.0)], InterpolationType::Linear)
             .expect("X clamps independently, Y remains valid");
         assert_eq!(
             property.evaluate(tt(5)),
@@ -5713,7 +5898,7 @@ mod tests {
         let before = malformed.clone();
         assert!(
             malformed
-                .write_channels(tt(5), &[(0, 0.75)], InterpolationType::Linear, None)
+                .write_channels(tt(5), &[(0, 0.75)], InterpolationType::Linear)
                 .is_err(),
             "a sparse write must reject an incomplete contract"
         );
@@ -5740,14 +5925,11 @@ mod tests {
                 tt(0),
                 PropertyValue::Float(f32::NAN),
                 InterpolationType::Linear,
-                None,
             )
             .is_err());
 
         property.enable_animation(tt(0)).expect("enable animation");
-        assert!(property
-            .write_channels(tt(5), &[(0, -0.1)], InterpolationType::Linear, None)
-            .is_err());
+        assert!(property.write_channels(tt(5), &[(0, -0.1)], InterpolationType::Linear).is_err());
         assert_eq!(property.evaluate(tt(5)), PropertyValue::Float(1.0));
     }
 
@@ -5812,7 +5994,6 @@ mod tests {
                     tt(2),
                     PropertyValue::Int(5),
                     property.default_interpolation().expect("default"),
-                    None,
                 )
                 .expect("write integer");
             assert_eq!(
@@ -5914,12 +6095,7 @@ mod tests {
         property.set_animation_enabled(true);
 
         let error = property
-            .write_value(
-                tt(0),
-                PropertyValue::Float(1.0),
-                InterpolationType::Linear,
-                None,
-            )
+            .write_value(tt(0), PropertyValue::Float(1.0), InterpolationType::Linear)
             .expect_err("unlisted interpolation must be rejected");
         assert!(error.to_string().contains("does not admit Linear"));
     }
@@ -5972,7 +6148,6 @@ mod tests {
                 tt(0),
                 PropertyValue::Enum("vendor:43".to_owned()),
                 InterpolationType::Hold,
-                None,
             )
             .expect("canonical choice write");
         assert_eq!(
@@ -5983,8 +6158,7 @@ mod tests {
             .write_value(
                 tt(0),
                 PropertyValue::Enum("Écho / 回声".to_owned()),
-                InterpolationType::Hold,
-                None
+                InterpolationType::Hold
             )
             .is_err());
     }
@@ -6012,7 +6186,6 @@ mod tests {
                 tt(10),
                 PropertyValue::Enum("second".to_owned()),
                 InterpolationType::Hold,
-                None,
             )
             .expect("hold write");
         assert_eq!(
@@ -6057,7 +6230,6 @@ mod tests {
                 tt(10),
                 PropertyValue::Enum("Subtract".to_string()),
                 InterpolationType::Hold,
-                None,
             )
             .expect("write discrete keyframe");
 
@@ -6074,7 +6246,6 @@ mod tests {
                 tt(20),
                 PropertyValue::Enum("Unknown".to_string()),
                 InterpolationType::Hold,
-                None,
             )
             .is_err());
     }
