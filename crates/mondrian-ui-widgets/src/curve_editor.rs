@@ -9,7 +9,10 @@ mod model;
 use model::{constrained_point, normalize_points, CurveGeometry};
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{EventContext, PaintContext};
+use mondrian_ui_core::widget::{
+    AccessibilityNode, AccessibilityRole, AccessibilityState, AccessibilityValue, EventContext,
+    PaintContext,
+};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_theme::Theme;
 
@@ -246,6 +249,8 @@ impl CurveEditorViewState {
 pub struct CurveEditor {
     id: WidgetId,
     view_key: Option<String>,
+    accessible_name: Option<String>,
+    keyboard_help: Option<String>,
     bounds: Rect,
     points: Vec<CurvePoint>,
     fixed_value: Option<f32>,
@@ -292,6 +297,8 @@ impl CurveEditor {
         let mut editor = Self {
             id: WidgetId::new(),
             view_key: None,
+            accessible_name: None,
+            keyboard_help: None,
             bounds: Rect::ZERO,
             points: Vec::new(),
             fixed_value: None,
@@ -597,6 +604,13 @@ impl CurveEditor {
     /// The shell must also scope restoration to the current author session.
     pub fn with_view_key(mut self, key: Option<String>) -> Self {
         self.view_key = key;
+        self
+    }
+
+    /// Attach localized accessible naming and keyboard instructions.
+    pub fn with_keyboard_help(mut self, name: impl Into<String>, help: impl Into<String>) -> Self {
+        self.accessible_name = Some(name.into());
+        self.keyboard_help = Some(help.into());
         self
     }
 
@@ -1070,6 +1084,85 @@ impl CurveEditor {
         }
     }
 
+    fn navigate_keyboard(
+        &mut self,
+        key: KeyCode,
+        modifiers: Modifiers,
+        ctx: &mut EventContext,
+    ) -> bool {
+        if ctx.focus.focused_widget() != Some(self.id) || !self.focused {
+            return false;
+        }
+        let primary = (modifiers.ctrl ^ modifiers.meta) && !modifiers.alt && !modifiers.shift;
+        let alt = modifiers.alt && !modifiers.ctrl && !modifiers.meta && !modifiers.shift;
+        let plain = modifiers == Modifiers::none();
+        let menu = key == KeyCode::F10 && modifiers == Modifiers::shift();
+        let navigation = (plain && matches!(key, KeyCode::Home | KeyCode::End))
+            || (primary && matches!(key, KeyCode::Left | KeyCode::Right))
+            || (alt && matches!(key, KeyCode::Left | KeyCode::Right | KeyCode::Up));
+        if !navigation && !menu {
+            return false;
+        }
+        // Selection cannot change the owner of an outstanding pointer draft.
+        if self.has_active_pointer_interaction() || self.gesture.is_some() {
+            return true;
+        }
+        if menu {
+            if let Some(index) = self.selected
+                && let Some(items) = self.point_metadata[index].context_menu.as_ref()
+                && items.iter().any(MenuItem::is_activatable)
+            {
+                let mut menu = ContextMenu::new(self.to_screen(self.points[index]), items.clone());
+                menu.layout(self.bounds);
+                menu.event(
+                    &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                    ctx,
+                );
+                self.context_menu = Some(menu);
+                ctx.tooltip.hide();
+                ctx.request_repaint();
+            }
+            return true;
+        }
+        if self.points.is_empty() {
+            return true;
+        }
+        let before = (self.selected, self.selected_tangent, self.focus_visible);
+        self.focus_visible = true;
+        if alt {
+            if key == KeyCode::Up {
+                self.selected_tangent = None;
+            } else if let Some(id) = self.selected_keyframe() {
+                let side = if key == KeyCode::Left {
+                    mondrian_core::BezierHandleSide::Incoming
+                } else {
+                    mondrian_core::BezierHandleSide::Outgoing
+                };
+                if self
+                    .tangents
+                    .iter()
+                    .any(|tangent| tangent.keyframe_id == id && tangent.side == side)
+                {
+                    self.selected_tangent = Some((id, side));
+                }
+            }
+        } else {
+            self.selected = Some(match key {
+                KeyCode::Home => 0,
+                KeyCode::End => self.points.len() - 1,
+                KeyCode::Left => {
+                    self.selected.map_or(self.points.len() - 1, |index| index.saturating_sub(1))
+                }
+                _ => self.selected.map_or(0, |index| (index + 1).min(self.points.len() - 1)),
+            });
+            self.selected_tangent = None;
+        }
+        if before != (self.selected, self.selected_tangent, self.focus_visible) {
+            ctx.request_repaint();
+        }
+        true
+    }
+
     fn nudge_selected(
         &mut self,
         key: KeyCode,
@@ -1266,6 +1359,9 @@ impl Widget for CurveEditor {
             return EventResult::Ignored;
         }
 
+        if matches!(event, UiEvent::KeyDown { .. }) {
+            ctx.tooltip.hide();
+        }
         match event {
             UiEvent::MouseDown { position, button: MouseButton::Right, .. }
                 if self.bounds.contains(*position) =>
@@ -1291,6 +1387,7 @@ impl Widget for CurveEditor {
                 if self.bounds.contains(*position) =>
             {
                 self.focus_visible = false;
+                ctx.tooltip.hide();
                 if let Some(tangent) = self.hit_tangent(*position) {
                     let index = self.keyframe_indices[&tangent.keyframe_id];
                     self.begin_drag(index, false, *position, ctx);
@@ -1356,6 +1453,14 @@ impl Widget for CurveEditor {
                     self.move_point_from_input(drag.index, point, ctx);
                     return EventResult::Handled;
                 }
+                if let Some(help) = &self.keyboard_help {
+                    if self.bounds.contains(*position) {
+                        ctx.tooltip
+                            .show(help.clone(), Point::new(position.x, position.y + PADDING));
+                    } else {
+                        ctx.tooltip.hide();
+                    }
+                }
                 EventResult::Ignored
             }
             UiEvent::MouseUp { button: MouseButton::Left, .. }
@@ -1368,6 +1473,14 @@ impl Widget for CurveEditor {
             UiEvent::FocusGained { source } => {
                 self.focused = true;
                 self.focus_visible = source.is_focus_visible();
+                if self.focus_visible
+                    && let Some(help) = &self.keyboard_help
+                {
+                    ctx.tooltip.show(
+                        help.clone(),
+                        Point::new(self.bounds.x, self.bounds.y + self.bounds.height),
+                    );
+                }
                 EventResult::Handled
             }
             UiEvent::FocusLost => {
@@ -1375,11 +1488,17 @@ impl Widget for CurveEditor {
                 self.commit_drag_edit(ctx);
                 self.focused = false;
                 self.focus_visible = false;
+                ctx.tooltip.hide();
                 self.selected = None;
                 self.selected_tangent = None;
                 if was_dragging {
                     ctx.release_pointer_capture(self.id);
                 }
+                EventResult::Handled
+            }
+            UiEvent::KeyDown { key, modifiers }
+                if self.navigate_keyboard(*key, *modifiers, ctx) =>
+            {
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::Escape, .. } if self.selected.is_some() => {
@@ -1551,6 +1670,25 @@ impl Widget for CurveEditor {
     fn can_focus(&self) -> bool {
         self.enabled
     }
+
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        let mut node = AccessibilityNode::new(self.id, AccessibilityRole::Canvas)
+            .with_state(AccessibilityState {
+                focusable: self.enabled,
+                focused: self.focused,
+                disabled: !self.enabled,
+                selected: Some(self.selected.is_some()),
+                expanded: Some(self.context_menu.is_some()),
+                ..AccessibilityState::default()
+            })
+            .with_value(AccessibilityValue::Collection {
+                total_count: self.points.len(),
+                visible_count: self.points.len(),
+                selected_count: usize::from(self.selected.is_some()),
+            });
+        node.name = self.accessible_name.clone();
+        Some(node)
+    }
 }
 
 #[cfg(test)]
@@ -1683,6 +1821,195 @@ mod tests {
         .with_view_key(Some("transfer".into()));
         assert!(changed.restore_view_state(&state));
         assert!(changed.selected_index().is_none());
+    }
+
+    struct CurveFocus(Option<WidgetId>);
+    impl mondrian_ui_core::focus::FocusManager for CurveFocus {
+        fn focused_widget(&self) -> Option<WidgetId> {
+            self.0
+        }
+        fn focused_panel(&self) -> Option<mondrian_editor_state::state::PanelKind> {
+            None
+        }
+        fn request_focus(&mut self, id: WidgetId) {
+            self.0 = Some(id);
+        }
+        fn release_focus(&mut self, id: WidgetId) {
+            if self.0 == Some(id) {
+                self.0 = None;
+            }
+        }
+        fn clear_focus(&mut self) {
+            self.0 = None;
+        }
+    }
+
+    #[test]
+    fn keyboard_selection_requires_focus_and_never_authors_points() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut editor = CurveEditor::new().on_change(curve_action);
+        let original = editor.points().to_vec();
+        let mut focus = CurveFocus(Some(editor.id()));
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        assert_eq!(
+            editor.event(
+                &UiEvent::KeyDown { key: KeyCode::Home, modifiers: Modifiers::none() },
+                &mut ctx
+            ),
+            EventResult::Ignored
+        );
+        editor.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        for (key, modifiers, index) in [
+            (KeyCode::Home, Modifiers::none(), 0),
+            (KeyCode::Right, Modifiers::ctrl(), 1),
+            (
+                KeyCode::Right,
+                Modifiers { meta: true, ..Modifiers::none() },
+                2,
+            ),
+            (KeyCode::End, Modifiers::none(), 3),
+            (KeyCode::Right, Modifiers::ctrl(), 3),
+            (KeyCode::Left, Modifiers::ctrl(), 2),
+        ] {
+            assert_eq!(
+                editor.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Handled
+            );
+            assert_eq!(editor.selected_index(), Some(index));
+        }
+        assert_eq!(
+            editor.event(
+                &UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+                &mut ctx
+            ),
+            EventResult::Ignored
+        );
+        assert_eq!(editor.points(), original);
+        assert!(actions.borrow().is_empty());
+        assert!(editor.focus_visible);
+    }
+
+    #[test]
+    fn keyboard_selects_both_handles_and_returns_to_owner_without_authoring() {
+        let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut editor = tangent_editor(events.clone());
+        let id = editor.tangents[0].keyframe_id;
+        let mut tangents = editor.tangents.clone();
+        tangents.push(CurveTangent {
+            keyframe_id: id,
+            side: mondrian_core::BezierHandleSide::Incoming,
+            point: CurvePoint::new(0.25, 0.5),
+            time_limits: [0.0, 0.5],
+        });
+        editor.set_tangents(tangents);
+        let mut focus = CurveFocus(Some(editor.id()));
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &|_| {});
+        editor.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        let alt = Modifiers { alt: true, ..Modifiers::none() };
+        for (key, side) in [
+            (KeyCode::Right, mondrian_core::BezierHandleSide::Outgoing),
+            (KeyCode::Left, mondrian_core::BezierHandleSide::Incoming),
+        ] {
+            assert_eq!(
+                editor.event(&UiEvent::KeyDown { key, modifiers: alt }, &mut ctx),
+                EventResult::Handled
+            );
+            assert_eq!(editor.selected_tangent, Some((id, side)));
+        }
+        assert_eq!(
+            editor.event(
+                &UiEvent::KeyDown { key: KeyCode::Up, modifiers: alt },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        assert!(editor.selected_tangent.is_none());
+        assert_eq!(editor.selected_keyframe(), Some(id));
+        assert!(events.borrow().is_empty());
+    }
+
+    #[test]
+    fn keyboard_navigation_does_not_switch_captured_handle_owner() {
+        let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut editor = tangent_editor(events.clone());
+        let mut focus = CurveFocus(Some(editor.id()));
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &|_| {});
+        editor.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        grab_tangent(&mut editor, &mut ctx);
+        let selection = (editor.selected, editor.selected_tangent);
+        let count = events.borrow().len();
+        for (key, modifiers) in [
+            (KeyCode::Home, Modifiers::none()),
+            (KeyCode::Left, Modifiers::ctrl()),
+            (KeyCode::Up, Modifiers { alt: true, ..Modifiers::none() }),
+            (KeyCode::F10, Modifiers::shift()),
+        ] {
+            assert_eq!(
+                editor.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Handled
+            );
+            assert_eq!((editor.selected, editor.selected_tangent), selection);
+            assert!(editor.has_active_pointer_interaction());
+            assert!(editor.context_menu.is_none());
+        }
+        assert_eq!(events.borrow().len(), count);
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert!(!editor.has_active_pointer_interaction());
+        assert!(matches!(
+            events.borrow().last(),
+            Some(CurveGestureEvent::Cancel(_))
+        ));
+    }
+
+    #[test]
+    fn keyboard_context_menu_activates_the_selected_points_command() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut editor = CurveEditor::new()
+            .with_point_context_menus(vec![
+                None,
+                Some(vec![MenuItem::new("Auto", Action::Paste)]),
+                None,
+                None,
+            ])
+            .with_keyboard_help("Curve", "Keyboard help");
+        editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let mut focus = CurveFocus(Some(editor.id()));
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        editor.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        editor.select(Some(1));
+        assert_eq!(
+            editor.event(
+                &UiEvent::KeyDown { key: KeyCode::F10, modifiers: Modifiers::shift() },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        let node = editor.accessibility().expect("canvas accessibility");
+        assert_eq!(node.role, AccessibilityRole::Canvas);
+        assert_eq!(node.name.as_deref(), Some("Curve"));
+        assert_eq!(node.state.expanded, Some(true));
+        assert!(node.state.focused);
+        assert_eq!(
+            editor.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(actions.borrow().as_slice(), &[Action::Paste]);
     }
 
     fn curve_edit_action(edit: CurveEdit) -> Action {

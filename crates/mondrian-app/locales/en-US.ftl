@@ -1458,3 +1458,7 @@ export-professional-pcm = PCM 24-bit / 48 kHz / stereo
 export-essence-prores = ProRes 422 HQ 10-bit 4:2:2
 export-essence-avc = AVC High 4:2:2 10-bit intra
 export-essence-jpeg2000 = JPEG 2000 XYZ 12-bit
+
+curve-editor-name = Curve editor
+curve-editor-keyboard-help = Home/End: first/last point; Ctrl/Cmd + Left/Right: previous/next point; Alt + Left/Right: incoming/outgoing handle; Alt + Up: return to point; arrows: adjust; Shift + F10: interpolation menu.
+curve-editor-shape-keyboard-help = Home/End: first/last point; Ctrl/Cmd + Left/Right: previous/next point; arrows: adjust; Shift + arrows: larger adjustment.

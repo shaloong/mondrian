@@ -1826,6 +1826,10 @@ pub(super) fn audio_automation_curve_control(
     let preview_action = pending_action.clone();
     let ids = model.keys.iter().map(|key| key.keyframe.as_ref().map(|key| key.id)).collect();
     let editor = CurveEditor::with_points(model.points())
+        .with_keyboard_help(
+            localizer.text("curve-editor-name"),
+            localizer.text("curve-editor-keyboard-help"),
+        )
         .with_view_key(
             serde_json::to_string(&ParameterCurveGestureTarget::Audio {
                 target: model.target.clone(),
@@ -2607,6 +2611,10 @@ fn numeric_curve_editor(
     let preview_action = pending_action.clone();
     let ids = model.keys.iter().map(|key| key.keyframe_id).collect();
     let editor = CurveEditor::with_points(points)
+        .with_keyboard_help(
+            localizer.text("curve-editor-name"),
+            localizer.text("curve-editor-keyboard-help"),
+        )
         .with_view_key(target.as_ref().and_then(|target| serde_json::to_string(target).ok()))
         .with_keyframe_ids(ids)
         .with_tangents(tangents)
@@ -3216,6 +3224,13 @@ pub(super) fn inspector_property_value_widget(
             let selected_clip = selection;
             Box::new(
                 CurveEditor::with_points(points)
+                    .with_view_key(selection.and_then(|selection| {
+                        serde_json::to_string(&(selection.clip_id, &target)).ok()
+                    }))
+                    .with_keyboard_help(
+                        localizer.text("curve-editor-name"),
+                        localizer.text("curve-editor-shape-keyboard-help"),
+                    )
                     .with_point_insertion_limit(
                         mondrian_core::automation::MAX_NORMALIZED_CURVE_POINTS,
                     )
@@ -3877,6 +3892,117 @@ mod temporal_handle_tests {
         for action in actions.borrow_mut().drain(..) {
             state.dispatch_action(action).expect("real author action");
         }
+    }
+
+    #[test]
+    fn temporal_keyboard_only_selection_and_handle_edits_are_exact_and_reversible() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let (mut state, selection, model, id) = temporal_curve_fixture(true);
+        let before = state.active_sequence().expect("before").clone();
+        let mut editor = fixture_curve_editor(selection, &model);
+        let mut router = EventRouter::new(editor.id());
+        for (key, modifiers) in [
+            (KeyCode::Tab, Modifiers::none()),
+            (KeyCode::Home, Modifiers::none()),
+            (KeyCode::Right, Modifiers::ctrl()),
+            (KeyCode::Right, Modifiers { alt: true, ..Modifiers::none() }),
+        ] {
+            route_temporal(
+                &mut editor,
+                &mut router,
+                &mut state,
+                UiEvent::KeyDown { key, modifiers },
+            );
+        }
+        assert_eq!(
+            router.focused(),
+            Some(editor.id()),
+            "Tab reaches the curve without mouse input"
+        );
+        assert_eq!(
+            editor.point_target(editor.selected_index().expect("selected point")),
+            Some(CurvePointTarget::Keyframe(id))
+        );
+        assert!(
+            !state.can_undo_action(),
+            "selection creates no author history"
+        );
+        assert!(state
+            .active_sequence()
+            .expect("selection only")
+            .author_state_eq_ignoring_revision(&before));
+        assert_eq!(
+            editor.accessibility().expect("a11y").name.as_deref(),
+            Some("Curve editor")
+        );
+        route_temporal(
+            &mut editor,
+            &mut router,
+            &mut state,
+            UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+        );
+        let handle_edited = state.active_sequence().expect("handle edit").clone();
+        let bag = handle_edited
+            .find_clip(selection.clip_id)
+            .expect("clip")
+            .intrinsic_parameter_bag();
+        let property = bag.property(Transform2D::OPACITY_PATH).expect("opacity");
+        let key = property.keyframe_by_id(id).expect("same key");
+        assert_eq!(key.time, TimelineTime::new(1, 2).expect("time"));
+        assert_eq!(key.value, PropertyValue::Float(0.5));
+        let outgoing = property
+            .channel_keyframe_handle(0, id, BezierHandleSide::Outgoing)
+            .expect("outgoing");
+        let incoming = property
+            .channel_keyframe_handle(0, id, BezierHandleSide::Incoming)
+            .expect("incoming");
+        assert_eq!(
+            outgoing.time_offset,
+            TimelineTime::new(1, 6).expect("unchanged handle time")
+        );
+        assert!(outgoing.value_offset > 0.1);
+        assert!(
+            (incoming.value_offset + outgoing.value_offset).abs() < 1e-6,
+            "continuous partner remains constrained"
+        );
+        route_temporal(
+            &mut editor,
+            &mut router,
+            &mut state,
+            UiEvent::KeyDown {
+                key: KeyCode::Up,
+                modifiers: Modifiers { alt: true, ..Modifiers::none() },
+            },
+        );
+        assert!(state
+            .active_sequence()
+            .expect("selection only")
+            .author_state_eq_ignoring_revision(&handle_edited));
+        route_temporal(
+            &mut editor,
+            &mut router,
+            &mut state,
+            UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+        );
+        let point_edited = state.active_sequence().expect("point edit").clone();
+        assert!(!point_edited.author_state_eq_ignoring_revision(&handle_edited));
+        assert!(state.undo_timeline().expect("Undo point"));
+        assert!(state
+            .active_sequence()
+            .expect("Undo point state")
+            .author_state_eq_ignoring_revision(&handle_edited));
+        assert!(state.undo_timeline().expect("Undo handle"));
+        assert!(state
+            .active_sequence()
+            .expect("Undo handle state")
+            .author_state_eq_ignoring_revision(&before));
+        assert!(!state.can_undo_action());
+        assert!(state.redo_timeline().expect("Redo handle"));
+        assert!(state.redo_timeline().expect("Redo point"));
+        assert!(state
+            .active_sequence()
+            .expect("Redo state")
+            .author_state_eq_ignoring_revision(&point_edited));
     }
 
     #[test]

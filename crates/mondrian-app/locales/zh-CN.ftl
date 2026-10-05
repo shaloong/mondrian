@@ -1393,3 +1393,7 @@ export-professional-pcm = PCM 24 位 / 48 kHz / 立体声
 export-essence-prores = ProRes 422 HQ 10 位 4:2:2
 export-essence-avc = AVC High 4:2:2 10 位帧内
 export-essence-jpeg2000 = JPEG 2000 XYZ 12 位
+
+curve-editor-name = 曲线编辑器
+curve-editor-keyboard-help = Home/End：首尾点；Ctrl/Cmd＋左右：上一个／下一个点；Alt＋左右：入／出手柄；Alt＋上：返回点；方向键：微调；Shift＋F10：插值菜单。
+curve-editor-shape-keyboard-help = Home/End：首尾点；Ctrl/Cmd＋左右：上一个／下一个点；方向键：微调；Shift＋方向键：较大幅度微调。

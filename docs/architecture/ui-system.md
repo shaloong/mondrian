@@ -3417,5 +3417,28 @@ Replacing a project/session or sequence retires the old focus identity even
 when persistent parameter/key IDs happen to match. A real Host/EventRouter
 regression routes pointer release through model rebuilding and a subsequent
 keyboard edit, then verifies two Undo/Redo steps and fresh-session isolation.
-Full keyboard selection, exact frame-grid nudges and viewport controls remain
+Multi-key workflows, exact frame-grid nudges and viewport controls remain
 separate qualification work.
+
+
+### Keyboard curve navigation
+
+Focused CurveEditor handles Home/End for first/last point, Ctrl or Cmd plus
+Left/Right for adjacent points, Alt plus Left/Right for incoming/outgoing
+canonical controls, and Alt plus Up to return to the owner point. These
+selection operations do not publish author edits or history. Navigation is
+contained during pointer capture, preserving the outstanding draft owner.
+Tab remains shell focus navigation. Shift+F10 opens the selected point's
+existing interpolation menu, initializes its keyboard selection, and uses
+its canonical stable-address commands.
+
+Temporal/audio and normalized transfer controls expose localized accessible
+canvas names, collection selection/focus/disabled state, and delayed keyboard
+help. Generic transfer help omits temporal control/menu instructions. Normalized
+transfer controls also attach their typed parameter owner view key, preserving
+focus and selection through unchanged canonical point projections. Actual
+Host regressions cover temporal and transfer refresh/key-edit/history/session
+isolation; a mouse-free EventRouter regression enters through Tab, selects a
+continuous handle, edits it while preserving exact time, returns to the point,
+and verifies two independent Undo/Redo steps. Exact frame-grid keyboard time
+steps and viewport controls remain open.

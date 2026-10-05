@@ -5726,6 +5726,15 @@ mod tests {
 
     #[test]
     fn inspector_curve_release_refresh_preserves_selection_and_keyboard_editing() {
+        curve_release_refresh_keyboard_matrix(false);
+    }
+
+    #[test]
+    fn transfer_curve_release_refresh_preserves_selection_and_keyboard_editing() {
+        curve_release_refresh_keyboard_matrix(true);
+    }
+
+    fn curve_release_refresh_keyboard_matrix(shape: bool) {
         use crate::app::product_action::{
             ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
         };
@@ -5744,7 +5753,32 @@ mod tests {
             .expect("opacity address");
         state.selection.selected_clips =
             vec![crate::app::SelectedClipRef { track_id, clip_id, is_video_track: true }];
-        for ratio in [0.0, 0.5, 1.0] {
+        if shape {
+            let mut effect =
+                mondrian_effects::instantiate_effect_node(mondrian_effects::EffectType::Curves)
+                    .expect("Curves");
+            effect
+                .properties
+                .set_static_value(
+                    &mondrian_effects::EffectType::Curves.property_path("master"),
+                    mondrian_core::PropertyValue::Curve(
+                        mondrian_core::NormalizedCurve::new(vec![
+                            mondrian_core::NormalizedCurvePoint::new(0.0, 0.0),
+                            mondrian_core::NormalizedCurvePoint::new(0.5, 0.5),
+                            mondrian_core::NormalizedCurvePoint::new(1.0, 1.0),
+                        ])
+                        .expect("transfer curve"),
+                    ),
+                )
+                .expect("seed transfer curve");
+            state
+                .active_sequence_mut_uncommitted()
+                .expect("fixture sequence")
+                .find_clip_mut(clip_id)
+                .expect("fixture clip")
+                .add_effect_node(effect);
+        }
+        for ratio in [0.0, 0.5, 1.0].into_iter().filter(|_| !shape) {
             state
                 .dispatch_action(clip_edit_numeric_curve_action(
                     ClipEditNumericCurvePayload {
