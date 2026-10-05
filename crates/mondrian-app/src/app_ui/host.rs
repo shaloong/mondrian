@@ -941,19 +941,23 @@ impl AppUiHost {
                         return;
                     }
                 };
-                if ticket.is_none()
-                    && matches!(
-                        next,
-                        ViewerPreviewState::Ready(ViewerFrameContent::ExternalTexture(_))
-                    )
-                {
-                    // Project the exact already-admitted physical slot through
-                    // the same observation seam as GPU preparation. This does
-                    // not republish pixels or revive a consumed still ticket.
-                    let _ = self.present_current_viewer_output(
-                        PreviewPresentationCandidate::already_visible((), None),
-                        PreviewPresentationCarrier::ExternalGpu,
-                    );
+                if matches!(
+                    next,
+                    ViewerPreviewState::Ready(ViewerFrameContent::ExternalTexture(_))
+                ) {
+                    if ticket.is_none() {
+                        // Observe an admitted physical slot without republishing
+                        // pixels or reviving a consumed still ticket.
+                        let _ = self.present_current_viewer_output(
+                            PreviewPresentationCandidate::already_visible((), None),
+                            PreviewPresentationCarrier::ExternalGpu,
+                        );
+                    } else {
+                        // Semantic reuse cannot prove the Window's physical
+                        // slot. Its GPU owner must validate that slot and
+                        // complete this ticket at the presentation seam.
+                        self.mark_window_preview_pending();
+                    }
                 } else {
                     let _ = self.admit_window_preview_state(ticket, next);
                 }
@@ -3417,6 +3421,84 @@ mod tests {
             assert!(!host.has_pending_ui_refresh());
             assert_eq!(host.app_state.borrow().playback_evidence_report(), evidence);
         }
+    }
+
+    #[test]
+    fn reused_gpu_model_projection_preserves_the_window_presentation_ticket() {
+        let mut state = workspace_app_state_with_timed_solid();
+        state.active_sequence_mut_uncommitted().expect("Sequence").video_tracks[0].clips[0]
+            .is_disabled = false;
+        state.seek(4).expect("bind still picture");
+        let host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("reused-gpu-model-projection"),
+        );
+        let PreviewGpuFrameState::Ready(frame) = host.gpu_preview_frame_for_current_state() else {
+            panic!("generated solid must have a ready GPU execution plan");
+        };
+        let presentation = ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
+            .expect("valid presentation");
+        assert!(matches!(
+            host.set_external_viewer_frame(&frame, "reused-model-output", presentation),
+            FramePresentationDisposition::Presented(_)
+        ));
+        host.app_state.borrow_mut().play().expect("prime playback of the same solid");
+        let demand = host
+            .app_state
+            .borrow()
+            .pending_playback_frame_demand_identity()
+            .expect("new playback demand");
+        let projection = {
+            let state = host.app_state.borrow();
+            host.preview_service.presentation(
+                state.preview_frame_execution_request(Instant::now()),
+                PreviewPresentationCarrier::ExternalGpu,
+            )
+        };
+        let PreviewPresentationState::Ready(candidate) = projection else {
+            panic!("static solid must reuse its semantically identical GPU output");
+        };
+        assert_eq!(
+            candidate.presentation_ticket().map(|ticket| ticket.identity()),
+            Some(demand)
+        );
+        let evidence = host.app_state.borrow().playback_evidence_report();
+        host.refresh_window_preview_state();
+        assert_eq!(
+            host.app_state.borrow().pending_playback_frame_demand_identity(),
+            Some(demand),
+            "model projection cannot complete GPU delivery before Window validates its physical slot",
+        );
+        assert_eq!(host.app_state.borrow().playback_evidence_report(), evidence);
+        assert!(matches!(
+            &*host.window_preview_state.borrow(),
+            ViewerPreviewState::Stale(ViewerFrameContent::ExternalTexture(frame))
+                if frame.key == "reused-model-output"
+        ));
+        let PreviewGpuFrameState::Current(candidate) = host.gpu_preview_frame_for_current_state()
+        else {
+            panic!("the GPU owner must receive the current reused output");
+        };
+        assert_eq!(
+            candidate.presentation_ticket().map(|ticket| ticket.identity()),
+            Some(demand)
+        );
+        assert!(candidate.was_already_visible());
+        assert!(matches!(
+            host.present_current_viewer_output(candidate, PreviewPresentationCarrier::ExternalGpu),
+            FramePresentationDisposition::Presented(_)
+        ));
+        assert!(host.app_state.borrow().pending_playback_frame_demand_identity().is_none());
+        let completed_evidence = host.app_state.borrow().playback_evidence_report();
+        host.ui_dirty.set(false);
+        host.preview_dirty.set(false);
+        host.refresh_window_preview_state();
+        assert_eq!(
+            host.app_state.borrow().playback_evidence_report(),
+            completed_evidence
+        );
+        assert!(!host.has_pending_ui_refresh());
     }
 
     #[test]
