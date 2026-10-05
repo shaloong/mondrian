@@ -877,7 +877,7 @@ impl ParameterSchema {
         if self.value_type == PropertyValueType::Int
             && self.allowed_interpolations != [ParameterInterpolation::Hold]
         {
-            // Author channels are f64; an interpolated integer schema must bound
+            // Continuous execution projects through f64; integer interpolation must bound
             // every value to the exact integer domain rather than silently round
             // wide i64 author values during channel lowering.
             if matches!(self.default_value, PropertyValue::Int(value) if value.unsigned_abs() > (1_u64 << 53))
@@ -1130,6 +1130,86 @@ impl ParameterNumericContract {
         Ok(Self { hard_range, soft_range, step, invalid_value_policy })
     }
 
+    fn integer_bounds(self) -> Option<(i64, i64)> {
+        let range = self.hard_range;
+        if range.min >= -(i64::MIN as f64) || range.max < i64::MIN as f64 {
+            return None;
+        }
+        let min = range.min.ceil() as i64;
+        let max = range.max.floor() as i64;
+        (min <= max).then_some((min, max))
+    }
+
+    /// Offset a canonical scalar and constrain it to representable hard bounds.
+    ///
+    /// Integer increments round once and multiply/add in widened integer arithmetic;
+    /// separate signed step counts preserve oversized coarse increments. The source
+    /// integer never passes through floating-point geometry. Float
+    /// bounds select inward representable values. Soft bounds and editor step
+    /// do not change this explicit author-unit increment. Invalid contracts,
+    /// non-finite increments and domains without a legal scalar return `None`.
+    pub fn offset_scalar(
+        self,
+        value: PropertyValue,
+        delta: f64,
+        steps: i8,
+    ) -> Option<PropertyValue> {
+        self.validate().ok()?;
+        if !delta.is_finite() {
+            return None;
+        }
+        let range = self.hard_range;
+        match value {
+            PropertyValue::Int(value) => {
+                let (min, max) = self.integer_bounds()?;
+                if !(min..=max).contains(&value) {
+                    return None;
+                }
+                let target = i128::from(value)
+                    .saturating_add((delta.round() as i128).saturating_mul(i128::from(steps)));
+                Some(PropertyValue::Int(
+                    target.clamp(i128::from(min), i128::from(max)) as i64,
+                ))
+            }
+            PropertyValue::Float(value) => {
+                if !value.is_finite() || !range.contains(f64::from(value)) {
+                    return None;
+                }
+                let mut min = range.min.max(-f64::from(f32::MAX)) as f32;
+                let mut max = range.max.min(f64::from(f32::MAX)) as f32;
+                if f64::from(min) < range.min {
+                    min = min.next_up();
+                }
+                if f64::from(max) > range.max {
+                    max = max.next_down();
+                }
+                if !min.is_finite() || !max.is_finite() || min > max {
+                    return None;
+                }
+                if delta == 0.0 || steps == 0 {
+                    return Some(PropertyValue::Float(value));
+                }
+                Some(PropertyValue::Float(
+                    delta
+                        .mul_add(f64::from(steps), f64::from(value))
+                        .clamp(f64::from(min), f64::from(max)) as f32,
+                ))
+            }
+            PropertyValue::Double(value) => {
+                if !value.is_finite() || !range.contains(value) {
+                    return None;
+                }
+                if delta == 0.0 || steps == 0 {
+                    return Some(PropertyValue::Double(value));
+                }
+                Some(PropertyValue::Double(
+                    delta.mul_add(f64::from(steps), value).clamp(range.min, range.max),
+                ))
+            }
+            _ => None,
+        }
+    }
+
     /// Revalidate a deserialized or directly constructed numeric contract.
     pub fn validate(self) -> std::result::Result<(), ParameterSchemaError> {
         let hard_range = ParameterNumericRange::new(self.hard_range.min, self.hard_range.max)?;
@@ -1287,6 +1367,15 @@ impl PropertyValue {
         match self {
             Self::Float(value) => Some(*value),
             _ => None,
+        }
+    }
+
+    /// Project one numeric scalar for display or floating execution coordinates.
+    /// Wide integers can round; author edits must retain the typed source value.
+    pub fn as_numeric_f64(&self) -> Option<f64> {
+        match self {
+            Self::Int(value) => Some(*value as f64),
+            _ => self.as_f64(),
         }
     }
 
@@ -1618,10 +1707,43 @@ impl PropertyDescriptor {
     }
 }
 
+/// Canonical scalar channel key, retaining exact integer author bits.
+/// Floating execution coordinates are derived explicitly at numeric seams.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum AnimationChannelValue {
+    /// Finite continuous author value (including exactly representable vectors).
+    Number(f64),
+    /// Exact signed integer author value.
+    Integer(i64),
+}
+
+impl AnimationChannelValue {
+    /// Project into numeric execution or UI geometry; wide integers can round.
+    pub fn projection(self) -> f64 {
+        match self {
+            Self::Number(value) => value,
+            Self::Integer(value) => value as f64,
+        }
+    }
+}
+
+impl crate::AuthoringFootprint for AnimationChannelValue {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        match self {
+            Self::Number(value) => collector.collect(value),
+            Self::Integer(value) => collector.collect(value),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnimationChannel {
     pub index: usize,
-    keyframes: AuthoringList<Keyframe<f64>>,
+    keyframes: AuthoringList<Keyframe<AnimationChannelValue>>,
 }
 
 impl AnimationChannel {
@@ -1629,15 +1751,15 @@ impl AnimationChannel {
         Self { index, keyframes: AuthoringList::new() }
     }
 
-    pub fn keyframes(&self) -> &[Keyframe<f64>] {
+    pub fn keyframes(&self) -> &[Keyframe<AnimationChannelValue>] {
         &self.keyframes
     }
 
-    pub fn keyframe_at(&self, time: TimelineTime) -> Option<&Keyframe<f64>> {
+    pub fn keyframe_at(&self, time: TimelineTime) -> Option<&Keyframe<AnimationChannelValue>> {
         self.keyframes.iter().find(|keyframe| keyframe.time == time)
     }
 
-    fn set_keyframe(&mut self, keyframe: Keyframe<f64>) {
+    fn set_keyframe(&mut self, keyframe: Keyframe<AnimationChannelValue>) {
         let pos = self.keyframes.partition_point(|candidate| candidate.time < keyframe.time);
         if pos < self.keyframes.len() && self.keyframes[pos].time == keyframe.time {
             self.keyframes[pos] = keyframe;
@@ -1646,7 +1768,7 @@ impl AnimationChannel {
         }
     }
 
-    fn remove_keyframe(&mut self, time: TimelineTime) -> Option<Keyframe<f64>> {
+    fn remove_keyframe(&mut self, time: TimelineTime) -> Option<Keyframe<AnimationChannelValue>> {
         self.keyframes
             .iter()
             .position(|keyframe| keyframe.time == time)
@@ -1711,7 +1833,7 @@ impl AnimationChannel {
                 .map(|key| crate::ExactAutomationKeyframe {
                     id: key.id,
                     time: key.time,
-                    value: key.value,
+                    value: key.value.projection(),
                     interpolation_to_next: crate::AutomationSegmentInterpolation::Bezier,
                     in_handle: match key.interp_in {
                         KeyframeInterpolation::Bezier(handle) => Some(handle),
@@ -1885,8 +2007,25 @@ impl AnimatedProperty {
                     ));
                 }
                 previous_time = Some(keyframe.time);
-                let value = self.normalize_numeric_channel(expected_index, keyframe.value)?;
-                if value != keyframe.value {
+                if matches!(keyframe.value, AnimationChannelValue::Integer(_))
+                    != (self.value_type() == PropertyValueType::Int)
+                {
+                    return Err(parameter_value_error(
+                        &self.descriptor.path,
+                        "channel scalar kind does not match its property",
+                    ));
+                }
+                if let AnimationChannelValue::Integer(value) = keyframe.value
+                    && self.normalize_value(PropertyValue::Int(value))? != PropertyValue::Int(value)
+                {
+                    return Err(parameter_value_error(
+                        &self.descriptor.path,
+                        "persisted integer key lies outside hard bounds",
+                    ));
+                }
+                let value =
+                    self.normalize_numeric_channel(expected_index, keyframe.value.projection())?;
+                if value != keyframe.value.projection() {
                     return Err(parameter_value_error(
                         &self.descriptor.path,
                         "persisted keyframe lies outside the parameter hard range",
@@ -2092,7 +2231,7 @@ impl AnimatedProperty {
         Some(Keyframe {
             id: id.unwrap_or_else(KeyframeId::new),
             time,
-            value: self.evaluate(time),
+            value: self.evaluate_channels(time),
             interp_in,
             interp_out,
             temporal_flags,
@@ -2113,6 +2252,20 @@ impl AnimatedProperty {
             return self.static_value.clone();
         }
 
+        self.evaluate_channels(time)
+    }
+
+    fn evaluate_channels(&self, time: TimelineTime) -> PropertyValue {
+        if self.value_type() == PropertyValueType::Int
+            && self.descriptor.schema.allowed_interpolations == [ParameterInterpolation::Hold]
+            && let Some(channel) = self.channels.first()
+            && !channel.keyframes.is_empty()
+        {
+            let index = channel.keyframes.partition_point(|key| key.time <= time).saturating_sub(1);
+            if let AnimationChannelValue::Integer(value) = channel.keyframes[index].value {
+                return PropertyValue::Int(value);
+            }
+        }
         let fallback = self
             .value_to_channel_values(&self.static_value)
             .unwrap_or_else(|_| self.static_value.to_channel_values());
@@ -2200,7 +2353,16 @@ impl AnimatedProperty {
             && self.descriptor.schema.is_animatable
             && !self.channels.is_empty()
         {
-            self.write_channels(time, &updates, interpolation)
+            if matches!(value, PropertyValue::Int(_)) {
+                self.ensure_interpolation_allowed(interpolation.parameter_interpolation())?;
+                let mut key = self
+                    .keyframe_at(time)
+                    .unwrap_or_else(|| Keyframe::from_preset(time, value.clone(), interpolation));
+                key.value = value;
+                self.set_exact_keyframe(key)
+            } else {
+                self.write_channels(time, &updates, interpolation)
+            }
         } else {
             self.static_value = value;
             Ok(())
@@ -2220,13 +2382,13 @@ impl AnimatedProperty {
         let mut candidate = self.clone();
         keyframe.value = candidate.normalize_value(keyframe.value)?;
         candidate.ensure_interpolation_allowed(keyframe_interpolation_type(&keyframe))?;
-        let channel_values = candidate.value_to_channel_values(&keyframe.value)?;
+        let channel_values = candidate.value_to_author_channel_values(&keyframe.value)?;
         validate_channel_updates(
             candidate.channel_count(),
             &channel_values
                 .iter()
                 .enumerate()
-                .map(|(index, value)| (index, *value))
+                .map(|(index, value)| (index, value.projection()))
                 .collect::<Vec<_>>(),
             &candidate.descriptor.path,
         )?;
@@ -2298,13 +2460,13 @@ impl AnimatedProperty {
         }
 
         let value = self.normalize_value(value)?;
-        let channel_values = self.value_to_channel_values(&value)?;
+        let channel_values = self.value_to_author_channel_values(&value)?;
         validate_channel_updates(
             self.channel_count(),
             &channel_values
                 .iter()
                 .enumerate()
-                .map(|(index, value)| (index, *value))
+                .map(|(index, value)| (index, value.projection()))
                 .collect::<Vec<_>>(),
             &self.descriptor.path,
         )?;
@@ -2390,7 +2552,11 @@ impl AnimatedProperty {
                 channel.set_keyframe(Keyframe {
                     id: existing.map(|keyframe| keyframe.id).unwrap_or_else(KeyframeId::new),
                     time,
-                    value: *value,
+                    value: if self.descriptor.schema.value_type == PropertyValueType::Int {
+                        AnimationChannelValue::Integer(value.round() as i64)
+                    } else {
+                        AnimationChannelValue::Number(*value)
+                    },
                     interp_in: existing.map(|keyframe| keyframe.interp_in).unwrap_or(interp_in),
                     interp_out: existing.map(|keyframe| keyframe.interp_out).unwrap_or(interp_out),
                     temporal_flags: existing
@@ -2626,7 +2792,7 @@ impl AnimatedProperty {
         Some(crate::TemporalBezierControl {
             keyframe_id: key.id,
             key_time: key.time,
-            key_value: key.value,
+            key_value: key.value.projection(),
             neighbor_time: neighbor.time,
             side,
             handle,
@@ -2756,7 +2922,11 @@ impl AnimatedProperty {
                 },
             )?;
 
-        keyframe.value = value;
+        keyframe.value = if self.descriptor.schema.value_type == PropertyValueType::Int {
+            AnimationChannelValue::Integer(value.round() as i64)
+        } else {
+            AnimationChannelValue::Number(value)
+        };
         self.normalize_channels()?;
         Ok(())
     }
@@ -2851,6 +3021,26 @@ impl AnimatedProperty {
                 &format!("unknown enum key `{key}`"),
             ));
         }
+        if let PropertyValue::Int(integer) = value {
+            self.value_to_channel_values(&PropertyValue::Int(integer))?;
+            let Some(contract) =
+                self.descriptor.schema.numeric.as_ref().and_then(|contracts| contracts.first())
+            else {
+                return Ok(PropertyValue::Int(integer));
+            };
+            let (min, max) = contract.integer_bounds().ok_or_else(|| {
+                parameter_value_error(&self.descriptor.path, "hard bounds contain no integer")
+            })?;
+            if !(min..=max).contains(&integer)
+                && contract.invalid_value_policy == ParameterInvalidValuePolicy::Reject
+            {
+                return Err(parameter_value_error(
+                    &self.descriptor.path,
+                    "integer value lies outside its hard bounds",
+                ));
+            }
+            return Ok(PropertyValue::Int(integer.clamp(min, max)));
+        }
         let channels = self.value_to_channel_values(&value)?;
         if channels.is_empty() {
             return Ok(value);
@@ -2864,6 +3054,17 @@ impl AnimatedProperty {
             return Ok(value);
         }
         Ok(self.value_from_channel_values(&normalized, &value))
+    }
+
+    fn value_to_author_channel_values(
+        &self,
+        value: &PropertyValue,
+    ) -> Result<Vec<AnimationChannelValue>> {
+        let numeric = self.value_to_channel_values(value)?;
+        Ok(match value {
+            PropertyValue::Int(value) => vec![AnimationChannelValue::Integer(*value)],
+            _ => numeric.into_iter().map(AnimationChannelValue::Number).collect(),
+        })
     }
 
     fn value_to_channel_values(&self, value: &PropertyValue) -> Result<Vec<f64>> {
@@ -3866,7 +4067,7 @@ fn validate_visual_handle_coordinates(
 
 fn validate_numeric_control_points(
     path: &str,
-    key: &Keyframe<f64>,
+    key: &Keyframe<AnimationChannelValue>,
     previous: Option<TimelineTime>,
     next: Option<TimelineTime>,
 ) -> Result<()> {
@@ -3876,7 +4077,7 @@ fn validate_numeric_control_points(
         (key.interp_out, next, false),
     ] {
         if let KeyframeInterpolation::Bezier(handle) = interpolation {
-            if !(key.value + handle.value_offset).is_finite() {
+            if !(key.value.projection() + handle.value_offset).is_finite() {
                 return Err(parameter_value_error(
                     path,
                     "Bezier value control is not representable",
@@ -3913,7 +4114,9 @@ fn keyframe_interpolation_type(keyframe: &Keyframe<PropertyValue>) -> ParameterI
     )
 }
 
-fn channel_keyframe_interpolation_type(keyframe: &Keyframe<f64>) -> ParameterInterpolation {
+fn channel_keyframe_interpolation_type(
+    keyframe: &Keyframe<AnimationChannelValue>,
+) -> ParameterInterpolation {
     interpolation_type_from_parts(
         keyframe.interp_in,
         keyframe.interp_out,
@@ -3975,13 +4178,13 @@ fn evaluate_numeric_channel(channel: &AnimationChannel, time: TimelineTime, fall
         return fallback;
     };
     if time <= first.time {
-        return first.value;
+        return first.value.projection();
     }
     let Some(last) = channel.keyframes.last() else {
         return fallback;
     };
     if time >= last.time {
-        return last.value;
+        return last.value.projection();
     }
 
     let idx = channel
@@ -4422,6 +4625,158 @@ impl crate::AuthoringFootprint for PropertyBag {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_integer_author_keys_preserve_all_bits_through_edit_and_codec() {
+        let numeric = ParameterNumericContract::closed(
+            i64::MIN as f64,
+            i64::MAX as f64,
+            Some(1.0),
+            ParameterInvalidValuePolicy::Reject,
+        )
+        .expect("full range");
+        let mut property = AnimatedProperty::from_descriptor(
+            PropertyDescriptor::new("test.exact.integer", "Count", PropertyValue::Int(0))
+                .with_animatable(true)
+                .with_numeric_contract(ParameterUnit::Unitless, numeric),
+        );
+        let time = TimelineTime::new(1, 3).expect("exact time");
+        let key = Keyframe::from_preset(
+            time,
+            PropertyValue::Int(i64::MAX - 1),
+            InterpolationType::Hold,
+        );
+        let id = key.id;
+        property.set_exact_keyframe(key).expect("author key");
+        assert_eq!(
+            property.keyframe_by_id(id).expect("read exact key").value,
+            PropertyValue::Int(i64::MAX - 1)
+        );
+        assert_eq!(
+            property.evaluate(TimelineTime::ZERO),
+            PropertyValue::Int(i64::MAX - 1)
+        );
+        property
+            .edit_keyframe(id, time, PropertyValue::Int(i64::MIN + 1))
+            .expect("exact edit");
+        let decoded: AnimatedProperty =
+            serde_json::from_slice(&serde_json::to_vec(&property).expect("serialize"))
+                .expect("decode");
+        decoded.validate().expect("validate reopened");
+        let restored = decoded.keyframe_by_id(id).expect("same key");
+        assert_eq!(restored.time, time);
+        assert_eq!(restored.value, PropertyValue::Int(i64::MIN + 1));
+        let mut disabled = decoded.clone();
+        disabled.disable_animation(TimelineTime::ZERO).expect("disable");
+        disabled
+            .set_static_value(PropertyValue::Int(0))
+            .expect("different static value");
+        assert_eq!(disabled.evaluate(TimelineTime::ZERO), PropertyValue::Int(0));
+        assert_eq!(
+            disabled.keyframe_by_id(id).expect("disabled author key").value,
+            PropertyValue::Int(i64::MIN + 1)
+        );
+        let mut legacy = serde_json::to_value(&decoded).expect("wire value");
+        legacy["channels"][0]["keyframes"][0]["value"] = serde_json::json!(1.0);
+        assert!(
+            serde_json::from_value::<AnimatedProperty>(legacy).is_err(),
+            "alpha admits no obsolete channel value parser"
+        );
+        let prepared =
+            PreparedPropertyQuery::prepare(&decoded, crate::TimeScale::ONE).expect("query");
+        assert_eq!(
+            prepared
+                .evaluate(AutomationQueryTime::new(0.5).expect("query time"))
+                .expect("value"),
+            PropertyValue::Int(i64::MIN + 1)
+        );
+    }
+
+    #[test]
+    fn scalar_offsets_preserve_integer_precision_and_representable_bounds() {
+        let all = ParameterNumericContract::closed(
+            i64::MIN as f64,
+            i64::MAX as f64,
+            Some(1.0),
+            ParameterInvalidValuePolicy::Reject,
+        )
+        .expect("range");
+        for (value, delta, expected) in [
+            (i64::MAX, -1.0, i64::MAX - 1),
+            (i64::MIN, 1.0, i64::MIN + 1),
+            (9_007_199_254_740_993, 1.0, 9_007_199_254_740_994),
+            (i64::MAX - 1, 5.0, i64::MAX),
+            (i64::MIN + 1, -5.0, i64::MIN),
+            (i64::MAX, -f64::MAX, i64::MIN),
+            (i64::MIN, f64::MAX, i64::MAX),
+        ] {
+            assert_eq!(
+                all.offset_scalar(PropertyValue::Int(value), delta, 1),
+                Some(PropertyValue::Int(expected))
+            );
+        }
+        let fractional =
+            ParameterNumericContract::closed(-1.5, 1.5, None, ParameterInvalidValuePolicy::Reject)
+                .expect("fractional bounds");
+        assert_eq!(
+            fractional.offset_scalar(PropertyValue::Int(0), 5.0, 1),
+            Some(PropertyValue::Int(1))
+        );
+        let empty =
+            ParameterNumericContract::closed(0.1, 0.9, None, ParameterInvalidValuePolicy::Reject)
+                .expect("empty integer domain");
+        assert!(empty.offset_scalar(PropertyValue::Int(0), 1.0, 1).is_none());
+        assert!(all.offset_scalar(PropertyValue::Int(0), f64::NAN, 1).is_none());
+        let wide = ParameterNumericContract::closed(
+            -f64::MAX,
+            f64::MAX,
+            None,
+            ParameterInvalidValuePolicy::Reject,
+        )
+        .expect("wide");
+        assert_eq!(
+            wide.offset_scalar(PropertyValue::Float(f32::MAX), f64::MAX, 1),
+            Some(PropertyValue::Float(f32::MAX))
+        );
+        assert_eq!(
+            wide.offset_scalar(PropertyValue::Double(f64::MAX), f64::MAX, 1),
+            Some(PropertyValue::Double(f64::MAX))
+        );
+        let inside =
+            ParameterNumericContract::closed(0.1, 0.2, None, ParameterInvalidValuePolicy::Reject)
+                .expect("float bounds");
+        let PropertyValue::Float(low) =
+            inside.offset_scalar(PropertyValue::Float(0.15), -5.0, 1).expect("low")
+        else {
+            panic!("Float");
+        };
+        let PropertyValue::Float(high) =
+            inside.offset_scalar(PropertyValue::Float(0.15), 5.0, 1).expect("high")
+        else {
+            panic!("Float");
+        };
+        assert!(f64::from(low) >= 0.1 && f64::from(high) <= 0.2);
+        assert_eq!(
+            wide.offset_scalar(PropertyValue::Double(-f64::MAX), f64::MAX, 5),
+            Some(PropertyValue::Double(f64::MAX))
+        );
+        let large = f64::from_bits(0x7fe0_0000_0000_0000);
+        assert_eq!(
+            wide.offset_scalar(PropertyValue::Double(-large), large, 2),
+            Some(PropertyValue::Double(large)),
+            "finite result after oversized intermediate product"
+        );
+        assert_eq!(
+            all.offset_scalar(PropertyValue::Int(i64::MAX), 2.0, -5),
+            Some(PropertyValue::Int(i64::MAX - 10))
+        );
+        let PropertyValue::Double(zero) =
+            wide.offset_scalar(PropertyValue::Double(-0.0), 0.0, 1).expect("zero")
+        else {
+            panic!("Double");
+        };
+        assert_eq!(zero.to_bits(), (-0.0f64).to_bits());
+    }
 
     #[test]
     fn ordered_visual_controls_preserve_exact_neighbors_defaults_and_hold_edges() {
@@ -6170,7 +6525,7 @@ mod tests {
                     .expect("exact channel endpoint");
                 assert_eq!(
                     property.channel(0).expect("channel").keyframes[1].value,
-                    sign * 0.2,
+                    AnimationChannelValue::Number(sign * 0.2),
                     "author channel precision is retained"
                 );
                 assert!(
@@ -6939,7 +7294,7 @@ mod tests {
         assert_eq!(property.keyframe_times(), vec![tt(12)]);
         assert_eq!(
             property.channel(0).expect("opacity channel").keyframes()[0].value,
-            0.75
+            AnimationChannelValue::Number(0.75)
         );
     }
 
@@ -7006,7 +7361,7 @@ mod tests {
             .iter()
             .find(|keyframe| keyframe.time == tt(8))
             .expect("keyframe at t=8");
-        assert_eq!(keyframe.value, 22.0);
+        assert_eq!(keyframe.value, AnimationChannelValue::Number(22.0));
         assert_eq!(keyframe.interp_out, KeyframeInterpolation::Linear);
     }
 
@@ -7467,7 +7822,7 @@ mod tests {
             .and_then(|channel| channel.keyframes().iter().find(|keyframe| keyframe.time == time))
             .expect("updated keyframe");
         assert_eq!(after_keyframe.id, before_id);
-        assert_eq!(after_keyframe.value, 22.0);
+        assert_eq!(after_keyframe.value, AnimationChannelValue::Number(22.0));
     }
 
     #[test]

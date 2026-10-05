@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 
 use mondrian_core::{
     AuthoringTimeDomain, AutomationSegmentInterpolation, ExactAutomationKeyframe,
-    ExactAutomationTangentMode, InterpolationType, ParameterInterpolation, PropertyValueType,
-    TimeScale, TimelineTime, TimelineTimeRange,
+    ExactAutomationTangentMode, InterpolationType, ParameterInterpolation, PropertyValue,
+    PropertyValueType, TimeScale, TimelineTime, TimelineTimeRange,
 };
 use mondrian_editor_state::Action;
 use mondrian_timeline::{
@@ -347,6 +347,22 @@ fn audio_curve_edit_intent(
         return None;
     }
     let edit = match edit {
+        CurveEdit::NudgeValue { keyframe_id, delta, steps } => {
+            let mut key =
+                model.source_curve.keyframes.iter().find(|key| key.id == keyframe_id)?.clone();
+            let range = model.value_axis.hard_range();
+            let contract = mondrian_core::automation::ParameterNumericContract::closed(
+                range.min,
+                range.max,
+                None,
+                mondrian_core::automation::ParameterInvalidValuePolicy::Reject,
+            )
+            .ok()?;
+            key.value = contract
+                .offset_scalar(PropertyValue::Double(key.value), delta, steps)?
+                .as_f64()?;
+            AudioAutomationEdit::UpsertKeyframe { keyframe: key }
+        }
         CurveEdit::NudgeTime { keyframe_id, side, delta } => {
             if let Some(side) = side {
                 let control = model

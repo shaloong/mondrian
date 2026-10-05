@@ -192,6 +192,15 @@ pub enum CurvePointTarget {
 /// One point or tangent author intent, carrying its stable source identity.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CurveEdit {
+    /// Offset an authored scalar key using its canonical typed value.
+    NudgeValue {
+        /// Stable owning key identity.
+        keyframe_id: mondrian_core::KeyframeId,
+        /// Author-unit step, independent of projected key geometry.
+        delta: f64,
+        /// Signed number of steps, retaining coarse increments without overflow.
+        steps: i8,
+    },
     /// Adjust an authored key or control by an exact owner-time increment.
     NudgeTime {
         /// Stable owning key identity.
@@ -1416,6 +1425,25 @@ impl CurveEditor {
             }
             return true;
         }
+        if self.value_axis.is_some()
+            && self.selected_tangent.is_none()
+            && matches!(key, KeyCode::Up | KeyCode::Down)
+            && !modifiers.ctrl
+            && !modifiers.alt
+            && !modifiers.meta
+            && let Some(keyframe_id) = self.selected_keyframe()
+        {
+            if self.has_active_pointer_interaction() || self.fixed_value.is_some() {
+                return true;
+            }
+            let delta = self.value_step(false);
+            let steps = if modifiers.shift { 5 } else { 1 };
+            let steps = if key == KeyCode::Down { -steps } else { steps };
+            if delta.is_finite() && delta != 0.0 {
+                self.dispatch_edit(CurveEdit::NudgeValue { keyframe_id, delta, steps }, ctx);
+            }
+            return true;
+        }
         if let Some((keyframe_id, side)) = self.selected_tangent {
             if modifiers.ctrl || modifiers.alt || modifiers.meta {
                 return false;
@@ -2368,6 +2396,9 @@ mod tests {
 
     fn curve_edit_action(edit: CurveEdit) -> Action {
         let name = match edit {
+            CurveEdit::NudgeValue { keyframe_id, delta, steps } => {
+                format!("value:{keyframe_id}:{delta}:{steps}")
+            }
             CurveEdit::NudgeTime { keyframe_id, side, delta } => {
                 format!("time:{keyframe_id}:{side:?}:{delta:?}")
             }
@@ -2651,6 +2682,60 @@ mod tests {
             actions.borrow().is_empty(),
             "viewport is not author history"
         );
+    }
+
+    #[test]
+    fn temporal_value_keyboard_emits_an_edit_above_f64_integer_precision() {
+        use mondrian_core::automation::ParameterNumericRange;
+        let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let id = mondrian_core::KeyframeId::new();
+        let range = ParameterNumericRange::new(i64::MIN as f64, i64::MAX as f64).expect("range");
+        let axis = CurveValueAxis::new(range, range, Some(1.0)).expect("axis");
+        let original = vec![
+            CurvePoint { x: 0.0, y: 0.0 },
+            CurvePoint { x: 0.5, y: i64::MAX as f64 },
+            CurvePoint { x: 1.0, y: 0.0 },
+        ];
+        let recorded = events.clone();
+        let mut editor = CurveEditor::with_author_points(original.clone(), axis)
+            .with_keyframe_ids(vec![None, Some(id), None])
+            .on_gesture(move |event| {
+                recorded.borrow_mut().push(event);
+                None::<Action>
+            });
+        editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        editor.selected = Some(1);
+        let mut focus = CurveFocus(Some(editor.id()));
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &|_| {});
+        editor.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(
+            events.borrow().len(),
+            1,
+            "a legal decrement must reach the canonical author value"
+        );
+        assert_eq!(editor.points, original, "canonical preview owns geometry");
+        assert!(
+            matches!(events.borrow()[0], CurveGestureEvent::Edit { gesture_id: None,
+            edit: CurveEdit::NudgeValue { keyframe_id, delta: 1.0, steps: -1 } } if keyframe_id == id)
+        );
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::shift() },
+            &mut ctx,
+        );
+        assert!(matches!(
+            events.borrow()[1],
+            CurveGestureEvent::Edit {
+                gesture_id: None,
+                edit: CurveEdit::NudgeValue { delta: 1.0, steps: 5, .. }
+            }
+        ));
+        assert_eq!(editor.points, original);
     }
 
     #[test]

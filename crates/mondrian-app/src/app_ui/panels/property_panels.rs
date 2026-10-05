@@ -2557,7 +2557,11 @@ fn numeric_key_points(
         .filter_map(|key| {
             Some((
                 key.id,
-                crate::app_ui::curve_tangents::project_key(key.time, key.value, model.owner_range)?,
+                crate::app_ui::curve_tangents::project_key(
+                    key.time,
+                    key.value.projection(),
+                    model.owner_range,
+                )?,
             ))
         })
         .collect()
@@ -2724,7 +2728,7 @@ pub(super) fn preview_numeric_curve_points(
                         .ok()?,
                 )
                 .ok()?;
-            let value = property.evaluate(time).as_f64()?;
+            let value = property.evaluate(time).as_numeric_f64()?;
             Some(CurvePoint { x: index as f32 / 128.0, y: value })
         })
         .collect::<Option<Vec<_>>>()?;
@@ -2737,6 +2741,12 @@ fn numeric_curve_edit_payload(
     edit: CurveEdit,
 ) -> Option<ClipCurveEditPayload> {
     let edit = match edit {
+        CurveEdit::NudgeValue { keyframe_id, delta, steps } => {
+            let key = model.curve_source.keyframe_by_id(keyframe_id)?;
+            let contract = model.curve_source.descriptor.schema.numeric.as_ref()?.first()?;
+            let value = contract.offset_scalar(key.value.clone(), delta, steps)?;
+            ClipCurveEditPayload::Move { keyframe_id, time: None, value: Some(value) }
+        }
         CurveEdit::NudgeTime { keyframe_id, side, delta } => {
             if let Some(side) = side {
                 let control = model
@@ -2769,7 +2779,7 @@ fn numeric_curve_edit_payload(
             let edit = crate::app_ui::curve_tangents::lower(
                 tangent,
                 point,
-                (key.time, key.value.as_f64()?),
+                (key.time, key.value.as_numeric_f64()?),
                 handle,
                 model.owner_range,
             )?;
@@ -2785,7 +2795,7 @@ fn numeric_curve_edit_payload(
                     let key = model.curve_source.keyframe_by_id(id)?;
                     let reference = crate::app_ui::curve_tangents::project_key(
                         key.time,
-                        key.value.as_f64()?,
+                        key.value.as_numeric_f64()?,
                         model.owner_range,
                     )?;
                     (Some(id), reference)

@@ -838,3 +838,12 @@ ExactAutomationCurve::keyframe_controls visit keys once in time order, incoming
 before outgoing, using the same resolver as single-ID handle reads. Default
 control rounding and Hold/Linear suppression are unchanged. Neither path
 normalizes or mutates the author snapshot.
+
+
+### Schema 31: exact integer channel authorship
+
+Canonical channel keys now carry a discriminated Number(f64) or Integer(i64)
+author value. Integer Hold keys retain every bit through edits, archive snapshots,
+readback and prepared execution queries. The writer emits document schema 31;
+existing alpha rejection of earlier schemas remains, with no implicit migration
+or old scalar-value parser. The `.mdp` ZIP format and SQLite schema are unchanged.

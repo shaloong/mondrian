@@ -8772,7 +8772,44 @@ fn effect_curve_author_values_beyond_soft_range_preserve_exact_axes_and_history(
     effect_curve_axis_contract("beyond_soft", numeric, 1.5000000000000002);
 }
 
+#[test]
+fn effect_curve_value_nudges_preserve_full_integer_precision_and_history() {
+    let numeric = ParameterNumericContract::closed(
+        i64::MIN as f64,
+        i64::MAX as f64,
+        Some(1.0),
+        ParameterInvalidValuePolicy::Reject,
+    )
+    .expect("integer domain");
+    for (case, value, delta, expected) in [
+        ("integer_max", i64::MAX, -1.0, i64::MAX - 1),
+        ("integer_min", i64::MIN, 1.0, i64::MIN + 1),
+        (
+            "integer_precise",
+            9_007_199_254_740_993,
+            1.0,
+            9_007_199_254_740_994,
+        ),
+    ] {
+        effect_curve_author_contract(
+            case,
+            numeric,
+            PropertyValue::Int(value),
+            Some((delta, PropertyValue::Int(expected))),
+        );
+    }
+}
+
 fn effect_curve_axis_contract(case: &str, numeric: ParameterNumericContract, author_value: f64) {
+    effect_curve_author_contract(case, numeric, PropertyValue::Double(author_value), None);
+}
+
+fn effect_curve_author_contract(
+    case: &str,
+    numeric: ParameterNumericContract,
+    value: PropertyValue,
+    nudge: Option<(f64, PropertyValue)>,
+) {
     use mondrian_core::automation::{ParameterUnit, PropertyDescriptor};
     use mondrian_effects::{
         instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
@@ -8783,7 +8820,6 @@ fn effect_curve_axis_contract(case: &str, numeric: ParameterNumericContract, aut
     let kind = EffectType::Plugin(format!("plugin.test.curve_axis_{case}"));
     let parameter_id = kind.parameter_id("value").expect("parameter");
     let (min, max) = (numeric.hard_range.min, numeric.hard_range.max);
-    let value = PropertyValue::Double(author_value);
     let path = format!("plugin.test.curve_axis_{case}.value");
     let descriptor = PropertyDescriptor::new(&path, "Precise value", value.clone())
         .with_parameter_id(parameter_id.clone())
@@ -8811,19 +8847,37 @@ fn effect_curve_axis_contract(case: &str, numeric: ParameterNumericContract, aut
         .build(),
     )
     .expect("canonical definition");
-    let axes: &[bool] = if min == max { &[true] } else { &[true, false] };
+    let axes: &[bool] = if nudge.is_some() {
+        &[false]
+    } else if min == max {
+        &[true]
+    } else {
+        &[true, false]
+    };
     for &horizontal in axes {
         let time = TimelineTime::new(1, 3).expect("exact third");
         let mut effect = instantiate_effect_node(kind.clone()).expect("effect");
         let effect_id = effect.id;
-        let keyframe = Keyframe::linear(time, value.clone());
+        let keyframe = Keyframe::from_preset(
+            time,
+            value.clone(),
+            if matches!(value, PropertyValue::Int(_)) {
+                InterpolationType::Hold
+            } else {
+                InterpolationType::Linear
+            },
+        );
         let keyframe_id = keyframe.id;
         effect
             .properties
             .apply_mutation(PropertyMutation::SetKeyframe { path: path.to_owned(), keyframe })
             .expect("key");
-        let mut clip =
-            Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("clip");
+        let mut clip = if nudge.is_some() {
+            Clip::new_basic_title("Integer", "Arial", TimelineTime::ZERO, TimelineTime::ONE)
+                .expect("synthetic owner")
+        } else {
+            Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("clip")
+        };
         let clip_id = clip.id;
         clip.add_effect_node(effect);
         let mut sequence = Sequence::new("Exact effect axes");
@@ -8868,7 +8922,10 @@ fn effect_curve_axis_contract(case: &str, numeric: ParameterNumericContract, aut
                     Some(SelectedClipRef { track_id, clip_id, is_video_track: true }),
                     effect_id,
                     model,
-                    CurveEdit::Move { target: numeric_target(model, index), point },
+                    nudge.as_ref().map_or_else(
+                        || CurveEdit::Move { target: numeric_target(model, index), point },
+                        |(delta, _)| CurveEdit::NudgeValue { keyframe_id, delta: *delta, steps: 1 },
+                    ),
                 )
                 .expect("effect curve action"),
             )
@@ -8887,7 +8944,14 @@ fn effect_curve_axis_contract(case: &str, numeric: ParameterNumericContract, aut
             .1
             .keyframe_by_id(keyframe_id)
             .expect("same key");
-        if horizontal {
+        if let Some((_, expected)) = &nudge {
+            assert_eq!(&key.value, expected, "canonical integer increment");
+            assert_eq!(key.time, time, "retain exact owner time");
+            assert_eq!(
+                key.interp_out,
+                mondrian_core::automation::KeyframeInterpolation::Hold
+            );
+        } else if horizontal {
             assert_eq!(
                 key.value, value,
                 "horizontal effect drag retains every double bit"
@@ -8902,11 +8966,36 @@ fn effect_curve_axis_contract(case: &str, numeric: ParameterNumericContract, aut
             .active_sequence()
             .expect("Undo state")
             .author_state_eq_ignoring_revision(&before));
+        let archive_directory =
+            nudge.as_ref().map(|_| tempfile::tempdir().expect("archive directory"));
+        if let Some(directory) = &archive_directory {
+            let path = directory.path().join("整数撤销😀.mdp");
+            state.save_project_file_as(path.clone()).expect("save undone exact integers");
+            assert!(state.can_redo_action(), "saving preserves live Redo");
+            let mut reopened = AppState::new();
+            reopened.open_project_file(path).expect("fresh undone reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("reopened sequence")
+                .author_state_eq_ignoring_revision(&before));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        }
         assert!(state.redo_timeline().expect("Redo"));
         assert!(state
             .active_sequence()
             .expect("Redo state")
             .author_state_eq_ignoring_revision(&after));
+        if let Some(directory) = &archive_directory {
+            let path = directory.path().join("整数编辑😀.mdp");
+            state.save_project_file_as(path.clone()).expect("save edited exact integers");
+            let mut reopened = AppState::new();
+            reopened.open_project_file(path).expect("fresh edited reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("reopened sequence")
+                .author_state_eq_ignoring_revision(&after));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        }
     }
 }
 

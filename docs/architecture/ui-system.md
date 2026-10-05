@@ -3545,5 +3545,21 @@ full finite geometry and real pointer edit/cancel/release after keyboard reveal.
 The original Host transfer-selection regression remains and verifies canonical
 f32 geometry after author refresh. Native output qualification remains bound to
 its independently recorded clean source and product hash. Axis rulers, multi-key
-workflows, physical high-DPI interaction and exact full-i64 value keyboard nudges
-remain separate professional workflow work; this change does not claim them.
+workflows and physical high-DPI interaction remain separate professional
+workflow work; this change does not claim them.
+
+
+### Exact scalar key nudges
+
+Temporal Up/Down on authored keys emits NudgeValue with stable KeyframeId, a
+finite author-unit step and signed count (Shift uses five). Widget geometry is
+updated only by the canonical preview projection. Visual adapters read the typed
+source key and call the Core numeric offset contract; audio applies the same
+contract to its canonical f64 keys. Sparse visual Move retains exact time and
+metadata and enters the existing author transaction/Undo path. Transfer curves,
+virtual insertions and tangent controls retain their distinct coordinate edits.
+
+Integer curve projection uses the explicitly lossy as_numeric_f64/ channel
+projection APIs only for graph geometry. Core now retains exact Integer channel
+keys; preview/source reads and value nudges retain those bits independently of
+whether adjacent integer values occupy the same floating screen coordinate.

@@ -4,8 +4,8 @@ mod integral;
 use integral::IntegralAccumulator;
 
 use super::{
-    interpolate_numeric_value, numeric_segment_control, AnimatedProperty, Keyframe,
-    KeyframeInterpolation, PropertyValue, PropertyValueType,
+    interpolate_numeric_value, numeric_segment_control, AnimatedProperty, AnimationChannelValue,
+    Keyframe, KeyframeInterpolation, PropertyValue, PropertyValueType,
 };
 use crate::{numeric_bezier, TimeScale, TimelineTime};
 
@@ -94,7 +94,11 @@ impl PreparedPropertyQuery {
                     admit_projected_times(&times)?;
                     Ok(PreparedChannel {
                         times,
-                        values: channel.keyframes().iter().map(|key| key.value).collect(),
+                        values: channel
+                            .keyframes()
+                            .iter()
+                            .map(|key| key.value.projection())
+                            .collect(),
                         segments: channel
                             .keyframes()
                             .windows(2)
@@ -133,6 +137,19 @@ impl PreparedPropertyQuery {
     ) -> Result<PropertyValue, AutomationQueryError> {
         if self.channels.is_empty() {
             return Ok(self.property.static_value().clone());
+        }
+        if self.property.value_type() == PropertyValueType::Int
+            && self.property.descriptor.schema.allowed_interpolations
+                == [super::ParameterInterpolation::Hold]
+        {
+            let channel = &self.channels[0];
+            let index = channel.times.partition_point(|key| *key <= time.0).saturating_sub(1);
+            if let Some(key) = self.property.channels()[0].keyframes().get(index)
+                && let AnimationChannelValue::Integer(value) = key.value
+            {
+                return Ok(PropertyValue::Int(value));
+            }
+            return Err(AutomationQueryError::InvalidSource);
         }
         let values = self
             .channels
@@ -299,30 +316,44 @@ pub(super) enum NumericSegment {
 }
 
 impl NumericSegment {
-    pub(super) fn between(a: &Keyframe<f64>, b: &Keyframe<f64>) -> Self {
+    pub(super) fn between(
+        a: &Keyframe<AnimationChannelValue>,
+        b: &Keyframe<AnimationChannelValue>,
+    ) -> Self {
         match (a.interp_out, b.interp_in) {
             (KeyframeInterpolation::Hold, _) | (_, KeyframeInterpolation::Hold) => {
-                Self::Hold(a.value)
+                Self::Hold(a.value.projection())
             }
             (KeyframeInterpolation::Linear, KeyframeInterpolation::Linear) => {
-                Self::Linear([a.value, b.value])
+                Self::Linear([a.value.projection(), b.value.projection()])
             }
             _ => {
                 let span = b.time.distance_from_f64(a.time);
                 let exact_span = b.time.checked_sub(a.time).ok();
                 let out = numeric_segment_control(
                     a.interp_out,
-                    a.value,
-                    b.value,
+                    a.value.projection(),
+                    b.value.projection(),
                     span,
                     exact_span,
                     false,
                 );
-                let incoming =
-                    numeric_segment_control(b.interp_in, a.value, b.value, span, exact_span, true);
+                let incoming = numeric_segment_control(
+                    b.interp_in,
+                    a.value.projection(),
+                    b.value.projection(),
+                    span,
+                    exact_span,
+                    true,
+                );
                 Self::Bezier {
                     times: [out.0, incoming.0],
-                    values: [a.value, out.1, incoming.1, b.value],
+                    values: [
+                        a.value.projection(),
+                        out.1,
+                        incoming.1,
+                        b.value.projection(),
+                    ],
                     uniform_time: out.2 && incoming.2,
                 }
             }

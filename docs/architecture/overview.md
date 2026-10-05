@@ -684,3 +684,24 @@ products in fixed storage and round only once at publication; overflowing pieces
 can cancel without erasing a small remaining area. Integer and categorical values retain their
 canonical value conversion but do not expose floating calculus. The OpenFX
 snapshot transport and native query dispatch remain separate integration work.
+
+
+### Canonical scalar keyboard offsets
+
+ParameterNumericContract::offset_scalar applies explicit finite author-unit
+increments with a separate signed step count. Integer source values remain i64
+and use widened saturating multiply/add before clamping to the integer lattice
+inside the hard bounds. Float bounds use inward representable f32 endpoints;
+Double overflow from an oversized directed increment resolves at the finite hard
+boundary. Zero increments preserve signed zero. Invalid or empty scalar domains
+are rejected. Soft display ranges do not participate in this author calculation.
+
+
+Canonical channel keys use AnimationChannelValue::Number or ::Integer. Scalar
+integer authorship never projects through f64 during normalization, insertion,
+edit, lookup or Hold evaluation. Prepared queries read the frozen exact integer
+key at the projected Hold interval; numeric calculus retains its existing type
+admission. Continuous numeric execution and UI use explicit projection().
+The alpha persisted key shape changes directly; no legacy numeric parser or
+parallel mirror is retained. Disabled animation still permits exact author-key
+lookup, sharing the same channel evaluator behind an explicit enable-state gate.

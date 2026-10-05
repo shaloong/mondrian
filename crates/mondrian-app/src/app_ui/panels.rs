@@ -4109,7 +4109,7 @@ fn numeric_curve_model_for_property(
     }
 
     let author_value = |value: PropertyValue| {
-        let value = value.as_f64()?;
+        let value = value.as_numeric_f64()?;
         value.is_finite().then_some(value)
     };
     let normalized_time = |keyframe_time: TimelineTime| {
@@ -4136,7 +4136,10 @@ fn numeric_curve_model_for_property(
         keys.push(InspectorCurveKeyModel {
             keyframe_id: Some(key.id),
             interpolation: Some(interpolation_preset_for_keyframe(key)),
-            point: CurvePoint { x: normalized_time(key.time)?, y: key.value },
+            point: CurvePoint {
+                x: normalized_time(key.time)?,
+                y: key.value.projection(),
+            },
         });
     }
     if visible.last().is_none_or(|key| key.time < end_tick) {

@@ -135,17 +135,17 @@ pub(crate) fn handle_for_in(interpolation: KeyframeInterpolation) -> ExactBezier
     handle_for_out(interpolation)
 }
 #[cfg(test)]
-pub(crate) fn tangent_slope_from_out(
-    _current: &Keyframe<f64>,
-    _next: &Keyframe<f64>,
+pub(crate) fn tangent_slope_from_out<T>(
+    _current: &Keyframe<T>,
+    _next: &Keyframe<T>,
     handle: ExactBezierHandle,
 ) -> Option<f64> {
     (!handle.time_offset.is_zero()).then(|| handle.value_offset / handle.time_offset.to_f64())
 }
 #[cfg(test)]
-pub(crate) fn tangent_slope_from_in(
-    previous: &Keyframe<f64>,
-    current: &Keyframe<f64>,
+pub(crate) fn tangent_slope_from_in<T>(
+    previous: &Keyframe<T>,
+    current: &Keyframe<T>,
     handle: ExactBezierHandle,
 ) -> Option<f64> {
     tangent_slope_from_out(previous, current, handle)
