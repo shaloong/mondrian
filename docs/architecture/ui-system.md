@@ -3182,7 +3182,7 @@ Clip identities or a second audio-authoring interpretation.
 ### Sparse numeric curve movement
 
 Clip and Effect curves distinguish existing-key movement from insertion. A move
-names the stable key and supplies only changed normalized axes. The shared author
+names the stable key and supplies exact typed author coordinates for supplied axes. The shared author
 adapter validates supplied coordinates, retains exact original time/value for
 absent axes, and applies the same collision, identity and history rules as a full
 update. Unchanged moves create no command or author generation. Synthetic curve
@@ -3192,11 +3192,12 @@ coordinates.
 
 ### Finite curve value ranges
 
-Inspector and audio automation curves consume Core's numeric interval mapping.
-Finite endpoints remain supported when their difference overflows; fixed ranges
-still expose key times and interpolation. Visual author preparation uses the same
-mapping as projection, so changed values retain the declared range's endpoints
-without infinity or a separate interpretation. Exact untouched coordinates keep
+Inspector and audio automation keys, samples and controls use absolute f64 author
+values. Soft bounds initialize the view; hard bounds constrain key input and the
+canonical schema remains author admission authority. A center/radius viewport
+represents full finite ranges without requiring a finite endpoint difference.
+Time and interpolation remain available for fixed hard ranges. Typed conversion
+occurs only when a value axis actually changes. Exact untouched coordinates keep
 the sparse-move semantics. Audio processor curve insertion is qualified through
 validated plugin parameter snapshots, canonical Rack insertion and author actions
 with Undo/Redo, including full finite intervals and fixed maximum values. Native
@@ -3204,9 +3205,10 @@ DSP execution remains separate acceptance evidence.
 
 ### Fixed-value curve interaction
 
-Inspector models carry the canonical value interval. Visual and audio curve
-factories configure `CurveEditor::with_fixed_value` for closed single-value
-intervals, retaining the normalized midpoint. Pointer movement and insertion
+Inspector models carry a validated CurveValueAxis. Visual and audio factories
+use CurveEditor::with_author_points; a fixed hard interval retains its exact
+absolute value and locks value input. A fixed soft interval with a wider hard
+interval displays the hard interval and keeps value editing available. Pointer movement and insertion
 constrain the visible draft before any author action. Selected Up/Down keys are
 consumed without edits, including Shift; Ctrl/Alt/Meta chords keep normal shortcut
 routing. Horizontal movement, insertion, deletion and interpolation remain
@@ -3218,8 +3220,8 @@ editable.
 
 ### Continuous audio curve values
 
-Audio automation projection carries the declared value type and hard/visible
-intervals. Continuous pointer edits map directly through Core's interval mapping;
+Audio automation projection carries the declared value type and validated value
+axis. Continuous pointer edits retain absolute author units;
 the numeric editor's increment is not an author-value quantization grid. This
 preserves continuous values and avoids overflow from dividing large values by
 small editor increments. Integer parameters still round to integral values before
@@ -3476,8 +3478,8 @@ existing same-owner/panel/author-session restoration seam; active captures are
 not transferable.
 
 Focused keyboard input supports Ctrl/Cmd PageUp/PageDown for time zoom (Shift
-for value), Ctrl/Cmd Shift arrows for pan, and Ctrl/Cmd 0 for the full normalized
-view. Author point/control navigation reveals offscreen selection. Viewport
+for value), Ctrl/Cmd Shift arrows for pan, and Ctrl/Cmd 0 for the initial value
+view and complete owner-time span. Author point/control navigation reveals offscreen selection. Viewport
 commands are contained during an author pointer draft. Exact frame nudges still
 use the sequence grid independently of view scale. Both help locales describe
 the controls; normalized transfer curves share the view interaction.
@@ -3489,10 +3491,9 @@ f32/GPU submission; all markers stay under the plot clip. Zoom/pan ranges are
 bounded and extreme finite value selection retains a representable span.
 EventRouter author regressions verify zoomed pointer edits followed by an exact
 frame nudge, with two independent Undo/Redo operations and untouched key values
-on time-only edits. Temporal key/sample projections still clamp to the numeric soft range, unlike
-unclamped temporal controls. Full display/edit of legal values outside soft
-bounds remains unqualified and requires separating generic bounded transfer
-points from author value coordinates. Physical high-DPI/platform input, domain
+on time-only edits. Temporal key/sample/control projections retain absolute author
+values outside soft bounds. Only screen geometry and author key input are bounded;
+canonical evaluation is not clamped by UI display bounds. Physical high-DPI/platform input, domain
 axis rulers and multi-key workflows remain separate qualification.
 
 
@@ -3512,6 +3513,37 @@ with an exact 7/8 owner-duration time, retaining its Bezier metadata. Regression
 fixtures lower UI seed positions before the author seam. Direct codec/preparation
 checks cover exact one-seventh time, Float/Double/Integer values outside soft
 but inside hard bounds, hard/time rejection, immutable source and a property
-without numeric editor metadata. Full UI display/edit of out-of-soft values
-still needs the subsequent value-projection change; this author contract is
-its prerequisite and does not claim that visual qualification.
+without numeric editor metadata. The absolute UI value projection described below
+uses this exact insertion contract rather than a normalized value parser.
+
+
+### Absolute temporal value coordinates
+
+CurvePoint.x is a normalized f32 owner-time projection; CurvePoint.y retains an
+absolute f64 value for temporal curves. The normalized transfer constructor and
+CurveEditor::with_points retain bounded f32 transfer storage precision. Temporal
+factories use with_author_points with a validated CurveValueAxis containing soft
+and hard bounds plus an optional author-unit keyboard step. No old coordinate
+payloads or compatibility aliases are added. Integer keyboard steps honor metadata
+at integer precision; continuous pointer values are not quantized to editor steps.
+
+Visual and audio projections retain raw canonical key values, evaluated samples
+and finite control excursions. Changed handle values subtract the canonical key
+value directly, avoiding an overflowing intermediate screen delta for legal
+opposite-sign controls. Moving an unchanged axis uses the current exact key
+value/time. Preview invokes the same canonical preparation/evaluator as the
+product action. A value viewport uses a finite center and radius, including full
+Double spans and subnormal views. Segment clipping rescales overflowing differences
+and pins boundary intersections before screen f32 conversion. Hit testing ignores
+invisible keys; keyboard selection reveals out-of-view values. Zoom, pan and reset
+carry only view state; raw value coordinates stay stable through owner refresh.
+
+Tests exercise a real visual model's former 1.5-to-1.0 clamp, an actual Effect
+with soft [0,1] and hard [-2,2], exact Double single-axis edits and Undo/Redo,
+raw audio values, canonical preview, fixed hard/soft intervals, signed zero,
+full finite geometry and real pointer edit/cancel/release after keyboard reveal.
+The original Host transfer-selection regression remains and verifies canonical
+f32 geometry after author refresh. Native output qualification remains bound to
+its independently recorded clean source and product hash. Axis rulers, multi-key
+workflows, physical high-DPI interaction and exact full-i64 value keyboard nudges
+remain separate professional workflow work; this change does not claim them.

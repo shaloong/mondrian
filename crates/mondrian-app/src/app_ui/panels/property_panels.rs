@@ -444,8 +444,8 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
         )
     } else {
         CurveEditor::with_points(vec![
-            CurvePoint::new(0.0, (model.opacity / 100.0) as f32),
-            CurvePoint::new(1.0, (model.opacity / 100.0) as f32),
+            CurvePoint::new(0.0, model.opacity / 100.0),
+            CurvePoint::new(1.0, model.opacity / 100.0),
         ])
         .disabled()
     };
@@ -1825,7 +1825,7 @@ pub(super) fn audio_automation_curve_control(
     let pending_action = std::rc::Rc::new(std::cell::RefCell::new(None));
     let preview_action = pending_action.clone();
     let ids = model.keys.iter().map(|key| key.keyframe.as_ref().map(|key| key.id)).collect();
-    let editor = CurveEditor::with_points(model.points())
+    let editor = CurveEditor::with_author_points(model.points(), model.value_axis)
         .with_frame_time_step(model.frame_time_step)
         .with_keyboard_help(
             localizer.text("curve-editor-name"),
@@ -1876,11 +1876,6 @@ pub(super) fn audio_automation_curve_control(
         .with_display_points(model.display_points.clone())
         .with_point_context_menus(interpolation_menus)
         .enabled(model.is_editable);
-    let editor = if model.view_min == model.view_max {
-        editor.with_fixed_value(0.5)
-    } else {
-        editor
-    };
     Box::new(editor.on_gesture(move |event| {
         match event {
             CurveGestureEvent::Begin(gesture_id) => Some(
@@ -2541,7 +2536,6 @@ fn numeric_tangents(
                 control.neighbor_time,
                 control.handle,
                 model.owner_range,
-                [model.value_range.min, model.value_range.max],
             )
         })
         .collect()
@@ -2563,12 +2557,7 @@ fn numeric_key_points(
         .filter_map(|key| {
             Some((
                 key.id,
-                crate::app_ui::curve_tangents::project_key(
-                    key.time,
-                    key.value,
-                    model.owner_range,
-                    [model.value_range.min, model.value_range.max],
-                )?,
+                crate::app_ui::curve_tangents::project_key(key.time, key.value, model.owner_range)?,
             ))
         })
         .collect()
@@ -2642,7 +2631,7 @@ fn numeric_curve_editor(
     let pending_action = std::rc::Rc::new(std::cell::RefCell::new(None));
     let preview_action = pending_action.clone();
     let ids = model.keys.iter().map(|key| key.keyframe_id).collect();
-    let editor = CurveEditor::with_points(points)
+    let editor = CurveEditor::with_author_points(points, model.value_axis)
         .with_frame_time_step(model.frame_time_step)
         .with_keyboard_help(
             localizer.text("curve-editor-name"),
@@ -2692,11 +2681,6 @@ fn numeric_curve_editor(
         .with_display_points(display_points)
         .with_point_context_menus(interpolation_menus)
         .enabled(can_edit);
-    let editor = if model.value_range.min == model.value_range.max {
-        editor.with_fixed_value(0.5)
-    } else {
-        editor
-    };
     editor.on_gesture(move |event| match event {
         CurveGestureEvent::Begin(gesture_id) => target
             .clone()
@@ -2741,10 +2725,7 @@ pub(super) fn preview_numeric_curve_points(
                 )
                 .ok()?;
             let value = property.evaluate(time).as_f64()?;
-            Some(CurvePoint::new(
-                index as f32 / 128.0,
-                model.value_range.normalized_position(value)? as f32,
-            ))
+            Some(CurvePoint { x: index as f32 / 128.0, y: value })
         })
         .collect::<Option<Vec<_>>>()?;
     *source = std::sync::Arc::new(property);
@@ -2788,10 +2769,9 @@ fn numeric_curve_edit_payload(
             let edit = crate::app_ui::curve_tangents::lower(
                 tangent,
                 point,
-                key.time,
+                (key.time, key.value.as_f64()?),
                 handle,
                 model.owner_range,
-                [model.value_range.min, model.value_range.max],
             )?;
             ClipCurveEditPayload::EditHandle { keyframe_id: id, side, edit }
         }
@@ -2807,7 +2787,6 @@ fn numeric_curve_edit_payload(
                         key.time,
                         key.value.as_f64()?,
                         model.owner_range,
-                        [model.value_range.min, model.value_range.max],
                     )?;
                     (Some(id), reference)
                 }
@@ -2830,8 +2809,7 @@ fn numeric_curve_edit_payload(
                 let value = if point.y == reference.y {
                     model.curve_source.keyframe_by_id(keyframe_id)?.value
                 } else {
-                    crate::app::numeric_curve_author_value(&model.curve_source, f64::from(point.y))
-                        .ok()?
+                    crate::app::numeric_curve_author_value(&model.curve_source, point.y).ok()?
                 };
                 ClipCurveEditPayload::Move { keyframe_id, time: Some(time), value: Some(value) }
             } else {
@@ -2890,8 +2868,7 @@ pub(super) fn inspector_curve_point_payload(
 ) -> Option<ClipCurveAuthorPoint> {
     Some(ClipCurveAuthorPoint {
         time: crate::app::numeric_curve_author_time(model.owner_range, f64::from(point.x)).ok()?,
-        value: crate::app::numeric_curve_author_value(&model.curve_source, f64::from(point.y))
-            .ok()?,
+        value: crate::app::numeric_curve_author_value(&model.curve_source, point.y).ok()?,
     })
 }
 
@@ -3279,8 +3256,11 @@ pub(super) fn inspector_property_value_widget(
             Box::new(Button::new(label).enabled(can_edit && action.is_some()).on_click(action))
         }
         PropertyValue::Curve(curve) => {
-            let points =
-                curve.points().iter().map(|point| CurvePoint::new(point.x, point.y)).collect();
+            let points = curve
+                .points()
+                .iter()
+                .map(|point| CurvePoint::new(point.x, f64::from(point.y)))
+                .collect();
             let selected_clip = selection;
             Box::new(
                 CurveEditor::with_points(points)
@@ -3313,7 +3293,7 @@ pub(super) fn inspector_property_value_widget(
                         let curve = NormalizedCurve::new(
                             points
                                 .iter()
-                                .map(|point| NormalizedCurvePoint::new(point.x, point.y))
+                                .map(|point| NormalizedCurvePoint::new(point.x, point.y as f32))
                                 .collect(),
                         )
                         .ok()?;
@@ -3845,8 +3825,12 @@ mod temporal_handle_tests {
             |_, _, _| None,
         );
         editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
-        let screen =
-            |point: CurvePoint| Point::new(10.0 + point.x * 200.0, 10.0 + (1.0 - point.y) * 84.0);
+        let screen = |point: CurvePoint| {
+            Point::new(
+                10.0 + point.x * 200.0,
+                (10.0 + (1.0 - point.y) * 84.0) as f32,
+            )
+        };
         let mut router = EventRouter::new(editor.id());
         let actions = RefCell::new(Vec::new());
         let route =
@@ -4278,7 +4262,10 @@ mod temporal_handle_tests {
             } else {
                 model.keys[1].point
             };
-            let position = Point::new(10.0 + point.x * 200.0, 10.0 + (1.0 - point.y) * 84.0);
+            let position = Point::new(
+                10.0 + point.x * 200.0,
+                (10.0 + (1.0 - point.y) * 84.0) as f32,
+            );
             for event in [
                 UiEvent::MouseDown {
                     position,
@@ -4380,7 +4367,10 @@ mod temporal_handle_tests {
             let mut editor = fixture_curve_editor(selection, &model);
             let mut router = EventRouter::new(editor.id());
             let point = model.keys[0].point;
-            let origin = Point::new(10.0 + point.x * 200.0, 10.0 + (1.0 - point.y) * 84.0);
+            let origin = Point::new(
+                10.0 + point.x * 200.0,
+                (10.0 + (1.0 - point.y) * 84.0) as f32,
+            );
             route_temporal(
                 &mut editor,
                 &mut router,
@@ -4641,6 +4631,42 @@ mod temporal_handle_tests {
     }
 
     #[test]
+    fn temporal_value_projection_retains_legal_values_beyond_soft_range() {
+        use mondrian_core::automation::{
+            AnimatedProperty, ParameterInvalidValuePolicy, ParameterNumericContract,
+            ParameterNumericRange, ParameterUnit, PropertyDescriptor,
+        };
+        let mut contract =
+            ParameterNumericContract::closed(-2.0, 2.0, None, ParameterInvalidValuePolicy::Reject)
+                .expect("hard range");
+        contract.soft_range = ParameterNumericRange::new(0.0, 1.0).expect("soft display");
+        let mut property = AnimatedProperty::from_descriptor(
+            PropertyDescriptor::new("test.temporal.author", "Value", PropertyValue::Double(1.5))
+                .with_animatable(true)
+                .with_numeric_contract(ParameterUnit::Unitless, contract),
+        );
+        property.set_animation_enabled(true);
+        let clip = mondrian_timeline::Clip::new_basic_title(
+            "Curve",
+            "Arial",
+            TimelineTime::ZERO,
+            TimelineTime::ONE,
+        )
+        .expect("owner");
+        let model =
+            numeric_curve_model_for_property(&property, &clip, mondrian_core::Rational::new(1, 30))
+                .expect("real model");
+        assert_eq!(
+            model.keys[0].point.y, 1.5,
+            "legal author value must not be clamped to the soft display boundary"
+        );
+        assert!(
+            model.display_points.iter().all(|point| point.y == 1.5),
+            "canonical samples retain the actual author value"
+        );
+    }
+
+    #[test]
     #[ignore = "performance smoke for actual visual/audio temporal control projection"]
     fn temporal_handle_large_curve_projection_smoke() {
         use crate::app_ui::audio_automation::{
@@ -4723,8 +4749,6 @@ mod temporal_handle_tests {
                     keyframe: Some(key),
                 })
                 .collect();
-            audio.view_min = 0.0;
-            audio.view_max = 1.0;
             for domain in ["visual", "audio"] {
                 let start = Instant::now();
                 let tangents = if domain == "visual" {
@@ -4818,7 +4842,18 @@ mod temporal_handle_tests {
             let mut widget = audio_automation_curve_control(&model, &locale);
             widget.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
             let screen = |point: CurvePoint| {
-                Point::new(10.0 + 200.0 * point.x, 10.0 + 84.0 * (1.0 - point.y))
+                Point::new(
+                    10.0 + 200.0 * point.x,
+                    (10.0
+                        + 84.0
+                            * (1.0
+                                - model
+                                    .value_axis
+                                    .soft_range()
+                                    .normalized_position(point.y)
+                                    .expect("initial audio view coordinate")))
+                        as f32,
+                )
             };
             let mut router = EventRouter::new(widget.id());
             let actions = RefCell::new(Vec::new());
@@ -4957,7 +4992,10 @@ mod temporal_handle_tests {
             );
             editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
             let screen = |point: CurvePoint| {
-                Point::new(10.0 + point.x * 200.0, 10.0 + (1.0 - point.y) * 84.0)
+                Point::new(
+                    10.0 + point.x * 200.0,
+                    (10.0 + (1.0 - point.y) * 84.0) as f32,
+                )
             };
             let mut router = EventRouter::new(editor.id());
             let actions = RefCell::new(Vec::new());

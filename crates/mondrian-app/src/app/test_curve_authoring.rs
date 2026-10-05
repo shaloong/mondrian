@@ -27,7 +27,13 @@ pub(crate) fn curve_author_point(
         .expect("fixture author span");
     super::product_action::ClipCurveAuthorPoint {
         time: super::numeric_curve_author_time(range, time_ratio).expect("fixture exact time"),
-        value: super::numeric_curve_author_value(property, value_ratio)
-            .expect("fixture typed value"),
+        value: super::numeric_curve_author_value(
+            property,
+            property.descriptor.schema.numeric.as_ref().expect("fixture numeric")[0]
+                .soft_range
+                .value_at_normalized_position(value_ratio)
+                .expect("fixture UI seed"),
+        )
+        .expect("fixture typed value"),
     }
 }

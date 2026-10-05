@@ -2114,8 +2114,8 @@ pub struct InspectorCurveModel {
     pub(crate) owner_range: mondrian_core::TimelineTimeRange,
     /// Stable property instance and definition identity.
     pub property: AnimationParameterAddress,
-    /// Canonical visible value interval, including fixed-value intervals.
-    pub value_range: mondrian_core::automation::ParameterNumericRange,
+    /// Validated soft display bounds, hard input bounds and author-unit step.
+    pub value_axis: mondrian_ui_widgets::CurveValueAxis,
     /// Editable keys in monotonic-time order.
     pub keys: Vec<InspectorCurveKeyModel>,
     /// Evaluated samples used to paint Hold/Bezier semantics faithfully.
@@ -4091,7 +4091,16 @@ fn numeric_curve_model_for_property(
         return None;
     }
     let numeric = property.descriptor.schema.numeric.as_ref()?.first().copied()?;
-    numeric.soft_range.normalized_position(numeric.soft_range.min)?;
+    let value_axis = mondrian_ui_widgets::CurveValueAxis::new(
+        numeric.soft_range,
+        numeric.hard_range,
+        if property.value_type() == PropertyValueType::Int {
+            Some(numeric.step.unwrap_or(1.0).round().max(1.0))
+        } else {
+            numeric.step
+        },
+    )
+    .ok()?;
     let start_tick = clip.clip_time_in;
     let end_tick = clip.clip_time_out().ok()?;
     let duration_ticks = end_tick.checked_sub(start_tick).ok()?;
@@ -4099,9 +4108,9 @@ fn numeric_curve_model_for_property(
         return None;
     }
 
-    let normalized_value = |value: PropertyValue| {
+    let author_value = |value: PropertyValue| {
         let value = value.as_f64()?;
-        Some(numeric.soft_range.normalized_position(value)? as f32)
+        value.is_finite().then_some(value)
     };
     let normalized_time = |keyframe_time: TimelineTime| {
         let elapsed = keyframe_time.checked_sub(start_tick).ok()?.to_f64();
@@ -4117,24 +4126,27 @@ fn numeric_curve_model_for_property(
         keys.push(InspectorCurveKeyModel {
             keyframe_id: None,
             interpolation: None,
-            point: CurvePoint::new(0.0, normalized_value(property.evaluate(start_tick))?),
+            point: CurvePoint {
+                x: 0.0,
+                y: author_value(property.evaluate(start_tick))?,
+            },
         });
     }
     for key in visible {
         keys.push(InspectorCurveKeyModel {
             keyframe_id: Some(key.id),
             interpolation: Some(interpolation_preset_for_keyframe(key)),
-            point: CurvePoint::new(
-                normalized_time(key.time)?,
-                numeric.soft_range.normalized_position(key.value)? as f32,
-            ),
+            point: CurvePoint { x: normalized_time(key.time)?, y: key.value },
         });
     }
     if visible.last().is_none_or(|key| key.time < end_tick) {
         keys.push(InspectorCurveKeyModel {
             keyframe_id: None,
             interpolation: None,
-            point: CurvePoint::new(1.0, normalized_value(property.evaluate(end_tick))?),
+            point: CurvePoint {
+                x: 1.0,
+                y: author_value(property.evaluate(end_tick))?,
+            },
         });
     }
 
@@ -4144,10 +4156,10 @@ fn numeric_curve_model_for_property(
             let scale = TimeScale::new(index, DISPLAY_SEGMENTS).ok()?;
             let sample_time =
                 start_tick.checked_add(duration_ticks.checked_scale(scale).ok()?).ok()?;
-            Some(CurvePoint::new(
-                index as f32 / DISPLAY_SEGMENTS as f32,
-                normalized_value(property.evaluate(sample_time))?,
-            ))
+            Some(CurvePoint {
+                x: index as f32 / DISPLAY_SEGMENTS as f32,
+                y: author_value(property.evaluate(sample_time))?,
+            })
         })
         .collect::<Option<Vec<_>>>()?;
 
@@ -4159,7 +4171,7 @@ fn numeric_curve_model_for_property(
         curve_source: std::sync::Arc::new(property.clone()),
         owner_range: mondrian_core::TimelineTimeRange::new(start_tick, duration_ticks).ok()?,
         property: property.address(),
-        value_range: numeric.soft_range,
+        value_axis,
         keys,
         display_points,
     })

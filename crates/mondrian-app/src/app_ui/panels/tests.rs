@@ -2,6 +2,7 @@ use super::*;
 use crate::app::preview_unavailability::PreviewOutputStage;
 use crate::app::product_action::TimelineSelectionEdit;
 use crate::app::AppMessage;
+use mondrian_core::automation::{ParameterInvalidValuePolicy, ParameterNumericContract};
 use mondrian_export::queue::{ExportFailure, ExportFailureReason};
 use mondrian_ui_widgets::CurvePointTarget;
 
@@ -8538,8 +8539,12 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
         ),
         owner_range: mondrian_core::TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE)
             .expect("fixture owner interval"),
-        value_range: mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0)
-            .expect("range"),
+        value_axis: mondrian_ui_widgets::CurveValueAxis::new(
+            mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0).expect("soft"),
+            mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0).expect("hard"),
+            None,
+        )
+        .expect("axis"),
         property: property.clone(),
         keys: vec![
             InspectorCurveKeyModel {
@@ -8601,8 +8606,12 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
         ),
         owner_range: mondrian_core::TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE)
             .expect("fixture owner interval"),
-        value_range: mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0)
-            .expect("range"),
+        value_axis: mondrian_ui_widgets::CurveValueAxis::new(
+            mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0).expect("soft"),
+            mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0).expect("hard"),
+            None,
+        )
+        .expect("axis"),
         property: property.clone(),
         keys: vec![
             InspectorCurveKeyModel {
@@ -8666,9 +8675,9 @@ fn visual_curve_single_axis_drag_preserves_exact_untouched_author_coordinate() {
             .expect("stable projected key");
         let origin = model.keys[index].point;
         let point = if horizontal {
-            CurvePoint::new(origin.x + 0.1, origin.y)
+            CurvePoint { x: origin.x + 0.1, y: origin.y }
         } else {
-            CurvePoint::new(origin.x, origin.y + 0.1)
+            CurvePoint { x: origin.x, y: origin.y + 0.1 }
         };
         let before = state.active_sequence().expect("before").clone();
         state
@@ -8713,23 +8722,58 @@ fn visual_curve_single_axis_drag_preserves_exact_untouched_author_coordinate() {
 
 #[test]
 fn effect_curve_axis_drag_preserves_double_value_and_exact_time() {
-    effect_curve_axis_contract("precision", 0.0, 1.0);
+    effect_curve_axis_contract(
+        "precision",
+        ParameterNumericContract::closed(0.0, 1.0, None, ParameterInvalidValuePolicy::Reject)
+            .expect("contract"),
+        0.12345678901234568,
+    );
 }
 
 #[test]
 fn effect_curve_supports_full_finite_double_range() {
-    effect_curve_axis_contract("full_finite", -f64::MAX, f64::MAX);
+    effect_curve_axis_contract(
+        "full_finite",
+        ParameterNumericContract::closed(
+            -f64::MAX,
+            f64::MAX,
+            None,
+            ParameterInvalidValuePolicy::Reject,
+        )
+        .expect("contract"),
+        0.12345678901234568,
+    );
 }
 
 #[test]
 fn effect_curve_fixed_value_range_retains_time_editing() {
-    effect_curve_axis_contract("fixed", 0.12345678901234568, 0.12345678901234568);
+    effect_curve_axis_contract(
+        "fixed",
+        ParameterNumericContract::closed(
+            0.12345678901234568,
+            0.12345678901234568,
+            None,
+            ParameterInvalidValuePolicy::Reject,
+        )
+        .expect("fixed contract"),
+        0.12345678901234568,
+    );
 }
 
-fn effect_curve_axis_contract(case: &str, min: f64, max: f64) {
-    use mondrian_core::automation::{
-        ParameterInvalidValuePolicy, ParameterNumericContract, ParameterUnit, PropertyDescriptor,
-    };
+#[test]
+fn effect_curve_author_values_beyond_soft_range_preserve_exact_axes_and_history() {
+    let numeric = ParameterNumericContract::new(
+        mondrian_core::automation::ParameterNumericRange::new(-2.0, 2.0).expect("hard"),
+        mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0).expect("soft"),
+        None,
+        ParameterInvalidValuePolicy::Reject,
+    )
+    .expect("contract");
+    effect_curve_axis_contract("beyond_soft", numeric, 1.5000000000000002);
+}
+
+fn effect_curve_axis_contract(case: &str, numeric: ParameterNumericContract, author_value: f64) {
+    use mondrian_core::automation::{ParameterUnit, PropertyDescriptor};
     use mondrian_effects::{
         instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
         EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
@@ -8738,16 +8782,13 @@ fn effect_curve_axis_contract(case: &str, min: f64, max: f64) {
     };
     let kind = EffectType::Plugin(format!("plugin.test.curve_axis_{case}"));
     let parameter_id = kind.parameter_id("value").expect("parameter");
-    let value = PropertyValue::Double(0.12345678901234568);
+    let (min, max) = (numeric.hard_range.min, numeric.hard_range.max);
+    let value = PropertyValue::Double(author_value);
     let path = format!("plugin.test.curve_axis_{case}.value");
     let descriptor = PropertyDescriptor::new(&path, "Precise value", value.clone())
         .with_parameter_id(parameter_id.clone())
         .with_animatable(true)
-        .with_numeric_contract(
-            ParameterUnit::Normalized,
-            ParameterNumericContract::closed(min, max, None, ParameterInvalidValuePolicy::Reject)
-                .expect("range"),
-        );
+        .with_numeric_contract(ParameterUnit::Normalized, numeric);
     register_effect_definition(
         EffectPluginDefinitionBuilder::new(
             kind.key(),
@@ -8816,9 +8857,9 @@ fn effect_curve_axis_contract(case: &str, min: f64, max: f64) {
             .expect("stable key");
         let origin = model.keys[index].point;
         let point = if horizontal {
-            CurvePoint::new(origin.x + 0.1, origin.y)
+            CurvePoint { x: origin.x + 0.1, y: origin.y }
         } else {
-            CurvePoint::new(origin.x, origin.y + 0.1)
+            CurvePoint { x: origin.x, y: origin.y + 0.1 }
         };
         let before = state.active_sequence().expect("before").clone();
         state
@@ -8882,7 +8923,8 @@ fn assert_fixed_curve_input_constraint(model: &InspectorPanelModel) {
             .as_any()
             .and_then(|value| value.downcast_ref::<CurveEditor>())
             .is_some_and(|curve| {
-                curve.points().len() == 3 && curve.points().iter().all(|point| point.y == 0.5)
+                curve.points().len() == 3
+                    && curve.points().iter().all(|point| point.y == curve.points()[0].y)
             })
         {
             return Some(widget.id());
@@ -8982,7 +9024,7 @@ fn assert_fixed_curve_input_constraint(model: &InspectorPanelModel) {
                     "fixed value still supports key insertion"
                 );
                 assert!(
-                    editor(curve).points().iter().all(|point| point.y == 0.5),
+                    editor(curve).points().iter().all(|point| point.y == origin.y),
                     "insertion must respect the fixed value before release"
                 );
             }
@@ -9404,8 +9446,12 @@ fn inspector_actions_without_selection_produce_no_command() {
         ),
         owner_range: mondrian_core::TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE)
             .expect("fixture owner interval"),
-        value_range: mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0)
-            .expect("range"),
+        value_axis: mondrian_ui_widgets::CurveValueAxis::new(
+            mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0).expect("soft"),
+            mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0).expect("hard"),
+            None,
+        )
+        .expect("axis"),
         property: AnimationParameterAddress {
             animation_track_id: mondrian_core::types::AnimationTrackId::new(),
             parameter_id: mondrian_core::ParameterId::new_static("mondrian.transform.opacity"),

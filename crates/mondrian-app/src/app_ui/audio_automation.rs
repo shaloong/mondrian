@@ -1,7 +1,7 @@
 //! Product Adapter for exact owner-time audio automation.
 //!
 //! Timeline owns curve addresses, time domains, lock admission, and mutation.
-//! This Module only projects an explicit exact viewport into normalized Widget
+//! This Module projects an explicit exact time viewport and absolute author value
 //! coordinates and lowers one committed gesture back to a stable-ID edit.
 
 use std::collections::BTreeMap;
@@ -37,7 +37,7 @@ pub(crate) struct AudioAutomationCurveKeyModel {
     pub(crate) point: CurvePoint,
 }
 
-/// Complete normalized curve projection consumed by the shared CurveEditor.
+/// Absolute author values and normalized owner time consumed by CurveEditor.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AudioAutomationCurveModel {
     pub(crate) frame_time_step: TimelineTime,
@@ -46,10 +46,7 @@ pub(crate) struct AudioAutomationCurveModel {
     pub(crate) viewport: AudioAutomationViewport,
     pub(crate) keys: Vec<AudioAutomationCurveKeyModel>,
     pub(crate) display_points: Vec<CurvePoint>,
-    pub(crate) hard_min: f64,
-    pub(crate) hard_max: f64,
-    pub(crate) view_min: f64,
-    pub(crate) view_max: f64,
+    pub(crate) value_axis: mondrian_ui_widgets::CurveValueAxis,
     pub(crate) value_type: PropertyValueType,
     pub(crate) insert_interpolation: AutomationSegmentInterpolation,
     pub(crate) allowed_interpolations: Vec<ParameterInterpolation>,
@@ -73,7 +70,6 @@ impl AudioAutomationCurveModel {
                         key.time,
                         key.value,
                         self.viewport.range,
-                        [self.view_min, self.view_max],
                     )?,
                 ))
             })
@@ -102,7 +98,6 @@ impl AudioAutomationCurveModel {
                     control.neighbor_time,
                     control.handle,
                     self.viewport.range,
-                    [self.view_min, self.view_max],
                 )
             })
             .collect()
@@ -179,7 +174,7 @@ pub(crate) fn component_automation_viewport(
     })
 }
 
-/// Project one Timeline-owned curve into an explicit normalized viewport.
+/// Project one Timeline-owned curve without clamping author values to the display range.
 pub(crate) fn project_audio_automation(
     sequence: &Sequence,
     target: AudioAutomationTarget,
@@ -196,30 +191,18 @@ pub(crate) fn project_audio_automation(
         ParameterInterpolation::Hold => AutomationSegmentInterpolation::Hold,
         ParameterInterpolation::Bezier => AutomationSegmentInterpolation::Bezier,
     };
-    let mut view_min = contract.soft_range.min;
-    let mut view_max = contract.soft_range.max;
-    if let Some(curve) = inspection.curve().filter(|curve| !curve.keyframes.is_empty()) {
-        for keyframe in &curve.keyframes {
-            view_min = view_min.min(keyframe.value);
-            view_max = view_max.max(keyframe.value);
-            if let Some(handle) = keyframe.in_handle {
-                view_min = view_min.min(keyframe.value + handle.value_offset);
-                view_max = view_max.max(keyframe.value + handle.value_offset);
-            }
-            if let Some(handle) = keyframe.out_handle {
-                view_min = view_min.min(keyframe.value + handle.value_offset);
-                view_max = view_max.max(keyframe.value + handle.value_offset);
-            }
-        }
-    } else {
-        view_min = view_min.min(inspection.default_value());
-        view_max = view_max.max(inspection.default_value());
-    }
-    let value_range =
-        mondrian_core::automation::ParameterNumericRange::new(view_min, view_max).ok()?;
+    let value_axis = mondrian_ui_widgets::CurveValueAxis::new(
+        contract.soft_range,
+        contract.hard_range,
+        if contract.value_type == PropertyValueType::Int {
+            Some(contract.step.unwrap_or(1.0).round().max(1.0))
+        } else {
+            contract.step
+        },
+    )
+    .ok()?;
     let range_end = viewport.range.end().ok()?;
-    let normalized_value =
-        |value: f64| value_range.normalized_position(value).map(|position| position as f32);
+    let author_value = |value: f64| value.is_finite().then_some(value);
     let normalized_time = |time: TimelineTime| {
         let elapsed = time.checked_sub(viewport.range.start).ok()?.to_f64();
         Some((elapsed / viewport.range.duration.to_f64()).clamp(0.0, 1.0) as f32)
@@ -234,14 +217,17 @@ pub(crate) fn project_audio_automation(
         viewport.range.start,
         AudioAutomationCurveKeyModel {
             keyframe: None,
-            point: CurvePoint::new(0.0, normalized_value(evaluate(viewport.range.start)?)?),
+            point: CurvePoint {
+                x: 0.0,
+                y: author_value(evaluate(viewport.range.start)?)?,
+            },
         },
     );
     keys.insert(
         range_end,
         AudioAutomationCurveKeyModel {
             keyframe: None,
-            point: CurvePoint::new(1.0, normalized_value(evaluate(range_end)?)?),
+            point: CurvePoint { x: 1.0, y: author_value(evaluate(range_end)?)? },
         },
     );
     if let Some(curve) = inspection.curve() {
@@ -253,10 +239,10 @@ pub(crate) fn project_audio_automation(
                 keyframe.time,
                 AudioAutomationCurveKeyModel {
                     keyframe: Some(keyframe.clone()),
-                    point: CurvePoint::new(
-                        normalized_time(keyframe.time)?,
-                        normalized_value(keyframe.value)?,
-                    ),
+                    point: CurvePoint {
+                        x: normalized_time(keyframe.time)?,
+                        y: author_value(keyframe.value)?,
+                    },
                 },
             );
         }
@@ -270,10 +256,10 @@ pub(crate) fn project_audio_automation(
                 .start
                 .checked_add(viewport.range.duration.checked_scale(scale).ok()?)
                 .ok()?;
-            Some(CurvePoint::new(
-                index as f32 / DISPLAY_SEGMENTS as f32,
-                normalized_value(evaluate(time)?)?,
-            ))
+            Some(CurvePoint {
+                x: index as f32 / DISPLAY_SEGMENTS as f32,
+                y: author_value(evaluate(time)?)?,
+            })
         })
         .collect::<Option<Vec<_>>>()?;
 
@@ -295,10 +281,7 @@ pub(crate) fn project_audio_automation(
         viewport,
         keys: keys.into_values().collect(),
         display_points,
-        hard_min: contract.hard_range.min,
-        hard_max: contract.hard_range.max,
-        view_min,
-        view_max,
+        value_axis,
         value_type: contract.value_type,
         insert_interpolation,
         allowed_interpolations: allowed.to_vec(),
@@ -397,16 +380,15 @@ fn audio_curve_edit_intent(
             let edit = crate::app_ui::curve_tangents::lower(
                 tangent,
                 point,
-                key.time,
+                (key.time, key.value),
                 handle,
                 model.viewport.range,
-                [model.view_min, model.view_max],
             )?;
             AudioAutomationEdit::EditHandle { keyframe_id: id, side, edit }
         }
         CurveEdit::Insert { keyframe_id, point, .. } => {
             let time = denormalized_time(model.viewport.range, point.x)?;
-            let value = denormalized_value(model, point.y)?;
+            let value = deauthor_value(model, point.y)?;
             let mut keyframe = ExactAutomationKeyframe::linear(time, value);
             keyframe.id = keyframe_id;
             keyframe.interpolation_to_next = model.insert_interpolation;
@@ -420,7 +402,6 @@ fn audio_curve_edit_intent(
                         key.time,
                         key.value,
                         model.viewport.range,
-                        [model.view_min, model.view_max],
                     )?;
                     (Some(id), reference)
                 }
@@ -440,7 +421,7 @@ fn audio_curve_edit_intent(
                     keyframe.time = denormalized_time(model.viewport.range, point.x)?;
                 }
                 if point.y != reference.y {
-                    keyframe.value = denormalized_value(model, point.y)?;
+                    keyframe.value = deauthor_value(model, point.y)?;
                 }
                 keyframe
             } else {
@@ -448,7 +429,7 @@ fn audio_curve_edit_intent(
                     return None;
                 }
                 let time = denormalized_time(model.viewport.range, reference.x)?;
-                let value = denormalized_value(model, point.y)?;
+                let value = deauthor_value(model, point.y)?;
                 let mut keyframe = ExactAutomationKeyframe::linear(time, value);
                 keyframe.interpolation_to_next = model.insert_interpolation;
                 keyframe
@@ -476,9 +457,6 @@ pub(crate) fn preview_audio_curve_edit(
     )
     .ok()?;
     let segments = curve.prepared_segments().ok()?;
-    let range =
-        mondrian_core::automation::ParameterNumericRange::new(model.view_min, model.view_max)
-            .ok()?;
     let display = (0..=DISPLAY_SEGMENTS)
         .map(|index| {
             let time = model
@@ -502,10 +480,10 @@ pub(crate) fn preview_audio_curve_edit(
                     .min(segments.len() - 1);
                 segments[segment].evaluate(time).ok()?
             };
-            Some(CurvePoint::new(
-                index as f32 / DISPLAY_SEGMENTS as f32,
-                range.normalized_position(value)? as f32,
-            ))
+            Some(CurvePoint {
+                x: index as f32 / DISPLAY_SEGMENTS as f32,
+                y: value,
+            })
         })
         .collect::<Option<Vec<_>>>()?;
     model.source_curve = curve;
@@ -524,15 +502,16 @@ fn denormalized_time(range: TimelineTimeRange, ratio: f32) -> Option<TimelineTim
         .ok()
 }
 
-fn denormalized_value(model: &AudioAutomationCurveModel, ratio: f32) -> Option<f64> {
-    let range =
-        mondrian_core::automation::ParameterNumericRange::new(model.view_min, model.view_max)
-            .ok()?;
-    let mut value = range.value_at_normalized_position(f64::from(ratio.clamp(0.0, 1.0)))?;
-    if model.value_type == PropertyValueType::Int {
-        value = value.round();
-    }
-    value.is_finite().then_some(value.clamp(model.hard_min, model.hard_max))
+fn deauthor_value(model: &AudioAutomationCurveModel, author_value: f64) -> Option<f64> {
+    let value = if model.value_type == PropertyValueType::Int {
+        author_value.round()
+    } else {
+        author_value
+    };
+    value.is_finite().then_some(value.clamp(
+        model.value_axis.hard_range().min,
+        model.value_axis.hard_range().max,
+    ))
 }
 
 #[cfg(test)]
@@ -563,13 +542,13 @@ mod tests {
             AudioProcessorRackEdit, AudioProcessorRackEditRequest, AudioProcessorRackPlacement,
         };
 
-        for (name, min, max, initial, ratio, expected) in [
+        for (name, min, max, initial, author_value, expected) in [
             (
                 "full range quarter",
                 -f64::MAX,
                 f64::MAX,
                 PropertyValue::Double(0.0),
-                0.25,
+                -f64::MAX * 0.5,
                 -f64::MAX * 0.5,
             ),
             (
@@ -577,7 +556,7 @@ mod tests {
                 -f64::MAX,
                 f64::MAX,
                 PropertyValue::Double(0.0),
-                1.0,
+                f64::MAX,
                 f64::MAX,
             ),
             (
@@ -585,7 +564,7 @@ mod tests {
                 f64::MAX,
                 f64::MAX,
                 PropertyValue::Double(f64::MAX),
-                0.5,
+                f64::MAX,
                 f64::MAX,
             ),
             (
@@ -601,7 +580,7 @@ mod tests {
                 0.0,
                 10.0,
                 PropertyValue::Int(0),
-                0.25,
+                2.5,
                 3.0,
             ),
         ] {
@@ -670,7 +649,7 @@ mod tests {
                 CurveEdit::Insert {
                     keyframe_id: mondrian_core::KeyframeId::new(),
                     index: 1,
-                    point: CurvePoint::new(0.25, ratio),
+                    point: CurvePoint { x: 0.25, y: author_value },
                 },
             )
             .expect(
@@ -987,7 +966,7 @@ mod tests {
         let model = project_audio_automation(&sequence, target.clone(), viewport).unwrap();
         assert_eq!(model.keys.len(), 3);
         assert_eq!(model.keys[1].keyframe.as_ref().unwrap().id, keyframe_id);
-        assert_eq!(model.keys[1].point, CurvePoint::new(0.5, 0.75));
+        assert_eq!(model.keys[1].point, CurvePoint { x: 0.5, y: -6.0 });
         assert_eq!(model.display_points.len(), 129);
 
         let action = audio_automation_curve_edit_action(
@@ -1109,13 +1088,13 @@ mod tests {
             range: TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE).unwrap(),
         };
         let model = project_audio_automation(&sequence, target, viewport).unwrap();
-        assert_eq!(model.keys[1].point.y, 0.0);
+        assert_eq!(model.keys[1].point.y, -100.0);
 
         let action = audio_automation_curve_edit_action(
             &model,
             CurveEdit::Move {
                 target: audio_target(&model, 1),
-                point: CurvePoint::new(0.75, model.keys[1].point.y),
+                point: CurvePoint { x: 0.75, y: model.keys[1].point.y },
             },
         )
         .unwrap();
@@ -1156,7 +1135,7 @@ mod tests {
             let model = project_audio_automation(&sequence, target.clone(), viewport).unwrap();
             let original = model.keys[1].point;
             let point = if horizontal {
-                CurvePoint::new(0.75, original.y)
+                CurvePoint { x: 0.75, y: original.y }
             } else {
                 CurvePoint::new(original.x, 0.25)
             };

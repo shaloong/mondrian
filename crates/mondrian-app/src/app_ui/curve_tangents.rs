@@ -41,14 +41,10 @@ pub(super) fn project_key(
     time: TimelineTime,
     value: f64,
     range: TimelineTimeRange,
-    values: [f64; 2],
 ) -> Option<CurvePoint> {
     let elapsed = time.checked_sub(range.start).ok()?.to_f64();
     let x = elapsed / range.duration.to_f64();
-    let y = mondrian_core::automation::ParameterNumericRange::new(values[0], values[1])
-        .ok()?
-        .normalized_position(value)?;
-    (x.is_finite() && y.is_finite()).then(|| CurvePoint::new(x as f32, y as f32))
+    (x.is_finite() && value.is_finite()).then_some(CurvePoint { x: x as f32, y: value })
 }
 
 pub(super) fn project(
@@ -58,16 +54,10 @@ pub(super) fn project(
     neighbor: TimelineTime,
     handle: ExactBezierHandle,
     range: TimelineTimeRange,
-    values: [f64; 2],
 ) -> Option<CurveTangent> {
     let (time, value) = key;
     let span = range.duration.to_f64();
-    let width = values[1] - values[0];
-    if span <= 0.0
-        || values[0] >= values[1]
-        || !span.is_finite()
-        || values.iter().any(|value| !value.is_finite())
-    {
+    if span <= 0.0 || !span.is_finite() {
         return None;
     }
     let ratio = |time: TimelineTime| time.distance_from_f64(range.start) / span;
@@ -78,11 +68,7 @@ pub(super) fn project(
     if !control.is_finite() {
         return None;
     }
-    let y = if width.is_finite() && (control - values[0]).is_finite() {
-        (control - values[0]) / width
-    } else {
-        (control * 0.5 - values[0] * 0.5) / (values[1] * 0.5 - values[0] * 0.5)
-    } as f32;
+    let y = control;
     let limits = [owner.min(neighbor).max(0.0), owner.max(neighbor).min(1.0)];
     if !x.is_finite() || !y.is_finite() || limits[0] > limits[1] {
         return None;
@@ -98,10 +84,9 @@ pub(super) fn project(
 pub(super) fn lower(
     tangent: CurveTangent,
     point: CurvePoint,
-    time: TimelineTime,
+    key: (TimelineTime, f64),
     handle: ExactBezierHandle,
     range: TimelineTimeRange,
-    values: [f64; 2],
 ) -> Option<ExactBezierHandleEdit> {
     if !point.x.is_finite() || !point.y.is_finite() {
         return None;
@@ -115,19 +100,11 @@ pub(super) fn lower(
                 .start
                 .checked_add(range.duration.checked_scale(TimeScale::try_from(ratio).ok()?).ok()?)
                 .ok()?
-                .checked_sub(time)
+                .checked_sub(key.0)
                 .ok()?,
         )
     };
-    let value_offset = (point.y != tangent.point.y).then(|| {
-        let delta = f64::from(point.y - tangent.point.y);
-        let width = values[1] - values[0];
-        if width.is_finite() {
-            handle.value_offset + delta * width
-        } else {
-            (handle.value_offset * 0.5 + delta * (values[1] * 0.5 - values[0] * 0.5)) * 2.0
-        }
-    });
+    let value_offset = (point.y != tangent.point.y).then_some(point.y - key.1);
     if value_offset.is_some_and(|value| !value.is_finite()) {
         return None;
     }
@@ -213,32 +190,32 @@ mod tests {
             TimelineTime::ONE,
             handle,
             range,
-            [-f64::MAX, f64::MAX],
         )
         .expect("finite wide-range projection");
-        assert_eq!(tangent.point.y, 0.625);
-        let same = lower(
-            tangent,
-            tangent.point,
-            time,
-            handle,
-            range,
-            [-f64::MAX, f64::MAX],
-        )
-        .expect("exact origin");
+        assert_eq!(tangent.point.y, f64::MAX / 4.0);
+        let same = lower(tangent, tangent.point, (time, 0.0), handle, range).expect("exact origin");
         assert_eq!(same.time_offset, Some(handle.time_offset));
         assert_eq!(same.value_offset, Some(handle.value_offset));
         let edit = lower(
             tangent,
-            CurvePoint { y: 0.75, ..tangent.point },
-            time,
+            CurvePoint { y: f64::MAX / 2.0, ..tangent.point },
+            (time, 0.0),
             handle,
             range,
-            [-f64::MAX, f64::MAX],
         )
         .expect("finite edit");
         assert_eq!(edit.time_offset, Some(handle.time_offset));
         assert_eq!(edit.value_offset, Some(f64::MAX / 2.0));
+        let flipped = lower(
+            tangent,
+            CurvePoint { y: -f64::MAX, ..tangent.point },
+            (time, 0.0),
+            handle,
+            range,
+        )
+        .expect("finite opposite control without an overflowing screen delta");
+        assert_eq!(flipped.time_offset, Some(handle.time_offset));
+        assert_eq!(flipped.value_offset, Some(-f64::MAX));
     }
     #[test]
     fn temporal_handle_projection_retains_unclamped_controls_and_rejects_nonfinite_edits() {
@@ -254,17 +231,15 @@ mod tests {
             TimelineTime::ONE,
             handle,
             range,
-            [0.0, 1.0],
         )
         .expect("projection");
         assert_eq!(tangent.point.y, 2.25);
         assert!(lower(
             tangent,
-            CurvePoint { y: f32::NAN, ..tangent.point },
-            TimelineTime::ZERO,
+            CurvePoint { y: f64::NAN, ..tangent.point },
+            (TimelineTime::ZERO, 0.25),
             handle,
             range,
-            [0.0, 1.0]
         )
         .is_none());
     }

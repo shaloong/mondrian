@@ -1,6 +1,6 @@
-//! Normalized curve editor primitive.
+//! Transfer and temporal author curve editor primitive.
 //!
-//! This widget owns screen-space interaction for editable 0..1 curve points.
+//! This widget owns screen interaction; temporal values retain f64 author units.
 //! Domain layers map keyframes, effect curves, or tone curves into this compact
 //! representation and commit mutations outside the widget.
 
@@ -64,14 +64,63 @@ impl CurveEditorVisualTokens {
 pub struct CurvePoint {
     /// Normalized horizontal position.
     pub x: f32,
-    /// Normalized vertical value.
-    pub y: f32,
+    /// Absolute author value for temporal curves, or normalized transfer value.
+    pub y: f64,
 }
 
 impl CurvePoint {
-    /// Create a normalized point.
-    pub fn new(x: f32, y: f32) -> Self {
-        Self { x: x.clamp(0.0, 1.0), y: y.clamp(0.0, 1.0) }
+    /// Create a bounded transfer point at its canonical f32 storage precision.
+    pub fn new(x: f32, y: f64) -> Self {
+        Self {
+            x: x.clamp(0.0, 1.0),
+            y: f64::from(y.clamp(0.0, 1.0) as f32),
+        }
+    }
+}
+
+/// Validated value coordinates for a temporal author curve.
+/// Soft bounds initialize the view; hard bounds constrain key input, never controls.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CurveValueAxis {
+    soft: mondrian_core::automation::ParameterNumericRange,
+    hard: mondrian_core::automation::ParameterNumericRange,
+    step: Option<f64>,
+}
+
+impl CurveValueAxis {
+    /// Validate author bounds and an optional keyboard step in author units.
+    pub fn new(
+        soft: mondrian_core::automation::ParameterNumericRange,
+        hard: mondrian_core::automation::ParameterNumericRange,
+        step: Option<f64>,
+    ) -> Result<Self, mondrian_core::automation::ParameterSchemaError> {
+        mondrian_core::automation::ParameterNumericRange::new(soft.min, soft.max)?;
+        mondrian_core::automation::ParameterNumericRange::new(hard.min, hard.max)?;
+        mondrian_core::automation::ParameterNumericContract::new(
+            hard,
+            soft,
+            step,
+            mondrian_core::automation::ParameterInvalidValuePolicy::Reject,
+        )?;
+        Ok(Self { soft, hard, step })
+    }
+
+    fn initial_range(self) -> mondrian_core::automation::ParameterNumericRange {
+        if self.soft.min == self.soft.max && self.hard.min < self.hard.max {
+            self.hard
+        } else {
+            self.soft
+        }
+    }
+
+    /// Initial visible interval in absolute author units.
+    pub fn soft_range(self) -> mondrian_core::automation::ParameterNumericRange {
+        self.soft
+    }
+
+    /// Admitted key values in absolute author units.
+    pub fn hard_range(self) -> mondrian_core::automation::ParameterNumericRange {
+        self.hard
     }
 }
 
@@ -158,14 +207,14 @@ pub enum CurveEdit {
         keyframe_id: mondrian_core::KeyframeId,
         /// Current display slot, never an author identity.
         index: usize,
-        /// Current normalized author coordinates.
+        /// Normalized owner time and absolute temporal value (or bounded transfer value).
         point: CurvePoint,
     },
     /// Move an existing point without changing its identity.
     Move {
         /// Stable author or owner-snapshot target.
         target: CurvePointTarget,
-        /// Current normalized author coordinates.
+        /// Normalized owner time and absolute temporal value (or bounded transfer value).
         point: CurvePoint,
     },
     /// Move one Bezier control without changing its owner or temporal side.
@@ -263,7 +312,7 @@ impl CurveEditorViewState {
     }
 }
 
-/// Interactive normalized curve editor.
+/// Interactive bounded transfer or absolute temporal author curve editor.
 pub struct CurveEditor {
     id: WidgetId,
     view_key: Option<String>,
@@ -274,7 +323,8 @@ pub struct CurveEditor {
     viewport: CurveViewport,
     panning: Option<ViewportDrag>,
     points: Vec<CurvePoint>,
-    fixed_value: Option<f32>,
+    fixed_value: Option<f64>,
+    value_axis: Option<CurveValueAxis>,
     point_insertion_limit: Option<usize>,
     point_metadata: Vec<CurvePointMetadata>,
     keyframe_indices: std::collections::HashMap<mondrian_core::KeyframeId, usize>,
@@ -315,6 +365,15 @@ impl CurveEditor {
 
     /// Create a curve editor from normalized points.
     pub fn with_points(points: Vec<CurvePoint>) -> Self {
+        Self::from_points(points, None)
+    }
+
+    /// Create a temporal curve with absolute f64 author values and a soft initial view.
+    pub fn with_author_points(points: Vec<CurvePoint>, axis: CurveValueAxis) -> Self {
+        Self::from_points(points, Some(axis))
+    }
+
+    fn from_points(points: Vec<CurvePoint>, value_axis: Option<CurveValueAxis>) -> Self {
         let mut editor = Self {
             id: WidgetId::new(),
             view_key: None,
@@ -322,10 +381,15 @@ impl CurveEditor {
             keyboard_help: None,
             frame_time_step: None,
             bounds: Rect::ZERO,
-            viewport: CurveViewport::default(),
+            viewport: value_axis.map_or_else(CurveViewport::default, |axis| {
+                CurveViewport::with_value_range(axis.initial_range())
+            }),
             panning: None,
             points: Vec::new(),
-            fixed_value: None,
+            fixed_value: value_axis
+                .filter(|axis| axis.hard.min == axis.hard.max)
+                .map(|axis| axis.hard.min),
+            value_axis,
             point_insertion_limit: None,
             point_metadata: Vec::new(),
             keyframe_indices: std::collections::HashMap::new(),
@@ -366,14 +430,23 @@ impl CurveEditor {
         self
     }
 
-    /// Fix all point values to one finite normalized coordinate.
+    /// Fix all point values to one finite coordinate admitted by this value axis.
     /// Time movement, insertion, deletion and interpolation remain available.
     /// Invalid coordinates are ignored. This also constrains supplied points
     /// and samples, regardless of builder order or later point replacement.
-    pub fn with_fixed_value(mut self, value: f32) -> Self {
-        if !(0.0..=1.0).contains(&value) {
+    pub fn with_fixed_value(mut self, value: f64) -> Self {
+        if !value.is_finite()
+            || self.value_axis.map_or(!(0.0..=1.0).contains(&value), |axis| {
+                value < axis.hard.min || value > axis.hard.max
+            })
+        {
             return self;
         }
+        let value = if self.value_axis.is_none() {
+            f64::from(value as f32)
+        } else {
+            value
+        };
         self.fixed_value = Some(value);
         Self::constrain_values(&mut self.points, self.fixed_value);
         if let Some(points) = &mut self.display_points {
@@ -382,7 +455,7 @@ impl CurveEditor {
         self
     }
 
-    fn constrain_values(points: &mut [CurvePoint], value: Option<f32>) {
+    fn constrain_values(points: &mut [CurvePoint], value: Option<f64>) {
         if let Some(value) = value {
             for point in points {
                 point.y = value;
@@ -391,6 +464,11 @@ impl CurveEditor {
     }
 
     fn constrained_value(&self, mut point: CurvePoint) -> CurvePoint {
+        let bounds = self.value_axis.map_or([0.0, 1.0], |axis| [axis.hard.min, axis.hard.max]);
+        point.y = point.y.clamp(bounds[0], bounds[1]);
+        if self.value_axis.is_none() {
+            point.y = f64::from(point.y as f32);
+        }
         if let Some(value) = self.fixed_value {
             point.y = value;
         }
@@ -513,7 +591,7 @@ impl CurveEditor {
 
     /// Replace the read-only sampled curve used for painting.
     pub fn set_display_points(&mut self, points: Vec<CurvePoint>) {
-        let mut points = normalize_points(points);
+        let mut points = normalize_points(points, self.value_axis.is_some());
         Self::constrain_values(&mut points, self.fixed_value);
         self.display_points = Some(points);
     }
@@ -561,7 +639,7 @@ impl CurveEditor {
         &self.points
     }
 
-    /// Replace curve points. Points are clamped and sorted by x.
+    /// Replace curve points. Times are bounded and sorted; temporal values stay absolute.
     pub fn set_points(&mut self, points: Vec<CurvePoint>) {
         if self.has_active_pointer_interaction() {
             self.pending_capture_release = true;
@@ -574,7 +652,7 @@ impl CurveEditor {
         self.tangents.clear();
         self.selected_tangent = None;
         self.tangent_origin = None;
-        self.points = normalize_points(points);
+        self.points = normalize_points(points, self.value_axis.is_some());
         Self::constrain_values(&mut self.points, self.fixed_value);
         self.point_metadata = default_point_policies(self.points.len())
             .into_iter()
@@ -827,12 +905,26 @@ impl CurveEditor {
         self.geometry().hit_point(&self.points, position)
     }
 
+    fn value_step(&self, coarse: bool) -> f64 {
+        self.value_axis
+            .and_then(|axis| axis.step)
+            .unwrap_or((if coarse { 0.1 } else { 0.02 }) * self.viewport.value_radius)
+            * if coarse && self.value_axis.is_some_and(|axis| axis.step.is_some()) {
+                5.0
+            } else {
+                1.0
+            }
+    }
+
     fn constrained_point(&self, index: usize, point: CurvePoint) -> CurvePoint {
         let lock_x = self.point_metadata.get(index).is_none_or(|metadata| metadata.policy.lock_x);
         constrained_point(&self.points, index, self.constrained_value(point), lock_x)
     }
 
     fn move_point(&mut self, index: usize, point: CurvePoint) -> bool {
+        if point.x.is_nan() || point.y.is_nan() {
+            return false;
+        }
         let Some(current) = self.points.get(index).copied() else {
             return false;
         };
@@ -1181,7 +1273,9 @@ impl CurveEditor {
             return true;
         }
         if reset {
-            self.viewport = CurveViewport::default();
+            self.viewport = self.value_axis.map_or_else(CurveViewport::default, |axis| {
+                CurveViewport::with_value_range(axis.initial_range())
+            });
         } else if zoom {
             self.viewport.zoom(
                 [0.5, 0.5],
@@ -1339,8 +1433,8 @@ impl CurveEditor {
             match key {
                 KeyCode::Left => point.x -= step,
                 KeyCode::Right => point.x += step,
-                KeyCode::Up => point.y += step,
-                KeyCode::Down => point.y -= step,
+                KeyCode::Up => point.y += self.value_step(modifiers.shift),
+                KeyCode::Down => point.y -= self.value_step(modifiers.shift),
                 _ => return false,
             }
             return self.move_tangent(tangent, point, ctx);
@@ -1359,8 +1453,8 @@ impl CurveEditor {
         match key {
             KeyCode::Left => next.x -= step,
             KeyCode::Right => next.x += step,
-            KeyCode::Up => next.y += step,
-            KeyCode::Down => next.y -= step,
+            KeyCode::Up => next.y += self.value_step(modifiers.shift),
+            KeyCode::Down => next.y -= self.value_step(modifiers.shift),
             _ => return false,
         }
         if !self.move_point_from_input(index, next, ctx) {
@@ -1665,8 +1759,8 @@ impl Widget for CurveEditor {
                             drag.tangent.point.y
                                 - ((f64::from(position.y - drag.pointer_origin.y)
                                     / f64::from(plot.height))
-                                    * self.viewport.value_span)
-                                    as f32
+                                    * 2.0
+                                    * self.viewport.value_radius)
                         } else {
                             drag.tangent.point.y
                         },
@@ -1676,8 +1770,8 @@ impl Widget for CurveEditor {
                 }
                 if let Some(drag) = self.dragging {
                     let plot = self.plot_rect();
-                    let point = CurvePoint::new(
-                        if plot.width > 0.0 {
+                    let point = CurvePoint {
+                        x: if plot.width > 0.0 {
                             drag.origin.x
                                 + ((f64::from(position.x - drag.pointer_origin.x)
                                     / f64::from(plot.width))
@@ -1686,16 +1780,16 @@ impl Widget for CurveEditor {
                         } else {
                             drag.origin.x
                         },
-                        if plot.height > 0.0 {
+                        y: if plot.height > 0.0 {
                             drag.origin.y
                                 - ((f64::from(position.y - drag.pointer_origin.y)
                                     / f64::from(plot.height))
-                                    * self.viewport.value_span)
-                                    as f32
+                                    * 2.0
+                                    * self.viewport.value_radius)
                         } else {
                             drag.origin.y
                         },
-                    );
+                    };
                     self.move_point_from_input(drag.index, point, ctx);
                     return EventResult::Handled;
                 }
@@ -2352,7 +2446,7 @@ mod tests {
             &mut ctx,
         );
         assert!(editor.viewport.time_start < origin.time_start);
-        assert!(editor.viewport.value_start > origin.value_start);
+        assert!(editor.viewport.value_center > origin.value_center);
         let moved = editor.viewport;
         editor.event(&zoom, &mut ctx);
         editor.event(
@@ -2489,7 +2583,7 @@ mod tests {
         );
         assert_eq!(editor.viewport.time_span, 1.0);
         let original = editor.tangents[0].point;
-        let span = editor.viewport.value_span;
+        let span = editor.viewport.value_radius * 2.0;
         let position = grab_tangent(&mut editor, &mut ctx);
         let viewport = editor.viewport;
         editor.event(
@@ -2509,7 +2603,7 @@ mod tests {
             &mut ctx,
         );
         assert_eq!(editor.tangents[0].point.x, original.x);
-        assert!((f64::from(editor.tangents[0].point.y - original.y) - 0.1 * span).abs() < 0.000001);
+        assert!(((editor.tangents[0].point.y - original.y) - 0.1 * span).abs() < 0.000001);
         editor.event(
             &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
             &mut ctx,
@@ -3058,6 +3152,174 @@ mod tests {
     }
 
     #[test]
+    fn author_value_pointer_edits_beyond_soft_bounds_cancel_or_finish_in_one_identity() {
+        use mondrian_core::automation::ParameterNumericRange;
+        let axis = CurveValueAxis::new(
+            ParameterNumericRange::new(0.0, 1.0).expect("soft"),
+            ParameterNumericRange::new(-2.0, 2.0).expect("hard"),
+            None,
+        )
+        .expect("axis");
+        for cancel in [false, true] {
+            let id = mondrian_core::KeyframeId::new();
+            let original = CurvePoint { x: 0.5, y: 1.5000000000000002 };
+            let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let recorded = events.clone();
+            let mut editor = CurveEditor::with_author_points(
+                vec![
+                    CurvePoint { x: 0.0, y: original.y },
+                    original,
+                    CurvePoint { x: 1.0, y: original.y },
+                ],
+                axis,
+            )
+            .with_keyframe_ids(vec![None, Some(id), None])
+            .on_gesture(move |event| {
+                recorded.borrow_mut().push(event);
+                None::<Action>
+            });
+            editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+            let mut focus = CurveFocus(Some(editor.id()));
+            let mut shortcuts = DummyShortcut;
+            let mut tooltip = DummyTooltip;
+            let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &|_| {});
+            editor.event(
+                &UiEvent::FocusGained { source: FocusSource::Keyboard },
+                &mut ctx,
+            );
+            editor.event(
+                &UiEvent::KeyDown { key: KeyCode::Home, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+            editor.event(
+                &UiEvent::KeyDown {
+                    key: KeyCode::Right,
+                    modifiers: Modifiers { ctrl: true, ..Modifiers::none() },
+                },
+                &mut ctx,
+            );
+            assert_eq!(editor.selected_keyframe(), Some(id));
+            let grab = editor.to_screen(original);
+            assert!(
+                editor.plot_rect().contains(grab),
+                "keyboard reveal exposes the legal out-of-soft key"
+            );
+            editor.event(
+                &UiEvent::MouseDown {
+                    position: grab,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            let moved = Point::new(grab.x, grab.y - 6.0);
+            editor.event(
+                &UiEvent::MouseMove { position: moved, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+            assert!(editor.points[1].y > original.y && editor.points[1].y <= 2.0);
+            assert_eq!(editor.points[1].x, original.x);
+            if cancel {
+                editor.event(
+                    &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                    &mut ctx,
+                );
+                assert_eq!(editor.points[1].y.to_bits(), original.y.to_bits());
+                assert!(matches!(
+                    events.borrow().last(),
+                    Some(CurveGestureEvent::Cancel(_))
+                ));
+            } else {
+                editor.event(
+                    &UiEvent::MouseUp {
+                        position: moved,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                );
+                assert!(matches!(
+                    events.borrow().last(),
+                    Some(CurveGestureEvent::Finish(_))
+                ));
+            }
+            assert_eq!(editor.point_target(1), Some(CurvePointTarget::Keyframe(id)));
+            assert!(!editor.has_active_pointer_interaction());
+            assert_eq!(
+                events
+                    .borrow()
+                    .iter()
+                    .filter(|event| matches!(event, CurveGestureEvent::Begin(_)))
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_soft_bounds_keep_author_value_editing_and_reset_to_a_resolvable_view() {
+        use mondrian_core::automation::ParameterNumericRange;
+        let axis = CurveValueAxis::new(
+            ParameterNumericRange::new(0.0, 0.0).expect("soft"),
+            ParameterNumericRange::new(-2.0, 2.0).expect("hard"),
+            Some(2.0),
+        )
+        .expect("axis");
+        let mut editor = CurveEditor::with_author_points(
+            vec![CurvePoint { x: 0.0, y: 0.0 }, CurvePoint { x: 1.0, y: 0.0 }],
+            axis,
+        );
+        assert_eq!(editor.fixed_value, None);
+        assert_eq!(editor.viewport.value_radius, 2.0);
+        assert!(editor.move_point(0, CurvePoint { x: 0.0, y: 1.0 }));
+        assert_eq!(editor.points[0].y, 1.0);
+        assert_eq!(editor.value_step(false), 2.0);
+    }
+
+    #[test]
+    fn author_points_retain_absolute_values_and_constrain_only_key_input() {
+        use mondrian_core::automation::ParameterNumericRange;
+        let axis = CurveValueAxis::new(
+            ParameterNumericRange::new(0.0, 1.0).expect("soft"),
+            ParameterNumericRange::new(-2.0, 2.0).expect("hard"),
+            Some(0.1),
+        )
+        .expect("axis");
+        let mut editor = CurveEditor::with_author_points(
+            vec![
+                CurvePoint { x: 0.0, y: 1.5 },
+                CurvePoint { x: 1.0, y: -1.5 },
+            ],
+            axis,
+        );
+        assert_eq!(editor.points[0].y, 1.5);
+        editor.set_display_points(vec![
+            CurvePoint { x: 0.0, y: 3.0 },
+            CurvePoint { x: 1.0, y: -3.0 },
+        ]);
+        assert_eq!(editor.display_points.as_ref().expect("samples")[0].y, 3.0);
+        assert!(editor.move_point(0, CurvePoint { x: 0.0, y: 2.5 }));
+        assert_eq!(editor.points[0].y, 2.0);
+        assert_eq!(editor.value_step(false), 0.1);
+        assert_eq!(editor.value_step(true), 0.5);
+        editor.set_points(vec![
+            CurvePoint { x: 0.0, y: 1.5000000000000002 },
+            CurvePoint { x: 1.0, y: -0.0 },
+        ]);
+        assert_eq!(
+            editor.points[0].y.to_bits(),
+            1.5000000000000002f64.to_bits()
+        );
+        assert_eq!(editor.points[1].y.to_bits(), (-0.0f64).to_bits());
+        let bounded = CurveEditor::with_points(vec![
+            CurvePoint { x: 0.0, y: 1.5 },
+            CurvePoint { x: 1.0, y: -1.5 },
+        ]);
+        assert_eq!(bounded.points[0].y, 1.0);
+        assert_eq!(bounded.points[1].y, 0.0);
+    }
+
+    #[test]
     fn fixed_value_survives_programmatic_and_display_replacement() {
         let points = vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)];
         for fixed in [0.0, 0.5, 1.0] {
@@ -3078,7 +3340,8 @@ mod tests {
                 .all(|point| point.y == fixed));
         }
         for invalid in [f32::NAN, f32::INFINITY, -0.1, 1.1] {
-            let editor = CurveEditor::with_points(points.clone()).with_fixed_value(invalid);
+            let editor =
+                CurveEditor::with_points(points.clone()).with_fixed_value(f64::from(invalid));
             assert_eq!(editor.points(), points);
             assert_eq!(editor.fixed_value, None);
         }
@@ -3405,7 +3668,7 @@ mod tests {
     #[test]
     fn insertion_limit_retains_supplied_points_and_default_is_unlimited() {
         let points: Vec<_> = (0..32)
-            .map(|index| CurvePoint::new(index as f32 / 31.0, index as f32 / 31.0))
+            .map(|index| CurvePoint::new(index as f32 / 31.0, index as f64 / 31.0))
             .collect();
         let limited = CurveEditor::with_points(points.clone()).with_point_insertion_limit(0);
         assert_eq!(limited.points(), points);

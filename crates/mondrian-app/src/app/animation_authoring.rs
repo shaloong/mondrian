@@ -728,25 +728,11 @@ pub(crate) fn numeric_curve_author_time(
         .map_err(Into::into)
 }
 
-/// Map a changed viewport value through the numeric schema and declared author type.
+/// Convert an absolute UI author value to its declared scalar type.
 pub(crate) fn numeric_curve_author_value(
     property: &mondrian_core::automation::AnimatedProperty,
-    ratio: f64,
+    value: f64,
 ) -> Result<PropertyValue> {
-    if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
-        return Err(curve_error("invalid viewport value coordinate"));
-    }
-    let numeric = property
-        .descriptor
-        .schema
-        .numeric
-        .as_ref()
-        .and_then(|contracts| contracts.first())
-        .ok_or_else(|| curve_error("curve parameter has no numeric editor range"))?;
-    let value = numeric
-        .soft_range
-        .value_at_normalized_position(ratio)
-        .ok_or_else(|| curve_error("invalid normalized value coordinate"))?;
     curve_value(property.value_type(), value)
 }
 
