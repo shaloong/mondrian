@@ -3456,12 +3456,10 @@ fn promoted_current_successor_retains_recurring_cold_source_prefetch_ownership()
     );
 
     let activation_key = media_preview_key_for_simple_sequence_frame(&service, &state, 48);
-    let boundary_limit = Instant::now() + Duration::from_secs(1);
-    while state.current_frame() == 0 {
-        assert!(Instant::now() < boundary_limit, "clock did not advance");
-        std::thread::sleep(Duration::from_millis(1));
-        state.advance_playback_clock_at(Instant::now());
-    }
+    // This tests exact successor ownership, not OS sleep precision. Advance at
+    // the original Engine wake so a scheduler stall cannot skip its first frame.
+    let boundary_at = state.playback_next_wake_deadline().expect("playing Engine wake");
+    state.advance_playback_clock_at(boundary_at);
     assert_eq!(state.current_frame(), 1);
     let candidate = match execute_gpu_preview_for_test_app(&service, &state) {
         PreviewGpuFrameState::Current(candidate) => candidate,
@@ -3478,12 +3476,12 @@ fn promoted_current_successor_retains_recurring_cold_source_prefetch_ownership()
     assert!(matches!(
         state.finalize_already_visible_frame_presentation(
             candidate.presentation_ticket(),
-            Instant::now(),
+            boundary_at,
             crate::app::playback::FramePresentationPublication::prepared(|| {}),
         ),
         crate::app::playback::FramePresentationDisposition::Presented(_)
     ));
-    service.prefetch_after_gpu_presentation(state.preview_frame_execution_request(Instant::now()));
+    service.prefetch_after_gpu_presentation(state.preview_frame_execution_request(boundary_at));
     assert!(
         service.scheduler.has_pending_key(&activation_key),
         "the promoted visible current must discover and reserve the cold source transition"
