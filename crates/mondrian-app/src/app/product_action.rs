@@ -2554,6 +2554,13 @@ pub use super::animation_authoring::ClipCurveAuthorPoint;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClipCurveEditPayload {
+    /// Remove a unique nonempty key set in one author transaction.
+    RemoveMany {
+        /// Complete canonical key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Exact owner time whose original evaluation survives deletion of all keys.
+        retain_time: TimelineTime,
+    },
     /// Edit sparse exact coordinates of a stable key's temporal control.
     EditHandle {
         /// Existing canonical key identity.
@@ -2601,6 +2608,17 @@ pub enum ClipCurveEditPayload {
         /// Authoring preset, including constrained Bezier modes.
         interpolation: mondrian_core::automation::InterpolationType,
     },
+}
+
+impl ClipCurveEditPayload {
+    /// Stable deletion targets used to update selection after a successful commit.
+    pub(crate) fn removed_keyframe_ids(&self) -> Option<&[KeyframeId]> {
+        match self {
+            Self::Remove { keyframe_id } => Some(std::slice::from_ref(keyframe_id)),
+            Self::RemoveMany { keyframe_ids, .. } => Some(keyframe_ids),
+            _ => None,
+        }
+    }
 }
 
 /// Edit one Clip-owned numeric curve through stable author identity.

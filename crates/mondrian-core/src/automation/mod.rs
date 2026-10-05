@@ -2664,6 +2664,59 @@ impl AnimatedProperty {
         Ok(())
     }
 
+    /// Remove a nonempty set of complete stable keys in one constraint admission.
+    /// If every key is removed, retain the original evaluated value at `retain_time`.
+    /// Duplicate or stale identities reject the entire edit.
+    pub fn remove_keyframes(
+        &mut self,
+        ids: &[KeyframeId],
+        retain_time: TimelineTime,
+    ) -> Result<()> {
+        self.admit_channels(|candidate| {
+            let identities = ids.iter().copied().collect::<std::collections::HashSet<_>>();
+            if ids.is_empty() || identities.len() != ids.len() {
+                return Err(parameter_value_error(
+                    &candidate.descriptor.path,
+                    "key selection must be nonempty and unique",
+                ));
+            }
+            let times = candidate
+                .channels
+                .first()
+                .into_iter()
+                .flat_map(|channel| &channel.keyframes)
+                .filter(|key| identities.contains(&key.id))
+                .filter(|key| {
+                    candidate.channels.iter().skip(1).all(|channel| {
+                        channel
+                            .keyframes
+                            .binary_search_by_key(&key.time, |other| other.time)
+                            .ok()
+                            .is_some_and(|index| channel.keyframes[index].id == key.id)
+                    })
+                })
+                .map(|key| key.time)
+                .collect::<std::collections::HashSet<_>>();
+            if times.len() != ids.len() {
+                return Err(parameter_value_error(
+                    &candidate.descriptor.path,
+                    "key selection contains a stale or incomplete key",
+                ));
+            }
+            let retained = candidate.evaluate(retain_time);
+            for channel in &mut candidate.channels {
+                channel.keyframes.retain(|key| !times.contains(&key.time));
+            }
+            if candidate.channels.iter().all(|channel| channel.keyframes.is_empty()) {
+                candidate.static_value = retained;
+                candidate.animation_enabled = false;
+                Ok(())
+            } else {
+                candidate.normalize_channels()
+            }
+        })
+    }
+
     /// Atomically move a complete key while retaining its identity and typed value.
     pub fn move_keyframe(&mut self, from_time: TimelineTime, to_time: TimelineTime) -> Result<()> {
         self.admit_channels(|candidate| candidate.move_keyframe_candidate(from_time, to_time))
@@ -3332,6 +3385,10 @@ impl AnimatedProperty {
                 self.remove_keyframe(time)?;
                 Ok(())
             }
+            PropertyMutation::RemoveKeyframes { path, keyframe_ids, retain_time } => {
+                self.ensure_path(&path)?;
+                self.remove_keyframes(&keyframe_ids, retain_time)
+            }
             PropertyMutation::MoveKeyframe { path, from_time, to_time } => {
                 self.ensure_path(&path)?;
                 self.move_keyframe(from_time, to_time)
@@ -3874,6 +3931,9 @@ impl PropertyBag {
                 self.edit_keyframe(&path, keyframe_id, time, value)
             }
             PropertyMutation::RemoveKeyframe { path, time } => self.remove_keyframe(&path, time),
+            PropertyMutation::RemoveKeyframes { path, keyframe_ids, retain_time } => {
+                self.require_property_mut(&path)?.remove_keyframes(&keyframe_ids, retain_time)
+            }
             PropertyMutation::MoveKeyframe { path, from_time, to_time } => {
                 self.move_keyframe(&path, from_time, to_time)
             }
@@ -3956,6 +4016,15 @@ pub enum PropertyMutation {
         path: String,
         time: TimelineTime,
     },
+    /// Remove complete stable keys together, retaining the sampled value if no keys survive.
+    RemoveKeyframes {
+        /// Address of the owning property.
+        path: String,
+        /// Nonempty unique complete key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Exact owner time sampled before deleting the final keys.
+        retain_time: TimelineTime,
+    },
     MoveKeyframe {
         path: String,
         from_time: TimelineTime,
@@ -4022,6 +4091,7 @@ impl PropertyMutation {
             | Self::SetChannelKeyframe { path, .. }
             | Self::EditKeyframe { path, .. }
             | Self::RemoveKeyframe { path, .. }
+            | Self::RemoveKeyframes { path, .. }
             | Self::MoveKeyframe { path, .. }
             | Self::UpdateKeyframeInterpolation { path, .. }
             | Self::UpdateChannelKeyframeHandles { path, .. }
@@ -4054,6 +4124,9 @@ impl PropertyMutation {
                 EditKeyframe { path: f(path), keyframe_id, time, value }
             }
             RemoveKeyframe { path, time } => RemoveKeyframe { path: f(path), time },
+            RemoveKeyframes { path, keyframe_ids, retain_time } => {
+                RemoveKeyframes { path: f(path), keyframe_ids, retain_time }
+            }
             MoveKeyframe { path, from_time, to_time } => {
                 MoveKeyframe { path: f(path), from_time, to_time }
             }

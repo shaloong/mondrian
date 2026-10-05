@@ -28,6 +28,13 @@ pub struct ClipCurveAuthorPoint {
 /// One stable-identity curve edit requested by a product Adapter.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClipNumericCurveEdit {
+    /// Remove a unique nonempty key set in one author transaction.
+    RemoveMany {
+        /// Complete canonical key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Exact owner time whose original evaluation survives deletion of all keys.
+        retain_time: TimelineTime,
+    },
     /// Move an existing key without reconstructing untouched coordinates.
     Move {
         /// Stable identity of the existing complete key.
@@ -68,7 +75,7 @@ pub enum ClipNumericCurveEdit {
 pub struct ClipNumericCurveEditOutcome {
     /// Whether an Author Transaction committed.
     pub changed: bool,
-    /// Stable identity created, edited, or removed.
+    /// Stable identity created, edited, or removed; the first supplied key for a batch.
     pub keyframe_id: KeyframeId,
 }
 
@@ -532,6 +539,27 @@ fn prepare_property_curve_edit(
 ) -> Result<PreparedCurveEdit> {
     validate_numeric_curve_property(property, address)?;
     match edit {
+        ClipNumericCurveEdit::RemoveMany { keyframe_ids, retain_time } => {
+            if retain_time < range.start || retain_time > range.end()? {
+                return Err(curve_error(
+                    "retained evaluation time is outside the owner interval",
+                ));
+            }
+            let keyframe_id = keyframe_ids
+                .first()
+                .copied()
+                .ok_or_else(|| curve_error("key selection is empty"))?;
+            let mut candidate = property.clone();
+            candidate.remove_keyframes(&keyframe_ids, retain_time)?;
+            Ok(PreparedCurveEdit {
+                mutations: vec![PropertyMutation::RemoveKeyframes {
+                    path: path.to_owned(),
+                    keyframe_ids,
+                    retain_time,
+                }],
+                keyframe_id,
+            })
+        }
         ClipNumericCurveEdit::EditHandle { keyframe_id, side, edit } => {
             let key = property.channels()[0]
                 .keyframes()
@@ -810,6 +838,193 @@ mod tests {
     use mondrian_effects::{EffectNodeExt, EffectType};
     use mondrian_timeline::clip::Transform2D;
     use mondrian_timeline::{Clip, Sequence};
+
+    #[test]
+    fn batch_key_removal_product_action_is_atomic_and_one_reversible_edit() {
+        use super::super::product_action::{ClipCurveEditPayload, ClipEditNumericCurvePayload};
+        use super::super::ui_actions::clip_edit_numeric_curve_action;
+        for preset in [
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let mut sequence = Sequence::new("Batch keys");
+            let time_base = sequence.time_base();
+            let clip =
+                Clip::new_basic_title("Batch", "Arial", TimelineTime::ZERO, tt(20, time_base))
+                    .expect("title");
+            let selection = SelectedClipRef {
+                clip_id: clip.id,
+                track_id: sequence.video_tracks[0].id,
+                is_video_track: true,
+            };
+            sequence.video_tracks[0].add_clip(clip).expect("place");
+            let mut state = AppState::new();
+            state.test_set_sequence(Some(sequence));
+            let mut ids = Vec::new();
+            for (frame, value) in [(0, 0.1), (5, 0.7), (10, 0.4), (15, 0.9), (20, 0.2)] {
+                let key = Keyframe::from_preset(
+                    tt(frame, time_base),
+                    PropertyValue::Float(value),
+                    preset,
+                );
+                ids.push(key.id);
+                state
+                    .mutate_clip_property(
+                        selection,
+                        PropertyMutation::SetKeyframe {
+                            path: Transform2D::OPACITY_PATH.into(),
+                            keyframe: key,
+                        },
+                        "seed",
+                    )
+                    .expect("seed");
+            }
+            let address = opacity_address(&state, selection);
+            state.set_animation_keyframe_selection(
+                ids.iter()
+                    .map(|id| super::super::AnimationKeyframeSelection {
+                        property: super::super::AnimationPropertySelection {
+                            clip_id: selection.clip_id,
+                            property: address.clone(),
+                        },
+                        keyframe_id: *id,
+                    })
+                    .collect(),
+            );
+            let selected = |state: &AppState| {
+                state
+                    .selected_animation_keyframes_for_clip(selection.clip_id)
+                    .into_iter()
+                    .map(|key| key.keyframe_id)
+                    .collect::<std::collections::HashSet<_>>()
+            };
+            let original = state.active_sequence().expect("origin").clone();
+            let history = state.authoring_history().expect("history").diagnostics();
+            let generation = state.project_author_generation();
+            let action = |keyframe_ids| {
+                clip_edit_numeric_curve_action(ClipEditNumericCurvePayload {
+                    clip_id: selection.clip_id,
+                    parameter: address.clone(),
+                    edit: ClipCurveEditPayload::RemoveMany {
+                        keyframe_ids,
+                        retain_time: tt(7, time_base),
+                    },
+                })
+            };
+            for invalid in [
+                vec![],
+                vec![ids[1], ids[1]],
+                vec![ids[1], KeyframeId::new()],
+            ] {
+                state.dispatch_action(action(invalid)).expect_err("reject batch");
+                assert!(state
+                    .active_sequence()
+                    .expect("unchanged")
+                    .author_state_eq_ignoring_revision(&original));
+                assert_eq!(state.project_author_generation(), generation);
+                assert_eq!(
+                    selected(&state),
+                    ids.iter().copied().collect(),
+                    "invalid selection cannot alter current selection"
+                );
+                assert_eq!(
+                    state.authoring_history().expect("unchanged history").diagnostics(),
+                    history
+                );
+            }
+            state
+                .dispatch_action(action(vec![ids[3], ids[1]]))
+                .expect("remove selected keys");
+            let changed = state.active_sequence().expect("changed").clone();
+            let bag = state.clip_snapshot(selection).expect("clip").property_bag().expect("bag");
+            let property = bag.property(Transform2D::OPACITY_PATH).expect("opacity");
+            assert_eq!(
+                property
+                    .channel(0)
+                    .expect("channel")
+                    .keyframes()
+                    .iter()
+                    .map(|key| key.id)
+                    .collect::<Vec<_>>(),
+                [ids[0], ids[2], ids[4]]
+            );
+            property.validate().expect("constraints");
+            assert_eq!(
+                selected(&state),
+                [ids[0], ids[2], ids[4]].into_iter().collect(),
+                "only surviving author keys may stay selected"
+            );
+            let directory = tempfile::tempdir().expect("archives");
+            let changed_path = directory.path().join("批量删除🙂.mdp");
+            state.save_project_file_as(changed_path.clone()).expect("save batch");
+            let mut reopened = AppState::new();
+            reopened.open_project_file(changed_path).expect("fresh batch reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("saved batch")
+                .author_state_eq_ignoring_revision(&changed));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            drop(reopened);
+
+            assert!(state.undo_timeline().expect("one undo"));
+            assert!(state
+                .active_sequence()
+                .expect("origin after undo")
+                .author_state_eq_ignoring_revision(&original));
+            let undone_path = directory.path().join("批量撤销🙂.mdp");
+            state.save_project_file_as(undone_path.clone()).expect("save undo");
+            let mut reopened = AppState::new();
+            reopened.open_project_file(undone_path).expect("fresh undone reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("saved origin")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            drop(reopened);
+            assert!(state.redo_timeline().expect("one redo"));
+            assert!(state
+                .active_sequence()
+                .expect("changed after redo")
+                .author_state_eq_ignoring_revision(&changed));
+            let retained = state
+                .clip_snapshot(selection)
+                .expect("clip")
+                .property_bag()
+                .expect("bag")
+                .property(Transform2D::OPACITY_PATH)
+                .expect("property")
+                .evaluate(tt(7, time_base));
+            state
+                .dispatch_action(action(vec![ids[0], ids[2], ids[4]]))
+                .expect("remove every surviving key");
+            let cleared = state.active_sequence().expect("cleared").clone();
+            let bag = state.clip_snapshot(selection).expect("clip").property_bag().expect("bag");
+            let property = bag.property(Transform2D::OPACITY_PATH).expect("property");
+            assert!(property.channel(0).expect("channel").keyframes().is_empty());
+            assert_eq!(property.evaluate(TimelineTime::ZERO), retained);
+            assert!(selected(&state).is_empty());
+            let path = directory.path().join("清空后保留求值🙂.mdp");
+            state.save_project_file_as(path.clone()).expect("save unkeyed");
+            let mut reopened = AppState::new();
+            reopened.open_project_file(path).expect("fresh unkeyed reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("saved unkeyed")
+                .author_state_eq_ignoring_revision(&cleared));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            drop(reopened);
+            assert!(state.undo_timeline().expect("one undo all-delete"));
+            assert!(state
+                .active_sequence()
+                .expect("restore constrained keys")
+                .author_state_eq_ignoring_revision(&changed));
+            assert!(state.redo_timeline().expect("one redo all-delete"));
+            assert!(state
+                .active_sequence()
+                .expect("restore retained value")
+                .author_state_eq_ignoring_revision(&cleared));
+        }
+    }
 
     #[test]
     fn exact_curve_insert_codec_preserves_values_outside_soft_and_rejects_invalid_requests() {

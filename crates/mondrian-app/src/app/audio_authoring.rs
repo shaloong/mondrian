@@ -544,6 +544,110 @@ mod tests {
     }
 
     #[test]
+    fn batch_key_removal_audio_action_preserves_atomic_history_and_track_locks() {
+        use mondrian_core::{ExactAutomationKeyframe, InterpolationType, KeyframeId, TimelineTime};
+        for preset in [
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let mut sequence = Sequence::new("Batch automation");
+            let track_id = sequence.audio_tracks[0].id;
+            let target = AudioAutomationTarget::ChannelFader {
+                owner: AudioChannelStripOwner::Track { track_id },
+            };
+            let mut ids = Vec::new();
+            for (time, value) in [(0, -12.0), (1, -6.0), (2, 0.0)] {
+                let key = ExactAutomationKeyframe::linear(
+                    TimelineTime::new(time, 1).expect("time"),
+                    value,
+                );
+                ids.push(key.id);
+                mondrian_timeline::apply_audio_automation_edit(
+                    &mut sequence,
+                    &AudioAutomationEditRequest {
+                        target: target.clone(),
+                        edit: AudioAutomationEdit::UpsertKeyframe { keyframe: key },
+                    },
+                )
+                .expect("seed");
+            }
+            mondrian_timeline::apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::SetInterpolation {
+                        keyframe_id: ids[1],
+                        interpolation: preset,
+                    },
+                },
+            )
+            .expect("mode");
+            let mut state = AppState::new();
+            state.test_set_sequence(Some(sequence));
+            let original = state.active_sequence().expect("origin").clone();
+            let retain_time = TimelineTime::new(3, 2).expect("retention");
+            let retained = mondrian_timeline::inspect_audio_automation(&original, &target)
+                .expect("inspection")
+                .curve()
+                .expect("curve")
+                .evaluate(retain_time)
+                .expect("retained");
+            let action = |ids| {
+                audio_automation_edit_action(AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::RemoveKeyframes { keyframe_ids: ids, retain_time },
+                })
+            };
+            let generation = state.project_author_generation();
+            let history = state.authoring_history().expect("history").diagnostics();
+            for invalid in [
+                vec![],
+                vec![ids[1], ids[1]],
+                vec![ids[1], KeyframeId::new()],
+            ] {
+                state.dispatch_action(action(invalid)).expect_err("invalid selection");
+                assert!(state
+                    .active_sequence()
+                    .expect("unchanged")
+                    .author_state_eq_ignoring_revision(&original));
+                assert_eq!(state.project_author_generation(), generation);
+                assert_eq!(
+                    state.authoring_history().expect("history").diagnostics(),
+                    history
+                );
+            }
+            state.dispatch_action(action(ids.clone())).expect("remove all");
+            let changed = state.active_sequence().expect("changed").clone();
+            let inspection =
+                mondrian_timeline::inspect_audio_automation(&changed, &target).expect("inspection");
+            assert!(inspection.curve().is_none());
+            assert_eq!(inspection.default_value(), retained);
+            assert!(state.undo_timeline().expect("one undo"));
+            assert!(state
+                .active_sequence()
+                .expect("undone")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(state.redo_timeline().expect("one redo"));
+            assert!(state
+                .active_sequence()
+                .expect("redone")
+                .author_state_eq_ignoring_revision(&changed));
+            let mut locked = original.clone();
+            locked.audio_tracks[0].is_locked = true;
+            let before = locked.clone();
+            assert!(mondrian_timeline::apply_audio_automation_edit(
+                &mut locked,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::RemoveKeyframes { keyframe_ids: ids, retain_time },
+                }
+            )
+            .is_err());
+            assert_eq!(locked, before);
+        }
+    }
+
+    #[test]
     fn typed_rack_actions_commit_once_and_round_trip_through_undo_redo() {
         let mut state = AppState::new();
         let sequence = Sequence::new("Processor authoring");

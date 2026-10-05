@@ -19,7 +19,8 @@ use mondrian_core::{
     AudioComponentEditId, AudioProcessingScopeId, AudioProcessorInstanceId, AudioRouteId,
     AuthoringTimeDomain, BezierHandleSide, ClipId, ExactAutomationCurve, ExactAutomationKeyframe,
     ExactBezierHandleEdit, InterpolationType, KeyframeId, MixBusId, ParameterId,
-    ParameterInterpolation, ParameterNumericRange, ProgramOutputId, PropertyValueType, TrackId,
+    ParameterInterpolation, ParameterNumericRange, ProgramOutputId, PropertyValueType,
+    TimelineTime, TrackId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -75,6 +76,13 @@ pub enum AudioAutomationTarget {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AudioAutomationEdit {
+    /// Remove a unique nonempty key set with one constraint normalization.
+    RemoveKeyframes {
+        /// Stable keys in the addressed curve.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Original evaluation retained when deleting every key.
+        retain_time: TimelineTime,
+    },
     /// Edit one Bezier handle using canonical constrained geometry.
     EditHandle {
         /// Stable keyframe to edit.
@@ -811,6 +819,9 @@ fn edit_curve(
 ) -> Result<bool, AudioAutomationEditError> {
     let before = curve.clone();
     match edit {
+        AudioAutomationEdit::RemoveKeyframes { keyframe_ids, retain_time } => {
+            curve.remove_keyframes(keyframe_ids, *retain_time).map_err(invalid_automation)?;
+        }
         AudioAutomationEdit::EditHandle { keyframe_id, side, edit } => {
             curve.edit_keyframe_handle(*keyframe_id, *side, *edit).map_err(
                 |error| match error {

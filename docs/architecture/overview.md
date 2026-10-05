@@ -718,3 +718,17 @@ by another key is rejected atomically. The old slot for the same identity is
 removed before final neighbor normalization and complete validation; no partial
 state is published. Other channels retain their values. This uses the existing
 canonical normalization and evaluation contracts.
+
+### Atomic key-set deletion
+
+Core owns bulk key deletion for both AnimatedProperty and ExactAutomationCurve.
+A nonempty unique stable ID set is validated in full before mutation; stale IDs
+reject the candidate. AnimatedProperty requires complete property keys across
+all populated channels and uses a first-channel scan plus binary sibling lookup,
+rather than repeatedly scanning the curve for each selected ID. Surviving
+constraints normalize once per candidate after the whole set is removed. If no
+keys survive, the original evaluation at the explicit owner retain_time becomes
+the unkeyed value. The existing typed scalar and interpolation contracts admit
+that result. PropertyMutation::RemoveKeyframes preserves this operation through
+PropertyBag and nested path mapping. No alternate evaluator or project schema
+is introduced.

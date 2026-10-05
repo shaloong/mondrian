@@ -275,3 +275,35 @@ No fresh native golden executable was built for this UI source. The historical
 97e native/SDK/GPU/encoded evidence above remains identified with that source.
 This continuation does not close the overall NLE goal or the remaining plugin,
 platform, multi-key, pointer precision and native qualification scope.
+
+
+## Atomic key-set author command continuation (2026-10-06)
+
+Core bulk deletion validates a unique nonempty stable key set, removes it as one
+candidate and normalizes surviving constraints together. Incomplete multi-channel
+keys, stale IDs, duplicates and empty sets reject the whole request. Deleting all
+keys retains the original evaluated value at an explicit owner time. Clip/Effect
+numeric product actions and audio automation actions use existing author
+transactions; no loop of independent edits or competing curve evaluator exists.
+
+The actual Clip action test covers Auto/Continuous Bezier, whole-set rejection,
+surviving selection, one Undo/Redo, partial and all-key removal, and Unicode `.mdp`
+save/reopen for edited, undone and unkeyed states. Fresh readers are closed before
+opening another copy of the same logical Project, honoring the product lease.
+The audio action test covers both constrained modes, one Undo/Redo, invalid sets,
+all-delete retained value and locked-track refusal. A public Core integration
+also covers incomplete channel identity, path mapping and codec roundtrip.
+
+Final gates: Core library **464 passed / 0 failed / 1 ignored**, Core integration
+**1 passed**, Timeline library **229 passed / 0 failed**, App all-feature library
+**2556 passed / 0 failed / 62 ignored** (326.83s), strict workspace/all-targets/
+all-features Clippy passed (3m28s), fmt and diff checks passed. The App suite includes
+modal focus, resource transactions and actual resource-LUT Undo/save/reopen/cube
+execution. A real RED exposed RemoveMany being classified as an ordinary edit,
+selecting one removed key; both product handlers now deselect deleted IDs only
+within the addressed property. No warnings were suppressed.
+
+This is verified author-command groundwork. CurveEditor multi-selection and
+group pointer/time/value/interpolation UI remain pending. No fresh native golden
+was built on this source; the prior native report remains source-pinned historical
+evidence. Overall NLE goal remains active.

@@ -1598,3 +1598,14 @@ bypass, and processor identity survive the edit and Undo/Redo.
 Validated scalar processor schemas use their sole numeric channel contract for
 static edits and automation range projection. CLAP descriptor bounds populate
 the same canonical list; audio authoring does not introduce a second range model.
+
+### Bulk automation key removal
+
+AudioAutomationEdit::RemoveKeyframes carries stable IDs and an exact retain_time
+in the resolved target owner domain. Timeline delegates to Core's atomic key-set
+operation, then applies its existing lock, numeric-schema and complete Audio
+Program validation before publishing the Sequence candidate. Optional channel
+curves become unkeyed when deleting every key; the original evaluated value is
+retained. Processor-owned curves keep their explicit Core curve object. Preview
+and author mutation consume the same edit contract. Batch deletion creates one
+author transaction and Undo entry through the existing App action path.

@@ -3677,3 +3677,20 @@ routing tests. Actual Inspector and Mixer tests target authored points rather
 than assume the full widget center is a key. Transfer curves retain their
 normalized plot without temporal rulers. No project schema, author coordinates,
 Undo interpretation or renderer evaluation changes.
+
+### Key-set author command groundwork
+
+ClipCurveEditPayload::RemoveMany lowers to the existing Clip/Effect numeric
+curve author transaction and one Core RemoveKeyframes mutation. It carries
+stable IDs and an explicit exact owner retain_time, validated against the Clip
+owner interval. Both numeric product action handlers update selection only
+after a successful commit, removing every deleted ID from the addressed
+property while preserving surviving keys and other property selections. Empty,
+duplicate, stale or incomplete sets do not publish author state or history.
+
+This is the author command groundwork for professional curve multi-selection.
+The CurveEditor still has a single-point selection; Shift/rubber-band selection,
+group pointer/value/time edits and group interpolation remain to be connected.
+The command is already exposed through real typed Clip/Effect product actions
+and the audio automation action, including scripting callers. No widget-owned
+curve replacement or loop of independent author commands is introduced.

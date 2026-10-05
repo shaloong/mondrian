@@ -248,6 +248,12 @@ pub(super) fn numeric_curve_edit_from_payload(
     edit: &ClipCurveEditPayload,
 ) -> Result<ClipNumericCurveEdit> {
     match edit {
+        ClipCurveEditPayload::RemoveMany { keyframe_ids, retain_time } => {
+            Ok(ClipNumericCurveEdit::RemoveMany {
+                keyframe_ids: keyframe_ids.clone(),
+                retain_time: *retain_time,
+            })
+        }
         ClipCurveEditPayload::EditHandle { keyframe_id, side, edit } => {
             Ok(ClipNumericCurveEdit::EditHandle {
                 keyframe_id: *keyframe_id,

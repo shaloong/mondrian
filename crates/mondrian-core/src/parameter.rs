@@ -369,6 +369,40 @@ impl ExactAutomationCurve {
         Ok(())
     }
 
+    /// Atomically remove unique stable keys and normalize surviving constraints once.
+    /// When no keys survive, preserve the original evaluated value at `retain_time`.
+    pub fn remove_keyframes(
+        &mut self,
+        ids: &[KeyframeId],
+        retain_time: TimelineTime,
+    ) -> Result<(), AutomationError> {
+        if ids.is_empty() {
+            return Err(AutomationError::EmptyKeySelection);
+        }
+        let identities = ids.iter().copied().collect::<std::collections::HashSet<_>>();
+        if identities.len() != ids.len() {
+            return Err(AutomationError::DuplicateKeyframeIdentity);
+        }
+        let present = self
+            .keyframes
+            .iter()
+            .map(|key| key.id)
+            .collect::<std::collections::HashSet<_>>();
+        if !identities.is_subset(&present) {
+            return Err(AutomationError::UnknownKeyframe);
+        }
+        let mut candidate = self.clone();
+        let retained = candidate.evaluate(retain_time)?;
+        candidate.keyframes.retain(|key| !identities.contains(&key.id));
+        if candidate.keyframes.is_empty() {
+            candidate.default_value = retained;
+        }
+        candidate.normalize_constrained_tangents()?;
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Remove a key and refresh the constraints of its surviving neighbors.
     pub fn remove_keyframe(&mut self, keyframe_id: KeyframeId) -> Result<(), AutomationError> {
         let mut candidate = self.clone();
@@ -894,6 +928,9 @@ impl ExactAutomationSegment {
 /// Invalid automation author state or evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AutomationError {
+    /// A batch key edit must address at least one key.
+    #[error("automation key selection is empty")]
+    EmptyKeySelection,
     /// Numeric author values and handle values must be finite.
     #[error("automation values must be finite")]
     NonFiniteValue,
@@ -1301,6 +1338,64 @@ fn bezier_value(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn batch_key_removal_rejects_whole_selection_and_retains_original_final_value() {
+        for mode in [
+            ExactAutomationTangentMode::Auto,
+            ExactAutomationTangentMode::Continuous,
+        ] {
+            let mut curve =
+                ExactAutomationCurve::new(ParameterId::new_static("test.batch.remove"), 0.0)
+                    .expect("curve");
+            for index in 0..5 {
+                let mut key = ExactAutomationKeyframe::linear(
+                    TimelineTime::new(index, 1).expect("time"),
+                    (index % 3) as f64,
+                );
+                key.interpolation_to_next = AutomationSegmentInterpolation::Bezier;
+                key.tangent_mode = mode;
+                curve.set_keyframe(key).expect("seed");
+            }
+            let original = curve.clone();
+            let ids = curve.keyframes.iter().map(|key| key.id).collect::<Vec<_>>();
+            for invalid in [
+                vec![],
+                vec![ids[1], ids[1]],
+                vec![ids[1], KeyframeId::new()],
+            ] {
+                assert!(curve.remove_keyframes(&invalid, TimelineTime::ONE).is_err());
+                assert_eq!(
+                    curve, original,
+                    "invalid batch cannot delete even its valid first key"
+                );
+            }
+            let retain_time = TimelineTime::new(3, 2).expect("sample");
+            let retained = original.evaluate(retain_time).expect("original evaluation");
+            curve.remove_keyframes(&[ids[3], ids[1]], retain_time).expect("batch");
+            assert_eq!(
+                curve.keyframes.iter().map(|key| key.id).collect::<Vec<_>>(),
+                [ids[0], ids[2], ids[4]]
+            );
+            curve.validate().expect("surviving constrained geometry");
+            let mut reverse = original.clone();
+            reverse
+                .remove_keyframes(&[ids[1], ids[3]], retain_time)
+                .expect("same set reversed");
+            assert_eq!(
+                curve, reverse,
+                "selection order cannot change constrained geometry"
+            );
+            curve = original;
+            curve.remove_keyframes(&ids, retain_time).expect("remove all");
+            assert!(curve.keyframes.is_empty());
+            assert_eq!(curve.default_value, retained);
+            assert_eq!(
+                curve.evaluate(TimelineTime::new(100, 1).expect("later")).expect("unkeyed"),
+                retained
+            );
+        }
+    }
+
     #[test]
     fn ordered_audio_controls_preserve_defaults_stored_handles_and_hold_segments() {
         use super::*;

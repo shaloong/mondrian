@@ -8,13 +8,13 @@ use crate::app::preview_quality::normalize_preview_resolution_scale;
 use crate::app::product_action::{
     AssetAudioComponentRebindPayload, AssetLibraryMovePayload, AssetLibrarySelectionPayload,
     AssetProductAction, AssetRelinkPayload, AssetRenameFolderPayload, AssetRenamePayload,
-    AssetSetInterpretationPayload, AssetSetProxyModePayload, AssetTargetPayload,
-    ClipCurveEditPayload, ClipProductAction, ExportDraftEdit, ExportProductAction, ProductAction,
-    ProjectCreateWithSettingsPayload, ProjectProductAction, ProjectRecoverFromAutosavePayload,
-    SequenceProductAction, SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload,
-    TimelineProductAction, TrackAddKind, TrackAuthorControl, TrackEditPolicyControl,
-    TrackProductAction, VideoTransitionProductAction, VideoTransitionTargetPayload,
-    ViewerProductAction, VisualEffectProductAction, VisualEffectSetParameterValuePayload,
+    AssetSetInterpretationPayload, AssetSetProxyModePayload, AssetTargetPayload, ClipProductAction,
+    ExportDraftEdit, ExportProductAction, ProductAction, ProjectCreateWithSettingsPayload,
+    ProjectProductAction, ProjectRecoverFromAutosavePayload, SequenceProductAction,
+    SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload, TimelineProductAction,
+    TrackAddKind, TrackAuthorControl, TrackEditPolicyControl, TrackProductAction,
+    VideoTransitionProductAction, VideoTransitionTargetPayload, ViewerProductAction,
+    VisualEffectProductAction, VisualEffectSetParameterValuePayload,
 };
 #[cfg(test)]
 use crate::app::product_action::{
@@ -1557,7 +1557,10 @@ impl AppState {
                 let edit = super::clip_authoring::numeric_curve_edit_from_payload(&payload.edit)?;
                 let clip_id = payload.clip_id;
                 let property = payload.parameter.clone();
-                let removing = matches!(&payload.edit, ClipCurveEditPayload::Remove { .. });
+                let removed_keys = payload
+                    .edit
+                    .removed_keyframe_ids()
+                    .map(|ids| ids.iter().copied().collect::<std::collections::HashSet<_>>());
                 let outcome = self.edit_effect_numeric_curve(
                     payload.clip_id,
                     payload.effect_id,
@@ -1579,8 +1582,11 @@ impl AppState {
                     },
                     keyframe_id: outcome.keyframe_id,
                 };
-                if removing {
-                    self.animation_selection.selected_keyframes.remove(&key_selection);
+                if let Some(removed_keys) = removed_keys {
+                    self.animation_selection.selected_keyframes.retain(|selected| {
+                        selected.property != key_selection.property
+                            || !removed_keys.contains(&selected.keyframe_id)
+                    });
                     self.set_active_animation_property(clip_id, property);
                 } else {
                     self.select_animation_keyframe_only(key_selection);
@@ -1718,7 +1724,10 @@ impl AppState {
             ClipProductAction::EditNumericCurve(payload) => {
                 let clip_id = payload.clip_id;
                 let property = payload.parameter.clone();
-                let removing = matches!(&payload.edit, ClipCurveEditPayload::Remove { .. });
+                let removed_keys = payload
+                    .edit
+                    .removed_keyframe_ids()
+                    .map(|ids| ids.iter().copied().collect::<std::collections::HashSet<_>>());
                 let outcome = self.edit_clip_numeric_curve_payload(*payload)?;
                 if !outcome.changed && self.parameter_gesture_command.is_some() {
                     return Ok(());
@@ -1735,8 +1744,11 @@ impl AppState {
                     },
                     keyframe_id: outcome.keyframe_id,
                 };
-                if removing {
-                    self.animation_selection.selected_keyframes.remove(&key_selection);
+                if let Some(removed_keys) = removed_keys {
+                    self.animation_selection.selected_keyframes.retain(|selected| {
+                        selected.property != key_selection.property
+                            || !removed_keys.contains(&selected.keyframe_id)
+                    });
                     self.set_active_animation_property(clip_id, property);
                 } else {
                     self.select_animation_keyframe_only(key_selection);
