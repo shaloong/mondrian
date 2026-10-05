@@ -215,6 +215,114 @@ fn product_worker_queries_canonical_sparse_curves_across_seeks() {
     }
 }
 
+#[test]
+#[ignore = "requires SessionProbe mode curve_lifecycle and current product"]
+fn product_worker_preserves_curve_source_lifecycle_at_equal_current_values() {
+    use mondrian_core::{InterpolationType, TimeScale};
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
+        "curve_lifecycle"
+    );
+    let binary =
+        PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));
+    let inspection = inspect_openfx_binary(product_executable(), &binary).expect("inspect");
+    let identifier = "uk.co.thefoundry.BasicGainPlugin";
+    let kind = register_selected_openfx_filter(product_executable(), &inspection, identifier)
+        .expect("register");
+    let effect = instantiate_effect_node(kind).expect("effect");
+    let description =
+        describe_openfx_filter(product_executable(), &inspection, identifier).expect("describe");
+    let scale = description
+        .parameters
+        .iter()
+        .find(|parameter| parameter.name == "scale")
+        .expect("scale");
+    let property = effect
+        .properties
+        .iter()
+        .find(|(_, property)| property.descriptor.display_name == scale.label)
+        .expect("canonical property")
+        .1;
+    let curve = |endpoint| {
+        let mut property = property.clone();
+        property.set_animation_enabled(true);
+        property
+            .write_channels(TimelineTime::ZERO, &[(0, 1.0)], InterpolationType::Linear)
+            .expect("start");
+        property
+            .write_channels(
+                TimelineTime::ONE,
+                &[(0, endpoint)],
+                InterpolationType::Linear,
+            )
+            .expect("end");
+        OpenFxParameterBinding::curve(
+            OpenFxParameterValue::Double(1.0),
+            property,
+            TimeScale::new(24, 1).expect("grid"),
+        )
+    };
+    let first = curve(2.0);
+    let changed = curve(3.0);
+    let constant = OpenFxParameterBinding::constant(OpenFxParameterValue::Double(1.0));
+    let sampled = OpenFxParameterBinding::current_frame(OpenFxParameterValue::Double(1.0));
+    let input = OpenFxFloatFrame {
+        width: 2,
+        height: 2,
+        pixels: vec![[-0.25, 0.5, 2.0, 0.25]; 4],
+    };
+    let timing = OpenFxRenderTiming {
+        frame: 0.0,
+        frame_rate: 24.0,
+        first_frame: 0.0,
+        last_frame: 48.0,
+        pixel_aspect_ratio: 1.0,
+    };
+    let cancellation = mondrian_core::ExecutionCancellationToken::new();
+    let mut session = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        identifier,
+        2,
+        2,
+        &mut checkpoint(&cancellation),
+    )
+    .expect("prepare");
+    let worker = session.worker_process_id();
+    for (phase, (binding, gain)) in [
+        (&first, 2.0),
+        (&first, 2.0),
+        (&changed, 3.0),
+        (&changed, 3.0),
+        (&constant, 1.0),
+        (&constant, 1.0),
+        (&sampled, 1.0),
+        (&sampled, 1.0),
+        (&first, 2.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let bindings = BTreeMap::from([("scale".to_owned(), binding.clone())]);
+        let output = session
+            .render(&timing, &bindings, &input, &mut checkpoint(&cancellation))
+            .expect("SDK queries and change notification counts");
+        assert_eq!(
+            output.pixels,
+            input
+                .pixels
+                .iter()
+                .map(|pixel| pixel.map(|value| value * gain))
+                .collect::<Vec<_>>(),
+            "phase {phase}"
+        );
+        assert_eq!(session.worker_process_id(), worker);
+    }
+    session
+        .shutdown()
+        .expect("last immutable curve remains alive during SDK destruction");
+}
+
 fn product_executable() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_mondrian"))
 }

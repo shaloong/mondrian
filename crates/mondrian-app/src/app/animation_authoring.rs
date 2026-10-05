@@ -750,6 +750,182 @@ mod tests {
     use mondrian_timeline::clip::Transform2D;
     use mondrian_timeline::{Clip, Sequence};
 
+    #[test]
+    #[ignore = "requires current product and SessionProbe mode curve_authoring"]
+    fn native_effect_curve_author_edit_undo_saved_redo_and_reopen_preserve_output() {
+        use super::super::ui_actions::{
+            visual_effect_edit_numeric_curve_action, ClipCurveEditPayload,
+            VisualEffectEditNumericCurvePayload,
+        };
+        use mondrian_core::{SampleAspectRatio, TimelineTimeRange, WorkingColorSpace};
+        use mondrian_effects::{EffectFrameContext, LutPreparationCache, PreparedEffectProgram};
+        use std::path::PathBuf;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        assert_eq!(
+            std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
+            "curve_authoring"
+        );
+        let helper =
+            PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").expect("product"));
+        let binary =
+            PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));
+        let inspection =
+            crate::openfx_adapter::inspect_openfx_binary(&helper, &binary).expect("inspect");
+        let kind = crate::openfx_effect::register_selected_openfx_filter(
+            &helper,
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+        )
+        .expect("register");
+        let description = crate::openfx_host::describe_openfx_filter(
+            &helper,
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+        )
+        .expect("describe");
+        let label =
+            &description.parameters.iter().find(|p| p.name == "scale").expect("scale").label;
+        let mut effect = mondrian_effects::instantiate_effect_node(kind).expect("effect");
+        let mut property = effect
+            .properties
+            .iter()
+            .find(|(_, p)| &p.descriptor.display_name == label)
+            .expect("canonical property")
+            .1
+            .clone();
+        property.set_animation_enabled(true);
+        property
+            .write_channels(TimelineTime::ZERO, &[(0, 1.0)], InterpolationType::Linear)
+            .expect("start");
+        property
+            .write_channels(TimelineTime::ONE, &[(0, 2.0)], InterpolationType::Linear)
+            .expect("end");
+        let endpoint_id = property.keyframe_at(TimelineTime::ONE).expect("endpoint").id;
+        let parameter = property.address();
+        effect.properties.upsert(property);
+        let effect_id = effect.id;
+        let mut clip = Clip::new_basic_title(
+            "Curve",
+            "Arial",
+            TimelineTime::ZERO,
+            TimelineTime::new(2, 1).expect("duration"),
+        )
+        .expect("title");
+        let clip_id = clip.id;
+        clip.add_effect_node(effect);
+        let mut sequence = Sequence::new("Native curve authoring");
+        sequence.video_tracks[0].add_clip(clip).expect("clip");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        let snapshot = |state: &AppState| {
+            state
+                .active_sequence()
+                .expect("sequence")
+                .find_clip(clip_id)
+                .expect("clip")
+                .effects
+                .iter()
+                .find(|effect| effect.id == effect_id)
+                .expect("effect")
+                .properties
+                .property_by_address(&parameter)
+                .expect("property")
+                .1
+                .clone()
+        };
+        let execute = |state: &AppState, gain: f32| {
+            let clip = state.active_sequence().expect("sequence").find_clip(clip_id).expect("clip");
+            let range = TimelineTimeRange::new(
+                TimelineTime::ZERO,
+                TimelineTime::new(2, 1).expect("duration"),
+            )
+            .expect("range");
+            let context =
+                EffectFrameContext::new(Rational::FPS_24, SampleAspectRatio::SQUARE, range)
+                    .expect("context");
+            let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+                &clip.effects,
+                &[],
+                &[],
+                &[],
+                WorkingColorSpace::LinearRec709,
+                context,
+                &LutPreparationCache::uncached(),
+            )
+            .expect("production graph");
+            let graph = program.evaluate(TimelineTime::ZERO).expect("author evaluation");
+            let input = vec![[-0.25, 0.5, 2.0, 0.25]; 4];
+            let pixels =
+                mondrian_effects::apply_compiled_effect_graph_rgba_f32(&input, 2, 2, &graph, 0)
+                    .expect("actual native queries/output");
+            assert_eq!(
+                pixels,
+                input.iter().map(|pixel| pixel.map(|value| value * gain)).collect::<Vec<_>>()
+            );
+            pixels
+        };
+        let original = snapshot(&state);
+        let before = execute(&state, 2.0);
+        let generation = state.project_author_generation();
+        let action = visual_effect_edit_numeric_curve_action(VisualEffectEditNumericCurvePayload {
+            clip_id,
+            effect_id,
+            parameter: parameter.clone(),
+            edit: ClipCurveEditPayload::Move {
+                keyframe_id: endpoint_id,
+                time: None,
+                value: Some(PropertyValue::Double(3.0)),
+            },
+        });
+        state.dispatch_action(action.clone()).expect("author commit");
+        assert_eq!(state.project_author_generation(), generation + 1);
+        let edited = snapshot(&state);
+        assert_eq!(
+            edited.keyframe_at(TimelineTime::ONE).expect("endpoint").id,
+            endpoint_id
+        );
+        let after = execute(&state, 3.0);
+        assert_ne!(before, after);
+        assert!(matches!(
+            state.dispatch_action(action),
+            Err(MondrianError::ActionNotExecuted { action, .. })
+                if action == "visual_effect_edit_numeric_curve"
+        ));
+        assert_eq!(state.project_author_generation(), generation + 1);
+        assert!(state.undo_timeline().expect("undo"));
+        assert_eq!(snapshot(&state), original);
+        assert_eq!(execute(&state, 2.0), before);
+        assert!(!state.can_undo_action());
+        assert!(state.can_redo_action());
+        let temp = tempfile::tempdir().expect("workspace");
+        let undone_path = temp.path().join("撤销后的曲线🙂.mdp");
+        state.save_project_file_as(undone_path.clone()).expect("durable undone save");
+        assert!(state.can_redo_action());
+        let mut reopened = AppState::new();
+        reopened.open_project_file(undone_path).expect("fresh undone reopen");
+        assert!(!reopened.can_undo_action());
+        assert!(!reopened.can_redo_action());
+        assert_eq!(snapshot(&reopened), original);
+        assert_eq!(execute(&reopened, 2.0), before);
+        drop(reopened);
+        assert!(state.redo_timeline().expect("redo after save"));
+        assert_eq!(snapshot(&state), edited);
+        assert_eq!(execute(&state, 3.0), after);
+        let edited_path = temp.path().join("重做后的曲线🙂.mdp");
+        state.save_project_file_as(edited_path.clone()).expect("durable edited save");
+        drop(state);
+        let mut reopened = AppState::new();
+        reopened.open_project_file(edited_path).expect("fresh edited reopen");
+        assert_eq!(snapshot(&reopened), edited);
+        assert_eq!(execute(&reopened, 3.0), after);
+        assert!(!reopened.can_undo_action());
+        assert!(!reopened.can_redo_action());
+        assert_eq!(
+            reopened.asset_library().expect("library").list_assets().expect("assets").len(),
+            0
+        );
+    }
+
     fn tt(frame: i64, time_base: Rational) -> TimelineTime {
         TimelineTime::new(
             frame.checked_mul(time_base.num).expect("test time fits"),

@@ -765,3 +765,18 @@ ordered key queries and complete sparse Double2/Double3/RGB/RGBA/Integer2/Intege
 values across non-monotonic seeks and instance teardown. Its reference raster
 formula is independent of Core. This scope does not imply all OFX contexts,
 formats, temporal image dependencies, native interacts or vendor compatibility.
+
+The owned curve lifecycle fixture also qualifies nine renders on one resident
+instance at the same frame: repeated unchanged snapshots, replacement by a curve
+with an equal current value, Curve/Constant/CurrentFrame transitions, and return
+to Curve. SDK callbacks assert exact parameter-change counts and query authority;
+reference pixels depend on an off-current endpoint, so stale snapshots cannot
+pass merely because the current sample is unchanged.
+
+The native authoring acceptance dispatches the actual visual-effect curve action,
+checks one author-generation increment and structured repeated-edit rejection,
+and preserves stable key identity through Undo/Redo. It saves the undone state
+without losing the live session's Redo, opens a fresh Unicode .mdp with no history,
+and compares complete canonical properties and native compiled-graph pixels.
+It then repeats save/reopen for the redone state, using the real SQLite library.
+This qualifies editor-owned curve edits; SDK-originated author edits remain pending.
