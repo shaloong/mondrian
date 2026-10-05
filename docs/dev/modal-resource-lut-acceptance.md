@@ -3,8 +3,8 @@
 ## Qualified snapshot
 
 Windows qualification on 2026-10-05 used clean, unchanged source
-`14bf2842e6a92a7cf767d2c13050eb10f51366b5` and the rebuilt product SHA256
-`5729e13abd326d3178df7c4e339c74c320ae0692c7618ad7e29d57b81868225a`.
+`c977ce1a7da6cc59de3bb7316aaf78d66544eb26` and the rebuilt product SHA256
+`9ca0e1136d6278fc762af798fda94f8f2894974f6ff9cd3d182f66294b6e4956`.
 The accompanying documentation update does not change production code.
 
 | Scope | Evidence |
@@ -31,12 +31,28 @@ When launching an App test executable directly on Windows, include the product
 `target/debug` directory in `PATH` for its native DLLs. Missing loader setup is
 an execution environment failure, not a test result.
 
+The current App test binary separately passed 16 modal tests and 103 resource
+tests; the five ignored resource tests and the ignored native curve test were
+explicitly run and passed. These checks include the exact curve insert request
+contract and subsequent test-helper module relocation.
+
 The exact-source complete output gate is
 `scripts/validation/invoke-complete-golden-project-gate.ps1`.
 This run's consecutive report is
-`target/validation/nle-backlog-complete/20261005T031901Z-complete-golden-4f3b2ab7/complete-golden-consecutive-report.json`.
+`target/validation/nle-backlog-complete/20261005T091432Z-complete-golden-662d02a7/complete-golden-consecutive-report.json`.
 It retains per-round reports, process logs, build log, source attestation,
 product hashes, pixel errors and encoder diagnostics.
+
+## Execution environment
+
+The first current-source Golden attempt built successfully but failed at Project
+startup with Windows access denied before any output stage. Product authority
+locks deliberately live in the fixed LocalAppData namespace, outside the
+workspace sandbox; changing TEMP must not split cross-process exclusion.
+Running the identical clean source/product with the required native execution
+permissions passed all three rounds. No lock bypass or alternate product
+interpretation was added. The failed attempt remains recorded in
+`target/validation/nle-backlog-complete/20261005T090302Z-complete-golden-4208cbd7/complete-golden-consecutive-report.json`.
 
 ## Remaining qualification
 
