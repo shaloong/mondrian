@@ -3417,8 +3417,7 @@ Replacing a project/session or sequence retires the old focus identity even
 when persistent parameter/key IDs happen to match. A real Host/EventRouter
 regression routes pointer release through model rebuilding and a subsequent
 keyboard edit, then verifies two Undo/Redo steps and fresh-session isolation.
-Multi-key workflows, exact frame-grid nudges and viewport controls remain
-separate qualification work.
+Multi-key workflows and viewport controls remain separate qualification work.
 
 
 ### Keyboard curve navigation
@@ -3440,5 +3439,26 @@ focus and selection through unchanged canonical point projections. Actual
 Host regressions cover temporal and transfer refresh/key-edit/history/session
 isolation; a mouse-free EventRouter regression enters through Tab, selects a
 continuous handle, edits it while preserving exact time, returns to the point,
-and verifies two independent Undo/Redo steps. Exact frame-grid keyboard time
-steps and viewport controls remain open.
+and verifies two independent Undo/Redo steps. Viewport controls remain open.
+
+
+### Exact frame nudges
+
+Temporal visual/audio models supply the current sequence time base to the shared
+CurveEditor. Plain Left/Right emit a stable key/control ID and signed exact
+one-frame delta; Shift uses five frames. Time intent does not travel through
+normalized floating-point point geometry. The author adapter reads the current
+canonical key/control and retains omitted value coordinates and metadata.
+Keys cannot cross or replace neighbors or leave the owner viewport; controls
+clamp to their canonical neighbor span. Rejected/unchanged moves emit no author
+action or history. Pointer capture consumes horizontal frame commands without
+changing the draft owner. Generic transfer curves retain normalized behavior.
+Nonpositive configured frame steps are inert.
+
+CurvePreview now projects canonical key positions by KeyframeId alongside
+sampled curve and tangent geometry, keeping selection and drawn markers aligned
+with repeated exact edits. The API intentionally requires this field; alpha
+has no compatibility shim. Fractional-rate EventRouter regressions cover
+30, 30000/1001 and 24000/1001, repeated/Shift movements, unchanged values and
+three independent Undo/Redo operations. Boundary/collision and dense viewport
+admission checks do not use normalized minimum-point spacing.

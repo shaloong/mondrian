@@ -1826,6 +1826,7 @@ pub(super) fn audio_automation_curve_control(
     let preview_action = pending_action.clone();
     let ids = model.keys.iter().map(|key| key.keyframe.as_ref().map(|key| key.id)).collect();
     let editor = CurveEditor::with_points(model.points())
+        .with_frame_time_step(model.frame_time_step)
         .with_keyboard_help(
             localizer.text("curve-editor-name"),
             localizer.text("curve-editor-keyboard-help"),
@@ -1854,7 +1855,11 @@ pub(super) fn audio_automation_curve_control(
                     edit,
                 )?;
                 *preview_action.borrow_mut() = action;
-                Some(CurvePreview { display_points, tangents: preview_model.tangents() })
+                Some(CurvePreview {
+                    display_points,
+                    tangents: preview_model.tangents(),
+                    key_points: preview_model.key_points(),
+                })
             }
             CurveGestureEvent::Cancel(_) => {
                 if let Some(origin) = preview_origin.take() {
@@ -2542,6 +2547,33 @@ fn numeric_tangents(
         .collect()
 }
 
+fn numeric_key_points(
+    model: &InspectorCurveModel,
+    source: &mondrian_core::automation::AnimatedProperty,
+) -> Vec<(KeyframeId, CurvePoint)> {
+    let Ok(end) = model.owner_range.end() else {
+        return Vec::new();
+    };
+    source
+        .channels()
+        .first()
+        .into_iter()
+        .flat_map(|channel| channel.keyframes())
+        .filter(|key| key.time >= model.owner_range.start && key.time <= end)
+        .filter_map(|key| {
+            Some((
+                key.id,
+                crate::app_ui::curve_tangents::project_key(
+                    key.time,
+                    key.value,
+                    model.owner_range,
+                    [model.value_range.min, model.value_range.max],
+                )?,
+            ))
+        })
+        .collect()
+}
+
 fn numeric_curve_editor(
     localizer: &Localizer,
     target: Option<ParameterCurveGestureTarget>,
@@ -2611,6 +2643,7 @@ fn numeric_curve_editor(
     let preview_action = pending_action.clone();
     let ids = model.keys.iter().map(|key| key.keyframe_id).collect();
     let editor = CurveEditor::with_points(points)
+        .with_frame_time_step(model.frame_time_step)
         .with_keyboard_help(
             localizer.text("curve-editor-name"),
             localizer.text("curve-editor-keyboard-help"),
@@ -2639,6 +2672,7 @@ fn numeric_curve_editor(
                     preview_numeric_curve_points(&live_model, &mut preview_source, edit)?;
                 *preview_action.borrow_mut() = action;
                 Some(CurvePreview {
+                    key_points: numeric_key_points(&preview_model, &preview_source),
                     display_points,
                     tangents: numeric_tangents(&preview_model, &preview_source),
                 })
@@ -2722,6 +2756,29 @@ fn numeric_curve_edit_payload(
     edit: CurveEdit,
 ) -> Option<ClipCurveEditPayload> {
     let edit = match edit {
+        CurveEdit::NudgeTime { keyframe_id, side, delta } => {
+            if let Some(side) = side {
+                let control = model
+                    .curve_source
+                    .channel_keyframe_controls(0)
+                    .find(|control| control.keyframe_id == keyframe_id && control.side == side)?;
+                ClipCurveEditPayload::EditHandle {
+                    keyframe_id,
+                    side,
+                    edit: crate::app_ui::curve_tangents::nudge_handle_time(control, delta)?,
+                }
+            } else {
+                let key = model.curve_source.keyframe_by_id(keyframe_id)?;
+                let channel = model.curve_source.channels().first()?;
+                let time = crate::app_ui::curve_tangents::nudge_key_time(
+                    key.time,
+                    delta,
+                    model.owner_range,
+                    channel.keyframes().iter().map(|key| key.time),
+                )?;
+                ClipCurveEditPayload::Move { keyframe_id, time: Some(time), value: None }
+            }
+        }
         CurveEdit::Handle { keyframe_id: id, side, point } => {
             let key = model.curve_source.keyframe_by_id(id)?;
             let handle = model.curve_source.channel_keyframe_handle(0, id, side)?;
@@ -3745,7 +3802,7 @@ mod temporal_handle_tests {
         let before = state.active_sequence().expect("sequence").clone();
         let model = opacity_curve_model_for_clip(
             before.find_clip(clip_id).expect("clip"),
-            TimelineTime::ZERO,
+            state.active_sequence().expect("sequence").time_base(),
         )
         .expect("model");
         (state, selection, model, key_id)
@@ -3891,6 +3948,111 @@ mod temporal_handle_tests {
         router.route(event, &mut WidgetTreeView::new(editor), &dispatch);
         for action in actions.borrow_mut().drain(..) {
             state.dispatch_action(action).expect("real author action");
+        }
+    }
+
+    #[test]
+    fn temporal_keyboard_time_nudge_uses_the_exact_sequence_frame_grid() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        for rate in [
+            mondrian_core::Rational::new(30, 1),
+            mondrian_core::Rational::new(30_000, 1001),
+            mondrian_core::Rational::new(24_000, 1001),
+        ] {
+            let (mut state, selection, _model, id) = temporal_curve_fixture(true);
+            state.active_sequence_mut_uncommitted().expect("fixture").settings.frame_rate = rate;
+            let model = opacity_curve_model_for_clip(
+                state
+                    .active_sequence()
+                    .expect("sequence")
+                    .find_clip(selection.clip_id)
+                    .expect("clip"),
+                state.active_sequence().expect("sequence").time_base(),
+            )
+            .expect("rate-bound model");
+            let frame = TimelineTime::from_frame_position(mondrian_core::FramePosition::new(
+                1,
+                state.active_sequence().expect("sequence").time_base(),
+            ))
+            .expect("exact frame");
+            let mut editor = fixture_curve_editor(selection, &model);
+            let mut router = EventRouter::new(editor.id());
+            for (key, modifiers) in [
+                (KeyCode::Tab, Modifiers::none()),
+                (KeyCode::Home, Modifiers::none()),
+                (KeyCode::Right, Modifiers::ctrl()),
+                (KeyCode::Right, Modifiers::none()),
+            ] {
+                route_temporal(
+                    &mut editor,
+                    &mut router,
+                    &mut state,
+                    UiEvent::KeyDown { key, modifiers },
+                );
+            }
+            let bag = state
+                .active_sequence()
+                .expect("after")
+                .find_clip(selection.clip_id)
+                .expect("clip")
+                .intrinsic_parameter_bag();
+            let key = bag
+                .property(Transform2D::OPACITY_PATH)
+                .expect("opacity")
+                .keyframe_by_id(id)
+                .expect("stable key");
+            assert_eq!(
+                key.time,
+                TimelineTime::new(1, 2).expect("origin").checked_add(frame).expect("one frame"),
+                "one arrow is one exact sequence frame at {rate:?}"
+            );
+            assert_eq!(key.value, PropertyValue::Float(0.5));
+            for (direction, modifiers, frames) in [
+                (KeyCode::Right, Modifiers::none(), 2),
+                (KeyCode::Left, Modifiers::shift(), -3),
+            ] {
+                route_temporal(
+                    &mut editor,
+                    &mut router,
+                    &mut state,
+                    UiEvent::KeyDown { key: direction, modifiers },
+                );
+                let expected = TimelineTime::new(1, 2)
+                    .expect("origin")
+                    .checked_add(
+                        frame
+                            .checked_scale(TimeScale::new(frames, 1).expect("steps"))
+                            .expect("delta"),
+                    )
+                    .expect("time");
+                let bag = state
+                    .active_sequence()
+                    .expect("sequence")
+                    .find_clip(selection.clip_id)
+                    .expect("clip")
+                    .intrinsic_parameter_bag();
+                let changed = bag
+                    .property(Transform2D::OPACITY_PATH)
+                    .expect("opacity")
+                    .keyframe_by_id(id)
+                    .expect("same key");
+                assert_eq!(changed.time, expected);
+                assert_eq!(changed.value, PropertyValue::Float(0.5));
+                let point = editor.points()[editor.selected_index().expect("selection")];
+                assert_eq!(
+                    point.x,
+                    expected.to_f64() as f32,
+                    "canonical marker follows each author move"
+                );
+            }
+            for _ in 0..3 {
+                assert!(state.undo_timeline().expect("Undo"));
+            }
+            assert!(!state.can_undo_action());
+            for _ in 0..3 {
+                assert!(state.redo_timeline().expect("Redo"));
+            }
+            assert!(!state.can_redo_action());
         }
     }
 
@@ -4335,7 +4497,8 @@ mod temporal_handle_tests {
                 })
                 .expect("real author key");
         }
-        let model = opacity_curve_model_for_clip(&clip, TimelineTime::ZERO).expect("model");
+        let model = opacity_curve_model_for_clip(&clip, mondrian_core::Rational::new(1, 30))
+            .expect("model");
         assert_eq!(
             model.keys.iter().map(|key| key.keyframe_id).collect::<Vec<_>>(),
             identities[1..4].iter().copied().map(Some).collect::<Vec<_>>()
@@ -4360,7 +4523,8 @@ mod temporal_handle_tests {
         let before = clip.clone();
         clip.clip_time_in = TimelineTime::new(3, 10).expect("inner in");
         clip.duration = TimelineTime::new(2, 5).expect("inner span");
-        let model = opacity_curve_model_for_clip(&clip, TimelineTime::ZERO).expect("inner model");
+        let model = opacity_curve_model_for_clip(&clip, mondrian_core::Rational::new(1, 30))
+            .expect("inner model");
         assert_eq!(
             model.keys.iter().map(|key| key.keyframe_id).collect::<Vec<_>>(),
             vec![None, Some(identities[2]), None]
@@ -4417,8 +4581,12 @@ mod temporal_handle_tests {
                 serde_json::from_value(encoded).expect("canonical fixture");
             property.validate().expect("valid author fixture");
             let model_start = Instant::now();
-            let visual =
-                numeric_curve_model_for_property(&property, &clip).expect("actual visual model");
+            let visual = numeric_curve_model_for_property(
+                &property,
+                &clip,
+                mondrian_core::Rational::new(1, 30),
+            )
+            .expect("actual visual model");
             println!(
                 "{}",
                 serde_json::json!({"domain":"visual_model","keys":count,"nanoseconds":model_start.elapsed().as_nanos(),"projected_keys":visual.keys.len()})

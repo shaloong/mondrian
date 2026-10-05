@@ -5,6 +5,38 @@ use mondrian_core::{
 };
 use mondrian_ui_widgets::{CurvePoint, CurveTangent};
 
+pub(super) fn nudge_key_time(
+    origin: TimelineTime,
+    delta: TimelineTime,
+    range: TimelineTimeRange,
+    times: impl Iterator<Item = TimelineTime>,
+) -> Option<TimelineTime> {
+    let time = origin.checked_add(delta).ok()?;
+    if time == origin || time < range.start || time > range.end().ok()? {
+        return None;
+    }
+    if times.into_iter().any(|neighbor| {
+        (neighbor < origin && time <= neighbor) || (neighbor > origin && time >= neighbor)
+    }) {
+        return None;
+    }
+    Some(time)
+}
+
+pub(super) fn nudge_handle_time(
+    control: mondrian_core::TemporalBezierControl,
+    delta: TimelineTime,
+) -> Option<ExactBezierHandleEdit> {
+    let limit = control.neighbor_time.checked_sub(control.key_time).ok()?;
+    let next = control.handle.time_offset.checked_add(delta).ok()?;
+    let next = match control.side {
+        BezierHandleSide::Incoming => next.max(limit).min(TimelineTime::ZERO),
+        BezierHandleSide::Outgoing => next.max(TimelineTime::ZERO).min(limit),
+    };
+    (next != control.handle.time_offset)
+        .then_some(ExactBezierHandleEdit { time_offset: Some(next), value_offset: None })
+}
+
 pub(super) fn project_key(
     time: TimelineTime,
     value: f64,
@@ -109,6 +141,63 @@ pub(super) fn lower(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exact_time_nudge_rejects_collisions_crossing_boundaries_and_zero_delta() {
+        let origin = TimelineTime::new(1, 2).expect("origin");
+        let frame = TimelineTime::new(1001, 30000).expect("fractional frame");
+        let occupied = origin.checked_add(frame).expect("neighbor");
+        let range = TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE).expect("range");
+        assert_eq!(
+            nudge_key_time(origin, frame, range, [occupied].into_iter()),
+            None
+        );
+        assert_eq!(
+            nudge_key_time(origin, TimelineTime::ONE, range, [].into_iter()),
+            None
+        );
+        assert_eq!(
+            nudge_key_time(origin, TimelineTime::ZERO, range, [].into_iter()),
+            None
+        );
+        let dense_range = TimelineTimeRange::new(
+            TimelineTime::ZERO,
+            TimelineTime::new(3600, 1).expect("long viewport"),
+        )
+        .expect("range");
+        assert_eq!(
+            nudge_key_time(
+                origin,
+                frame,
+                dense_range,
+                [TimelineTime::ZERO, TimelineTime::ONE].into_iter()
+            ),
+            Some(occupied)
+        );
+        let incoming = mondrian_core::TemporalBezierControl {
+            keyframe_id: mondrian_core::KeyframeId::new(),
+            key_time: origin,
+            key_value: 0.5,
+            neighbor_time: TimelineTime::ZERO,
+            side: BezierHandleSide::Incoming,
+            handle: ExactBezierHandle {
+                time_offset: TimelineTime::ZERO.checked_sub(frame).expect("negative"),
+                value_offset: -0.123456789,
+            },
+        };
+        assert_eq!(
+            nudge_handle_time(incoming, frame),
+            Some(ExactBezierHandleEdit {
+                time_offset: Some(TimelineTime::ZERO),
+                value_offset: None
+            })
+        );
+        let zero = mondrian_core::TemporalBezierControl {
+            handle: ExactBezierHandle { time_offset: TimelineTime::ZERO, ..incoming.handle },
+            ..incoming
+        };
+        assert_eq!(nudge_handle_time(zero, frame), None);
+    }
+
     #[test]
     fn temporal_handle_projection_and_lowering_cover_full_finite_value_span() {
         let range = TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE).expect("range");

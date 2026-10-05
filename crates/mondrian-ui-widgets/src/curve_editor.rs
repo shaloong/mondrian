@@ -125,6 +125,8 @@ pub struct CurvePreview {
     pub display_points: Vec<CurvePoint>,
     /// Complete current tangent projection, including constrained partners.
     pub tangents: Vec<CurveTangent>,
+    /// Canonical positions of authored keys, bound by stable identity.
+    pub key_points: Vec<(mondrian_core::KeyframeId, CurvePoint)>,
 }
 
 /// Stable source of one editable point, independent of its current display slot.
@@ -141,6 +143,15 @@ pub enum CurvePointTarget {
 /// One point or tangent author intent, carrying its stable source identity.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CurveEdit {
+    /// Adjust an authored key or control by an exact owner-time increment.
+    NudgeTime {
+        /// Stable owning key identity.
+        keyframe_id: mondrian_core::KeyframeId,
+        /// Control side, or `None` for the key itself.
+        side: Option<mondrian_core::BezierHandleSide>,
+        /// Signed exact owner-time delta derived from an explicit UI frame grid.
+        delta: mondrian_core::TimelineTime,
+    },
     /// Insert a new point between existing neighbors.
     Insert {
         /// Identity reserved for every update of this inserted point.
@@ -251,6 +262,7 @@ pub struct CurveEditor {
     view_key: Option<String>,
     accessible_name: Option<String>,
     keyboard_help: Option<String>,
+    frame_time_step: Option<mondrian_core::TimelineTime>,
     bounds: Rect,
     points: Vec<CurvePoint>,
     fixed_value: Option<f32>,
@@ -299,6 +311,7 @@ impl CurveEditor {
             view_key: None,
             accessible_name: None,
             keyboard_help: None,
+            frame_time_step: None,
             bounds: Rect::ZERO,
             points: Vec::new(),
             fixed_value: None,
@@ -607,6 +620,13 @@ impl CurveEditor {
         self
     }
 
+    /// Route horizontal arrows as exact temporal intents rather than screen ratios.
+    /// Nonpositive steps consume horizontal keys without authoring time changes.
+    pub fn with_frame_time_step(mut self, step: mondrian_core::TimelineTime) -> Self {
+        self.frame_time_step = Some(step);
+        self
+    }
+
     /// Attach localized accessible naming and keyboard instructions.
     pub fn with_keyboard_help(mut self, name: impl Into<String>, help: impl Into<String>) -> Self {
         self.accessible_name = Some(name.into());
@@ -843,6 +863,11 @@ impl CurveEditor {
         if matches!(event, CurveGestureEvent::Edit { .. })
             && let Some(points) = points
         {
+            for (id, point) in points.key_points {
+                if let Some(index) = self.keyframe_indices.get(&id).copied() {
+                    self.points[index] = point;
+                }
+            }
             self.set_display_points(points.display_points);
             self.set_tangents(points.tangents);
             ctx.request_repaint();
@@ -1169,6 +1194,30 @@ impl CurveEditor {
         modifiers: Modifiers,
         ctx: &mut EventContext,
     ) -> bool {
+        if let Some(step) = self.frame_time_step
+            && matches!(key, KeyCode::Left | KeyCode::Right)
+            && !modifiers.ctrl
+            && !modifiers.alt
+            && !modifiers.meta
+        {
+            if self.has_active_pointer_interaction() || step <= mondrian_core::TimelineTime::ZERO {
+                return true;
+            }
+            let target = self
+                .selected_tangent
+                .map(|(id, side)| (id, Some(side)))
+                .or_else(|| self.selected_keyframe().map(|id| (id, None)));
+            if let Some((keyframe_id, side)) = target {
+                let count = if modifiers.shift { 5 } else { 1 };
+                let count = if key == KeyCode::Left { -count } else { count };
+                if let Ok(scale) = mondrian_core::TimeScale::new(count, 1)
+                    && let Ok(delta) = step.checked_scale(scale)
+                {
+                    self.dispatch_edit(CurveEdit::NudgeTime { keyframe_id, side, delta }, ctx);
+                }
+            }
+            return true;
+        }
         if let Some((keyframe_id, side)) = self.selected_tangent {
             if modifiers.ctrl || modifiers.alt || modifiers.meta {
                 return false;
@@ -2014,6 +2063,9 @@ mod tests {
 
     fn curve_edit_action(edit: CurveEdit) -> Action {
         let name = match edit {
+            CurveEdit::NudgeTime { keyframe_id, side, delta } => {
+                format!("time:{keyframe_id}:{side:?}:{delta:?}")
+            }
             CurveEdit::Insert { index, point, .. } => {
                 format!("insert:{index}:{:.4},{:.4}", point.x, point.y)
             }
@@ -2051,6 +2103,54 @@ mod tests {
         editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
         editor.select(Some(1));
         editor
+    }
+
+    #[test]
+    fn exact_frame_commands_preserve_geometry_and_ignore_capture_or_invalid_grid() {
+        let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let frame = mondrian_core::TimelineTime::new(1001, 30000).expect("frame");
+        let mut editor = tangent_editor(events.clone()).with_frame_time_step(frame);
+        let original = editor.points.clone();
+        let mut focus = CurveFocus(Some(editor.id()));
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &|_| {});
+        editor.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        for (key, modifiers, count) in [
+            (KeyCode::Right, Modifiers::none(), 1),
+            (KeyCode::Left, Modifiers::shift(), -5),
+        ] {
+            editor.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx);
+            assert!(
+                matches!(events.borrow().last(), Some(CurveGestureEvent::Edit { gesture_id: None, edit: CurveEdit::NudgeTime { side: None, delta, .. } }) if *delta == frame.checked_scale(mondrian_core::TimeScale::new(count, 1).expect("steps")).expect("delta"))
+            );
+            assert_eq!(
+                editor.points, original,
+                "author preview owns marker changes"
+            );
+        }
+        grab_tangent(&mut editor, &mut ctx);
+        let count = events.borrow().len();
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(events.borrow().len(), count, "capture owns the draft");
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        editor.frame_time_step = Some(mondrian_core::TimelineTime::ZERO);
+        let count = events.borrow().len();
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(
+            events.borrow().len(),
+            count,
+            "invalid grid has no normalized fallback"
+        );
     }
 
     fn grab_tangent(editor: &mut CurveEditor, ctx: &mut EventContext) -> Point {
@@ -2248,6 +2348,7 @@ mod tests {
             ])
             .with_preview_projection(move |event| {
                 matches!(event, CurveGestureEvent::Edit { .. }).then(|| CurvePreview {
+                    key_points: Vec::new(),
                     display_points: vec![CurvePoint::new(0.0, 0.5), CurvePoint::new(1.0, 0.5)],
                     tangents: projection
                         .iter()
@@ -3096,6 +3197,7 @@ mod tests {
             match event {
                 CurveGestureEvent::Edit { edit: CurveEdit::Move { point, .. }, .. } => {
                     Some(CurvePreview {
+                        key_points: Vec::new(),
                         display_points: vec![
                             CurvePoint::new(0.0, 0.0),
                             point,
@@ -3105,6 +3207,7 @@ mod tests {
                     })
                 }
                 CurveGestureEvent::Cancel(_) => Some(CurvePreview {
+                    key_points: Vec::new(),
                     display_points: vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 0.0)],
                     tangents: Vec::new(),
                 }),

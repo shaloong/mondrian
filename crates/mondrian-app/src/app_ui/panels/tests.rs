@@ -8220,7 +8220,7 @@ fn live_visual_curve_samples_equal_real_author_results() {
                 state.select_clip_by_id(clip_id).unwrap();
                 let initial = opacity_curve_model_for_clip(
                     state.active_sequence().unwrap().find_clip(clip_id).unwrap(),
-                    TimelineTime::ZERO,
+                    mondrian_core::Rational::new(1, 30),
                 )
                 .unwrap();
                 for (x, y) in [(0.0, 0.2), (0.5, 0.8), (1.0, 0.4)] {
@@ -8241,7 +8241,7 @@ fn live_visual_curve_samples_equal_real_author_results() {
                         .unwrap();
                     let current = opacity_curve_model_for_clip(
                         state.active_sequence().unwrap().find_clip(clip_id).unwrap(),
-                        TimelineTime::ZERO,
+                        mondrian_core::Rational::new(1, 30),
                     )
                     .unwrap();
                     if current
@@ -8284,7 +8284,7 @@ fn live_visual_curve_samples_equal_real_author_results() {
                 }
                 let model = opacity_curve_model_for_clip(
                     state.active_sequence().unwrap().find_clip(clip_id).unwrap(),
-                    TimelineTime::ZERO,
+                    mondrian_core::Rational::new(1, 30),
                 )
                 .unwrap();
                 assert_eq!(model.keys[1].interpolation, Some(interpolation));
@@ -8320,7 +8320,7 @@ fn live_visual_curve_samples_equal_real_author_results() {
                         .unwrap();
                     let current = opacity_curve_model_for_clip(
                         state.active_sequence().unwrap().find_clip(clip_id).unwrap(),
-                        TimelineTime::ZERO,
+                        mondrian_core::Rational::new(1, 30),
                     )
                     .unwrap();
                     assert_eq!(
@@ -8353,7 +8353,7 @@ fn live_visual_curve_samples_equal_real_author_results() {
                     .unwrap();
                 let authored = opacity_curve_model_for_clip(
                     state.active_sequence().unwrap().find_clip(clip_id).unwrap(),
-                    TimelineTime::ZERO,
+                    mondrian_core::Rational::new(1, 30),
                 )
                 .unwrap();
                 assert_eq!(
@@ -8411,7 +8411,7 @@ fn live_visual_curve_return_to_origin_restores_exact_author_coordinates() {
     let original = state.active_sequence().unwrap().clone();
     let model = opacity_curve_model_for_clip(
         state.active_sequence().unwrap().find_clip(clip_id).unwrap(),
-        TimelineTime::ZERO,
+        mondrian_core::Rational::new(1, 30),
     )
     .unwrap();
     let index = model
@@ -8528,6 +8528,7 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
         })
         .expect("canonical source key");
     let model = InspectorCurveModel {
+        frame_time_step: TimelineTime::new(1, 30).expect("fixture grid"),
         curve_source: std::sync::Arc::new(
             source_clip
                 .intrinsic_parameter_bag()
@@ -8590,6 +8591,7 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
 
     let boundary_keyframe_id = KeyframeId::new();
     let boundary_model = InspectorCurveModel {
+        frame_time_step: TimelineTime::new(1, 30).expect("fixture grid"),
         curve_source: std::sync::Arc::new(
             Transform2D::identity()
                 .to_property_bag()
@@ -9392,6 +9394,7 @@ fn inspector_actions_without_selection_produce_no_command() {
         None
     );
     let curve_model = InspectorCurveModel {
+        frame_time_step: TimelineTime::new(1, 30).expect("fixture grid"),
         curve_source: std::sync::Arc::new(
             Transform2D::identity()
                 .to_property_bag()

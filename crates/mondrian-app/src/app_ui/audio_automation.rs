@@ -40,6 +40,7 @@ pub(crate) struct AudioAutomationCurveKeyModel {
 /// Complete normalized curve projection consumed by the shared CurveEditor.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AudioAutomationCurveModel {
+    pub(crate) frame_time_step: TimelineTime,
     pub(crate) source_curve: mondrian_core::ExactAutomationCurve,
     pub(crate) target: AudioAutomationTarget,
     pub(crate) viewport: AudioAutomationViewport,
@@ -57,6 +58,28 @@ pub(crate) struct AudioAutomationCurveModel {
 }
 
 impl AudioAutomationCurveModel {
+    pub(crate) fn key_points(&self) -> Vec<(mondrian_core::KeyframeId, CurvePoint)> {
+        let Ok(end) = self.viewport.range.end() else {
+            return Vec::new();
+        };
+        self.source_curve
+            .keyframes
+            .iter()
+            .filter(|key| key.time >= self.viewport.range.start && key.time <= end)
+            .filter_map(|key| {
+                Some((
+                    key.id,
+                    crate::app_ui::curve_tangents::project_key(
+                        key.time,
+                        key.value,
+                        self.viewport.range,
+                        [self.view_min, self.view_max],
+                    )?,
+                ))
+            })
+            .collect()
+    }
+
     pub(crate) fn is_automated(&self) -> bool {
         self.keys.iter().any(|key| key.keyframe.is_some())
     }
@@ -255,6 +278,11 @@ pub(crate) fn project_audio_automation(
         .collect::<Option<Vec<_>>>()?;
 
     Some(AudioAutomationCurveModel {
+        frame_time_step: TimelineTime::from_frame_position(mondrian_core::FramePosition::new(
+            1,
+            sequence.time_base(),
+        ))
+        .ok()?,
         source_curve: match inspection.curve() {
             Some(curve) => curve.clone(),
             None => mondrian_core::ExactAutomationCurve::new(
@@ -336,6 +364,29 @@ fn audio_curve_edit_intent(
         return None;
     }
     let edit = match edit {
+        CurveEdit::NudgeTime { keyframe_id, side, delta } => {
+            if let Some(side) = side {
+                let control = model
+                    .source_curve
+                    .keyframe_controls()
+                    .find(|control| control.keyframe_id == keyframe_id && control.side == side)?;
+                AudioAutomationEdit::EditHandle {
+                    keyframe_id,
+                    side,
+                    edit: crate::app_ui::curve_tangents::nudge_handle_time(control, delta)?,
+                }
+            } else {
+                let mut key =
+                    model.source_curve.keyframes.iter().find(|key| key.id == keyframe_id)?.clone();
+                key.time = crate::app_ui::curve_tangents::nudge_key_time(
+                    key.time,
+                    delta,
+                    model.viewport.range,
+                    model.source_curve.keyframes.iter().map(|key| key.time),
+                )?;
+                AudioAutomationEdit::UpsertKeyframe { keyframe: key }
+            }
+        }
         CurveEdit::Handle { keyframe_id: id, side, point } => {
             let key = model.source_curve.keyframes.iter().find(|key| key.id == id)?;
             let handle = model.source_curve.keyframe_handle(id, side)?;
@@ -808,6 +859,108 @@ mod tests {
             drop(library);
             std::fs::remove_dir_all(directory).unwrap();
         }
+    }
+
+    #[test]
+    fn audio_frame_nudge_preserves_author_metadata_and_sparse_handle_values() {
+        use mondrian_core::{BezierHandleSide, Rational};
+        use mondrian_timeline::apply_audio_automation_edit;
+        let mut sequence = Sequence::new("Exact audio nudge");
+        sequence.settings.frame_rate = Rational::new(30000, 1001);
+        let target = AudioAutomationTarget::ChannelFader {
+            owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+        };
+        let middle =
+            ExactAutomationKeyframe::linear(TimelineTime::new(1, 2).expect("middle"), -6.123456789);
+        for keyframe in [
+            ExactAutomationKeyframe::linear(TimelineTime::ZERO, -12.0),
+            middle.clone(),
+            ExactAutomationKeyframe::linear(TimelineTime::ONE, -3.0),
+        ] {
+            apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                },
+            )
+            .expect("seed");
+        }
+        let viewport = AudioAutomationViewport {
+            domain: AuthoringTimeDomain::Sequence(sequence.id),
+            range: TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE).expect("range"),
+        };
+        let model = project_audio_automation(&sequence, target.clone(), viewport).expect("model");
+        let frame = TimelineTime::new(1001, 30000).expect("frame");
+        assert_eq!(model.frame_time_step, frame);
+        let edit = audio_curve_edit_intent(
+            &model,
+            CurveEdit::NudgeTime { keyframe_id: middle.id, side: None, delta: frame },
+        )
+        .expect("exact intent");
+        let mut expected = middle.clone();
+        expected.time = expected.time.checked_add(frame).expect("next frame");
+        assert_eq!(
+            edit,
+            AudioAutomationEdit::UpsertKeyframe { keyframe: expected.clone() }
+        );
+        assert!(audio_curve_edit_intent(
+            &model,
+            CurveEdit::NudgeTime {
+                keyframe_id: middle.id,
+                side: None,
+                delta: TimelineTime::new(1, 2).expect("collision")
+            }
+        )
+        .is_none());
+        apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest { target: target.clone(), edit },
+        )
+        .expect("author move");
+        apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::SetInterpolation {
+                    keyframe_id: middle.id,
+                    interpolation: InterpolationType::ContinuousBezier,
+                },
+            },
+        )
+        .expect("constrained mode");
+        let model = project_audio_automation(&sequence, target, viewport).expect("current model");
+        assert_eq!(
+            model.key_points().iter().find(|(id, _)| *id == middle.id).expect("marker").1.x,
+            expected.time.to_f64() as f32
+        );
+        let control = model
+            .source_curve
+            .keyframe_controls()
+            .find(|control| {
+                control.keyframe_id == middle.id && control.side == BezierHandleSide::Outgoing
+            })
+            .expect("control");
+        assert_eq!(
+            audio_curve_edit_intent(
+                &model,
+                CurveEdit::NudgeTime {
+                    keyframe_id: middle.id,
+                    side: Some(BezierHandleSide::Outgoing),
+                    delta: frame
+                }
+            ),
+            Some(AudioAutomationEdit::EditHandle {
+                keyframe_id: middle.id,
+                side: BezierHandleSide::Outgoing,
+                edit: mondrian_core::ExactBezierHandleEdit {
+                    time_offset: Some(
+                        control.handle.time_offset.checked_add(frame).expect("control step")
+                    ),
+                    value_offset: None
+                }
+            })
+        );
     }
 
     #[test]
