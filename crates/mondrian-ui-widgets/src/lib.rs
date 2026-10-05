@@ -56,8 +56,8 @@ pub use color_picker::{
 };
 pub use context_menu::ContextMenu;
 pub use curve_editor::{
-    CurveEdit, CurveEditor, CurveGestureEvent, CurvePoint, CurvePointPolicy, CurvePointTarget,
-    CurvePreview, CurveTangent,
+    CurveEdit, CurveEditor, CurveEditorViewState, CurveGestureEvent, CurvePoint, CurvePointPolicy,
+    CurvePointTarget, CurvePreview, CurveTangent,
 };
 pub use dialog_surface::DialogSurface;
 pub use dock_panel::{DockPanel, DockPanelDropArea};

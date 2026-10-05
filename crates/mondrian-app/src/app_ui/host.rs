@@ -5724,6 +5724,194 @@ mod tests {
         inspector_curve_capture_owner_matrix(true, 7..8);
     }
 
+    #[test]
+    fn inspector_curve_release_refresh_preserves_selection_and_keyboard_editing() {
+        use crate::app::product_action::{
+            ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
+        };
+        use crate::app::ui_actions::clip_edit_numeric_curve_action;
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1600.0);
+        let mut state = workspace_app_state_with_timed_solid();
+        let sequence = state.active_sequence().expect("sequence");
+        let track_id = sequence.video_tracks[0].id;
+        let clip_id = sequence.video_tracks[0].clips[0].id;
+        let parameter = sequence.video_tracks[0].clips[0]
+            .intrinsic_parameter_bag()
+            .address_for_path(mondrian_timeline::clip::Transform2D::OPACITY_PATH)
+            .expect("opacity address");
+        state.selection.selected_clips =
+            vec![crate::app::SelectedClipRef { track_id, clip_id, is_video_track: true }];
+        for ratio in [0.0, 0.5, 1.0] {
+            state
+                .dispatch_action(clip_edit_numeric_curve_action(
+                    ClipEditNumericCurvePayload {
+                        clip_id,
+                        parameter: parameter.clone(),
+                        edit: ClipCurveEditPayload::Upsert {
+                            keyframe_id: None,
+                            point: ClipNormalizedCurvePointPayload {
+                                time_ratio: ratio,
+                                value_ratio: ratio,
+                            },
+                        },
+                    },
+                ))
+                .expect("seed key");
+        }
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("curve-refresh-focus"),
+        );
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let curve_id =
+            panel_curve_with_point_count(host.active_root(), PanelKind::Inspector, false, 3)
+                .expect("opacity curve");
+        let point = {
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let curve = tree.get(curve_id).expect("curve");
+            let mut min = Point::new(f32::MAX, f32::MAX);
+            let mut max = Point::new(0.0, 0.0);
+            for y in (0..1600).step_by(2) {
+                for x in (0..1280).step_by(2) {
+                    let point = Point::new(x as f32, y as f32);
+                    if curve.hit_test(point) {
+                        min.x = min.x.min(point.x);
+                        min.y = min.y.min(point.y);
+                        max.x = max.x.max(point.x);
+                        max.y = max.y.max(point.y);
+                    }
+                }
+            }
+            assert!(min.x < max.x && min.y < max.y);
+            Point::new((min.x + max.x) * 0.5, (min.y + max.y) * 0.5)
+        };
+        let pending = PendingUiActions::default();
+        let dispatch = |action| pending.push(action);
+        let mut router = EventRouter::new(host.active_root().id());
+        let original = host.app_state().active_sequence().expect("before pointer").clone();
+        let moved = Point::new(point.x + 6.0, point.y - 6.0);
+        for event in [
+            UiEvent::MouseDown {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseMove { position: moved, modifiers: Modifiers::none() },
+            UiEvent::MouseUp {
+                position: moved,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            router.route(
+                event,
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &dispatch,
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        }
+        assert!(router.captured().is_none());
+        let refreshed_id =
+            panel_curve_with_point_count(host.active_root(), PanelKind::Inspector, false, 3)
+                .expect("refreshed opacity curve");
+        let tree = WidgetTreeView::new(host.active_root_mut());
+        let curve = tree
+            .get(refreshed_id)
+            .expect("refreshed curve")
+            .as_any()
+            .expect("downcast")
+            .downcast_ref::<mondrian_ui_widgets::CurveEditor>()
+            .expect("curve editor");
+        assert_eq!(
+            curve.selected_index(),
+            Some(1),
+            "author refresh must retain the selected key"
+        );
+        let before = host.app_state().active_sequence().expect("before keyboard").clone();
+        router.route(
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::types::KeyCode::Up,
+                modifiers: Modifiers::none(),
+            },
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &dispatch,
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert!(
+            router.focused().is_some_and(|id| id == refreshed_id),
+            "keyboard focus must follow the same curve owner"
+        );
+        assert!(
+            !host
+                .app_state()
+                .active_sequence()
+                .expect("after keyboard")
+                .author_state_eq_ignoring_revision(&before),
+            "keyboard edit must reach the selected canonical key after refresh"
+        );
+        let accepted = host.app_state().active_sequence().expect("accepted keyboard").clone();
+        assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo keyboard"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("keyboard Undo")
+            .author_state_eq_ignoring_revision(&before));
+        assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo pointer"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("pointer Undo")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(host.app_state.borrow_mut().redo_timeline().expect("Redo pointer"));
+        assert!(host.app_state.borrow_mut().redo_timeline().expect("Redo keyboard"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("restored accepted")
+            .author_state_eq_ignoring_revision(&accepted));
+
+        // A fresh author session may contain exactly the same persistent entity IDs.
+        let mut reopened = AppState::new();
+        reopened.test_set_sequence(Some(accepted.clone()));
+        reopened.test_set_project_path(PathBuf::from("E:/projects/edit.mdp"));
+        reopened.selection.selected_clips =
+            vec![crate::app::SelectedClipRef { track_id, clip_id, is_video_track: true }];
+        assert_ne!(
+            reopened.authoring_session_id(),
+            host.app_state().authoring_session_id()
+        );
+        host.app_state.replace(reopened);
+        host.mark_dirty();
+        host.refresh_if_dirty(bounds);
+        let reopened_id =
+            panel_curve_with_point_count(host.active_root(), PanelKind::Inspector, false, 3)
+                .expect("reopened curve");
+        assert_ne!(
+            reopened_id, refreshed_id,
+            "new author sessions must retire old focus identity"
+        );
+        router.route(
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::types::KeyCode::Up,
+                modifiers: Modifiers::none(),
+            },
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &dispatch,
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert!(
+            host.app_state()
+                .active_sequence()
+                .expect("fresh session")
+                .author_state_eq_ignoring_revision(&accepted),
+            "stale keyboard focus must not write into the reopened author session"
+        );
+    }
+
     fn inspector_curve_capture_owner_matrix(structured: bool, boundaries: std::ops::Range<usize>) {
         use crate::app::product_action::{
             ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,

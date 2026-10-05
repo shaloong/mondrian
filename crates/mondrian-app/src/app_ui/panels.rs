@@ -321,6 +321,7 @@ pub enum AssetThumbnailState {
 /// Complete set of view models needed by the app UI panel shell.
 #[derive(Debug, Clone)]
 pub struct AppUiPanelModels {
+    pub(crate) curve_author_scope: Option<(mondrian_editor_state::AuthoringSessionId, SequenceId)>,
     locale: AppUiLocale,
     panel_titles: HashMap<PanelKind, String>,
     pub assets: AssetGridModel,
@@ -400,6 +401,7 @@ impl AppUiPanelModels {
         let scopes = ScopesPanelModel::from_viewer(&viewer);
         let input_pipeline = asset_input_pipeline_for_state(state);
         Self {
+            curve_author_scope: state.authoring_session_id().zip(state.active_sequence_id()),
             locale: inspector_localizer.locale(),
             panel_titles: localized_panel_titles(localizer),
             assets: AssetGridModel::from_asset_library_in_folder_with_thumbnails_and_locale(
@@ -433,6 +435,7 @@ impl AppUiPanelModels {
         let viewer = ViewerPanelModel::from_app_state(state);
         let scopes = ScopesPanelModel::from_viewer(&viewer);
         Self {
+            curve_author_scope: state.authoring_session_id().zip(state.active_sequence_id()),
             locale: localizer.locale(),
             panel_titles: localized_panel_titles(None),
             assets: demo_asset_model(),

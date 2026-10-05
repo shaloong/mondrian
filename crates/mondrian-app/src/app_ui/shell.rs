@@ -1681,6 +1681,13 @@ impl AppUiAppRoot {
             self.modal = None;
         }
 
+        let curve_states = if self.models.curve_author_scope.is_some()
+            && self.models.curve_author_scope == models.curve_author_scope
+        {
+            collect_curve_view_state(&self.dock)
+        } else {
+            Vec::new()
+        };
         let layout = self.dock.layout_snapshot();
         let dock_panel_state = collect_dock_panel_state(&self.dock);
         let asset_grid_state = collect_asset_grid_state(&self.dock);
@@ -1695,6 +1702,7 @@ impl AppUiAppRoot {
             self.custom_workspace_layout.as_ref(),
         );
         self.dock.restore_layout(&layout);
+        restore_curve_view_state(&mut self.dock, &curve_states);
         restore_dock_panel_state(&mut self.dock, &dock_panel_state);
         restore_asset_grid_state(&mut self.dock, &asset_grid_state);
         restore_panel_list_state(&mut self.dock, &panel_list_state);
@@ -2688,6 +2696,67 @@ fn restore_dock_panel_state(widget: &mut dyn Widget, states: &[DockPanelState]) 
             restore_dock_panel_state(child, states);
         }
     }
+}
+
+fn collect_curve_view_state(
+    widget: &dyn Widget,
+) -> Vec<(PanelKind, mondrian_ui_widgets::CurveEditorViewState)> {
+    fn visit(
+        widget: &dyn Widget,
+        panel: Option<PanelKind>,
+        states: &mut Vec<(PanelKind, mondrian_ui_widgets::CurveEditorViewState)>,
+    ) {
+        let panel = widget.panel_kind().or(panel);
+        if let Some(panel) = panel
+            && let Some(curve) = widget
+                .as_any()
+                .and_then(|any| any.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+            && let Some(state) = curve.view_state()
+        {
+            states.push((panel, state));
+        }
+        for index in 0..widget.child_count() {
+            if let Some(child) = widget.child(index) {
+                visit(child, panel, states);
+            }
+        }
+    }
+    let mut states = Vec::new();
+    visit(widget, None, &mut states);
+    states
+}
+
+fn restore_curve_view_state(
+    widget: &mut dyn Widget,
+    states: &[(PanelKind, mondrian_ui_widgets::CurveEditorViewState)],
+) {
+    fn visit(
+        widget: &mut dyn Widget,
+        panel: Option<PanelKind>,
+        states: &[(PanelKind, mondrian_ui_widgets::CurveEditorViewState)],
+        consumed: &mut std::collections::HashSet<usize>,
+    ) {
+        let panel = widget.panel_kind().or(panel);
+        if let Some(panel) = panel
+            && let Some(curve) = widget
+                .as_any_mut()
+                .and_then(|any| any.downcast_mut::<mondrian_ui_widgets::CurveEditor>())
+        {
+            for (index, (owner, state)) in states.iter().enumerate() {
+                if *owner == panel && !consumed.contains(&index) && curve.restore_view_state(state)
+                {
+                    consumed.insert(index);
+                    break;
+                }
+            }
+        }
+        for index in 0..widget.child_count() {
+            if let Some(child) = widget.child_mut(index) {
+                visit(child, panel, states, consumed);
+            }
+        }
+    }
+    visit(widget, None, states, &mut std::collections::HashSet::new());
 }
 
 fn collect_asset_grid_state(widget: &dyn Widget) -> Vec<AssetGridLocalState> {

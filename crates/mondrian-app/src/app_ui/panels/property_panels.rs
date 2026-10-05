@@ -1826,6 +1826,12 @@ pub(super) fn audio_automation_curve_control(
     let preview_action = pending_action.clone();
     let ids = model.keys.iter().map(|key| key.keyframe.as_ref().map(|key| key.id)).collect();
     let editor = CurveEditor::with_points(model.points())
+        .with_view_key(
+            serde_json::to_string(&ParameterCurveGestureTarget::Audio {
+                target: model.target.clone(),
+            })
+            .ok(),
+        )
         .with_keyframe_ids(ids)
         .with_tangents(model.tangents())
         .with_preview_projection(move |event| match event {
@@ -2601,6 +2607,7 @@ fn numeric_curve_editor(
     let preview_action = pending_action.clone();
     let ids = model.keys.iter().map(|key| key.keyframe_id).collect();
     let editor = CurveEditor::with_points(points)
+        .with_view_key(target.as_ref().and_then(|target| serde_json::to_string(target).ok()))
         .with_keyframe_ids(ids)
         .with_tangents(tangents)
         .with_preview_projection(move |event| match event {

@@ -222,9 +222,30 @@ struct CurvePointMetadata {
     context_menu: Option<Vec<MenuItem>>,
 }
 
+/// Inactive curve selection and focus, scoped to an explicit owner view key.
+/// This snapshot contains no pointer capture, author draft or callbacks.
+#[derive(Debug, Clone)]
+pub struct CurveEditorViewState {
+    view_key: String,
+    id: WidgetId,
+    points: Option<Vec<CurvePoint>>,
+    selected: Option<CurvePointTarget>,
+    selected_tangent: Option<(mondrian_core::KeyframeId, mondrian_core::BezierHandleSide)>,
+    focused: bool,
+    focus_visible: bool,
+}
+
+impl CurveEditorViewState {
+    /// Owner key used by a shell to match a replacement view.
+    pub fn view_key(&self) -> &str {
+        &self.view_key
+    }
+}
+
 /// Interactive normalized curve editor.
 pub struct CurveEditor {
     id: WidgetId,
+    view_key: Option<String>,
     bounds: Rect,
     points: Vec<CurvePoint>,
     fixed_value: Option<f32>,
@@ -270,6 +291,7 @@ impl CurveEditor {
     pub fn with_points(points: Vec<CurvePoint>) -> Self {
         let mut editor = Self {
             id: WidgetId::new(),
+            view_key: None,
             bounds: Rect::ZERO,
             points: Vec::new(),
             fixed_value: None,
@@ -569,6 +591,66 @@ impl CurveEditor {
             CurvePointTarget::Keyframe(id) => Some(id),
             _ => None,
         }
+    }
+
+    /// Attach an owner key for preserving view state across shell rebuilds.
+    /// The shell must also scope restoration to the current author session.
+    pub fn with_view_key(mut self, key: Option<String>) -> Self {
+        self.view_key = key;
+        self
+    }
+
+    /// Capture inactive selection and focus; live drafts are never transferable.
+    pub fn view_state(&self) -> Option<CurveEditorViewState> {
+        if self.has_active_pointer_interaction()
+            || self.gesture.is_some()
+            || self.context_menu.is_some()
+        {
+            return None;
+        }
+        let selected = self.selected.and_then(|index| self.point_target(index));
+        Some(CurveEditorViewState {
+            view_key: self.view_key.clone()?,
+            id: self.id,
+            points: selected
+                .filter(|target| !matches!(target, CurvePointTarget::Keyframe(_)))
+                .map(|_| self.points.clone()),
+            selected,
+            selected_tangent: self.selected_tangent,
+            focused: self.focused,
+            focus_visible: self.focus_visible,
+        })
+    }
+
+    /// Restore only an inactive view with the same owner key.
+    /// Missing author keys lose selection; snapshot points require identical geometry.
+    /// Retaining the widget ID lets the router resolve focus in the new tree.
+    pub fn restore_view_state(&mut self, state: &CurveEditorViewState) -> bool {
+        if self.view_key.as_deref() != Some(state.view_key())
+            || self.has_active_pointer_interaction()
+            || self.gesture.is_some()
+            || self.context_menu.is_some()
+        {
+            return false;
+        }
+        self.id = state.id;
+        self.selected = state.selected.and_then(|target| match target {
+            CurvePointTarget::Keyframe(id) => self.keyframe_indices.get(&id).copied(),
+            _ if state.points.as_deref() == Some(self.points.as_slice()) => {
+                self.point_metadata.iter().position(|point| point.target == target)
+            }
+            _ => None,
+        });
+        self.selected_tangent = state.selected_tangent.filter(|(id, side)| {
+            Some(*id) == self.selected_keyframe()
+                && self
+                    .tangents
+                    .iter()
+                    .any(|tangent| tangent.keyframe_id == *id && tangent.side == *side)
+        });
+        self.focused = state.focused && self.enabled;
+        self.focus_visible = state.focus_visible && self.enabled;
+        true
     }
 
     /// Selected point index, if any.
@@ -1138,6 +1220,10 @@ impl Default for CurveEditor {
 }
 
 impl Widget for CurveEditor {
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
     }
@@ -1519,6 +1605,84 @@ mod tests {
             name,
             payload: Default::default(),
         }
+    }
+
+    #[test]
+    fn view_state_restores_stable_key_and_focus_after_reordering() {
+        let id = mondrian_core::KeyframeId::new();
+        let mut original = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .with_keyframe_ids(vec![None, Some(id), None])
+        .with_view_key(Some("owner".into()));
+        original.select(Some(1));
+        original.focused = true;
+        original.focus_visible = true;
+        let state = original.view_state().expect("inactive state");
+        assert!(
+            state.points.is_none(),
+            "author IDs require no geometry snapshot"
+        );
+        let mut refreshed = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.25, 0.3),
+            CurvePoint::new(0.6, 0.7),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .with_keyframe_ids(vec![
+            None,
+            Some(mondrian_core::KeyframeId::new()),
+            Some(id),
+            None,
+        ])
+        .with_view_key(Some("owner".into()));
+        assert!(refreshed.restore_view_state(&state));
+        assert_eq!(refreshed.id(), original.id());
+        assert_eq!(refreshed.selected_index(), Some(2));
+        assert!(refreshed.focused && refreshed.focus_visible);
+        assert_eq!(
+            refreshed.points()[2],
+            CurvePoint::new(0.6, 0.7),
+            "new canonical geometry remains authoritative"
+        );
+    }
+
+    #[test]
+    fn view_state_does_not_transfer_to_another_owner_or_deleted_key() {
+        let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut original = tangent_editor(events).with_view_key(Some("owner".into()));
+        original.selected_tangent =
+            Some((original.tangents[0].keyframe_id, original.tangents[0].side));
+        let state = original.view_state().expect("state");
+        let mut other = CurveEditor::new().with_view_key(Some("other".into()));
+        let other_id = other.id();
+        assert!(!other.restore_view_state(&state));
+        assert_eq!(other.id(), other_id);
+        let mut replacement = CurveEditor::new().with_view_key(Some("owner".into()));
+        assert!(replacement.restore_view_state(&state));
+        assert!(replacement.selected_index().is_none());
+        assert!(replacement.selected_tangent.is_none());
+    }
+
+    #[test]
+    fn view_state_snapshot_selection_requires_identical_geometry() {
+        let mut original = CurveEditor::new().with_view_key(Some("transfer".into()));
+        original.select(Some(1));
+        let state = original.view_state().expect("state");
+        let mut same = CurveEditor::with_points(original.points().to_vec())
+            .with_view_key(Some("transfer".into()));
+        assert!(same.restore_view_state(&state));
+        assert_eq!(same.selected_index(), Some(1));
+        let mut changed = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.8),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .with_view_key(Some("transfer".into()));
+        assert!(changed.restore_view_state(&state));
+        assert!(changed.selected_index().is_none());
     }
 
     fn curve_edit_action(edit: CurveEdit) -> Action {

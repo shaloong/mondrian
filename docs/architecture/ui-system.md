@@ -3400,3 +3400,22 @@ and deletion followed by keyboard edits and two Undo/Redo steps in the visual
 adapter, plus insertion/keyboard editing/Undo/Redo in the audio adapter.
 Component tests also retain shifted generic snapshot identity, context commands and canonical controls on cancellation. This does
 not establish physical keyboard, viewport zoom/pan or frame-grid qualification.
+
+
+### Curve selection across workspace refresh
+
+Temporal Inspector and audio controls attach a view key encoded from their typed
+parameter owner. AppUiPanelModels carries the current AuthoringSessionId and
+SequenceId. AppRoot retains inactive CurveEditorViewState only within that
+scope and the same owning panel/key. Restoration preserves widget focus identity
+and resolves selected author keys through KeyframeId, retaining new canonical
+geometry. Missing keys/controls lose selection. Snapshot/virtual selection
+requires identical geometry. Author-ID selection does not clone the point array.
+
+Live pointer gestures, author drafts and context menus are not transferable.
+Replacing a project/session or sequence retires the old focus identity even
+when persistent parameter/key IDs happen to match. A real Host/EventRouter
+regression routes pointer release through model rebuilding and a subsequent
+keyboard edit, then verifies two Undo/Redo steps and fresh-session isolation.
+Full keyboard selection, exact frame-grid nudges and viewport controls remain
+separate qualification work.
