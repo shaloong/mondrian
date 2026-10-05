@@ -17,6 +17,7 @@ use mondrian_renderer::GpuNativeDecodedFrameImportSupport;
 use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_core::{TreeWalker, Widget};
 use mondrian_ui_theme::{set_theme_preset, ThemePreset};
+use mondrian_ui_widgets::ViewerFrameContent;
 
 use crate::app::execution_resource_coordination::{
     apply_preview_viewer_gpu_resource_decision, ExecutionDomainDemand,
@@ -593,7 +594,13 @@ impl AppUiHost {
     pub(crate) fn preflight_pending_viewer_gpu_presentation(&self) -> bool {
         let preflight =
             self.app_state.borrow_mut().preflight_pending_frame_presentation(Instant::now());
-        self.finish_window_presentation_preflight(preflight)
+        match preflight {
+            // No candidate has been built or published at this admission seam.
+            // A consumed demand blocks new work without invalidating the
+            // retained picture or scheduling another identical preparation.
+            FramePresentationPreflight::LostAuthority => false,
+            other => self.finish_window_presentation_preflight(other),
+        }
     }
 
     /// Recheck the exact ticket carried by a built candidate immediately
@@ -934,7 +941,22 @@ impl AppUiHost {
                         return;
                     }
                 };
-                let _ = self.admit_window_preview_state(ticket, next);
+                if ticket.is_none()
+                    && matches!(
+                        next,
+                        ViewerPreviewState::Ready(ViewerFrameContent::ExternalTexture(_))
+                    )
+                {
+                    // Project the exact already-admitted physical slot through
+                    // the same observation seam as GPU preparation. This does
+                    // not republish pixels or revive a consumed still ticket.
+                    let _ = self.present_current_viewer_output(
+                        PreviewPresentationCandidate::already_visible((), None),
+                        PreviewPresentationCarrier::ExternalGpu,
+                    );
+                } else {
+                    let _ = self.admit_window_preview_state(ticket, next);
+                }
             }
             PreviewPresentationState::Transparent(candidate) => {
                 let _ = self.admit_window_preview_state(
@@ -3358,6 +3380,85 @@ mod tests {
             &*host.window_preview_state.borrow(),
             ViewerPreviewState::Stale(_)
         ));
+    }
+
+    #[test]
+    fn settled_gpu_model_projection_keeps_the_admitted_picture_without_republishing() {
+        let mut state = workspace_app_state_with_timed_solid();
+        state.active_sequence_mut_uncommitted().expect("Sequence").video_tracks[0].clips[0]
+            .is_disabled = false;
+        state.seek(4).expect("bind still picture");
+        let host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("settled-gpu-model-projection"),
+        );
+        let PreviewGpuFrameState::Ready(frame) = host.gpu_preview_frame_for_current_state() else {
+            panic!("generated solid must have a ready GPU execution plan");
+        };
+        let presentation = ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
+            .expect("valid presentation");
+        assert!(matches!(
+            host.set_external_viewer_frame(&frame, "settled-model-output", presentation),
+            FramePresentationDisposition::Presented(_)
+        ));
+        assert!(host.app_state.borrow().pending_playback_frame_demand_identity().is_none());
+        let evidence = host.app_state.borrow().playback_evidence_report();
+        host.ui_dirty.set(false);
+        host.preview_dirty.set(false);
+
+        for _ in 0..10 {
+            host.refresh_window_preview_state();
+            assert!(matches!(
+                &*host.window_preview_state.borrow(),
+                ViewerPreviewState::Ready(ViewerFrameContent::ExternalTexture(frame))
+                    if frame.key == "settled-model-output"
+            ));
+            assert!(!host.has_pending_ui_refresh());
+            assert_eq!(host.app_state.borrow().playback_evidence_report(), evidence);
+        }
+    }
+
+    #[test]
+    fn settled_gpu_preparation_does_not_self_schedule_preview_refresh() {
+        let host = workspace_host_without_preview_workers("settled-gpu-preparation");
+        let ticket = {
+            let mut state = host.app_state.borrow_mut();
+            state.seek(0).expect("bind still demand");
+            state
+                .playback_frame_presentation_ticket(
+                    mondrian_playback::FramePresentationQuality::Ready,
+                )
+                .expect("current ticket")
+        };
+        seed_window_gpu_output(&host);
+        assert!(matches!(
+            host.present_current_viewer_output(
+                PreviewPresentationCandidate::new((), Some(ticket)),
+                PreviewPresentationCarrier::ExternalGpu,
+            ),
+            FramePresentationDisposition::Presented(_)
+        ));
+        assert!(host.app_state.borrow().pending_playback_frame_demand_identity().is_none());
+        let before = window_preview_state_external_texture_key(&host.window_preview_state.borrow())
+            .expect("visible GPU output")
+            .to_owned();
+        host.ui_dirty.set(false);
+        host.preview_dirty.set(false);
+
+        for _ in 0..1_000 {
+            assert_eq!(host.viewer_gpu_preparation(), None);
+            assert!(
+                !host.has_pending_ui_refresh(),
+                "no candidate can require another redraw"
+            );
+            assert!(matches!(
+                &*host.window_preview_state.borrow(),
+                ViewerPreviewState::Ready(ViewerFrameContent::ExternalTexture(frame))
+                    if frame.key == before
+            ));
+        }
+        assert!(host.preview_service.has_retained_gpu_output());
     }
 
     #[test]
