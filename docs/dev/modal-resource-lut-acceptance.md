@@ -3,10 +3,10 @@
 ## Qualified native-output snapshot
 
 Windows qualification on 2026-10-06 used clean, unchanged production source
-`55cd95c86539ba3d023d5bd348644d0d1cbebeeb` and rebuilt product SHA256
-`8a1e0cfab72f1494191fba8d860c38470f08946d1785e9ac8701f59479945c90`.
-This receipt qualifies that production source. The subsequent UI admission
-fix below has its own test scope; it does not inherit native-output attestation.
+`4d2a21e420a99620a2a66279d4ed83e3503f9ef6` and rebuilt product SHA256
+`e5d5de9d274c30e38345d55c30e5da6ee7a0e7bd024fb23e51015d85f877a51f`.
+This receipt qualifies that exact clean source, including curve preview admission.
+The accompanying documentation update does not change production code.
 
 | Scope | Evidence |
 | --- | --- |
@@ -26,11 +26,12 @@ executed separately; ignored results were never counted as passes.
 
 ## Workspace gates and author format
 
-The all-feature workspace test run passed 7523 tests, failed zero and ignored
+The prior 55cd95c all-feature workspace test run passed 7523 tests, failed zero and ignored
 159, including integration and documentation tests across 133 result summaries.
 App alone passed 2549, failed zero and ignored 62. Strict workspace
 all-target/all-feature Clippy, formatting and diff checks passed before the
-production commit. The committed source then passed rebuilt modal, resource,
+production commit. The current 4d2a21e source passed full Widgets 1080 and App 2550 tests with zero
+failures, plus strict Clippy, formatting and diff checks. It then passed rebuilt modal, resource,
 integer-history, Float-history and all six explicit native tests. Product and
 clean source identity remained unchanged throughout qualification.
 
@@ -51,7 +52,7 @@ This is an alpha action payload change with no previous PropertyValue decoder;
 project storage remains schema 31. Core full 463 and App curve 48 regressions
 passed; their ignored counts were 1 and 3 respectively.
 
-## Subsequent UI admission qualification
+## Curve preview admission qualification
 
 The curve preview provider is the admission authority: an absent Edit projection
 rejects its candidate and author dispatch. Point/handle movement restores local
@@ -79,9 +80,10 @@ keeping nonblocking handoff, independent release, real join and single-drop
 assertions. The final full App run and 20 forced-idle repetitions passed; product
 retirement logic and deadlines are unchanged.
 
-Native output for this subsequent UI source has not yet been requalified. The
-55cd95c LUT, Unicode archive, GPU and H.264 results above retain their exact-source
-scope.
+The committed 4d2a21e source was then rebuilt and qualified by Golden 3/3,
+all six explicit native tests and modal/resource/integer/Float history tests.
+The source and product hashes remained unchanged throughout. Golden rounds
+exited naturally in 124.822, 120.500 and 123.331 seconds.
 
 ## Reproduce and locate evidence
 
@@ -95,8 +97,8 @@ Missing loader setup is an execution environment failure, not a test result.
 
 The exact-source complete output gate is
 `scripts/validation/invoke-complete-golden-project-gate.ps1`.
-The qualified 55cd95c consecutive report is
-`target/validation/nle-backlog-complete/20261005T165658Z-complete-golden-5f191471/complete-golden-consecutive-report.json`.
+The qualified 4d2a21e consecutive report is
+`target/validation/nle-backlog-complete/20261005T190834Z-complete-golden-bd0354d9/complete-golden-consecutive-report.json`.
 It retains per-round reports, process logs, build log, source attestation,
 product hashes, pixel errors and encoder diagnostics.
 
@@ -119,6 +121,12 @@ The previous production 1ade888 qualified Golden 3/3 at
 Its product SHA256 was
 `75bac4a3ad892717e68e1a2a2b13f9d1bd3c09eeb5f25249940774def980e1aa`.
 That receipt remains historical for this changed production source.
+
+The previous 55cd95c qualification passed Golden 3/3 at
+`target/validation/nle-backlog-complete/20261005T165658Z-complete-golden-5f191471/complete-golden-consecutive-report.json`.
+Its product SHA256 was
+`8a1e0cfab72f1494191fba8d860c38470f08946d1785e9ac8701f59479945c90`.
+It remains historical evidence for that source.
 
 ## Remaining qualification
 
