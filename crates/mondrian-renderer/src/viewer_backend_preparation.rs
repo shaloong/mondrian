@@ -405,14 +405,6 @@ impl ViewerBackendOwner {
         self.returned_native_cache.take()
     }
 
-    pub(crate) fn native_is_prepared(
-        &self,
-        plan: &ViewerGpuBackendPreparation,
-        native: &[NativeVideoInputBackendPreparation],
-    ) -> bool {
-        self.is_prepared(plan) && self.prepared_native == native
-    }
-
     pub(crate) fn is_pending(&self) -> bool {
         self.pending
     }
@@ -609,8 +601,7 @@ mod tests {
             assert!(Instant::now() < deadline);
             thread::sleep(Duration::from_millis(1));
         }
-        assert!(owner.native_is_prepared(&requested, &plans));
-        assert!(!owner.native_is_prepared(&requested, &[]));
+        assert!(owner.is_prepared(&requested));
         let mut returned = owner.take_returned_native_cache().expect("same cache returned");
         assert_eq!(
             returned.runtime.diagnostics().next_frame_id,
@@ -654,7 +645,58 @@ mod tests {
             second.runtime.diagnostics().backend_objects.misses,
             prepared.backend_objects.misses
         );
+        let pq_input = ColorFrameDescriptor { color_space: ColorSpace::Rec2100Pq.into(), ..input };
+        assert!(!second.runtime.fused_yuv_descriptor_backend_is_cached(
+            &plans[0].transform,
+            pq_input,
+            output,
+            second.source.0,
+        ));
+        second
+            .runtime
+            .prepare_fused_yuv_descriptor_backend(
+                &plans[0].transform,
+                pq_input,
+                output,
+                (second.source.0, &second.source.1),
+                &context.device,
+                &context.queue,
+            )
+            .unwrap();
+        let before_inspection = second.runtime.diagnostics();
+        // Both physical contracts remain prepared; the last worker job is not
+        // a cache inventory. Inspection does not touch LRU order or frames.
+        for source in [input, pq_input, input] {
+            assert!(second.runtime.fused_yuv_descriptor_backend_is_cached(
+                &plans[0].transform,
+                source,
+                output,
+                second.source.0,
+            ));
+        }
+        let invalid_output = ColorFrameDescriptor { width: output.width + 1, ..output };
+        assert!(!second.runtime.fused_yuv_descriptor_backend_is_cached(
+            &plans[0].transform,
+            input,
+            invalid_output,
+            second.source.0,
+        ));
+        assert_eq!(second.runtime.diagnostics(), before_inspection);
+        let pq_plan = NativeVideoInputBackendPreparation { input: pq_input, ..plans[0].clone() };
         native.return_input_backend_cache(second);
+        assert!(native.input_backends_are_prepared(&plans));
+        assert!(native.input_backends_are_prepared(&[pq_plan]));
+        let mut cache = native.take_input_backend_cache().unwrap();
+        assert!(
+            !native.input_backends_are_prepared(&plans),
+            "loaned cache is never ready"
+        );
+        cache.runtime = RenderGpuOutputBoundaryRuntime::new().unwrap();
+        native.return_input_backend_cache(cache);
+        assert!(
+            !native.input_backends_are_prepared(&plans),
+            "new device cache is cold"
+        );
         assert_eq!(native.retained_source_count(), 0);
         assert_eq!(
             finish(&mut owner),

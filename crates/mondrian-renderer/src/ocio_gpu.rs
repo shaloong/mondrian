@@ -4020,6 +4020,16 @@ impl OcioGpuWgpuBackendPrepRuntime {
         Self::default()
     }
 
+    pub(crate) fn cached_static_pipeline(
+        &self,
+        shader_plan: &OcioGpuShaderPlan,
+        output_format: OcioGpuWgpuColorTargetFormat,
+    ) -> Option<&OcioGpuWgpuPreparedStaticPipeline> {
+        self.static_pipelines
+            .peek(&static_pipeline_cache_key(shader_plan, output_format))
+            .map(AsRef::as_ref)
+    }
+
     /// Prepare pure backend contracts for an OCIO fullscreen color pass.
     pub fn prepare_static_pipeline(
         &mut self,
@@ -4389,6 +4399,24 @@ impl OcioGpuWgpuBackendObjectRuntime {
         }
     }
 
+    pub(crate) fn fused_input_is_cached(
+        &self,
+        shader_plan: &OcioGpuShaderPlan,
+        static_pipeline: &OcioGpuWgpuPreparedStaticPipeline,
+        input_source: &str,
+    ) -> bool {
+        let Some(backend) =
+            self.objects.peek(&backend_object_cache_key(shader_plan, static_pipeline))
+        else {
+            return false;
+        };
+        self.input_pipelines.contains(&fused_input_pipeline_cache_key(
+            shader_plan,
+            backend,
+            input_source,
+        ))
+    }
+
     /// Compose a physical input fetch with the same compiled OCIO callable and LUTs.
     /// The caller supplies a group-1 input layout; OCIO retains group 0.
     pub(crate) fn prepare_fused_input_pipeline(
@@ -4402,14 +4430,7 @@ impl OcioGpuWgpuBackendObjectRuntime {
         if backend.ocio_bind_group.bind_group_index != 0 {
             return Err(OcioGpuFusedInputError::ResourceGroup);
         }
-        let key = OcioGpuCanonicalIdentity::for_hash(
-            b"fused-input-pipeline",
-            &(
-                shader_plan.canonical_identity(),
-                backend.ocio_bind_group.layout_identity,
-                input_source,
-            ),
-        );
+        let key = fused_input_pipeline_cache_key(shader_plan, backend, input_source);
         if let Some(pipeline) = self.input_pipelines.get(&key) {
             return Ok(Arc::clone(pipeline));
         }
@@ -5479,6 +5500,10 @@ impl OcioGpuShaderCache {
     /// backend objects have separate device-scoped lifecycle barriers.
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    pub(crate) fn cached(&self, request: &OcioGpuShaderRequest) -> Option<&OcioGpuShaderPlan> {
+        self.entries.peek(&request_cache_identity(request)).map(AsRef::as_ref)
     }
 
     /// Resolve a request to an OCIO GPU shader plan, using the cache when possible.
@@ -8097,6 +8122,21 @@ fn hash_resource_layout(signature: ResourceLayoutSignature) -> u64 {
         ),
     )
     .diagnostic_key()
+}
+
+fn fused_input_pipeline_cache_key(
+    shader_plan: &OcioGpuShaderPlan,
+    backend: &OcioGpuWgpuPreparedBackendObjects,
+    input_source: &str,
+) -> OcioGpuCanonicalIdentity {
+    OcioGpuCanonicalIdentity::for_hash(
+        b"fused-input-pipeline",
+        &(
+            shader_plan.canonical_identity(),
+            backend.ocio_bind_group.layout_identity,
+            input_source,
+        ),
+    )
 }
 
 fn backend_object_cache_key(

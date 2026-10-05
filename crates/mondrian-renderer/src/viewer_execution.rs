@@ -544,6 +544,20 @@ impl NativeVideoImportRuntime {
         })
     }
 
+    pub(crate) fn input_backends_are_prepared(
+        &self,
+        plans: &[NativeVideoInputBackendPreparation],
+    ) -> bool {
+        if plans.is_empty() {
+            return true;
+        }
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        if let Some(backend) = &self.backend {
+            return backend.input_backends_are_prepared(plans);
+        }
+        false
+    }
+
     pub(crate) fn take_input_backend_cache(&mut self) -> Option<NativeVideoInputBackendCache> {
         #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
         if let Some(backend) = &mut self.backend {

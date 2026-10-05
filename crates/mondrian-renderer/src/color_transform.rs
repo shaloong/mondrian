@@ -1119,6 +1119,44 @@ fn flatten_rgba_f32_pixels(pixels: &[[f32; 4]]) -> Vec<f32> {
     flat
 }
 
+/// One semantic contract shared by planning and cache inspection.
+pub(crate) fn input_to_working_gpu_contract(
+    input: ColorFrameDescriptor,
+    transform: &RenderInputTransform,
+    options: RenderColorTransformGpuOptions,
+) -> Result<(ColorFrameDescriptor, OcioGpuShaderRequest), RenderColorTransformError> {
+    if input.domain != ColorFrameDomain::Source {
+        return Err(RenderColorTransformError::UnsupportedInputDomain { domain: input.domain });
+    }
+    require_straight_compatible_color_alpha(input)?;
+
+    let output = ColorFrameDescriptor {
+        width: input.width,
+        height: input.height,
+        color_space: transform.working_color_space.into(),
+        domain: ColorFrameDomain::Working,
+        encoding: ColorFrameEncoding::LinearFloat,
+        residency: options.output_residency,
+        alpha: input.alpha,
+    };
+    let working = transform.working_color_space;
+    let source = input.color_space.color().ok_or_else(|| {
+        RenderColorTransformError::execution_failed(
+            RenderColorTransformDirection::InputToWorking,
+            input,
+            output,
+            "GPU input frame is missing an external color-space identity",
+        )
+    })?;
+    let request = OcioGpuShaderRequest::ColorSpace {
+        engine: transform.engine.clone(),
+        src: OcioColorSpaceIdentity::Color(source),
+        dst: OcioColorSpaceIdentity::Working(working),
+        language: options.language,
+    };
+    Ok((output, request))
+}
+
 pub struct RenderColorTransformGpuPlanner<'a> {
     cache: &'a mut OcioGpuShaderCache,
     options: RenderColorTransformGpuOptions,
@@ -1136,35 +1174,7 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
         input: ColorFrameDescriptor,
         transform: &RenderInputTransform,
     ) -> Result<RenderColorTransformGpuPlan, RenderColorTransformError> {
-        if input.domain != ColorFrameDomain::Source {
-            return Err(RenderColorTransformError::UnsupportedInputDomain { domain: input.domain });
-        }
-        require_straight_compatible_color_alpha(input)?;
-
-        let output = ColorFrameDescriptor {
-            width: input.width,
-            height: input.height,
-            color_space: transform.working_color_space.into(),
-            domain: ColorFrameDomain::Working,
-            encoding: ColorFrameEncoding::LinearFloat,
-            residency: self.options.output_residency,
-            alpha: input.alpha,
-        };
-        let working = transform.working_color_space;
-        let source = input.color_space.color().ok_or_else(|| {
-            RenderColorTransformError::execution_failed(
-                RenderColorTransformDirection::InputToWorking,
-                input,
-                output,
-                "GPU input frame is missing an external color-space identity",
-            )
-        })?;
-        let request = OcioGpuShaderRequest::ColorSpace {
-            engine: transform.engine.clone(),
-            src: OcioColorSpaceIdentity::Color(source),
-            dst: OcioColorSpaceIdentity::Working(working),
-            language: self.options.language,
-        };
+        let (output, request) = input_to_working_gpu_contract(input, transform, self.options)?;
         self.plan(
             RenderColorTransformDirection::InputToWorking,
             input,

@@ -477,7 +477,8 @@ impl ViewerGpuExecutionRuntime {
         layers: &[ViewerGpuExecutionLayer],
     ) -> Result<bool, ViewerGpuExecutionError> {
         let native_plans = self.native_input_backend_plans(layers)?;
-        Ok(self.color_output.native_is_prepared(plan, &native_plans))
+        Ok(self.color_output.is_prepared(plan)
+            && self.native_video_import.input_backends_are_prepared(&native_plans))
     }
 
     fn native_input_backend_plans(
@@ -530,7 +531,9 @@ impl ViewerGpuExecutionRuntime {
             return Ok(crate::ViewerGpuBackendPreparationStatus::Pending);
         }
         let native_plans = self.native_input_backend_plans(layers)?;
-        if self.color_output.native_is_prepared(&plan, &native_plans) {
+        if self.color_output.is_prepared(&plan)
+            && self.native_video_import.input_backends_are_prepared(&native_plans)
+        {
             return Ok(crate::ViewerGpuBackendPreparationStatus::Ready);
         }
         let cache = if native_plans.is_empty() {

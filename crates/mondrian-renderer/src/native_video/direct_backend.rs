@@ -267,6 +267,31 @@ where
         self.frame_cpu_timings
     }
 
+    pub(crate) fn input_backends_are_prepared(
+        &self,
+        plans: &[crate::viewer_execution::NativeVideoInputBackendPreparation],
+    ) -> bool {
+        let Some(runtime) = &self.color_runtime else {
+            return false;
+        };
+        let source = if self.adapter.supports_buffer_source() {
+            let Some(source) = self.yuv_decoder.fused_buffer_input() else {
+                return false;
+            };
+            source
+        } else {
+            self.yuv_decoder.fused_texture_input()
+        };
+        plans.iter().all(|plan| {
+            runtime.fused_yuv_descriptor_backend_is_cached(
+                &plan.transform,
+                plan.input,
+                plan.output,
+                source.0,
+            )
+        })
+    }
+
     /// Loan only device caches; native surfaces and synchronization remain here.
     pub(crate) fn take_input_backend_cache(
         &mut self,

@@ -1721,6 +1721,39 @@ impl RenderGpuOutputBoundaryRuntime {
         )
     }
 
+    /// Inspect the physical owner caches without extraction, compilation, or LRU mutation.
+    pub(crate) fn fused_yuv_descriptor_backend_is_cached(
+        &self,
+        transform: &RenderInputTransform,
+        input: ColorFrameDescriptor,
+        output: ColorFrameDescriptor,
+        input_source: &str,
+    ) -> bool {
+        let Ok((planned_output, request)) = crate::color_transform::input_to_working_gpu_contract(
+            input,
+            transform,
+            RenderColorTransformGpuOptions::default(),
+        ) else {
+            return false;
+        };
+        if planned_output != output {
+            return false;
+        }
+        let Some(shader) = self.shader_cache.cached(&request) else {
+            return false;
+        };
+        let format = match product_gpu_working_texture_format() {
+            GpuColorFrameTextureFormat::Rgba16Float => OcioGpuWgpuColorTargetFormat::Rgba16Float,
+            GpuColorFrameTextureFormat::Rgba32Float => OcioGpuWgpuColorTargetFormat::Rgba32Float,
+            _ => unreachable!("product working format must be floating point"),
+        };
+        self.backend_prep
+            .cached_static_pipeline(shader, format)
+            .is_some_and(|pipeline| {
+                self.backend_objects.fused_input_is_cached(shader, pipeline, input_source)
+            })
+    }
+
     /// Device-cache preparation from a validated native contract, without frame identities.
     pub(crate) fn prepare_fused_yuv_descriptor_backend(
         &mut self,

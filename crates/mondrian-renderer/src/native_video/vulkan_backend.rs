@@ -140,6 +140,13 @@ impl VulkanNativeVideoImportBackend {
         self.inner.frame_cpu_timings()
     }
 
+    pub(crate) fn input_backends_are_prepared(
+        &self,
+        plans: &[crate::viewer_execution::NativeVideoInputBackendPreparation],
+    ) -> bool {
+        self.inner.input_backends_are_prepared(plans)
+    }
+
     pub(crate) fn take_input_backend_cache(
         &mut self,
     ) -> Option<crate::viewer_execution::NativeVideoInputBackendCache> {
