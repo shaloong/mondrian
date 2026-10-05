@@ -544,6 +544,16 @@ fn media_preview_worker_with_decoder<DecodeJob>(
             continue;
         }
         let decode_started_at = Instant::now();
+        tracing::debug!(
+            ?execution_id, ?lane,
+            asset_id = %job.key.asset_id,
+            source_sample = ?job.key.source_sample(),
+            generation = job.generation,
+            priority = ?job.priority,
+            demand_identity = ?job.demand_identity,
+            queue_wait_us, dispatch_wait_us,
+            "Preview media execution began"
+        );
         let panic_context =
             MediaPreviewWorkerPanicContext::from_job(&job, queue_wait_us, execution_id);
         let recovery_revision = decode_context.recovery_revision();
@@ -586,7 +596,15 @@ fn media_preview_worker_with_decoder<DecodeJob>(
             }
         };
         result.dispatch_wait_us = dispatch_wait_us;
+        tracing::debug!(
+            ?execution_id,
+            ?lane,
+            decode_elapsed_us = result.decode_elapsed_us,
+            worker_elapsed_us = app_duration_us(decode_started_at.elapsed()),
+            "Preview media decoder returned"
+        );
         scheduler.mark_execution_completed(execution_id);
+        let observer_wait_started = tracing::enabled!(tracing::Level::DEBUG).then(Instant::now);
         let terminal = match cancellation_observer.finish(execution_id) {
             Ok(terminal) => terminal,
             Err(()) => {
@@ -600,6 +618,13 @@ fn media_preview_worker_with_decoder<DecodeJob>(
                 break;
             }
         };
+        tracing::debug!(
+            ?execution_id,
+            ?lane,
+            ?terminal,
+            observer_wait_us = observer_wait_started.map(|start| app_duration_us(start.elapsed())),
+            "Preview media cancellation observer acknowledged execution"
+        );
         match terminal {
             MediaPreviewCancellationObserverTerminal::Canceled => {
                 apply_media_preview_cancel_observation(&mut result, cancel_observation.snapshot());
@@ -904,6 +929,7 @@ fn send_media_preview_result(
     mut result: MediaPreviewResult,
 ) -> MediaPreviewResultPublication {
     let execution_id = result.execution_id;
+    let publication_started = tracing::enabled!(tracing::Level::DEBUG).then(Instant::now);
     if let Some(execution_id) = execution_id {
         scheduler.mark_execution_completed(execution_id);
     }
@@ -926,6 +952,13 @@ fn send_media_preview_result(
         match results.try_send(result) {
             Ok(()) => {
                 work_notifier.result_became_pollable();
+                tracing::debug!(
+                    ?execution_id,
+                    ?lane,
+                    publication_us =
+                        publication_started.map(|start| app_duration_us(start.elapsed())),
+                    "Preview media result transport accepted execution"
+                );
                 return MediaPreviewResultPublication::Published;
             }
             Err(mpsc::TrySendError::Full(returned)) => {

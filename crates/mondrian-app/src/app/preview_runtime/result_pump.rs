@@ -166,6 +166,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 && (result.access_mode != PreviewDecodeAccessMode::PlaybackCursor
                     || owns_pending_playback_demand);
             tracing::debug!(
+                execution_id = ?result.execution_id,
                 asset_id = %result.key.asset_id,
                 path = %result.key.decode.source().path().display(),
                 source_sample = ?result.key.source_sample(),
