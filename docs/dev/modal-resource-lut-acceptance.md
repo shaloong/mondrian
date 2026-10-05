@@ -3,11 +3,11 @@
 ## Latest qualified native-output snapshot
 
 Windows qualification on 2026-10-06 used clean, unchanged production source
-`4d2a21e420a99620a2a66279d4ed83e3503f9ef6` and rebuilt product SHA256
-`e5d5de9d274c30e38345d55c30e5da6ee7a0e7bd024fb23e51015d85f877a51f`.
-This receipt qualifies that exact clean source, including curve preview admission.
-Later temporal UI changes are qualified separately below; this native receipt
-does not qualify a later production binary.
+`97e82355bb92e4eb81d982c39bfad3628018cf99` and rebuilt product SHA256
+`6d208ce39bc84c10e39e4c023eb96faf34591b07b45ac72ca15c8c052456e72e`.
+This receipt qualifies that exact clean source, including curve preview admission,
+dense temporal editing and canonical key ordering. The accompanying documentation
+update does not change production code.
 
 | Scope | Evidence |
 | --- | --- |
@@ -17,6 +17,7 @@ does not qualify a later production binary.
 | Native resource execution | Three ignored tests explicitly passed with the rebuilt product: native Unicode paths/helper, actual Host asynchronous confirmation, and native SDK path cancel/Undo/SQLite/Unicode `.mdp` reopen with exact pixels. |
 | Undo and durable state | Saving an undone snapshot retains live Redo. Fresh reopen restores saved author state with empty history. The ignored native curve test explicitly passed author edit/Undo/saved Redo/fresh reopen/output checks. |
 | Exact integer keys | A current App regression passed three cases: i64 extrema and a value above 2**53. Each case saves and reopens both undone and redone Unicode archives, comparing the entire author Sequence and fresh history. Canonical Integer keys retain all bits; keyboard value increments retain exact owner time, identity and Hold interpolation. |
+| Dense temporal keys | Actual Inspector Auto/Continuous Bezier cases qualify exact frame crossing, canonical ID order even with coincident projected coordinates, complete Undo/Redo and Unicode undone/redone saved states. Fresh reopen has empty history. |
 | Raw Float keys | The legal canonical Number endpoint 0.2 under hard bounds 0.1..0.2 retains every author bit during time-only editing. Dispatched author gestures returning to origin or cancelling preserve the entire author state and an existing Redo; Unicode undone/redone archives reopen exactly with empty fresh history. |
 | LUT pixels | A real Unicode `.cube` swaps red/blue on positive-alpha samples, retains alpha, and preserves zero-alpha hidden RGB. The shared compiled graph returns identical float pixels after durable reopen. |
 | GPU and encoded output | Complete Golden passed 3/3, seven stages per round, natural exit 0 each. Source attestation remained clean/stable and baseline eligible. DX12 output had zero CPU fallbacks; final H.264 decoded maximum channel error was 4/255 each round. |
@@ -91,8 +92,8 @@ exited naturally in 124.822, 120.500 and 123.331 seconds.
 The subsequent temporal UI patch passed full Widgets (1083 passed, zero failed,
 zero ignored), full all-feature App (2551 passed, zero failed, 62 ignored), strict
 workspace all-target/all-feature Clippy, formatting and diff checks. These
-results supersede the earlier library counts for this patch, not the native
-product identity above. Ignored native tests require rebuilt-product execution.
+results supersede the earlier library counts for this patch. Its clean committed
+source was then rebuilt and qualified by the complete native-output gate above.
 
 Transfer-curve display spacing had prevented moving and inserting distinct,
 closely spaced temporal keys. A genuine pointer regression reproduced the
@@ -113,7 +114,10 @@ Each accepted step compares exact owner time, canonical identity order and the
 entire author Sequence. Undo and Redo compare every snapshot; Unicode archives
 save undone and redone states, saving retains live Redo, and fresh reopen restores
 the complete saved Sequence with empty history. This is not a physical pointer
-precision or native output claim for the changed source.
+precision claim. The committed source additionally passed Golden 3/3, all six
+explicit native tests, modal/resource filters and the integer/dense/Float history
+regressions. The source and product hashes remained unchanged throughout; rounds
+exited naturally in 122.676, 121.348 and 122.433 seconds.
 
 ## Reproduce and locate evidence
 
@@ -127,8 +131,8 @@ Missing loader setup is an execution environment failure, not a test result.
 
 The exact-source complete output gate is
 `scripts/validation/invoke-complete-golden-project-gate.ps1`.
-The qualified 4d2a21e consecutive report is
-`target/validation/nle-backlog-complete/20261005T190834Z-complete-golden-bd0354d9/complete-golden-consecutive-report.json`.
+The qualified 97e8235 consecutive report is
+`target/validation/nle-backlog-complete/20261005T202700Z-complete-golden-4c57c061/complete-golden-consecutive-report.json`.
 It retains per-round reports, process logs, build log, source attestation,
 product hashes, pixel errors and encoder diagnostics.
 
@@ -156,6 +160,12 @@ The previous 55cd95c qualification passed Golden 3/3 at
 `target/validation/nle-backlog-complete/20261005T165658Z-complete-golden-5f191471/complete-golden-consecutive-report.json`.
 Its product SHA256 was
 `8a1e0cfab72f1494191fba8d860c38470f08946d1785e9ac8701f59479945c90`.
+It remains historical evidence for that source.
+
+The previous 4d2a21e qualification passed Golden 3/3 at
+`target/validation/nle-backlog-complete/20261005T190834Z-complete-golden-bd0354d9/complete-golden-consecutive-report.json`.
+Its product SHA256 was
+`e5d5de9d274c30e38345d55c30e5da6ee7a0e7bd024fb23e51015d85f877a51f`.
 It remains historical evidence for that source.
 
 ## Remaining qualification
