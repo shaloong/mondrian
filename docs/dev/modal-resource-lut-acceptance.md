@@ -7,7 +7,8 @@ Windows qualification on 2026-10-06 used clean, unchanged production source
 `6d208ce39bc84c10e39e4c023eb96faf34591b07b45ac72ca15c8c052456e72e`.
 This receipt qualifies that exact clean source, including curve preview admission,
 dense temporal editing and canonical key ordering. The accompanying documentation
-update does not change production code.
+update does not change production code. Later sections identify subsequent UI
+changes that are not covered by this binary receipt.
 
 | Scope | Evidence |
 | --- | --- |
@@ -142,6 +143,40 @@ This patch passed 84 Widgets curve/model tests, the full all-feature App library
 Clippy, formatting and diff checks. These results qualify the changed UI source;
 the native binary and Golden report above remain bound to production 97e8235.
 Further curve interaction work will be batched before rebuilding that output gate.
+
+## Canonical temporal start and end previews
+
+A subsequent real Inspector regression reproduced a boundary projection defect:
+an authored key moved to the exact owner start, but the widget retained both
+its real point and the former evaluated virtual point. The rebuilt owner model
+correctly contained one endpoint. CurvePreview now explicitly supplies evaluated
+virtual start/end points only where no authored key occupies that exact time.
+CurveBoundary identifies Start/End independently of display slots. Both visual
+and audio adapters use exact owner intervals and already evaluated canonical
+samples; no alternate boundary evaluator or legacy slot parser was added.
+
+The widget reconciles at most two boundaries in place. Ordinary value updates
+retain the ID index; structural insertion/removal rebuilds it. Captured point
+gestures retain at most two original boundary entries. Cancellation restores
+origin slots and selection by target, accounting for an uncommitted inserted
+point. Additional genuine regressions exposed provisional insertion indices and
+Snapshot targets skipped by Keyframe-only restoration; both retain their original
+assertions and now pass through the same bounded rollback.
+
+Actual Inspector Auto/Continuous cases cover both owner endpoints, moving away,
+retrying and cancelling with complete author-state and live-model comparison.
+Actual audio EventRouter Auto/Continuous cases cover both endpoints, moving away,
+retrying, identity/capture and a single complete Undo/Redo. The boundary filter
+passed 33 tests; these overlap the full App run and are not added to its count.
+The final changed source passed 85 Widgets curve/model tests and full all-feature
+App (2554 passed, zero failed, 62 ignored), strict workspace all-target/all-feature
+Clippy, formatting and diff checks. The native product receipt above remains
+bound to 97e8235; it does not qualify this subsequent UI binary.
+
+This alpha widget API change requires CurvePreview providers to supply
+virtual_boundaries and changes VirtualBoundary targets to semantic CurveBoundary
+values. All in-repository providers and callers were updated; no compatibility
+alias or prior action decoder was retained. Project storage remains schema 31.
 
 ## Reproduce and locate evidence
 

@@ -3641,3 +3641,18 @@ prior Redo, and compare full author state plus display order and identity.
 Exact neighbor-time pointer collisions retain the last admitted geometry and
 author state, capture and identity; a subsequent valid candidate recovers before
 Escape cancellation. Both constrained Bezier modes have real Inspector coverage.
+
+### Canonical temporal boundary projection
+
+CurvePreview supplies evaluated start/end points only where no author key owns
+that exact boundary time. CurveBoundary identifies owner Start/End, independent
+of mutable display slots. Visual and audio adapters lower boundaries through the
+exact owner interval and share projection from canonical samples. No legacy slot
+parser or alternate evaluator is retained. The widget updates or inserts/removes
+at most two boundary points in place; ID indices rebuild only on a shape change.
+Captured point gestures retain at most two original boundary entries and restore
+exact origin order on cancellation, accounting for a provisional inserted point.
+Real Inspector and audio EventRouter tests compare live projections to rebuilt
+owner models at both ends, after moving away, and after cancellation or single
+Undo/Redo. This does not qualify physical precision or native output for this
+subsequent source change.

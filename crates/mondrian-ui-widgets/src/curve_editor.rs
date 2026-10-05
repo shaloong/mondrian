@@ -177,6 +177,17 @@ pub struct CurvePreview {
     /// Canonical positions of authored keys in owner-time order, bound by identity.
     /// Order distinguishes exact times that share one projected coordinate.
     pub key_points: Vec<(mondrian_core::KeyframeId, CurvePoint)>,
+    /// Evaluated owner boundaries; absent where an authored key owns that exact time.
+    pub virtual_boundaries: [Option<CurvePoint>; 2],
+}
+
+/// An exact endpoint of the visible owner interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CurveBoundary {
+    /// Start of the owner interval.
+    Start,
+    /// End of the owner interval.
+    End,
 }
 
 /// Stable source of one editable point, independent of its current display slot.
@@ -187,7 +198,7 @@ pub enum CurvePointTarget {
     /// A point in the immutable normalized-value snapshot supplied by the owner.
     Snapshot(usize),
     /// An evaluated temporal viewport boundary with no authored keyframe yet.
-    VirtualBoundary(usize),
+    VirtualBoundary(CurveBoundary),
 }
 
 /// One point or tangent author intent, carrying its stable source identity.
@@ -303,6 +314,8 @@ struct CurvePointMetadata {
     context_menu: Option<Vec<MenuItem>>,
 }
 
+type CurveBoundaryOrigin = [Option<(usize, CurvePoint, CurvePointMetadata)>; 2];
+
 /// Inactive curve selection and focus, scoped to an explicit owner view key.
 /// This snapshot contains no pointer capture, author draft or callbacks.
 #[derive(Debug, Clone)]
@@ -350,6 +363,7 @@ pub struct CurveEditor {
     tangent_origin: Option<Vec<CurveTangent>>,
     dragging: Option<CurvePointDrag>,
     drag_value_origin: Option<(Vec<CurvePoint>, Vec<CurvePointMetadata>)>,
+    drag_boundary_origin: Option<CurveBoundaryOrigin>,
     grid_columns: usize,
     grid_rows: usize,
     focused: bool,
@@ -415,6 +429,7 @@ impl CurveEditor {
             tangent_origin: None,
             dragging: None,
             drag_value_origin: None,
+            drag_boundary_origin: None,
             grid_columns: 4,
             grid_rows: 3,
             focused: false,
@@ -691,7 +706,11 @@ impl CurveEditor {
         }
         for (index, (metadata, id)) in self.point_metadata.iter_mut().zip(ids).enumerate() {
             metadata.target = id.map_or(
-                CurvePointTarget::VirtualBoundary(index),
+                CurvePointTarget::VirtualBoundary(if self.points[index].x == 0.0 {
+                    CurveBoundary::Start
+                } else {
+                    CurveBoundary::End
+                }),
                 CurvePointTarget::Keyframe,
             );
         }
@@ -771,6 +790,113 @@ impl CurveEditor {
         if reordered || canonical_order.is_some() {
             self.rebuild_keyframe_indices();
         }
+    }
+
+    fn reconcile_virtual_boundaries(&mut self, boundaries: [Option<CurvePoint>; 2]) {
+        if self.value_axis.is_none() {
+            return;
+        }
+        let mut shape_changed = false;
+        for (boundary, point) in
+            [CurveBoundary::Start, CurveBoundary::End].into_iter().zip(boundaries)
+        {
+            let target = CurvePointTarget::VirtualBoundary(boundary);
+            let index = self.point_metadata.iter().position(|metadata| metadata.target == target);
+            match (index, point) {
+                (Some(index), Some(point)) => self.points[index] = point,
+                (Some(index), None) => {
+                    shape_changed = true;
+                    self.points.remove(index);
+                    self.point_metadata.remove(index);
+                    self.selected = self.selected.and_then(|selected| {
+                        if selected == index {
+                            None
+                        } else {
+                            Some(selected - usize::from(selected > index))
+                        }
+                    });
+                    if let Some(drag) = self.dragging.as_mut() {
+                        drag.index -= usize::from(drag.index > index);
+                    }
+                }
+                (None, Some(point)) => {
+                    shape_changed = true;
+                    let index = if boundary == CurveBoundary::Start {
+                        0
+                    } else {
+                        self.points.len()
+                    };
+                    self.points.insert(index, point);
+                    self.point_metadata.insert(
+                        index,
+                        CurvePointMetadata {
+                            target,
+                            policy: CurvePointPolicy::anchor(),
+                            context_menu: None,
+                        },
+                    );
+                    if let Some(selected) = self.selected.as_mut() {
+                        *selected += usize::from(*selected >= index);
+                    }
+                    if let Some(drag) = self.dragging.as_mut() {
+                        drag.index += usize::from(drag.index >= index);
+                    }
+                }
+                (None, None) => {}
+            }
+        }
+        if shape_changed {
+            self.rebuild_keyframe_indices();
+        }
+    }
+
+    fn restore_drag_boundaries(&mut self, drag: CurvePointDrag) -> bool {
+        let Some(origin) = self.drag_boundary_origin.take() else {
+            return false;
+        };
+        let selected_target = self
+            .selected
+            .and_then(|index| self.point_metadata.get(index))
+            .map(|metadata| metadata.target);
+        for index in (0..self.points.len()).rev() {
+            if matches!(
+                self.point_metadata[index].target,
+                CurvePointTarget::VirtualBoundary(_)
+            ) {
+                self.points.remove(index);
+                self.point_metadata.remove(index);
+            }
+        }
+        if !drag.inserted
+            && !matches!(drag.target_origin, CurvePointTarget::VirtualBoundary(_))
+            && let Some(index) = self
+                .point_metadata
+                .iter()
+                .position(|metadata| metadata.target == drag.target_origin)
+        {
+            let rank = drag.origin_index
+                - origin
+                    .iter()
+                    .flatten()
+                    .filter(|(index, _, _)| *index < drag.origin_index)
+                    .count();
+            if index < rank {
+                self.points[index..=rank].rotate_left(1);
+                self.point_metadata[index..=rank].rotate_left(1);
+            } else if index > rank {
+                self.points[rank..=index].rotate_right(1);
+                self.point_metadata[rank..=index].rotate_right(1);
+            }
+        }
+        for (index, point, metadata) in origin.into_iter().flatten() {
+            self.points.insert(index, point);
+            self.point_metadata.insert(index, metadata);
+        }
+        self.selected = selected_target.and_then(|target| {
+            self.point_metadata.iter().position(|metadata| metadata.target == target)
+        });
+        self.rebuild_keyframe_indices();
+        true
     }
 
     fn selected_keyframe(&self) -> Option<mondrian_core::KeyframeId> {
@@ -1097,6 +1223,7 @@ impl CurveEditor {
                 }
             }
             self.reorder_temporal_points(Some(&points.key_points));
+            self.reconcile_virtual_boundaries(points.virtual_boundaries);
             self.set_display_points(points.display_points);
             self.set_tangents(points.tangents);
             if !self.has_active_pointer_interaction() {
@@ -1126,6 +1253,7 @@ impl CurveEditor {
         {
             self.display_points = origin;
         }
+        self.drag_boundary_origin = None;
         if let Some(id) = self.gesture.take() {
             if let Some(action) = &self.on_value_edit
                 && let Some(action) = action(
@@ -1195,6 +1323,28 @@ impl CurveEditor {
             }
         } else {
             self.end_gesture(true, ctx);
+        }
+        if self.value_axis.is_some()
+            && (self.on_gesture.is_some() || self.preview_projection.is_some())
+        {
+            self.drag_boundary_origin = Some(std::array::from_fn(|side| {
+                let target = CurvePointTarget::VirtualBoundary(if side == 0 {
+                    CurveBoundary::Start
+                } else {
+                    CurveBoundary::End
+                });
+                self.point_metadata
+                    .iter()
+                    .enumerate()
+                    .find(|(_, metadata)| metadata.target == target)
+                    .map(|(boundary_index, metadata)| {
+                        (
+                            boundary_index - usize::from(inserted && boundary_index > index),
+                            self.points[boundary_index],
+                            metadata.clone(),
+                        )
+                    })
+            }));
         }
         if self.on_gesture.is_some() {
             self.drag_display_origin = Some(self.display_points.clone());
@@ -1347,6 +1497,7 @@ impl CurveEditor {
                 self.points.remove(drag.index);
                 self.point_metadata.remove(drag.index);
                 self.selected = None;
+                self.restore_drag_boundaries(drag);
                 self.rebuild_keyframe_indices();
                 true
             } else {
@@ -1367,6 +1518,9 @@ impl CurveEditor {
                     changed
                 })
                 .unwrap_or(false);
+            if self.restore_drag_boundaries(drag) {
+                return changed;
+            }
             // Restore the original slot rather than sorting projected coordinates:
             // distinct exact owner times can share the same f32 position.
             if drag.index < drag.origin_index {
@@ -3150,6 +3304,7 @@ mod tests {
             ])
             .with_preview_projection(move |event| {
                 matches!(event, CurveGestureEvent::Edit { .. }).then(|| CurvePreview {
+                    virtual_boundaries: [None, None],
                     key_points: Vec::new(),
                     display_points: vec![CurvePoint::new(0.0, 0.5), CurvePoint::new(1.0, 0.5)],
                     tangents: projection
@@ -3284,7 +3439,7 @@ mod tests {
         );
         assert_eq!(
             editor.point_target(0),
-            Some(CurvePointTarget::VirtualBoundary(0))
+            Some(CurvePointTarget::VirtualBoundary(CurveBoundary::Start))
         );
         assert!(editor.keyframe_indices.is_empty());
         let events = events.borrow();
@@ -3548,6 +3703,51 @@ mod tests {
             &mut ctx,
         );
         assert_eq!(editor.points, original);
+        assert!(!editor.has_active_pointer_interaction());
+    }
+
+    #[test]
+    fn temporal_snapshot_gesture_crossing_cancel_restores_origin_order() {
+        use mondrian_core::automation::ParameterNumericRange;
+        let range = ParameterNumericRange::new(0.0, 1.0).expect("range");
+        let original = vec![
+            CurvePoint::new(0.0, 0.5),
+            CurvePoint::new(0.25, 0.5),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 0.5),
+        ];
+        let mut editor = CurveEditor::with_author_points(
+            original.clone(),
+            CurveValueAxis::new(range, range, None).expect("axis"),
+        )
+        .on_gesture(|_| None::<Action>);
+        editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let start = editor.to_screen(original[1]);
+        let destination = editor.to_screen(CurvePoint::new(0.75, 0.5));
+        let mut ctx = event_ctx();
+        editor.event(
+            &UiEvent::MouseDown {
+                position: start,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        editor.event(
+            &UiEvent::MouseMove {
+                position: destination,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(editor.points[2], CurvePoint::new(0.75, 0.5));
+        assert_eq!(editor.point_target(2), Some(CurvePointTarget::Snapshot(1)));
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(editor.points, original);
+        assert_eq!(editor.selected_index(), Some(1));
         assert!(!editor.has_active_pointer_interaction());
     }
 
@@ -4316,6 +4516,7 @@ mod tests {
                 CurveGestureEvent::Edit { edit: CurveEdit::Delete { .. }, .. }
             )
             .then(|| CurvePreview {
+                virtual_boundaries: [None, None],
                 display_points: vec![CurvePoint::new(0.0, 0.5), CurvePoint::new(1.0, 0.5)],
                 key_points: Vec::new(),
                 tangents: Vec::new(),
@@ -4455,6 +4656,7 @@ mod tests {
                 if point.y <= 0.6 =>
             {
                 Some(CurvePreview {
+                    virtual_boundaries: [None, None],
                     key_points: Vec::new(),
                     display_points: vec![
                         CurvePoint::new(0.0, 0.0),
@@ -4547,6 +4749,7 @@ mod tests {
             match event {
                 CurveGestureEvent::Edit { edit: CurveEdit::Move { point, .. }, .. } => {
                     Some(CurvePreview {
+                        virtual_boundaries: [None, None],
                         key_points: Vec::new(),
                         display_points: vec![
                             CurvePoint::new(0.0, 0.0),
@@ -4557,6 +4760,7 @@ mod tests {
                     })
                 }
                 CurveGestureEvent::Cancel(_) => Some(CurvePreview {
+                    virtual_boundaries: [None, None],
                     key_points: Vec::new(),
                     display_points: vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 0.0)],
                     tangents: Vec::new(),

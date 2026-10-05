@@ -113,6 +113,25 @@ pub(super) fn lower(
     })
 }
 
+/// Project exact owner boundary presence using already evaluated canonical samples.
+pub(super) fn virtual_boundary_points(
+    times: impl IntoIterator<Item = TimelineTime>,
+    range: TimelineTimeRange,
+    display: &[CurvePoint],
+) -> Option<[Option<CurvePoint>; 2]> {
+    let end = range.end().ok()?;
+    let mut boundaries = [Some(*display.first()?), Some(*display.last()?)];
+    for time in times {
+        if time == range.start {
+            boundaries[0] = None;
+        }
+        if time == end {
+            boundaries[1] = None;
+        }
+    }
+    Some(boundaries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

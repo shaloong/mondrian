@@ -8,7 +8,11 @@ use mondrian_ui_widgets::CurvePointTarget;
 
 fn numeric_target(model: &InspectorCurveModel, index: usize) -> CurvePointTarget {
     model.keys[index].keyframe_id.map_or(
-        CurvePointTarget::VirtualBoundary(index),
+        CurvePointTarget::VirtualBoundary(if model.keys[index].point.x == 0.0 {
+            mondrian_ui_widgets::CurveBoundary::Start
+        } else {
+            mondrian_ui_widgets::CurveBoundary::End
+        }),
         CurvePointTarget::Keyframe,
     )
 }
@@ -9358,6 +9362,186 @@ fn inspector_crossed_curve_escape_restores_author_and_projected_identity_order()
             .active_sequence()
             .expect("Redone")
             .author_state_eq_ignoring_revision(&redo_state));
+    }
+}
+
+#[test]
+fn inspector_boundary_key_preview_matches_canonical_owner_model() {
+    use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    fn editor(widget: &dyn Widget) -> &CurveEditor {
+        widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .expect("curve")
+    }
+    fn find_curve(widget: &dyn Widget) -> Option<WidgetId> {
+        if widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .is_some_and(|curve| curve.points().len() == 5 && curve.points()[2].y == 0.5)
+        {
+            return Some(widget.id());
+        }
+        (0..widget.child_count()).find_map(|i| widget.child(i).and_then(find_curve))
+    }
+    for (interpolation, at_end) in [
+        (InterpolationType::AutoBezier, false),
+        (InterpolationType::ContinuousBezier, false),
+        (InterpolationType::AutoBezier, true),
+        (InterpolationType::ContinuousBezier, true),
+    ] {
+        let duration = TimelineTime::ONE;
+        let times = [
+            TimelineTime::new(1, 4).expect("previous"),
+            TimelineTime::new(1, 2).expect("middle"),
+            TimelineTime::new(3, 4).expect("next"),
+        ];
+        let mut clip = Clip::new_basic_title("Dense keys", "Arial", TimelineTime::ZERO, duration)
+            .expect("title");
+        let clip_id = clip.id;
+        let mut ids = Vec::new();
+        for (key_index, time) in times.into_iter().enumerate() {
+            let key = Keyframe::from_preset(
+                time,
+                PropertyValue::Float((key_index + 1) as f32 * 0.25),
+                interpolation,
+            );
+            ids.push(key.id);
+            clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: Transform2D::OPACITY_PATH.into(),
+                keyframe: key,
+            })
+            .expect("seed canonical key");
+        }
+        let mut sequence = Sequence::new("Dense temporal authoring");
+        sequence.video_tracks[0].add_clip(clip).expect("place title");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("selection");
+        let original = state.active_sequence().expect("origin").clone();
+        let models = AppUiPanelModels::from_app_state(&state);
+        let mut panel = inspector_panel(&models.inspector, &chinese_localizer());
+        let id = find_curve(&panel).expect("actual Inspector curve");
+        let mut tree = WidgetTreeView::new(&mut panel);
+        let curve = tree.get_mut(id).expect("curve");
+        curve.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let center = Point::new(110.0, 52.0);
+        curve.event(
+            &UiEvent::MouseDown {
+                position: center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        curve.event(
+            &UiEvent::MouseMove {
+                position: Point::new(if at_end { 210.0 } else { 10.0 }, 52.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        for action in actions.borrow_mut().drain(..) {
+            state.dispatch_action(action).expect("move real key to owner boundary");
+        }
+        let current = AppUiPanelModels::from_app_state(&state);
+        let model = current.inspector.opacity_curve.as_ref().expect("canonical moved curve");
+        let moved = model.curve_source.keyframe_by_id(ids[1]).expect("same middle key");
+        assert_eq!(
+            moved.time,
+            if at_end {
+                TimelineTime::ONE
+            } else {
+                TimelineTime::ZERO
+            }
+        );
+        assert_eq!(
+            editor(curve).points(),
+            model.keys.iter().map(|key| key.point).collect::<Vec<_>>(),
+            "live point projection must equal canonical owner, including virtual boundaries"
+        );
+        let displayed_ids = (0..editor(curve).points().len())
+            .filter_map(|i| match editor(curve).point_target(i) {
+                Some(CurvePointTarget::Keyframe(id)) => Some(id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            displayed_ids,
+            model.keys.iter().filter_map(|key| key.keyframe_id).collect::<Vec<_>>()
+        );
+        assert!(curve.has_active_pointer_interaction());
+        curve.event(
+            &UiEvent::MouseMove { position: center, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        for action in actions.borrow_mut().drain(..) {
+            state.dispatch_action(action).expect("move away from boundary");
+        }
+        assert!(state
+            .active_sequence()
+            .expect("origin draft")
+            .author_state_eq_ignoring_revision(&original));
+        assert_eq!(
+            editor(curve).points(),
+            models
+                .inspector
+                .opacity_curve
+                .as_ref()
+                .expect("origin")
+                .keys
+                .iter()
+                .map(|key| key.point)
+                .collect::<Vec<_>>()
+        );
+        curve.event(
+            &UiEvent::MouseMove {
+                position: Point::new(if at_end { 210.0 } else { 10.0 }, 52.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        for action in actions.borrow_mut().drain(..) {
+            state.dispatch_action(action).expect("boundary retry");
+        }
+        curve.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        for action in actions.borrow_mut().drain(..) {
+            state.dispatch_action(action).expect("cancel boundary edit");
+        }
+        assert!(state
+            .active_sequence()
+            .expect("cancelled")
+            .author_state_eq_ignoring_revision(&original));
+        assert_eq!(
+            editor(curve).points(),
+            models
+                .inspector
+                .opacity_curve
+                .as_ref()
+                .expect("origin")
+                .keys
+                .iter()
+                .map(|key| key.point)
+                .collect::<Vec<_>>()
+        );
+        assert!(!state.can_undo_action());
     }
 }
 

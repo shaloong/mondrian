@@ -421,12 +421,19 @@ fn audio_curve_edit_intent(
                     )?;
                     (Some(id), reference)
                 }
-                CurvePointTarget::VirtualBoundary(index) => {
-                    let key = model.keys.get(index)?;
-                    if key.keyframe.is_some() {
-                        return None;
-                    }
-                    (None, key.point)
+                CurvePointTarget::VirtualBoundary(boundary) => {
+                    let (x, time) = match boundary {
+                        mondrian_ui_widgets::CurveBoundary::Start => {
+                            (0.0, model.viewport.range.start)
+                        }
+                        mondrian_ui_widgets::CurveBoundary::End => {
+                            (1.0, model.viewport.range.end().ok()?)
+                        }
+                    };
+                    (
+                        None,
+                        CurvePoint { x, y: model.source_curve.evaluate(time).ok()? },
+                    )
                 }
                 CurvePointTarget::Snapshot(_) => return None,
             };
@@ -539,7 +546,11 @@ mod tests {
 
     fn audio_target(model: &AudioAutomationCurveModel, index: usize) -> CurvePointTarget {
         model.keys[index].keyframe.as_ref().map(|key| key.id).map_or(
-            CurvePointTarget::VirtualBoundary(index),
+            CurvePointTarget::VirtualBoundary(if model.keys[index].point.x == 0.0 {
+                mondrian_ui_widgets::CurveBoundary::Start
+            } else {
+                mondrian_ui_widgets::CurveBoundary::End
+            }),
             CurvePointTarget::Keyframe,
         )
     }
