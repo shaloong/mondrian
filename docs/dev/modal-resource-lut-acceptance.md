@@ -119,6 +119,30 @@ explicit native tests, modal/resource filters and the integer/dense/Float histor
 regressions. The source and product hashes remained unchanged throughout; rounds
 exited naturally in 122.676, 121.348 and 122.433 seconds.
 
+## Crossed gesture cancellation and collision admission
+
+A subsequent actual Inspector regression reproduced a cancellation defect when
+three exact owner times shared one f32 position: the complete author Sequence
+was restored, but two displayed key identities remained swapped. Cancelling by
+sorting projected positions cannot recover exact origin order. Point gestures
+now retain the original slot, rotate points and metadata back together in place,
+restore selection by target and rebuild the existing ID index. This adds one
+slot coordinate to the drag state, not a whole-curve clone per pointer movement.
+
+The real Inspector regression covers six cases: Auto/Continuous Bezier in an
+ordinary dense interval, a wide interval with coincident projected coordinates,
+and an exact quarter-time neighbor collision. A refused collision retains the
+last admitted full author state, geometry, identity order and capture; a valid
+candidate recovers. Escape and a finished excursion returning to the exact origin
+restore author state and displayed identity order, add no Undo, preserve prior
+Redo, and the retained Redo still restores its complete expected Sequence.
+
+This patch passed 84 Widgets curve/model tests, the full all-feature App library
+(2552 passed, zero failed, 62 ignored), strict workspace all-target/all-feature
+Clippy, formatting and diff checks. These results qualify the changed UI source;
+the native binary and Golden report above remain bound to production 97e8235.
+Further curve interaction work will be batched before rebuilding that output gate.
+
 ## Reproduce and locate evidence
 
 Run `cargo test -p mondrian-app --all-features --lib modal -- --test-threads=1`

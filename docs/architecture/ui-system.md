@@ -3630,3 +3630,14 @@ saving preserves live Redo and fresh reopen begins with empty history. Additiona
 wide owner-time cases qualify exact keyboard crossing where projected coordinates
 coincide. These do not qualify physical pointer precision beyond its projection,
 all platform layouts, multi-key editing or full interactive performance.
+
+Point gestures retain the original point slot as well as the projected coordinate.
+Cancellation restores that slot by rotating points and metadata together in place;
+it never infers exact owner order from equal projected coordinates. Selection follows
+the restored target and the existing ID index is rebuilt without a full curve clone.
+Actual Inspector regressions cover crossed Auto/Continuous keys in ordinary and
+collapsed projected intervals, Escape and finished return-to-origin with a retained
+prior Redo, and compare full author state plus display order and identity.
+Exact neighbor-time pointer collisions retain the last admitted geometry and
+author state, capture and identity; a subsequent valid candidate recovers before
+Escape cancellation. Both constrained Bezier modes have real Inspector coverage.

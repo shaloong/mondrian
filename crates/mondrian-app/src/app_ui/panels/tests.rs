@@ -9070,6 +9070,298 @@ fn inspector_dense_curve_reordering_preserves_exact_steps_and_durable_history() 
 }
 
 #[test]
+fn inspector_crossed_curve_escape_restores_author_and_projected_identity_order() {
+    use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    fn editor(widget: &dyn Widget) -> &CurveEditor {
+        widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .expect("curve")
+    }
+    fn find_curve(widget: &dyn Widget) -> Option<WidgetId> {
+        if widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .is_some_and(|curve| curve.points().len() == 5 && curve.points()[2].y == 0.5)
+        {
+            return Some(widget.id());
+        }
+        (0..widget.child_count()).find_map(|i| widget.child(i).and_then(find_curve))
+    }
+    for (interpolation, collapsed, collision) in [
+        (InterpolationType::AutoBezier, false, false),
+        (InterpolationType::ContinuousBezier, false, false),
+        (InterpolationType::AutoBezier, true, false),
+        (InterpolationType::ContinuousBezier, true, false),
+        (InterpolationType::AutoBezier, false, true),
+        (InterpolationType::ContinuousBezier, false, true),
+    ] {
+        let (duration, times) = if collision {
+            (
+                TimelineTime::ONE,
+                [
+                    TimelineTime::new(1, 4).expect("previous"),
+                    TimelineTime::new(1, 2).expect("middle"),
+                    TimelineTime::new(3, 4).expect("next"),
+                ],
+            )
+        } else if collapsed {
+            let origin = TimelineTime::new(16_777_216, 1).expect("wide owner time");
+            (
+                TimelineTime::new(33_554_432, 1).expect("wide interval"),
+                [
+                    origin
+                        .checked_sub(TimelineTime::new(1, 10).expect("previous offset"))
+                        .expect("previous"),
+                    origin,
+                    origin
+                        .checked_add(TimelineTime::new(1, 50).expect("next offset"))
+                        .expect("next"),
+                ],
+            )
+        } else {
+            (
+                TimelineTime::new(600, 1).expect("duration"),
+                [
+                    TimelineTime::new(2997, 10).expect("previous"),
+                    TimelineTime::new(300, 1).expect("middle"),
+                    TimelineTime::new(3003, 10).expect("next"),
+                ],
+            )
+        };
+        let mut clip = Clip::new_basic_title("Dense keys", "Arial", TimelineTime::ZERO, duration)
+            .expect("title");
+        let clip_id = clip.id;
+        let mut ids = Vec::new();
+        for (key_index, time) in times.into_iter().enumerate() {
+            let key = Keyframe::from_preset(
+                time,
+                PropertyValue::Float((key_index + 1) as f32 * 0.25),
+                interpolation,
+            );
+            ids.push(key.id);
+            clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: Transform2D::OPACITY_PATH.into(),
+                keyframe: key,
+            })
+            .expect("seed canonical key");
+        }
+        let mut sequence = Sequence::new("Dense temporal authoring");
+        sequence.video_tracks[0].add_clip(clip).expect("place title");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("selection");
+        let original = state.active_sequence().expect("origin").clone();
+        let mut redo_key = state
+            .active_sequence()
+            .expect("origin")
+            .find_clip(clip_id)
+            .expect("clip")
+            .intrinsic_parameter_bag()
+            .property(Transform2D::OPACITY_PATH)
+            .expect("opacity")
+            .keyframe_by_id(ids[1])
+            .expect("middle key");
+        redo_key.value = PropertyValue::Float(0.625);
+        state
+            .mutate_clip_property(
+                state.selected_clips()[0],
+                PropertyMutation::SetKeyframe {
+                    path: Transform2D::OPACITY_PATH.into(),
+                    keyframe: redo_key,
+                },
+                "Seed previous Redo",
+            )
+            .expect("seed reversible author edit");
+        let redo_state = state.active_sequence().expect("seeded Redo").clone();
+        assert!(state.undo_timeline().expect("retain previous Redo"));
+        assert!(state
+            .active_sequence()
+            .expect("origin")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(state.can_redo_action());
+        let models = AppUiPanelModels::from_app_state(&state);
+        let mut panel = inspector_panel(&models.inspector, &chinese_localizer());
+        let id = find_curve(&panel).expect("actual dense Inspector");
+        let mut tree = WidgetTreeView::new(&mut panel);
+        let curve = tree.get_mut(id).expect("curve");
+        curve.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let center = Point::new(110.0, 52.0);
+        let destination = Point::new(if collision { 185.0 } else { 130.0 }, 52.0);
+        let origin_points = editor(curve).points().to_vec();
+        let targets = |curve: &dyn Widget| {
+            (0..editor(curve).points().len())
+                .map(|index| editor(curve).point_target(index))
+                .collect::<Vec<_>>()
+        };
+        let origin_targets = targets(curve);
+        if collapsed {
+            assert!(editor(curve).points()[1..4].iter().all(|point| point.x == 0.5));
+        }
+        curve.event(
+            &UiEvent::MouseDown {
+                position: center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(
+            editor(curve).point_target(editor(curve).selected_index().expect("selected")),
+            Some(CurvePointTarget::Keyframe(ids[1]))
+        );
+        curve.event(
+            &UiEvent::MouseMove {
+                position: destination,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        for action in actions.borrow_mut().drain(..) {
+            state.dispatch_action(action).expect("crossed pointer candidate");
+        }
+        assert!(!state
+            .active_sequence()
+            .expect("draft")
+            .author_state_eq_ignoring_revision(&original));
+        let selected = editor(curve).selected_index().expect("captured key");
+        assert_eq!(
+            editor(curve).point_target(selected),
+            Some(CurvePointTarget::Keyframe(ids[1]))
+        );
+        assert_eq!(selected, 3, "middle key has crossed the right neighbor");
+        assert!(curve.has_active_pointer_interaction());
+        if collision {
+            let admitted = state.active_sequence().expect("admitted").clone();
+            let admitted_points = editor(curve).points().to_vec();
+            let admitted_targets = targets(curve);
+            curve.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(160.0, 52.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            assert!(
+                actions.borrow().is_empty(),
+                "exact neighbor collision cannot dispatch author mutation"
+            );
+            assert!(state
+                .active_sequence()
+                .expect("rejected")
+                .author_state_eq_ignoring_revision(&admitted));
+            assert_eq!(editor(curve).points(), admitted_points);
+            assert_eq!(targets(curve), admitted_targets);
+            assert!(
+                curve.has_active_pointer_interaction(),
+                "refusal permits recovery"
+            );
+            curve.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(170.0, 52.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            for action in actions.borrow_mut().drain(..) {
+                state.dispatch_action(action).expect("recover from collision");
+            }
+            assert!(!state
+                .active_sequence()
+                .expect("recovered")
+                .author_state_eq_ignoring_revision(&admitted));
+            assert_eq!(
+                editor(curve)
+                    .point_target(editor(curve).selected_index().expect("stable selection")),
+                Some(CurvePointTarget::Keyframe(ids[1]))
+            );
+            assert!(curve.has_active_pointer_interaction());
+        }
+        curve.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        for action in actions.borrow_mut().drain(..) {
+            state.dispatch_action(action).expect("cancel crossed author gesture");
+        }
+        assert!(state
+            .active_sequence()
+            .expect("cancelled")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(!state.can_undo_action());
+        assert!(!curve.has_active_pointer_interaction());
+        assert_eq!(
+            targets(curve),
+            origin_targets,
+            "cancel restores exact origin identity order"
+        );
+        assert_eq!(
+            editor(curve).points(),
+            origin_points,
+            "cancel restores projected origin"
+        );
+        assert_eq!(editor(curve).selected_index(), Some(2));
+        assert!(state.can_redo_action(), "cancel preserves previous Redo");
+        // A finished excursion returning to the exact origin is also a no-op.
+        curve.event(
+            &UiEvent::MouseDown {
+                position: center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        for position in [destination, center] {
+            curve.event(
+                &UiEvent::MouseMove { position, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+            for action in actions.borrow_mut().drain(..) {
+                state.dispatch_action(action).expect("return to exact origin");
+            }
+        }
+        curve.event(
+            &UiEvent::MouseUp {
+                position: center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        for action in actions.borrow_mut().drain(..) {
+            state.dispatch_action(action).expect("finish origin no-op");
+        }
+        assert!(state
+            .active_sequence()
+            .expect("origin")
+            .author_state_eq_ignoring_revision(&original));
+        assert_eq!(targets(curve), origin_targets);
+        assert_eq!(editor(curve).points(), origin_points);
+        assert!(!state.can_undo_action());
+        assert!(state.can_redo_action());
+        assert!(state.redo_timeline().expect("previous Redo still executes"));
+        assert!(state
+            .active_sequence()
+            .expect("Redone")
+            .author_state_eq_ignoring_revision(&redo_state));
+    }
+}
+
+#[test]
 fn effect_curve_rejected_native_float_preview_preserves_geometry_and_author_history() {
     use mondrian_core::automation::{ParameterUnit, PropertyDescriptor, PropertyMutation};
     use mondrian_effects::{

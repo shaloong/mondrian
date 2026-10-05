@@ -276,6 +276,7 @@ pub type CurveValueEditAction = dyn Fn(ValueEdit, &[CurvePoint]) -> Option<Actio
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct CurvePointDrag {
     index: usize,
+    origin_index: usize,
     origin: CurvePoint,
     pointer_origin: Point,
     inserted: bool,
@@ -1213,6 +1214,7 @@ impl CurveEditor {
         }
         self.dragging = Some(CurvePointDrag {
             index,
+            origin_index: index,
             origin: self.points[index],
             pointer_origin,
             inserted,
@@ -1352,17 +1354,32 @@ impl CurveEditor {
             }
         } else {
             self.point_metadata[drag.index].target = drag.target_origin;
-            self.rebuild_keyframe_indices();
+            let selected_target = self
+                .selected
+                .and_then(|index| self.point_metadata.get(index))
+                .map(|metadata| metadata.target);
             let changed = self
                 .points
                 .get_mut(drag.index)
                 .map(|point| {
-                    let changed = *point != drag.origin;
+                    let changed = *point != drag.origin || drag.index != drag.origin_index;
                     *point = drag.origin;
                     changed
                 })
                 .unwrap_or(false);
-            self.reorder_temporal_points(None);
+            // Restore the original slot rather than sorting projected coordinates:
+            // distinct exact owner times can share the same f32 position.
+            if drag.index < drag.origin_index {
+                self.points[drag.index..=drag.origin_index].rotate_left(1);
+                self.point_metadata[drag.index..=drag.origin_index].rotate_left(1);
+            } else if drag.index > drag.origin_index {
+                self.points[drag.origin_index..=drag.index].rotate_right(1);
+                self.point_metadata[drag.origin_index..=drag.index].rotate_right(1);
+            }
+            self.selected = selected_target.and_then(|target| {
+                self.point_metadata.iter().position(|metadata| metadata.target == target)
+            });
+            self.rebuild_keyframe_indices();
             changed
         }
     }
