@@ -4636,9 +4636,14 @@ fn run_app_ui_with_initial_state_on_event_loop(
                 }
                 #[cfg(target_os = "macos")]
                 {
-                    if Instant::now() >= session.next_native_display_observation {
+                    if Instant::now() >= session.next_native_display_observation
+                        && session.surface_acquisition.as_ref().is_none_or(|owner| !owner.is_pending())
+                    {
                         // AppKit activates EDR asynchronously after CAMetalLayer configuration.
                         // OS HDR/profile changes also need observation when the window is idle.
+                        // Metal capability queries share the Surface lock held by nextDrawable.
+                        // The existing acquisition completion wakes this loop; observe only
+                        // after it returns, without making the playback thread wait for it.
                         refresh_display_output_contract(
                             DisplayOutputContractRefreshReason::NativeDisplayObservation,
                             adapter,
@@ -4821,10 +4826,12 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     host.next_execution_resource_observation_deadline(),
                 ));
                 #[cfg(target_os = "macos")]
-                elwt.set_control_flow(control_flow_wake_no_later_than(
-                    elwt.control_flow(),
-                    session.next_native_display_observation,
-                ));
+                if session.surface_acquisition.as_ref().is_none_or(|owner| !owner.is_pending()) {
+                    elwt.set_control_flow(control_flow_wake_no_later_than(
+                        elwt.control_flow(),
+                        session.next_native_display_observation,
+                    ));
+                }
                 #[cfg(feature = "validation")]
                 if let Some(validation) = surface_reopen_validation.as_ref() {
                     elwt.set_control_flow(control_flow_wake_no_later_than(

@@ -964,6 +964,13 @@ cannot suspend the event-loop's
 existing Playback clock, producer/result, or GPU-completion observation.
 It owns no Timeline, picture, color, Frame Demand, or presentation authority.
 
+Periodic macOS display observation waits for this same acquisition owner to
+return before querying Metal surface capabilities. Those queries share the
+native surface lock with drawable acquisition. While acquisition is pending,
+its existing completion event supplies the observation wake; an already-due
+display poll must not spin or block Playback on that lock. The original display
+observation remains due and runs when acquisition returns.
+
 A drawable is transferred only for the latest configuration. A move-only paint
 guard excludes configure and another acquisition until recording/present (or
 unwind) returns and the real texture is released. Revoking a ready drawable also
