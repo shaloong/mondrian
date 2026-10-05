@@ -2568,7 +2568,35 @@ impl AnimatedProperty {
     ) -> Option<ExactBezierHandle> {
         let keys = self.channels.get(channel_index)?.keyframes();
         let index = keys.iter().position(|key| key.id == keyframe_id)?;
-        let key = &keys[index];
+        self.channel_keyframe_control(channel_index, index, side)
+            .map(|control| control.handle)
+    }
+
+    /// Visit a channel's canonical controls in key-time order, incoming before outgoing.
+    /// Missing channels yield no controls; each side resolves its immediate neighbor.
+    pub fn channel_keyframe_controls(
+        &self,
+        channel_index: usize,
+    ) -> impl Iterator<Item = crate::TemporalBezierControl> + '_ {
+        let count = self.channels.get(channel_index).map_or(0, |channel| channel.keyframes().len());
+        (0..count).flat_map(move |index| {
+            [
+                crate::BezierHandleSide::Incoming,
+                crate::BezierHandleSide::Outgoing,
+            ]
+            .into_iter()
+            .filter_map(move |side| self.channel_keyframe_control(channel_index, index, side))
+        })
+    }
+
+    fn channel_keyframe_control(
+        &self,
+        channel_index: usize,
+        index: usize,
+        side: crate::BezierHandleSide,
+    ) -> Option<crate::TemporalBezierControl> {
+        let keys = self.channels.get(channel_index)?.keyframes();
+        let key = keys.get(index)?;
         let (neighbor, interpolation, opposite) = match side {
             crate::BezierHandleSide::Incoming => {
                 let neighbor = keys.get(index.checked_sub(1)?)?;
@@ -2582,9 +2610,9 @@ impl AnimatedProperty {
         if matches!(opposite, KeyframeInterpolation::Hold) {
             return None;
         }
-        match interpolation {
-            KeyframeInterpolation::Bezier(handle) => Some(handle),
-            KeyframeInterpolation::DefaultBezier => Some(ExactBezierHandle {
+        let handle = match interpolation {
+            KeyframeInterpolation::Bezier(handle) => handle,
+            KeyframeInterpolation::DefaultBezier => ExactBezierHandle {
                 time_offset: neighbor
                     .time
                     .checked_sub(key.time)
@@ -2592,9 +2620,17 @@ impl AnimatedProperty {
                     .checked_scale(crate::TimeScale::new(1, 3).ok()?)
                     .ok()?,
                 value_offset: 0.0,
-            }),
-            _ => None,
-        }
+            },
+            _ => return None,
+        };
+        Some(crate::TemporalBezierControl {
+            keyframe_id: key.id,
+            key_time: key.time,
+            key_value: key.value,
+            neighbor_time: neighbor.time,
+            side,
+            handle,
+        })
     }
 
     /// Atomically replace one channel's typed handles and admit the resulting constraints.
@@ -4386,6 +4422,69 @@ impl crate::AuthoringFootprint for PropertyBag {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordered_visual_controls_preserve_exact_neighbors_defaults_and_hold_edges() {
+        let path = "test.ordered.controls";
+        let mut bag = overshoot_property_bag(path, 4.0);
+        for (time, value) in [
+            (TimelineTime::ZERO, 0.0),
+            (TimelineTime::ONE, 0.5),
+            (TimelineTime::new(3, 1).expect("last"), 1.0),
+        ] {
+            bag.set_keyframe(
+                path,
+                Keyframe::from_preset(
+                    time,
+                    PropertyValue::Double(value),
+                    InterpolationType::Bezier,
+                ),
+            )
+            .expect("key");
+        }
+        let mut property = bag.property(path).expect("property").clone();
+        property.validate().expect("valid controls");
+        let controls = property.channel_keyframe_controls(0).collect::<Vec<_>>();
+        assert_eq!(controls.len(), 4);
+        assert_eq!(
+            controls.iter().map(|c| (c.key_time, c.side)).collect::<Vec<_>>(),
+            vec![
+                (TimelineTime::ZERO, crate::BezierHandleSide::Outgoing),
+                (TimelineTime::ONE, crate::BezierHandleSide::Incoming),
+                (TimelineTime::ONE, crate::BezierHandleSide::Outgoing),
+                (
+                    TimelineTime::new(3, 1).expect("last"),
+                    crate::BezierHandleSide::Incoming
+                ),
+            ]
+        );
+        assert_eq!(
+            controls.iter().map(|c| c.handle.time_offset).collect::<Vec<_>>(),
+            vec![
+                TimelineTime::ONE_THIRD,
+                TimelineTime::NEGATIVE_ONE_THIRD,
+                TimelineTime::new(2, 3).expect("out"),
+                TimelineTime::new(-2, 3).expect("in"),
+            ]
+        );
+        assert!(controls.iter().all(|c| c.handle.value_offset == 0.0));
+        assert_eq!(
+            controls[2].neighbor_time,
+            TimelineTime::new(3, 1).expect("neighbor")
+        );
+        assert_eq!(controls[2].key_value, 0.5);
+        assert_eq!(
+            controls[2].keyframe_id,
+            property.channels()[0].keyframes()[1].id
+        );
+        assert_eq!(property.channel_keyframe_controls(1).count(), 0);
+        property.channels[0].keyframes[1].interp_in = KeyframeInterpolation::Hold;
+        property.validate().expect("mixed hold edge");
+        let controls = property.channel_keyframe_controls(0).collect::<Vec<_>>();
+        assert_eq!(controls.len(), 2);
+        assert_eq!(controls[0].key_time, TimelineTime::ONE);
+        assert_eq!(controls[0].side, crate::BezierHandleSide::Outgoing);
+    }
 
     fn overshoot_property_bag(path: &str, bound: f64) -> PropertyBag {
         let mut bag = PropertyBag::default();

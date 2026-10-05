@@ -4095,39 +4095,34 @@ fn numeric_curve_model_for_property(
         Some((elapsed / duration_ticks.to_f64()).clamp(0.0, 1.0) as f32)
     };
 
-    let mut keys = BTreeMap::<TimelineTime, InspectorCurveKeyModel>::new();
-    keys.insert(
-        start_tick,
-        InspectorCurveKeyModel {
+    let channel_keys = property.channels().first()?.keyframes();
+    let first = channel_keys.partition_point(|key| key.time < start_tick);
+    let last = channel_keys.partition_point(|key| key.time <= end_tick);
+    let visible = channel_keys.get(first..last)?;
+    let mut keys = Vec::with_capacity(visible.len().saturating_add(2));
+    if visible.first().is_none_or(|key| key.time > start_tick) {
+        keys.push(InspectorCurveKeyModel {
             keyframe_id: None,
             interpolation: None,
             point: CurvePoint::new(0.0, normalized_value(property.evaluate(start_tick))?),
-        },
-    );
-    keys.insert(
-        end_tick,
-        InspectorCurveKeyModel {
+        });
+    }
+    for key in visible {
+        keys.push(InspectorCurveKeyModel {
+            keyframe_id: Some(key.id),
+            interpolation: Some(interpolation_preset_for_keyframe(key)),
+            point: CurvePoint::new(
+                normalized_time(key.time)?,
+                numeric.soft_range.normalized_position(key.value)? as f32,
+            ),
+        });
+    }
+    if visible.last().is_none_or(|key| key.time < end_tick) {
+        keys.push(InspectorCurveKeyModel {
             keyframe_id: None,
             interpolation: None,
             point: CurvePoint::new(1.0, normalized_value(property.evaluate(end_tick))?),
-        },
-    );
-    for keyframe_time in property.keyframe_times() {
-        if keyframe_time < start_tick || keyframe_time > end_tick {
-            continue;
-        }
-        let keyframe = property.keyframe_at(keyframe_time)?;
-        keys.insert(
-            keyframe_time,
-            InspectorCurveKeyModel {
-                keyframe_id: Some(keyframe.id),
-                interpolation: Some(interpolation_preset_for_keyframe(&keyframe)),
-                point: CurvePoint::new(
-                    normalized_time(keyframe_time)?,
-                    normalized_value(keyframe.value)?,
-                ),
-            },
-        );
+        });
     }
 
     const DISPLAY_SEGMENTS: i64 = 128;
@@ -4148,13 +4143,13 @@ fn numeric_curve_model_for_property(
         owner_range: mondrian_core::TimelineTimeRange::new(start_tick, duration_ticks).ok()?,
         property: property.address(),
         value_range: numeric.soft_range,
-        keys: keys.into_values().collect(),
+        keys,
         display_points,
     })
 }
 
-fn interpolation_preset_for_keyframe(
-    keyframe: &mondrian_core::automation::Keyframe<PropertyValue>,
+fn interpolation_preset_for_keyframe<T>(
+    keyframe: &mondrian_core::automation::Keyframe<T>,
 ) -> InterpolationType {
     if keyframe.temporal_flags.auto_bezier {
         return InterpolationType::AutoBezier;

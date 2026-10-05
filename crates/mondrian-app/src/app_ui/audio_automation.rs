@@ -62,39 +62,24 @@ impl AudioAutomationCurveModel {
     }
 
     pub(crate) fn tangents(&self) -> Vec<mondrian_ui_widgets::CurveTangent> {
-        self.keys
+        let visible = self
+            .keys
             .iter()
             .enumerate()
-            .flat_map(|(index, projected)| {
-                [
-                    mondrian_core::BezierHandleSide::Incoming,
-                    mondrian_core::BezierHandleSide::Outgoing,
-                ]
-                .into_iter()
-                .filter_map(move |side| {
-                    let id = projected.keyframe.as_ref()?.id;
-                    let position =
-                        self.source_curve.keyframes.iter().position(|key| key.id == id)?;
-                    let key = &self.source_curve.keyframes[position];
-                    let neighbor = match side {
-                        mondrian_core::BezierHandleSide::Incoming => {
-                            self.source_curve.keyframes.get(position.checked_sub(1)?)?
-                        }
-                        mondrian_core::BezierHandleSide::Outgoing => {
-                            self.source_curve.keyframes.get(position + 1)?
-                        }
-                    };
-                    let handle = self.source_curve.keyframe_handle(id, side)?;
-                    crate::app_ui::curve_tangents::project(
-                        index,
-                        side,
-                        (key.time, key.value),
-                        neighbor.time,
-                        handle,
-                        self.viewport.range,
-                        [self.view_min, self.view_max],
-                    )
-                })
+            .filter_map(|(index, key)| Some((key.keyframe.as_ref()?.id, index)))
+            .collect::<std::collections::HashMap<_, _>>();
+        self.source_curve
+            .keyframe_controls()
+            .filter_map(|control| {
+                crate::app_ui::curve_tangents::project(
+                    *visible.get(&control.keyframe_id)?,
+                    control.side,
+                    (control.key_time, control.key_value),
+                    control.neighbor_time,
+                    control.handle,
+                    self.viewport.range,
+                    [self.view_min, self.view_max],
+                )
             })
             .collect()
     }

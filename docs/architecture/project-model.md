@@ -829,3 +829,12 @@ used by its segment evaluator. These methods do not create author state or add a
 second interpolation model. Product handle gestures retain ExactBezierHandle's
 owner-time and world-value coordinates; persisted curves and constrained tangent
 admission remain the existing canonical contracts.
+### Ordered temporal control reads
+
+TemporalBezierControl is an ephemeral read projection, with stable key identity,
+exact owner time, world value, neighbor time and canonical resolved handle. It
+is not persisted author data. AnimatedProperty::channel_keyframe_controls and
+ExactAutomationCurve::keyframe_controls visit keys once in time order, incoming
+before outgoing, using the same resolver as single-ID handle reads. Default
+control rounding and Hold/Linear suppression are unchanged. Neither path
+normalizes or mutates the author snapshot.

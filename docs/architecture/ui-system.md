@@ -3348,3 +3348,18 @@ Viewport zoom/pan, frame-grid nudge controls, keyboard-only handle selection,
 large-curve projection performance and physical/platform interaction acceptance
 require further implementation and qualification before claiming a complete
 professional temporal curve editor.
+### Dense curve projection
+
+Visual and audio tangent adapters consume Core's ordered control iterator and
+map stable IDs to current visible widget indices. Virtual viewport anchors have
+no author identity and never acquire another key's controls. The scalar visual
+model reads its admitted single channel directly with exact-time partition
+boundaries; it preserves real keys at either viewport edge and uses virtual
+anchors only where no real key exists. Outside keys remain in the canonical
+source for interpolation and neighboring control spans. Presets derive from
+stored interpolation metadata without reconstructing complete property keys.
+
+The ignored temporal_handle_large_curve_projection_smoke exercises these real
+App adapters at 1024, 4096 and 16384 keys, records model/tangent timings and
+checks key/control counts plus finite geometry. It is a local projection
+measurement, not a full interactive/render/plugin realtime qualification.

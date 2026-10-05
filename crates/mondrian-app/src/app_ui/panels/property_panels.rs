@@ -8,7 +8,6 @@ use crate::app::parameter_gesture::{
     ParameterCurveGestureTarget, ParameterGestureAction, ParameterGestureEdit,
 };
 use crate::app_ui::localization::keyframe_interpolation_message_id;
-use mondrian_core::BezierHandleSide;
 use mondrian_ui_widgets::CurveGestureEvent;
 use mondrian_ui_widgets::{CurvePreview, CurveTangent};
 
@@ -2505,32 +2504,23 @@ fn numeric_tangents(
     model: &InspectorCurveModel,
     property: &mondrian_core::AnimatedProperty,
 ) -> Vec<CurveTangent> {
-    model
+    let visible = model
         .keys
         .iter()
         .enumerate()
-        .flat_map(|(index, projected)| {
-            [BezierHandleSide::Incoming, BezierHandleSide::Outgoing].into_iter().filter_map(
-                move |side| {
-                    let id = projected.keyframe_id?;
-                    let keys = property.channels().first()?.keyframes();
-                    let position = keys.iter().position(|key| key.id == id)?;
-                    let key = &keys[position];
-                    let neighbor = match side {
-                        BezierHandleSide::Incoming => keys.get(position.checked_sub(1)?)?,
-                        BezierHandleSide::Outgoing => keys.get(position + 1)?,
-                    };
-                    let handle = property.channel_keyframe_handle(0, id, side)?;
-                    crate::app_ui::curve_tangents::project(
-                        index,
-                        side,
-                        (key.time, key.value),
-                        neighbor.time,
-                        handle,
-                        model.owner_range,
-                        [model.value_range.min, model.value_range.max],
-                    )
-                },
+        .filter_map(|(index, key)| Some((key.keyframe_id?, index)))
+        .collect::<std::collections::HashMap<_, _>>();
+    property
+        .channel_keyframe_controls(0)
+        .filter_map(|control| {
+            crate::app_ui::curve_tangents::project(
+                *visible.get(&control.keyframe_id)?,
+                control.side,
+                (control.key_time, control.key_value),
+                control.neighbor_time,
+                control.handle,
+                model.owner_range,
+                [model.value_range.min, model.value_range.max],
             )
         })
         .collect()
@@ -3638,11 +3628,192 @@ mod temporal_handle_tests {
     use super::*;
     use crate::app::AppState;
     use mondrian_core::automation::{Keyframe, KeyframeInterpolation, PropertyMutation};
+    use mondrian_core::BezierHandleSide;
     use mondrian_ui_core::tree::WidgetTreeView;
     use mondrian_ui_core::types::{KeyCode, Modifiers, MouseButton, Point, Rect};
     use mondrian_ui_core::UiEvent;
     use mondrian_ui_events::EventRouter;
     use std::cell::RefCell;
+
+    #[test]
+    fn temporal_control_projection_preserves_real_boundaries_and_virtual_anchor_indices() {
+        let mut clip = mondrian_timeline::Clip::new_basic_title(
+            "Visible keys",
+            "Arial",
+            TimelineTime::ZERO,
+            TimelineTime::new(1, 2).expect("duration"),
+        )
+        .expect("clip");
+        clip.clip_time_in = TimelineTime::new(1, 4).expect("in");
+        let mut identities = Vec::new();
+        for (index, interpolation) in [
+            InterpolationType::Linear,
+            InterpolationType::Hold,
+            InterpolationType::Bezier,
+            InterpolationType::Linear,
+            InterpolationType::Linear,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = Keyframe::from_preset(
+                TimelineTime::new(index as i64, 4).expect("time"),
+                PropertyValue::Float(index as f32 / 4.0),
+                interpolation,
+            );
+            identities.push(key.id);
+            clip.transform
+                .apply_property_mutation(PropertyMutation::SetKeyframe {
+                    path: Transform2D::OPACITY_PATH.to_owned(),
+                    keyframe: key,
+                })
+                .expect("real author key");
+        }
+        let model = opacity_curve_model_for_clip(&clip, TimelineTime::ZERO).expect("model");
+        assert_eq!(
+            model.keys.iter().map(|key| key.keyframe_id).collect::<Vec<_>>(),
+            identities[1..4].iter().copied().map(Some).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            model.keys.iter().map(|key| key.point.x).collect::<Vec<_>>(),
+            vec![0.0, 0.5, 1.0]
+        );
+        assert_eq!(
+            model.keys.iter().map(|key| key.interpolation).collect::<Vec<_>>(),
+            vec![
+                Some(InterpolationType::Hold),
+                Some(InterpolationType::Bezier),
+                Some(InterpolationType::Linear)
+            ]
+        );
+        let controls = numeric_tangents(&model, &model.curve_source);
+        assert_eq!(controls.len(), 1);
+        assert_eq!(controls[0].index, 1);
+        assert_eq!(controls[0].side, BezierHandleSide::Outgoing);
+        assert_eq!(controls[0].point.x, 2.0 / 3.0);
+        let before = clip.clone();
+        clip.clip_time_in = TimelineTime::new(3, 10).expect("inner in");
+        clip.duration = TimelineTime::new(2, 5).expect("inner span");
+        let model = opacity_curve_model_for_clip(&clip, TimelineTime::ZERO).expect("inner model");
+        assert_eq!(
+            model.keys.iter().map(|key| key.keyframe_id).collect::<Vec<_>>(),
+            vec![None, Some(identities[2]), None]
+        );
+        assert_eq!(
+            model.keys.iter().map(|key| key.point.x).collect::<Vec<_>>(),
+            vec![0.0, 0.5, 1.0]
+        );
+        let controls = numeric_tangents(&model, &model.curve_source);
+        assert_eq!(controls.len(), 1);
+        assert_eq!(controls[0].index, 1);
+        assert_eq!(
+            clip.transform, before.transform,
+            "viewport changes preserve all outside author keys"
+        );
+    }
+
+    #[test]
+    #[ignore = "performance smoke for actual visual/audio temporal control projection"]
+    fn temporal_handle_large_curve_projection_smoke() {
+        use crate::app_ui::audio_automation::{
+            project_audio_automation, AudioAutomationCurveKeyModel, AudioAutomationViewport,
+        };
+        use mondrian_core::{
+            AuthoringTimeDomain, AutomationSegmentInterpolation, ExactAutomationKeyframe,
+        };
+        use mondrian_timeline::{AudioAutomationTarget, AudioChannelStripOwner};
+        use std::time::Instant;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        for count in [1024usize, 4096, 16384] {
+            let clip = mondrian_timeline::Clip::new_basic_title(
+                "Projection",
+                "Arial",
+                TimelineTime::ZERO,
+                TimelineTime::ONE,
+            )
+            .expect("clip");
+            let bag = clip.transform.to_property_bag();
+            let mut encoded =
+                serde_json::to_value(bag.property(Transform2D::OPACITY_PATH).expect("property"))
+                    .expect("property fixture");
+            let keys = (0..count)
+                .map(|index| {
+                    Keyframe::from_preset(
+                        TimelineTime::new(index as i64, (count - 1) as i64).expect("time"),
+                        0.5f64,
+                        InterpolationType::Bezier,
+                    )
+                })
+                .collect::<Vec<_>>();
+            encoded["channels"][0]["keyframes"] = serde_json::to_value(&keys).expect("keys");
+            encoded["animation_enabled"] = serde_json::Value::Bool(true);
+            let property: mondrian_core::AnimatedProperty =
+                serde_json::from_value(encoded).expect("canonical fixture");
+            property.validate().expect("valid author fixture");
+            let model_start = Instant::now();
+            let visual =
+                numeric_curve_model_for_property(&property, &clip).expect("actual visual model");
+            println!(
+                "{}",
+                serde_json::json!({"domain":"visual_model","keys":count,"nanoseconds":model_start.elapsed().as_nanos(),"projected_keys":visual.keys.len()})
+            );
+            assert_eq!(visual.keys.len(), count);
+            let sequence = mondrian_timeline::Sequence::new("Projection");
+            let mut audio = project_audio_automation(
+                &sequence,
+                AudioAutomationTarget::ChannelFader {
+                    owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+                },
+                AudioAutomationViewport {
+                    domain: AuthoringTimeDomain::Sequence(sequence.id),
+                    range: mondrian_core::TimelineTimeRange::new(
+                        TimelineTime::ZERO,
+                        TimelineTime::ONE,
+                    )
+                    .expect("range"),
+                },
+            )
+            .expect("actual audio model");
+            let audio_keys = keys
+                .iter()
+                .map(|key| {
+                    let mut audio_key = ExactAutomationKeyframe::linear(key.time, 0.5);
+                    audio_key.interpolation_to_next = AutomationSegmentInterpolation::Bezier;
+                    audio_key
+                })
+                .collect::<Vec<_>>();
+            audio.source_curve.keyframes = audio_keys.clone().into();
+            audio.source_curve.validate().expect("valid audio curve");
+            audio.keys = audio_keys
+                .into_iter()
+                .map(|key| AudioAutomationCurveKeyModel {
+                    point: CurvePoint::new(key.time.to_f64() as f32, 0.5),
+                    keyframe: Some(key),
+                })
+                .collect();
+            audio.view_min = 0.0;
+            audio.view_max = 1.0;
+            for domain in ["visual", "audio"] {
+                let start = Instant::now();
+                let tangents = if domain == "visual" {
+                    numeric_tangents(std::hint::black_box(&visual), &property)
+                } else {
+                    std::hint::black_box(&audio).tangents()
+                };
+                let elapsed = start.elapsed().as_nanos();
+                assert_eq!(tangents.len(), 2 * (count - 1));
+                assert!(tangents.iter().all(|control| control.point.y == 0.5));
+                assert!(tangents
+                    .iter()
+                    .all(|control| control.point.x >= 0.0 && control.point.x <= 1.0));
+                println!(
+                    "{}",
+                    serde_json::json!({"domain":domain,"keys":count,"nanoseconds":elapsed,"controls":tangents.len()})
+                );
+                std::hint::black_box(tangents);
+            }
+        }
+    }
 
     #[test]
     fn temporal_audio_handles_route_into_one_reversible_author_gesture() {

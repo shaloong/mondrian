@@ -109,6 +109,24 @@ pub enum BezierHandleSide {
     Outgoing,
 }
 
+/// Read-only canonical control resolved from one ordered author curve.
+/// This projection carries author identity and coordinates without creating state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TemporalBezierControl {
+    /// Stable identity of the owning key.
+    pub keyframe_id: KeyframeId,
+    /// Exact time in the curve owner's domain.
+    pub key_time: TimelineTime,
+    /// Canonical numeric value of the owning channel.
+    pub key_value: f64,
+    /// Exact time of the neighbor defining this control's admitted span.
+    pub neighbor_time: TimelineTime,
+    /// Temporal side of the owning key.
+    pub side: BezierHandleSide,
+    /// The stored or canonical default control used by execution.
+    pub handle: ExactBezierHandle,
+}
+
 /// Sparse author edit retaining every omitted exact handle coordinate.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -720,7 +738,25 @@ impl ExactAutomationCurve {
         side: BezierHandleSide,
     ) -> Option<ExactBezierHandle> {
         let index = self.keyframes.iter().position(|key| key.id == keyframe_id)?;
-        let key = &self.keyframes[index];
+        self.keyframe_control(index, side).map(|control| control.handle)
+    }
+
+    /// Visit canonical controls in key-time order, incoming before outgoing.
+    /// Resolves each neighbor once per side without repeated identity searches.
+    pub fn keyframe_controls(&self) -> impl Iterator<Item = TemporalBezierControl> + '_ {
+        (0..self.keyframes.len()).flat_map(move |index| {
+            [BezierHandleSide::Incoming, BezierHandleSide::Outgoing]
+                .into_iter()
+                .filter_map(move |side| self.keyframe_control(index, side))
+        })
+    }
+
+    fn keyframe_control(
+        &self,
+        index: usize,
+        side: BezierHandleSide,
+    ) -> Option<TemporalBezierControl> {
+        let key = self.keyframes.get(index)?;
         let (neighbor, stored, interpolation) = match side {
             BezierHandleSide::Incoming => {
                 let neighbor = self.keyframes.get(index.checked_sub(1)?)?;
@@ -735,7 +771,15 @@ impl ExactAutomationCurve {
         if interpolation != AutomationSegmentInterpolation::Bezier {
             return None;
         }
-        stored.or_else(|| initial_segment_handle(key, neighbor, None).ok())
+        let handle = stored.or_else(|| initial_segment_handle(key, neighbor, None).ok())?;
+        Some(TemporalBezierControl {
+            keyframe_id: key.id,
+            key_time: key.time,
+            key_value: key.value,
+            neighbor_time: neighbor.time,
+            side,
+            handle,
+        })
     }
 
     /// Validate once and materialize the ordered interpolation segments.
@@ -1257,6 +1301,47 @@ fn bezier_value(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ordered_audio_controls_preserve_defaults_stored_handles_and_hold_segments() {
+        use super::*;
+        let mut curve =
+            ExactAutomationCurve::new(ParameterId::new_static("test.ordered.controls"), 0.0)
+                .expect("curve");
+        assert_eq!(curve.keyframe_controls().count(), 0);
+        let stored = ExactBezierHandle {
+            time_offset: TimelineTime::new(1, 6).expect("time"),
+            value_offset: 0.2,
+        };
+        let mut first = ExactAutomationKeyframe::linear(TimelineTime::ZERO, 0.0);
+        first.interpolation_to_next = AutomationSegmentInterpolation::Bezier;
+        first.out_handle = Some(stored);
+        let mut middle = ExactAutomationKeyframe::linear(TimelineTime::ONE, 1.0);
+        middle.interpolation_to_next = AutomationSegmentInterpolation::Hold;
+        let last = ExactAutomationKeyframe::linear(TimelineTime::new(3, 1).expect("last"), 2.0);
+        curve.keyframes = vec![first, middle, last].into();
+        curve.validate().expect("legal mixed segments");
+        let before = curve.clone();
+        let controls = curve.keyframe_controls().collect::<Vec<_>>();
+        assert_eq!(controls.len(), 2);
+        assert_eq!(controls[0].handle, stored);
+        assert_eq!(controls[0].keyframe_id, curve.keyframes[0].id);
+        assert_eq!(controls[0].neighbor_time, TimelineTime::ONE);
+        assert_eq!(controls[1].side, BezierHandleSide::Incoming);
+        assert_eq!(controls[1].key_time, TimelineTime::ONE);
+        assert_eq!(controls[1].key_value, 1.0);
+        assert_eq!(controls[1].neighbor_time, TimelineTime::ZERO);
+        assert_eq!(
+            controls[1].handle.time_offset,
+            TimelineTime::NEGATIVE_ONE_THIRD
+        );
+        // The canonical default first interpolates its world control, then subtracts the owner.
+        assert_eq!(controls[1].handle.value_offset, (1.0 - 1.0 / 3.0) - 1.0);
+        assert_eq!(
+            curve, before,
+            "read projections never normalize or mutate author state"
+        );
+    }
+
     use super::*;
 
     #[test]
