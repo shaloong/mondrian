@@ -9,7 +9,7 @@ use crate::app::parameter_gesture::{
 };
 use crate::app_ui::localization::keyframe_interpolation_message_id;
 use mondrian_ui_widgets::CurveGestureEvent;
-use mondrian_ui_widgets::{CurvePreview, CurveTangent};
+use mondrian_ui_widgets::{CurvePointTarget, CurvePreview, CurveTangent};
 
 pub(super) fn audio_mixer_panel(
     model: &AudioMixerPanelModel,
@@ -1822,7 +1822,11 @@ pub(super) fn audio_automation_curve_control(
         .collect();
     let mut preview_model = model.clone();
     let mut preview_origin = None;
+    let pending_action = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let preview_action = pending_action.clone();
+    let ids = model.keys.iter().map(|key| key.keyframe.as_ref().map(|key| key.id)).collect();
     let editor = CurveEditor::with_points(model.points())
+        .with_keyframe_ids(ids)
         .with_tangents(model.tangents())
         .with_preview_projection(move |event| match event {
             CurveGestureEvent::Begin(_) => {
@@ -1833,10 +1837,13 @@ pub(super) fn audio_automation_curve_control(
                 if let Some(origin) = &preview_origin {
                     preview_model.source_curve = origin.clone();
                 }
+                *preview_action.borrow_mut() = None;
+                let action = audio_automation_curve_edit_action(&preview_model, edit);
                 let display_points = crate::app_ui::audio_automation::preview_audio_curve_edit(
                     &mut preview_model,
                     edit,
                 )?;
+                *preview_action.borrow_mut() = action;
                 Some(CurvePreview { display_points, tangents: preview_model.tangents() })
             }
             CurveGestureEvent::Cancel(_) => {
@@ -1870,8 +1877,8 @@ pub(super) fn audio_automation_curve_control(
                 }
                 .action(),
             ),
-            CurveGestureEvent::Edit { gesture_id, edit } => {
-                let action = audio_automation_curve_edit_action(&action_model, edit)?;
+            CurveGestureEvent::Edit { gesture_id, .. } => {
+                let action = pending_action.borrow_mut().take()?;
                 if let Some(gesture_id) = gesture_id {
                     ParameterGestureEdit::from_action(&action)
                         .map(|edit| ParameterGestureAction::Update { gesture_id, edit }.action())
@@ -2504,17 +2511,16 @@ fn numeric_tangents(
     model: &InspectorCurveModel,
     property: &mondrian_core::AnimatedProperty,
 ) -> Vec<CurveTangent> {
-    let visible = model
-        .keys
-        .iter()
-        .enumerate()
-        .filter_map(|(index, key)| Some((key.keyframe_id?, index)))
-        .collect::<std::collections::HashMap<_, _>>();
+    let end = match model.owner_range.end() {
+        Ok(end) => end,
+        Err(_) => return Vec::new(),
+    };
     property
         .channel_keyframe_controls(0)
+        .filter(|control| control.key_time >= model.owner_range.start && control.key_time <= end)
         .filter_map(|control| {
             crate::app_ui::curve_tangents::project(
-                *visible.get(&control.keyframe_id)?,
+                control.keyframe_id,
                 control.side,
                 (control.key_time, control.key_value),
                 control.neighbor_time,
@@ -2591,7 +2597,11 @@ fn numeric_curve_editor(
     let preview_model = model.clone();
     let mut preview_source = preview_model.curve_source.clone();
     let mut preview_origin = None;
+    let pending_action = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let preview_action = pending_action.clone();
+    let ids = model.keys.iter().map(|key| key.keyframe_id).collect();
     let editor = CurveEditor::with_points(points)
+        .with_keyframe_ids(ids)
         .with_tangents(tangents)
         .with_preview_projection(move |event| match event {
             CurveGestureEvent::Begin(_) => {
@@ -2606,8 +2616,13 @@ fn numeric_curve_editor(
                 {
                     preview_source = origin.clone();
                 }
+                *preview_action.borrow_mut() = None;
+                let mut live_model = preview_model.clone();
+                live_model.curve_source = preview_source.clone();
+                let action = on_edit(&live_model, edit);
                 let display_points =
-                    preview_numeric_curve_points(&preview_model, &mut preview_source, edit)?;
+                    preview_numeric_curve_points(&live_model, &mut preview_source, edit)?;
+                *preview_action.borrow_mut() = action;
                 Some(CurvePreview {
                     display_points,
                     tangents: numeric_tangents(&preview_model, &preview_source),
@@ -2637,8 +2652,8 @@ fn numeric_curve_editor(
         CurveGestureEvent::Begin(gesture_id) => target
             .clone()
             .map(|target| ParameterGestureAction::BeginCurve { gesture_id, target }.action()),
-        CurveGestureEvent::Edit { gesture_id, edit } => {
-            let action = on_edit(&model, edit)?;
+        CurveGestureEvent::Edit { gesture_id, .. } => {
+            let action = pending_action.borrow_mut().take()?;
             if let Some(gesture_id) = gesture_id {
                 ParameterGestureEdit::from_action(&action)
                     .map(|edit| ParameterGestureAction::Update { gesture_id, edit }.action())
@@ -2692,13 +2707,12 @@ fn numeric_curve_edit_payload(
     edit: CurveEdit,
 ) -> Option<ClipCurveEditPayload> {
     let edit = match edit {
-        CurveEdit::Handle { index, side, point } => {
-            let id = model.keys.get(index)?.keyframe_id?;
+        CurveEdit::Handle { keyframe_id: id, side, point } => {
             let key = model.curve_source.keyframe_by_id(id)?;
             let handle = model.curve_source.channel_keyframe_handle(0, id, side)?;
             let tangent = numeric_tangents(model, &model.curve_source)
                 .into_iter()
-                .find(|tangent| tangent.index == index && tangent.side == side)?;
+                .find(|tangent| tangent.keyframe_id == id && tangent.side == side)?;
             let edit = crate::app_ui::curve_tangents::lower(
                 tangent,
                 point,
@@ -2713,17 +2727,36 @@ fn numeric_curve_edit_payload(
             keyframe_id: Some(keyframe_id),
             point: inspector_curve_point_payload(point),
         },
-        CurveEdit::Move { index, point } => {
-            let key = model.keys.get(index)?;
+        CurveEdit::Move { target, point } => {
+            let (identity, reference) = match target {
+                CurvePointTarget::Keyframe(id) => {
+                    let key = model.curve_source.keyframe_by_id(id)?;
+                    let reference = crate::app_ui::curve_tangents::project_key(
+                        key.time,
+                        key.value.as_f64()?,
+                        model.owner_range,
+                        [model.value_range.min, model.value_range.max],
+                    )?;
+                    (Some(id), reference)
+                }
+                CurvePointTarget::VirtualBoundary(index) => {
+                    let key = model.keys.get(index)?;
+                    if key.keyframe_id.is_some() {
+                        return None;
+                    }
+                    (None, key.point)
+                }
+                CurvePointTarget::Snapshot(_) => return None,
+            };
             let projected = inspector_curve_point_payload(point);
-            if let Some(keyframe_id) = key.keyframe_id {
-                let time = if point.x == key.point.x {
+            if let Some(keyframe_id) = identity {
+                let time = if point.x == reference.x {
                     model.curve_source.keyframe_by_id(keyframe_id)?.time
                 } else {
                     crate::app::numeric_curve_author_time(model.owner_range, projected.time_ratio)
                         .ok()?
                 };
-                let value = if point.y == key.point.y {
+                let value = if point.y == reference.y {
                     model.curve_source.keyframe_by_id(keyframe_id)?.value
                 } else {
                     crate::app::numeric_curve_author_value(
@@ -2737,8 +2770,10 @@ fn numeric_curve_edit_payload(
                 ClipCurveEditPayload::Upsert { keyframe_id: None, point: projected }
             }
         }
-        CurveEdit::Delete { index } => {
-            let keyframe_id = model.keys.get(index).and_then(|key| key.keyframe_id)?;
+        CurveEdit::Delete { target } => {
+            let CurvePointTarget::Keyframe(keyframe_id) = target else {
+                return None;
+            };
             ClipCurveEditPayload::Remove { keyframe_id }
         }
     };
@@ -3635,6 +3670,504 @@ mod temporal_handle_tests {
     use mondrian_ui_events::EventRouter;
     use std::cell::RefCell;
 
+    fn temporal_curve_fixture(
+        seed_keys: bool,
+    ) -> (AppState, SelectedClipRef, InspectorCurveModel, KeyframeId) {
+        let mut clip = mondrian_timeline::Clip::new_basic_title(
+            "Handles",
+            "Arial",
+            TimelineTime::ZERO,
+            TimelineTime::ONE,
+        )
+        .expect("clip");
+        let clip_id = clip.id;
+        let mut key = Keyframe::linear(
+            TimelineTime::new(1, 2).expect("middle"),
+            PropertyValue::Float(0.5),
+        );
+        key.interp_in = KeyframeInterpolation::Bezier(mondrian_core::ExactBezierHandle {
+            time_offset: TimelineTime::new(-1, 6).expect("incoming"),
+            value_offset: -0.1,
+        });
+        key.interp_out = KeyframeInterpolation::Bezier(mondrian_core::ExactBezierHandle {
+            time_offset: TimelineTime::new(1, 6).expect("outgoing"),
+            value_offset: 0.1,
+        });
+        key.temporal_flags.continuous = true;
+        let key_id = key.id;
+        for seeded in [
+            Keyframe::linear(TimelineTime::ZERO, PropertyValue::Float(0.25)),
+            key,
+            Keyframe::linear(TimelineTime::ONE, PropertyValue::Float(0.75)),
+        ]
+        .into_iter()
+        .filter(|_| seed_keys)
+        {
+            clip.transform
+                .apply_property_mutation(PropertyMutation::SetKeyframe {
+                    path: Transform2D::OPACITY_PATH.to_owned(),
+                    keyframe: seeded,
+                })
+                .expect("seed canonical curve");
+        }
+        let mut sequence = mondrian_timeline::Sequence::new("Handles");
+        let selection = SelectedClipRef {
+            track_id: sequence.video_tracks[0].id,
+            is_video_track: true,
+            clip_id,
+        };
+        sequence.video_tracks[0].add_clip(clip).expect("clip");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("current Inspector target");
+        let before = state.active_sequence().expect("sequence").clone();
+        let model = opacity_curve_model_for_clip(
+            before.find_clip(clip_id).expect("clip"),
+            TimelineTime::ZERO,
+        )
+        .expect("model");
+        (state, selection, model, key_id)
+    }
+
+    #[test]
+    fn temporal_insert_draft_never_paints_another_keys_controls() {
+        use mondrian_core::Color;
+        use mondrian_ui_core::{DrawCommandEncoder, PaintContext};
+        use mondrian_ui_theme::ThemePreset;
+        #[derive(Default)]
+        struct Lines(Vec<(Point, Point, Color)>);
+        impl DrawCommandEncoder for Lines {
+            fn push_clip(&mut self, _: Rect) {}
+            fn pop_clip(&mut self) {}
+            fn draw_rect(&mut self, _: Rect, _: Color, _: f32) {}
+            fn draw_line(&mut self, start: Point, end: Point, _: f32, color: Color) {
+                self.0.push((start, end, color));
+            }
+            fn draw_text(&mut self, _: &str, _: f32, _: Point, _: Color) {}
+            fn push_translate(&mut self, _: glam::Vec2) {}
+            fn pop_transform(&mut self) {}
+        }
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let (mut state, selection, model, key_id) = temporal_curve_fixture(true);
+        let clip_id = selection.clip_id;
+        let before = state.active_sequence().expect("before").clone();
+        let localizer =
+            Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs).expect("locale");
+        let mut editor = numeric_curve_editor(
+            &localizer,
+            Some(ParameterCurveGestureTarget::Clip { clip_id, parameter: model.property.clone() }),
+            model.clone(),
+            true,
+            None,
+            move |model, edit| inspector_curve_edit_action(Some(selection), model, edit),
+            |_, _, _| None,
+        );
+        editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let screen =
+            |point: CurvePoint| Point::new(10.0 + point.x * 200.0, 10.0 + (1.0 - point.y) * 84.0);
+        let mut router = EventRouter::new(editor.id());
+        let actions = RefCell::new(Vec::new());
+        let route =
+            |editor: &mut CurveEditor, router: &mut EventRouter, state: &mut AppState, event| {
+                let dispatch = |action| actions.borrow_mut().push(action);
+                router.route(event, &mut WidgetTreeView::new(editor), &dispatch);
+                for action in actions.borrow_mut().drain(..) {
+                    state.dispatch_action(action).expect("real author action");
+                }
+            };
+        let inserted = screen(CurvePoint::new(0.25, 0.7));
+        route(
+            &mut editor,
+            &mut router,
+            &mut state,
+            UiEvent::MouseDown {
+                position: inserted,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+        );
+        assert!(editor.has_active_pointer_interaction());
+        assert_eq!(editor.selected_index(), Some(1));
+        let bag = state
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(clip_id)
+            .expect("clip")
+            .intrinsic_parameter_bag();
+        let property = bag.property_by_address(&model.property).expect("property").1;
+        let new_key = property.channels()[0]
+            .keyframes()
+            .iter()
+            .find(|key| key.time == TimelineTime::new(1, 4).expect("insert time"))
+            .expect("live canonical inserted key");
+        assert_ne!(new_key.id, key_id);
+        assert!(
+            property
+                .channel_keyframe_controls(0)
+                .all(|control| control.keyframe_id != new_key.id),
+            "this linear inserted key has no canonical controls"
+        );
+        let theme = ThemePreset::Dark.build();
+        let mut lines = Lines::default();
+        editor.paint(&mut PaintContext {
+            encoder: &mut lines,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 220.0, 104.0),
+        });
+        assert!(
+            lines.0.iter().all(|(_, _, color)| *color != theme.colors.muted_foreground),
+            "selected inserted key must not inherit the previous index owners controls"
+        );
+        route(
+            &mut editor,
+            &mut router,
+            &mut state,
+            UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+        );
+        assert_eq!(
+            state
+                .active_sequence()
+                .expect("restored")
+                .find_clip(clip_id)
+                .expect("clip")
+                .intrinsic_parameter_bag(),
+            before.find_clip(clip_id).expect("before").intrinsic_parameter_bag()
+        );
+        assert!(!state.can_undo_action());
+    }
+
+    fn fixture_curve_editor(
+        selection: SelectedClipRef,
+        model: &InspectorCurveModel,
+    ) -> CurveEditor {
+        let localizer =
+            Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs).expect("locale");
+        let mut editor = numeric_curve_editor(
+            &localizer,
+            Some(ParameterCurveGestureTarget::Clip {
+                clip_id: selection.clip_id,
+                parameter: model.property.clone(),
+            }),
+            model.clone(),
+            true,
+            None,
+            move |model, edit| inspector_curve_edit_action(Some(selection), model, edit),
+            |_, _, _| None,
+        );
+        editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        editor
+    }
+
+    fn route_temporal(
+        editor: &mut dyn Widget,
+        router: &mut EventRouter,
+        state: &mut AppState,
+        event: UiEvent,
+    ) {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        router.route(event, &mut WidgetTreeView::new(editor), &dispatch);
+        for action in actions.borrow_mut().drain(..) {
+            state.dispatch_action(action).expect("real author action");
+        }
+    }
+
+    #[test]
+    fn temporal_structural_edits_keep_following_keyboard_author_ids_and_two_undo_steps() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        for insertion in [true, false] {
+            let (mut state, selection, model, _) = temporal_curve_fixture(true);
+            let before = state.active_sequence().expect("before").clone();
+            let mut editor = fixture_curve_editor(selection, &model);
+            let mut router = EventRouter::new(editor.id());
+            let point = if insertion {
+                CurvePoint::new(0.25, 0.7)
+            } else {
+                model.keys[1].point
+            };
+            let position = Point::new(10.0 + point.x * 200.0, 10.0 + (1.0 - point.y) * 84.0);
+            for event in [
+                UiEvent::MouseDown {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::MouseUp {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+            ] {
+                route_temporal(&mut editor, &mut router, &mut state, event);
+            }
+            if !insertion {
+                assert!(!state.can_undo_action(), "selection cannot author history");
+                route_temporal(
+                    &mut editor,
+                    &mut router,
+                    &mut state,
+                    UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
+                );
+            }
+            let CurvePointTarget::Keyframe(id) = editor
+                .point_target(editor.selected_index().expect("selection"))
+                .expect("target")
+            else {
+                panic!("selected canonical key");
+            };
+            if !insertion {
+                assert_eq!(Some(id), model.keys[2].keyframe_id);
+            }
+            let property = |state: &AppState| {
+                state
+                    .active_sequence()
+                    .expect("sequence")
+                    .find_clip(selection.clip_id)
+                    .expect("clip")
+                    .intrinsic_parameter_bag()
+                    .property_by_address(&model.property)
+                    .expect("property")
+                    .1
+                    .clone()
+            };
+            let structural = property(&state);
+            let original_key = structural.keyframe_by_id(id).expect("stable survivor");
+            route_temporal(
+                &mut editor,
+                &mut router,
+                &mut state,
+                UiEvent::KeyDown {
+                    key: if insertion {
+                        KeyCode::Up
+                    } else {
+                        KeyCode::Down
+                    },
+                    modifiers: Modifiers::none(),
+                },
+            );
+            let edited = property(&state);
+            let changed_key = edited.keyframe_by_id(id).expect("same author identity");
+            assert_eq!(
+                changed_key.time, original_key.time,
+                "value nudge preserves exact time"
+            );
+            assert_ne!(changed_key.value, original_key.value);
+            for key in structural.channels()[0].keyframes().iter().filter(|key| key.id != id) {
+                assert_eq!(
+                    edited.keyframe_by_id(key.id).expect("untouched key"),
+                    structural.keyframe_by_id(key.id).expect("before")
+                );
+            }
+            assert!(state.undo_timeline().expect("undo keyboard nudge"));
+            assert_eq!(property(&state), structural);
+            assert!(state.undo_timeline().expect("undo structural edit"));
+            assert_eq!(
+                state
+                    .active_sequence()
+                    .expect("sequence")
+                    .find_clip(selection.clip_id)
+                    .expect("clip")
+                    .intrinsic_parameter_bag(),
+                before.find_clip(selection.clip_id).expect("before").intrinsic_parameter_bag()
+            );
+            assert!(!state.can_undo_action(), "exactly two history entries");
+            assert!(state.redo_timeline().expect("redo structural edit"));
+            assert!(state.redo_timeline().expect("redo keyboard nudge"));
+            assert_eq!(property(&state), edited);
+        }
+    }
+
+    #[test]
+    fn temporal_virtual_boundary_return_to_origin_leaves_no_author_key_or_history() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        for move_away in [false, true] {
+            let (mut state, selection, model, _) = temporal_curve_fixture(false);
+            let before = state.active_sequence().expect("before").clone();
+            assert!(model.keys.iter().all(|key| key.keyframe_id.is_none()));
+            let mut editor = fixture_curve_editor(selection, &model);
+            let mut router = EventRouter::new(editor.id());
+            let point = model.keys[0].point;
+            let origin = Point::new(10.0 + point.x * 200.0, 10.0 + (1.0 - point.y) * 84.0);
+            route_temporal(
+                &mut editor,
+                &mut router,
+                &mut state,
+                UiEvent::MouseDown {
+                    position: origin,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+            );
+            if move_away {
+                route_temporal(
+                    &mut editor,
+                    &mut router,
+                    &mut state,
+                    UiEvent::MouseMove {
+                        position: Point::new(origin.x, origin.y + 12.0),
+                        modifiers: Modifiers::none(),
+                    },
+                );
+                assert!(!state
+                    .active_sequence()
+                    .expect("sequence")
+                    .find_clip(selection.clip_id)
+                    .expect("clip")
+                    .intrinsic_parameter_bag()
+                    .property_by_address(&model.property)
+                    .expect("property")
+                    .1
+                    .channels()[0]
+                    .keyframes()
+                    .is_empty());
+                route_temporal(
+                    &mut editor,
+                    &mut router,
+                    &mut state,
+                    UiEvent::MouseMove { position: origin, modifiers: Modifiers::none() },
+                );
+            }
+            route_temporal(
+                &mut editor,
+                &mut router,
+                &mut state,
+                UiEvent::MouseUp {
+                    position: origin,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+            );
+            assert_eq!(
+                editor.point_target(0),
+                Some(CurvePointTarget::VirtualBoundary(0))
+            );
+            assert!(!editor.has_active_pointer_interaction());
+            assert_eq!(
+                state
+                    .active_sequence()
+                    .expect("sequence")
+                    .find_clip(selection.clip_id)
+                    .expect("clip")
+                    .intrinsic_parameter_bag(),
+                before.find_clip(selection.clip_id).expect("before").intrinsic_parameter_bag()
+            );
+            assert!(!state.can_undo_action());
+        }
+    }
+
+    #[test]
+    fn temporal_audio_insert_then_keyboard_edit_retains_id_and_reversible_history() {
+        use crate::app_ui::audio_automation::{project_audio_automation, AudioAutomationViewport};
+        use mondrian_core::{AuthoringTimeDomain, ExactAutomationKeyframe};
+        use mondrian_timeline::{
+            apply_audio_automation_edit, inspect_audio_automation, AudioAutomationEdit,
+            AudioAutomationEditRequest, AudioAutomationTarget, AudioChannelStripOwner,
+        };
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut sequence = mondrian_timeline::Sequence::new("Audio structural edits");
+        let target = AudioAutomationTarget::ChannelFader {
+            owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+        };
+        for (time, value) in [
+            (TimelineTime::ZERO, -15.0),
+            (TimelineTime::new(1, 2).expect("middle"), -12.0),
+            (TimelineTime::ONE, -9.0),
+        ] {
+            apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::UpsertKeyframe {
+                        keyframe: ExactAutomationKeyframe::linear(time, value),
+                    },
+                },
+            )
+            .expect("seed author curve");
+        }
+        let viewport = AudioAutomationViewport {
+            domain: AuthoringTimeDomain::Sequence(sequence.id),
+            range: TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE).expect("range"),
+        };
+        let model = project_audio_automation(&sequence, target.clone(), viewport).expect("model");
+        let before = inspect_audio_automation(&sequence, &target)
+            .expect("before")
+            .curve()
+            .expect("curve")
+            .clone();
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        let localizer =
+            Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs).expect("locale");
+        let mut editor = audio_automation_curve_control(&model, &localizer);
+        editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let mut router = EventRouter::new(editor.id());
+        let position = Point::new(60.0, 52.0);
+        for event in [
+            UiEvent::MouseDown {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseUp {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            route_temporal(editor.as_mut(), &mut router, &mut state, event);
+        }
+        let curve = |state: &AppState| {
+            inspect_audio_automation(state.active_sequence().expect("sequence"), &target)
+                .expect("inspect")
+                .curve()
+                .expect("curve")
+                .clone()
+        };
+        let structural = curve(&state);
+        let inserted = structural
+            .keyframes
+            .iter()
+            .find(|key| key.time == TimelineTime::new(1, 4).expect("insert"))
+            .expect("canonical insertion");
+        let widget = editor
+            .as_any()
+            .expect("widget type")
+            .downcast_ref::<CurveEditor>()
+            .expect("curve editor");
+        assert_eq!(
+            widget.point_target(1),
+            Some(CurvePointTarget::Keyframe(inserted.id))
+        );
+        route_temporal(
+            editor.as_mut(),
+            &mut router,
+            &mut state,
+            UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+        );
+        let edited = curve(&state);
+        let changed = edited
+            .keyframes
+            .iter()
+            .find(|key| key.id == inserted.id)
+            .expect("same new identity");
+        assert_eq!(changed.time, inserted.time);
+        assert_ne!(changed.value, inserted.value);
+        for key in structural.keyframes.iter().filter(|key| key.id != inserted.id) {
+            assert_eq!(
+                edited.keyframes.iter().find(|candidate| candidate.id == key.id),
+                Some(key)
+            );
+        }
+        assert!(state.undo_timeline().expect("undo nudge"));
+        assert_eq!(curve(&state), structural);
+        assert!(state.undo_timeline().expect("undo insertion"));
+        assert_eq!(curve(&state), before);
+        assert!(!state.can_undo_action());
+        assert!(state.redo_timeline().expect("redo insertion"));
+        assert!(state.redo_timeline().expect("redo nudge"));
+        assert_eq!(curve(&state), edited);
+    }
+
     #[test]
     fn temporal_control_projection_preserves_real_boundaries_and_virtual_anchor_indices() {
         let mut clip = mondrian_timeline::Clip::new_basic_title(
@@ -3688,7 +4221,7 @@ mod temporal_handle_tests {
         );
         let controls = numeric_tangents(&model, &model.curve_source);
         assert_eq!(controls.len(), 1);
-        assert_eq!(controls[0].index, 1);
+        assert_eq!(Some(controls[0].keyframe_id), model.keys[1].keyframe_id);
         assert_eq!(controls[0].side, BezierHandleSide::Outgoing);
         assert_eq!(controls[0].point.x, 2.0 / 3.0);
         let before = clip.clone();
@@ -3705,7 +4238,7 @@ mod temporal_handle_tests {
         );
         let controls = numeric_tangents(&model, &model.curve_source);
         assert_eq!(controls.len(), 1);
-        assert_eq!(controls[0].index, 1);
+        assert_eq!(Some(controls[0].keyframe_id), model.keys[1].keyframe_id);
         assert_eq!(
             clip.transform, before.transform,
             "viewport changes preserve all outside author keys"
@@ -3874,7 +4407,7 @@ mod temporal_handle_tests {
                 .tangents()
                 .into_iter()
                 .find(|tangent| {
-                    tangent.index == index && tangent.side == BezierHandleSide::Outgoing
+                    tangent.keyframe_id == key_id && tangent.side == BezierHandleSide::Outgoing
                 })
                 .expect("outgoing");
             let before = sequence.clone();
@@ -3997,62 +4530,16 @@ mod temporal_handle_tests {
     fn temporal_handles_route_into_one_reversible_author_gesture() {
         let _guard = crate::app_ui::test_utils::theme_test_guard();
         for terminal in 0..4 {
-            let mut clip = mondrian_timeline::Clip::new_basic_title(
-                "Handles",
-                "Arial",
-                TimelineTime::ZERO,
-                TimelineTime::ONE,
-            )
-            .expect("clip");
-            let clip_id = clip.id;
-            let mut key = Keyframe::linear(
-                TimelineTime::new(1, 2).expect("middle"),
-                PropertyValue::Float(0.5),
-            );
-            key.interp_in = KeyframeInterpolation::Bezier(mondrian_core::ExactBezierHandle {
-                time_offset: TimelineTime::new(-1, 6).expect("incoming"),
-                value_offset: -0.1,
-            });
-            key.interp_out = KeyframeInterpolation::Bezier(mondrian_core::ExactBezierHandle {
-                time_offset: TimelineTime::new(1, 6).expect("outgoing"),
-                value_offset: 0.1,
-            });
-            key.temporal_flags.continuous = true;
-            let key_id = key.id;
-            for seeded in [
-                Keyframe::linear(TimelineTime::ZERO, PropertyValue::Float(0.25)),
-                key,
-                Keyframe::linear(TimelineTime::ONE, PropertyValue::Float(0.75)),
-            ] {
-                clip.transform
-                    .apply_property_mutation(PropertyMutation::SetKeyframe {
-                        path: Transform2D::OPACITY_PATH.to_owned(),
-                        keyframe: seeded,
-                    })
-                    .expect("seed canonical curve");
-            }
-            let mut sequence = mondrian_timeline::Sequence::new("Handles");
-            let selection = SelectedClipRef {
-                track_id: sequence.video_tracks[0].id,
-                is_video_track: true,
-                clip_id,
-            };
-            sequence.video_tracks[0].add_clip(clip).expect("clip");
-            let mut state = AppState::new();
-            state.test_set_sequence(Some(sequence));
-            state.select_clip_by_id(clip_id).expect("current Inspector target");
-            let before = state.active_sequence().expect("sequence").clone();
-            let model = opacity_curve_model_for_clip(
-                before.find_clip(clip_id).expect("clip"),
-                TimelineTime::ZERO,
-            )
-            .expect("model");
+            let (mut state, selection, model, key_id) = temporal_curve_fixture(true);
+            let clip_id = selection.clip_id;
+            let before = state.active_sequence().expect("before").clone();
             let index =
                 model.keys.iter().position(|key| key.keyframe_id == Some(key_id)).expect("key");
             let tangent = numeric_tangents(&model, &model.curve_source)
                 .into_iter()
                 .find(|tangent| {
-                    tangent.index == index && tangent.side == BezierHandleSide::Outgoing
+                    Some(tangent.keyframe_id) == model.keys[index].keyframe_id
+                        && tangent.side == BezierHandleSide::Outgoing
                 })
                 .expect("actual outgoing control");
             let localizer =

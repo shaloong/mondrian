@@ -3,6 +3,14 @@ use crate::app::preview_unavailability::PreviewOutputStage;
 use crate::app::product_action::TimelineSelectionEdit;
 use crate::app::AppMessage;
 use mondrian_export::queue::{ExportFailure, ExportFailureReason};
+use mondrian_ui_widgets::CurvePointTarget;
+
+fn numeric_target(model: &InspectorCurveModel, index: usize) -> CurvePointTarget {
+    model.keys[index].keyframe_id.map_or(
+        CurvePointTarget::VirtualBoundary(index),
+        CurvePointTarget::Keyframe,
+    )
+}
 
 fn chinese_localizer() -> Localizer {
     Localizer::new(AppUiLocale::ZhCn).expect("bundled Chinese catalog")
@@ -8294,8 +8302,10 @@ fn live_visual_curve_samples_equal_real_author_results() {
                 }
                 let mut preview_source = model.curve_source.clone();
                 if operation == 0 {
-                    let intermediate =
-                        CurveEdit::Move { index: 1, point: CurvePoint::new(0.55, 0.65) };
+                    let intermediate = CurveEdit::Move {
+                        target: numeric_target(&model, 1),
+                        point: CurvePoint::new(0.55, 0.65),
+                    };
                     let predicted = property_panels::preview_numeric_curve_points(
                         &model,
                         &mut preview_source,
@@ -8319,13 +8329,16 @@ fn live_visual_curve_samples_equal_real_author_results() {
                     );
                 }
                 let edit = match operation {
-                    0 => CurveEdit::Move { index: 1, point: CurvePoint::new(0.6, 0.7) },
+                    0 => CurveEdit::Move {
+                        target: numeric_target(&model, 1),
+                        point: CurvePoint::new(0.6, 0.7),
+                    },
                     1 => CurveEdit::Insert {
                         keyframe_id: KeyframeId::new(),
                         index: 1,
                         point: CurvePoint::new(0.25, 0.3),
                     },
-                    _ => CurveEdit::Delete { index: 1 },
+                    _ => CurveEdit::Delete { target: numeric_target(&model, 1) },
                 };
                 let display = property_panels::preview_numeric_curve_points(
                     &model,
@@ -8429,12 +8442,15 @@ fn live_visual_curve_return_to_origin_restores_exact_author_coordinates() {
         preview_numeric_curve_points(
             &model,
             &mut preview_source,
-            CurveEdit::Move { index, point },
+            CurveEdit::Move { target: numeric_target(&model, index), point },
         )
         .expect("canonical curve preview");
-        let action =
-            inspector_curve_edit_action(Some(selection), &model, CurveEdit::Move { index, point })
-                .unwrap();
+        let action = inspector_curve_edit_action(
+            Some(selection),
+            &model,
+            CurveEdit::Move { target: numeric_target(&model, index), point },
+        )
+        .unwrap();
         state
             .dispatch_action(
                 ParameterGestureAction::Update {
@@ -8498,10 +8514,23 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
         animation_track_id: mondrian_core::types::AnimationTrackId::new(),
         parameter_id: mondrian_core::ParameterId::new_static("mondrian.transform.opacity"),
     };
+    let mut source_clip =
+        Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("source clip");
+    let mut key = Keyframe::linear(
+        TimelineTime::new(1, 2).expect("middle time"),
+        PropertyValue::Float(0.5),
+    );
+    key.id = keyframe_id;
+    source_clip
+        .apply_property_mutation(PropertyMutation::SetKeyframe {
+            path: Transform2D::OPACITY_PATH.to_owned(),
+            keyframe: key,
+        })
+        .expect("canonical source key");
     let model = InspectorCurveModel {
         curve_source: std::sync::Arc::new(
-            Transform2D::identity()
-                .to_property_bag()
+            source_clip
+                .intrinsic_parameter_bag()
                 .property(Transform2D::OPACITY_PATH)
                 .expect("fixture property")
                 .clone(),
@@ -8533,7 +8562,10 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
     let action = inspector_curve_edit_action(
         Some(selection),
         &model,
-        CurveEdit::Move { index: 1, point: CurvePoint::new(0.6, 0.7) },
+        CurveEdit::Move {
+            target: numeric_target(&model, 1),
+            point: CurvePoint::new(0.6, 0.7),
+        },
     );
 
     match action {
@@ -8587,7 +8619,7 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
     let boundary_delete = inspector_curve_edit_action(
         Some(selection),
         &boundary_model,
-        CurveEdit::Delete { index: 0 },
+        CurveEdit::Delete { target: numeric_target(&boundary_model, 0) },
     );
     let Some(Action::Custom { payload, .. }) = boundary_delete else {
         panic!("expected boundary keyframe removal action");
@@ -8642,7 +8674,7 @@ fn visual_curve_single_axis_drag_preserves_exact_untouched_author_coordinate() {
                 inspector_curve_edit_action(
                     Some(SelectedClipRef { track_id, clip_id, is_video_track: true }),
                     &model,
-                    CurveEdit::Move { index, point },
+                    CurveEdit::Move { target: numeric_target(&model, index), point },
                 )
                 .expect("real curve action"),
             )
@@ -8793,7 +8825,7 @@ fn effect_curve_axis_contract(case: &str, min: f64, max: f64) {
                     Some(SelectedClipRef { track_id, clip_id, is_video_track: true }),
                     effect_id,
                     model,
-                    CurveEdit::Move { index, point },
+                    CurveEdit::Move { target: numeric_target(model, index), point },
                 )
                 .expect("effect curve action"),
             )

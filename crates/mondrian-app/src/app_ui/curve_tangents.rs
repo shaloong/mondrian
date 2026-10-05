@@ -5,8 +5,22 @@ use mondrian_core::{
 };
 use mondrian_ui_widgets::{CurvePoint, CurveTangent};
 
+pub(super) fn project_key(
+    time: TimelineTime,
+    value: f64,
+    range: TimelineTimeRange,
+    values: [f64; 2],
+) -> Option<CurvePoint> {
+    let elapsed = time.checked_sub(range.start).ok()?.to_f64();
+    let x = elapsed / range.duration.to_f64();
+    let y = mondrian_core::automation::ParameterNumericRange::new(values[0], values[1])
+        .ok()?
+        .normalized_position(value)?;
+    (x.is_finite() && y.is_finite()).then(|| CurvePoint::new(x as f32, y as f32))
+}
+
 pub(super) fn project(
-    index: usize,
+    keyframe_id: mondrian_core::KeyframeId,
     side: BezierHandleSide,
     key: (TimelineTime, f64),
     neighbor: TimelineTime,
@@ -42,7 +56,7 @@ pub(super) fn project(
         return None;
     }
     Some(CurveTangent {
-        index,
+        keyframe_id,
         side,
         point: CurvePoint { x, y },
         time_limits: limits,
@@ -104,7 +118,7 @@ mod tests {
             value_offset: f64::MAX / 4.0,
         };
         let tangent = project(
-            0,
+            mondrian_core::KeyframeId::new(),
             BezierHandleSide::Outgoing,
             (time, 0.0),
             TimelineTime::ONE,
@@ -145,7 +159,7 @@ mod tests {
             value_offset: 2.0,
         };
         let tangent = project(
-            0,
+            mondrian_core::KeyframeId::new(),
             BezierHandleSide::Outgoing,
             (TimelineTime::ZERO, 0.25),
             TimelineTime::ONE,

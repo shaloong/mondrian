@@ -16,7 +16,7 @@ use mondrian_timeline::{
     inspect_audio_automation, AudioAutomationEdit, AudioAutomationEditRequest,
     AudioAutomationTarget, Sequence,
 };
-use mondrian_ui_widgets::{CurveEdit, CurvePoint, CurvePointPolicy};
+use mondrian_ui_widgets::{CurveEdit, CurvePoint, CurvePointPolicy, CurvePointTarget};
 
 use crate::app::ui_actions::audio_automation_edit_action;
 
@@ -62,17 +62,18 @@ impl AudioAutomationCurveModel {
     }
 
     pub(crate) fn tangents(&self) -> Vec<mondrian_ui_widgets::CurveTangent> {
-        let visible = self
-            .keys
-            .iter()
-            .enumerate()
-            .filter_map(|(index, key)| Some((key.keyframe.as_ref()?.id, index)))
-            .collect::<std::collections::HashMap<_, _>>();
+        let end = match self.viewport.range.end() {
+            Ok(end) => end,
+            Err(_) => return Vec::new(),
+        };
         self.source_curve
             .keyframe_controls()
+            .filter(|control| {
+                control.key_time >= self.viewport.range.start && control.key_time <= end
+            })
             .filter_map(|control| {
                 crate::app_ui::curve_tangents::project(
-                    *visible.get(&control.keyframe_id)?,
+                    control.keyframe_id,
                     control.side,
                     (control.key_time, control.key_value),
                     control.neighbor_time,
@@ -335,14 +336,13 @@ fn audio_curve_edit_intent(
         return None;
     }
     let edit = match edit {
-        CurveEdit::Handle { index, side, point } => {
-            let id = model.keys.get(index)?.keyframe.as_ref()?.id;
+        CurveEdit::Handle { keyframe_id: id, side, point } => {
             let key = model.source_curve.keyframes.iter().find(|key| key.id == id)?;
             let handle = model.source_curve.keyframe_handle(id, side)?;
             let tangent = model
                 .tangents()
                 .into_iter()
-                .find(|tangent| tangent.index == index && tangent.side == side)?;
+                .find(|tangent| tangent.keyframe_id == id && tangent.side == side)?;
             let edit = crate::app_ui::curve_tangents::lower(
                 tangent,
                 point,
@@ -361,22 +361,42 @@ fn audio_curve_edit_intent(
             keyframe.interpolation_to_next = model.insert_interpolation;
             AudioAutomationEdit::UpsertKeyframe { keyframe }
         }
-        CurveEdit::Move { index, point } => {
-            let key = model.keys.get(index)?;
-            let keyframe = if let Some(keyframe) = &key.keyframe {
-                let mut keyframe = keyframe.clone();
-                if point.x != key.point.x {
+        CurveEdit::Move { target, point } => {
+            let (identity, reference) = match target {
+                CurvePointTarget::Keyframe(id) => {
+                    let key = model.source_curve.keyframes.iter().find(|key| key.id == id)?;
+                    let reference = crate::app_ui::curve_tangents::project_key(
+                        key.time,
+                        key.value,
+                        model.viewport.range,
+                        [model.view_min, model.view_max],
+                    )?;
+                    (Some(id), reference)
+                }
+                CurvePointTarget::VirtualBoundary(index) => {
+                    let key = model.keys.get(index)?;
+                    if key.keyframe.is_some() {
+                        return None;
+                    }
+                    (None, key.point)
+                }
+                CurvePointTarget::Snapshot(_) => return None,
+            };
+            let keyframe = if let Some(id) = identity {
+                let mut keyframe =
+                    model.source_curve.keyframes.iter().find(|key| key.id == id)?.clone();
+                if point.x != reference.x {
                     keyframe.time = denormalized_time(model.viewport.range, point.x)?;
                 }
-                if point.y != key.point.y {
+                if point.y != reference.y {
                     keyframe.value = denormalized_value(model, point.y)?;
                 }
                 keyframe
             } else {
-                if point.y == key.point.y {
+                if point.y == reference.y {
                     return None;
                 }
-                let time = denormalized_time(model.viewport.range, key.point.x)?;
+                let time = denormalized_time(model.viewport.range, reference.x)?;
                 let value = denormalized_value(model, point.y)?;
                 let mut keyframe = ExactAutomationKeyframe::linear(time, value);
                 keyframe.interpolation_to_next = model.insert_interpolation;
@@ -384,9 +404,12 @@ fn audio_curve_edit_intent(
             };
             AudioAutomationEdit::UpsertKeyframe { keyframe }
         }
-        CurveEdit::Delete { index } => AudioAutomationEdit::RemoveKeyframe {
-            keyframe_id: model.keys.get(index)?.keyframe.as_ref()?.id,
-        },
+        CurveEdit::Delete { target } => {
+            let CurvePointTarget::Keyframe(keyframe_id) = target else {
+                return None;
+            };
+            AudioAutomationEdit::RemoveKeyframe { keyframe_id }
+        }
     };
     Some(edit)
 }
@@ -467,6 +490,13 @@ mod tests {
     use crate::app::product_action::{AudioProductAction, ProductAction};
     use mondrian_core::AutomationSegmentInterpolation;
     use mondrian_timeline::{AudioAutomationTarget, AudioChannelStripOwner};
+
+    fn audio_target(model: &AudioAutomationCurveModel, index: usize) -> CurvePointTarget {
+        model.keys[index].keyframe.as_ref().map(|key| key.id).map_or(
+            CurvePointTarget::VirtualBoundary(index),
+            CurvePointTarget::Keyframe,
+        )
+    }
 
     #[test]
     fn processor_curve_edits_preserve_continuous_values_across_finite_ranges() {
@@ -658,13 +688,16 @@ mod tests {
             };
             let model = project_audio_automation(&sequence, target.clone(), viewport).unwrap();
             for edit in [
-                CurveEdit::Move { index: 0, point: CurvePoint::new(0.1, 0.2) },
+                CurveEdit::Move {
+                    target: audio_target(&model, 0),
+                    point: CurvePoint::new(0.1, 0.2),
+                },
                 CurveEdit::Insert {
                     keyframe_id: mondrian_core::KeyframeId::new(),
                     index: 1,
                     point: CurvePoint::new(0.5, 0.6),
                 },
-                CurveEdit::Delete { index: 0 },
+                CurveEdit::Delete { target: audio_target(&model, 0) },
             ] {
                 let display = preview_audio_curve_edit(&mut model.clone(), edit).unwrap();
                 let mut authored = sequence.clone();
@@ -703,17 +736,20 @@ mod tests {
             assert!(
                 audio_automation_curve_edit_action(
                     &model,
-                    CurveEdit::Move { index, point: model.keys[index].point },
+                    CurveEdit::Move {
+                        target: audio_target(&model, index),
+                        point: model.keys[index].point
+                    },
                 )
                 .is_none(),
                 "an unchanged virtual boundary must not create automation"
             );
             let point = CurvePoint::new(model.keys[index].point.x, 0.25);
-            let action =
-                audio_automation_curve_edit_action(&model, CurveEdit::Move { index, point })
-                    .expect(
-                        "boundary drag must author a key, not leave an uncommitted widget point",
-                    );
+            let action = audio_automation_curve_edit_action(
+                &model,
+                CurveEdit::Move { target: audio_target(&model, index), point },
+            )
+            .expect("boundary drag must author a key, not leave an uncommitted widget point");
             let Some(ProductAction::Audio(AudioProductAction::EditAutomation(request))) =
                 ProductAction::decode_external(&action).unwrap()
             else {
@@ -803,7 +839,10 @@ mod tests {
 
         let action = audio_automation_curve_edit_action(
             &model,
-            CurveEdit::Move { index: 1, point: CurvePoint::new(0.75, 0.5) },
+            CurveEdit::Move {
+                target: audio_target(&model, 1),
+                point: CurvePoint::new(0.75, 0.5),
+            },
         )
         .unwrap();
         assert!(matches!(
@@ -922,7 +961,7 @@ mod tests {
         let action = audio_automation_curve_edit_action(
             &model,
             CurveEdit::Move {
-                index: 1,
+                target: audio_target(&model, 1),
                 point: CurvePoint::new(0.75, model.keys[1].point.y),
             },
         )
@@ -968,9 +1007,11 @@ mod tests {
             } else {
                 CurvePoint::new(original.x, 0.25)
             };
-            let action =
-                audio_automation_curve_edit_action(&model, CurveEdit::Move { index: 1, point })
-                    .unwrap();
+            let action = audio_automation_curve_edit_action(
+                &model,
+                CurveEdit::Move { target: audio_target(&model, 1), point },
+            )
+            .unwrap();
             let Some(ProductAction::Audio(AudioProductAction::EditAutomation(request))) =
                 ProductAction::decode_external(&action).unwrap()
             else {

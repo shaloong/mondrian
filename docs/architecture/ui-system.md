@@ -329,17 +329,18 @@ vector component preserves the other component. Preview Full/1/2/1/4,
 proxy/original selection, and Viewer Fit zoom change only execution or
 presentation sampling and never rewrite these controls.
 
-`CurveEditor` is a normalized interaction Module, not an automation owner. It
-keeps high-frequency pointer motion local and emits exactly one committed
-`CurveEdit::{Insert, Move, Delete}` for a pointer gesture; keyboard edits are
-already atomic. The Inspector Adapter maps the snapshot-local point index to
+`CurveEditor` is a normalized interaction Module, not an automation owner.
+Its complete-value and non-live callbacks keep pointer edits local until release;
+its temporal gesture callback publishes Begin/Edit/Finish/Cancel with live
+canonical author updates and one history entry. Keyboard edits are atomic.
+Move/Delete carry CurvePointTarget and handles carry KeyframeId, independent
+of the current display slot. The Inspector Adapter resolves these targets to
 `AnimationParameterAddress + KeyframeId` before dispatch. Evaluated
 Hold/Linear/Bezier samples are a separate read-only paint series, so display
-fidelity cannot rewrite interpolation. Each editable point also carries an
-explicit interaction policy: virtual Clip-boundary samples are fixed and
-non-deletable, while real author keys remain movable and deletable even when
-their time lies exactly on a boundary. Escape cancels widget-local preview
-state and publishes no author mutation.
+fidelity cannot rewrite interpolation. Point metadata keeps identity, policy
+and context commands together. Virtual boundaries have fixed time and editable
+value; real author keys remain movable and deletable even at viewport edges.
+Escape restores widget projection and cancels the canonical author gesture.
 
 Scalar floating-point visual Effect parameters use this same curve editor and
 stable-key Product Action path. The Inspector projects the definition-owned
@@ -3350,8 +3351,10 @@ require further implementation and qualification before claiming a complete
 professional temporal curve editor.
 ### Dense curve projection
 
-Visual and audio tangent adapters consume Core's ordered control iterator and
-map stable IDs to current visible widget indices. Virtual viewport anchors have
+Visual and audio tangent adapters consume Core's ordered control iterator,
+filter exact owner times to the viewport, and retain KeyframeId ownership.
+The Widget owns a linear-size ID-to-display-slot index; no author callback
+interprets the current slot as a key identity. Virtual viewport anchors have
 no author identity and never acquire another key's controls. The scalar visual
 model reads its admitted single channel directly with exact-time partition
 boundaries; it preserves real keys at either viewport edge and uses virtual
@@ -3363,3 +3366,37 @@ The ignored temporal_handle_large_curve_projection_smoke exercises these real
 App adapters at 1024, 4096 and 16384 keys, records model/tangent timings and
 checks key/control counts plus finite geometry. It is a local projection
 measurement, not a full interactive/render/plugin realtime qualification.
+
+### Stable temporal point and tangent ownership
+
+CurvePointTarget distinguishes a canonical KeyframeId, a generic normalized
+owner-snapshot point, and an unauthored temporal viewport boundary. CurveEdit
+Move/Delete carry that target; Handle and CurveTangent carry KeyframeId.
+The temporal App adapters reject generic snapshot targets rather than infer
+an author key from its current array slot. Normalized transfer curves retain
+their complete-value callbacks and immutable snapshot identity semantics.
+
+CurveEditor keeps target, interaction policy and context menu together in
+point metadata. Structural insertion/deletion updates that metadata and the
+ID-to-slot map atomically. Tangent filtering, hit tests, painting, selection
+and author intents all resolve the same stable owner. A newly inserted key
+cannot inherit the former occupant's controls or context commands. Escape
+restores point metadata and the original canonical tangent projection.
+
+Visual and audio adapters lower each action against the current canonical
+preview source before applying that preview, retaining an immutable source
+origin during a pointer gesture. The callback consumes that already-lowered
+action, so projection order cannot change the unchanged-axis decision. Newly
+inserted keys can be edited again without rebuilding the Widget; audio edits
+clone current canonical key metadata rather than stale initial projected keys.
+Virtual boundaries reserve one ID when authored. Return to the original point
+cancels materialization and history; accepting a changed boundary makes it an
+editable real key. The non-live callback emits one Insert on release.
+
+A real App EventRouter/author/paint regression originally showed a linear
+inserted key drawing the displaced key's controls, despite having no controls
+in canonical state. Acceptance retains that assertion and routes insertion
+and deletion followed by keyboard edits and two Undo/Redo steps in the visual
+adapter, plus insertion/keyboard editing/Undo/Redo in the audio adapter.
+Component tests also retain shifted generic snapshot identity, context commands and canonical controls on cancellation. This does
+not establish physical keyboard, viewport zoom/pan or frame-grid qualification.
