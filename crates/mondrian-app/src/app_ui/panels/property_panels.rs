@@ -8,6 +8,7 @@ use crate::app::parameter_gesture::{
     ParameterCurveGestureTarget, ParameterGestureAction, ParameterGestureEdit,
 };
 use crate::app_ui::localization::keyframe_interpolation_message_id;
+use mondrian_core::automation::AnimationChannelValue;
 use mondrian_ui_widgets::CurveGestureEvent;
 use mondrian_ui_widgets::{CurvePointTarget, CurvePreview, CurveTangent};
 
@@ -2742,9 +2743,22 @@ fn numeric_curve_edit_payload(
 ) -> Option<ClipCurveEditPayload> {
     let edit = match edit {
         CurveEdit::NudgeValue { keyframe_id, delta, steps } => {
-            let key = model.curve_source.keyframe_by_id(keyframe_id)?;
+            let key = model
+                .curve_source
+                .channel(0)?
+                .keyframes()
+                .iter()
+                .find(|key| key.id == keyframe_id)?;
             let contract = model.curve_source.descriptor.schema.numeric.as_ref()?.first()?;
-            let value = contract.offset_scalar(key.value.clone(), delta, steps)?;
+            let scalar = match key.value {
+                AnimationChannelValue::Integer(value) => PropertyValue::Int(value),
+                AnimationChannelValue::Number(value) => PropertyValue::Double(value),
+            };
+            let value = match contract.offset_scalar(scalar, delta, steps)? {
+                PropertyValue::Int(value) => AnimationChannelValue::Integer(value),
+                PropertyValue::Double(value) => AnimationChannelValue::Number(value),
+                _ => return None,
+            };
             ClipCurveEditPayload::Move { keyframe_id, time: None, value: Some(value) }
         }
         CurveEdit::NudgeTime { keyframe_id, side, delta } => {
@@ -2771,7 +2785,7 @@ fn numeric_curve_edit_payload(
             }
         }
         CurveEdit::Handle { keyframe_id: id, side, point } => {
-            let key = model.curve_source.keyframe_by_id(id)?;
+            let key = model.curve_source.channel(0)?.keyframes().iter().find(|key| key.id == id)?;
             let handle = model.curve_source.channel_keyframe_handle(0, id, side)?;
             let tangent = numeric_tangents(model, &model.curve_source)
                 .into_iter()
@@ -2779,7 +2793,7 @@ fn numeric_curve_edit_payload(
             let edit = crate::app_ui::curve_tangents::lower(
                 tangent,
                 point,
-                (key.time, key.value.as_numeric_f64()?),
+                (key.time, key.value.projection()),
                 handle,
                 model.owner_range,
             )?;
@@ -2792,10 +2806,15 @@ fn numeric_curve_edit_payload(
         CurveEdit::Move { target, point } => {
             let (identity, reference) = match target {
                 CurvePointTarget::Keyframe(id) => {
-                    let key = model.curve_source.keyframe_by_id(id)?;
+                    let key = model
+                        .curve_source
+                        .channel(0)?
+                        .keyframes()
+                        .iter()
+                        .find(|key| key.id == id)?;
                     let reference = crate::app_ui::curve_tangents::project_key(
                         key.time,
-                        key.value.as_numeric_f64()?,
+                        key.value.projection(),
                         model.owner_range,
                     )?;
                     (Some(id), reference)
@@ -2810,14 +2829,20 @@ fn numeric_curve_edit_payload(
                 CurvePointTarget::Snapshot(_) => return None,
             };
             if let Some(keyframe_id) = identity {
+                let key = model
+                    .curve_source
+                    .channel(0)?
+                    .keyframes()
+                    .iter()
+                    .find(|key| key.id == keyframe_id)?;
                 let time = if point.x == reference.x {
-                    model.curve_source.keyframe_by_id(keyframe_id)?.time
+                    key.time
                 } else {
                     crate::app::numeric_curve_author_time(model.owner_range, f64::from(point.x))
                         .ok()?
                 };
                 let value = if point.y == reference.y {
-                    model.curve_source.keyframe_by_id(keyframe_id)?.value
+                    key.value
                 } else {
                     crate::app::numeric_curve_author_value(&model.curve_source, point.y).ok()?
                 };

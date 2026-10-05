@@ -8,8 +8,8 @@
 
 use super::{AppState, SelectedClipRef};
 use mondrian_core::automation::{
-    AnimationParameterAddress, InterpolationType, Keyframe, ParameterInterpolation, PropertyBag,
-    PropertyHost, PropertyMutation, PropertyValue, PropertyValueType,
+    AnimationChannelValue, AnimationParameterAddress, InterpolationType, Keyframe,
+    ParameterInterpolation, PropertyBag, PropertyHost, PropertyMutation, PropertyValueType,
 };
 use mondrian_core::{EffectId, KeyframeId, MondrianError, Result, TimeScale, TimelineTime};
 
@@ -21,8 +21,8 @@ const CURVE_QUANTIZATION_DENOMINATOR: u32 = 1_000_000;
 pub struct ClipCurveAuthorPoint {
     /// Absolute author time in the owning Clip domain.
     pub time: TimelineTime,
-    /// Absolute typed parameter value; the owner schema governs admission.
-    pub value: PropertyValue,
+    /// Canonical scalar channel value; evaluation derives the native scalar type.
+    pub value: AnimationChannelValue,
 }
 
 /// One stable-identity curve edit requested by a product Adapter.
@@ -34,8 +34,8 @@ pub enum ClipNumericCurveEdit {
         keyframe_id: KeyframeId,
         /// Absolute owner time; absence retains the current exact time.
         time: Option<TimelineTime>,
-        /// Absolute typed author value; absence retains the current value.
-        value: Option<PropertyValue>,
+        /// Canonical scalar author value; absence retains the current channel value.
+        value: Option<AnimationChannelValue>,
     },
     /// Insert a key, or edit the key with the supplied stable identity.
     Upsert {
@@ -330,7 +330,10 @@ fn complete_curve_targets(
     properties: &PropertyBag,
     address: &AnimationParameterAddress,
     edit: ClipNumericCurveEdit,
-) -> Result<(ClipNumericCurveEdit, Option<Keyframe<PropertyValue>>)> {
+) -> Result<(
+    ClipNumericCurveEdit,
+    Option<Keyframe<AnimationChannelValue>>,
+)> {
     let (_, property) = properties
         .property_by_address(address)
         .ok_or_else(|| curve_error("curve parameter is not owned by this target"))?;
@@ -355,16 +358,21 @@ fn complete_curve_targets(
             ))
         }
         ClipNumericCurveEdit::Move { keyframe_id, time, value } => {
-            let key = property.keyframe_by_id(keyframe_id).ok_or_else(|| {
-                curve_error(format!("keyframe {keyframe_id} is stale or incomplete"))
-            })?;
+            validate_numeric_curve_property(property, address)?;
+            let author_key = property
+                .channel(0)
+                .and_then(|channel| {
+                    channel.keyframes().iter().find(|candidate| candidate.id == keyframe_id)
+                })
+                .cloned()
+                .ok_or_else(|| curve_error("canonical channel key is missing"))?;
             Ok((
                 ClipNumericCurveEdit::Move {
                     keyframe_id,
-                    time: Some(time.unwrap_or(key.time)),
-                    value: Some(value.unwrap_or_else(|| key.value.clone())),
+                    time: Some(time.unwrap_or(author_key.time)),
+                    value: Some(value.unwrap_or(author_key.value)),
                 },
-                Some(key),
+                Some(author_key),
             ))
         }
         ClipNumericCurveEdit::Upsert { keyframe_id: None, point } => {
@@ -388,35 +396,59 @@ fn prepare_resolved_curve_edit(
     clip: &mondrian_timeline::Clip,
     address: &AnimationParameterAddress,
     edit: ClipNumericCurveEdit,
-    source_key: Option<Keyframe<PropertyValue>>,
+    source_key: Option<Keyframe<AnimationChannelValue>>,
 ) -> Result<PreparedCurveEdit> {
-    if let ClipNumericCurveEdit::Move {
-        keyframe_id,
-        time: Some(time),
-        value: Some(ref value),
-    } = edit
+    if let ClipNumericCurveEdit::Move { keyframe_id, time: Some(time), value: Some(value) } = edit
         && let Some(mut key) = source_key
         && key.id == keyframe_id
     {
         let (path, property) = properties
             .property_by_address(address)
             .ok_or_else(|| curve_error("curve parameter is not owned by this target"))?;
-        if property.keyframe_by_id(keyframe_id).is_none() {
-            let range = numeric_curve_owner_range(clip)?;
-            if time < range.start || time > range.start.checked_add(range.duration)? {
-                return Err(curve_error("curve move time is outside the owner interval"));
-            }
-            // Reuse collision admission before retaining the complete current key.
-            let mut prepared =
-                prepare_key_position_edit(property, path, Some(keyframe_id), time, value.clone())?;
-            key.time = time;
-            key.value = value.clone();
-            prepared.mutations =
-                vec![PropertyMutation::SetKeyframe { path: path.to_owned(), keyframe: key }];
-            return Ok(prepared);
+        validate_numeric_curve_property(property, address)?;
+        let range = numeric_curve_owner_range(clip)?;
+        if time < range.start || time > range.end()? {
+            return Err(curve_error("curve move time is outside the owner interval"));
         }
+        // Existing gesture keys retain origin controls; a late inserted key
+        // carries its current metadata because the origin has no such key.
+        key = property
+            .channel(0)
+            .and_then(|channel| {
+                channel.keyframes().iter().find(|original| original.id == keyframe_id)
+            })
+            .cloned()
+            .unwrap_or(key);
+        key.time = time;
+        key.value = value;
+        return prepare_channel_key_position_edit(property, path, key);
     }
     prepare_curve_edit(properties, clip, address, edit)
+}
+
+fn prepare_channel_key_position_edit(
+    property: &mondrian_core::automation::AnimatedProperty,
+    path: &str,
+    key: Keyframe<AnimationChannelValue>,
+) -> Result<PreparedCurveEdit> {
+    let channel = property.channel(0).ok_or_else(|| curve_error("author channel is missing"))?;
+    if channel.keyframe_at(key.time).is_some_and(|current| current.id != key.id) {
+        return Err(curve_error(
+            "keyframe cannot move onto an occupied author time",
+        ));
+    }
+    let keyframe_id = key.id;
+    let unchanged = channel.keyframes().iter().any(|current| current == &key);
+    let mutations = if unchanged {
+        Vec::new()
+    } else {
+        vec![PropertyMutation::SetChannelKeyframe {
+            path: path.to_owned(),
+            channel_index: 0,
+            keyframe: key,
+        }]
+    };
+    Ok(PreparedCurveEdit { mutations, keyframe_id })
 }
 
 fn numeric_curve_owner_range(
@@ -468,13 +500,10 @@ pub(crate) fn preview_numeric_curve_edit(
     Ok(candidate)
 }
 
-fn prepare_property_curve_edit(
-    path: &str,
+fn validate_numeric_curve_property(
     property: &mondrian_core::automation::AnimatedProperty,
-    range: mondrian_core::TimelineTimeRange,
     address: &AnimationParameterAddress,
-    edit: ClipNumericCurveEdit,
-) -> Result<PreparedCurveEdit> {
+) -> Result<()> {
     if !property.descriptor.schema.is_animatable || property.channel_count() != 1 {
         return Err(curve_error(format!(
             "parameter {} is not a single-channel animatable curve",
@@ -491,6 +520,17 @@ fn prepare_property_curve_edit(
             address.parameter_id
         )));
     }
+    Ok(())
+}
+
+fn prepare_property_curve_edit(
+    path: &str,
+    property: &mondrian_core::automation::AnimatedProperty,
+    range: mondrian_core::TimelineTimeRange,
+    address: &AnimationParameterAddress,
+    edit: ClipNumericCurveEdit,
+) -> Result<PreparedCurveEdit> {
+    validate_numeric_curve_property(property, address)?;
     match edit {
         ClipNumericCurveEdit::EditHandle { keyframe_id, side, edit } => {
             let key = property.channels()[0]
@@ -625,20 +665,20 @@ fn prepare_property_curve_edit(
             Ok(PreparedCurveEdit { mutations: vec![mutation], keyframe_id })
         }
         ClipNumericCurveEdit::Move { keyframe_id, time, value } => {
-            let keyframe = property.keyframe_by_id(keyframe_id).ok_or_else(|| {
-                curve_error(format!(
-                    "keyframe {keyframe_id} is stale or is not a complete key"
-                ))
-            })?;
+            let mut keyframe = property
+                .channel(0)
+                .and_then(|channel| channel.keyframes().iter().find(|key| key.id == keyframe_id))
+                .cloned()
+                .ok_or_else(|| curve_error("canonical channel key is stale"))?;
             if let Some(time) = time {
                 let end = range.start.checked_add(range.duration)?;
                 if time < range.start || time > end {
                     return Err(curve_error("curve move time is outside the owner interval"));
                 }
             }
-            let target_time = time.unwrap_or(keyframe.time);
-            let target_value = value.unwrap_or(keyframe.value);
-            prepare_key_position_edit(property, path, Some(keyframe_id), target_time, target_value)
+            keyframe.time = time.unwrap_or(keyframe.time);
+            keyframe.value = value.unwrap_or(keyframe.value);
+            prepare_channel_key_position_edit(property, path, keyframe)
         }
         ClipNumericCurveEdit::Upsert { keyframe_id, point } => {
             if point.time < range.start || point.time > range.end()? {
@@ -656,12 +696,14 @@ fn prepare_key_position_edit(
     path: &str,
     keyframe_id: Option<KeyframeId>,
     target_time: TimelineTime,
-    target_value: PropertyValue,
+    target_value: AnimationChannelValue,
 ) -> Result<PreparedCurveEdit> {
+    let channel = property.channel(0).ok_or_else(|| curve_error("author channel is missing"))?;
     let existing = if let Some(keyframe_id) = keyframe_id {
-        let keyframe = property.keyframe_by_id(keyframe_id);
+        let keyframe = channel.keyframes().iter().find(|key| key.id == keyframe_id).cloned();
         if property
-            .keyframe_at(target_time)
+            .channel(0)
+            .and_then(|channel| channel.keyframe_at(target_time))
             .is_some_and(|candidate| candidate.id != keyframe_id)
         {
             return Err(curve_error(format!(
@@ -670,22 +712,13 @@ fn prepare_key_position_edit(
         }
         keyframe
     } else {
-        property.keyframe_at(target_time)
+        channel.keyframe_at(target_time).cloned()
     };
 
-    if let Some(keyframe) = existing {
-        if keyframe.time == target_time && keyframe.value == target_value {
-            return Ok(PreparedCurveEdit { mutations: Vec::new(), keyframe_id: keyframe.id });
-        }
-        return Ok(PreparedCurveEdit {
-            mutations: vec![PropertyMutation::EditKeyframe {
-                path: path.to_owned(),
-                keyframe_id: keyframe.id,
-                time: target_time,
-                value: target_value,
-            }],
-            keyframe_id: keyframe.id,
-        });
+    if let Some(mut keyframe) = existing {
+        keyframe.time = target_time;
+        keyframe.value = target_value;
+        return prepare_channel_key_position_edit(property, path, keyframe);
     }
 
     let mut keyframe =
@@ -695,7 +728,11 @@ fn prepare_key_position_edit(
     }
     let keyframe_id = keyframe.id;
     Ok(PreparedCurveEdit {
-        mutations: vec![PropertyMutation::SetKeyframe { path: path.to_owned(), keyframe }],
+        mutations: vec![PropertyMutation::SetChannelKeyframe {
+            path: path.to_owned(),
+            channel_index: 0,
+            keyframe,
+        }],
         keyframe_id,
     })
 }
@@ -728,25 +765,26 @@ pub(crate) fn numeric_curve_author_time(
         .map_err(Into::into)
 }
 
-/// Convert an absolute UI author value to its declared scalar type.
+/// Lower an absolute UI value to the canonical scalar channel author kind.
 pub(crate) fn numeric_curve_author_value(
     property: &mondrian_core::automation::AnimatedProperty,
     value: f64,
-) -> Result<PropertyValue> {
+) -> Result<AnimationChannelValue> {
     curve_value(property.value_type(), value)
 }
 
-fn curve_value(value_type: PropertyValueType, value: f64) -> Result<PropertyValue> {
+fn curve_value(value_type: PropertyValueType, value: f64) -> Result<AnimationChannelValue> {
     if !value.is_finite() {
         return Err(curve_error(
             "curve value mapping produced a non-finite number",
         ));
     }
     match value_type {
-        PropertyValueType::Float => Ok(PropertyValue::Float(value as f32)),
-        PropertyValueType::Double => Ok(PropertyValue::Double(value)),
+        PropertyValueType::Float | PropertyValueType::Double => {
+            Ok(AnimationChannelValue::Number(value))
+        }
         PropertyValueType::Int if value.round().abs() <= 9_007_199_254_740_992.0 => {
-            Ok(PropertyValue::Int(value.round() as i64))
+            Ok(AnimationChannelValue::Integer(value.round() as i64))
         }
         _ => Err(curve_error(
             "curve value mapping requires an exactly representable numeric value",
@@ -764,6 +802,7 @@ fn curve_error(reason: impl Into<String>) -> MondrianError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_core::automation::PropertyValue;
     use mondrian_core::automation::{
         ExactBezierHandle, KeyframeInterpolation, KeyframeTemporalFlags, PropertyHost,
     };
@@ -781,21 +820,24 @@ mod tests {
         };
         let range = mondrian_core::TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE)
             .expect("owner range");
-        for (default, value, invalid) in [
+        for (default, value, author_value, invalid) in [
             (
                 PropertyValue::Double(0.5),
                 PropertyValue::Double(1.5000000000000002),
-                PropertyValue::Double(3.0),
+                AnimationChannelValue::Number(1.5000000000000002),
+                AnimationChannelValue::Number(3.0),
             ),
             (
                 PropertyValue::Float(0.5),
                 PropertyValue::Float(1.5),
-                PropertyValue::Float(3.0),
+                AnimationChannelValue::Number(1.5),
+                AnimationChannelValue::Number(3.0),
             ),
             (
                 PropertyValue::Int(1),
                 PropertyValue::Int(2),
-                PropertyValue::Int(3),
+                AnimationChannelValue::Integer(2),
+                AnimationChannelValue::Integer(3),
             ),
         ] {
             let mut numeric = ParameterNumericContract::closed(
@@ -816,7 +858,7 @@ mod tests {
             let time = TimelineTime::new(1, 7).expect("free exact time");
             let payload = ClipCurveEditPayload::Upsert {
                 keyframe_id: Some(id),
-                point: ClipCurveAuthorPoint { time, value: value.clone() },
+                point: ClipCurveAuthorPoint { time, value: author_value },
             };
             let decoded: ClipCurveEditPayload =
                 serde_json::from_value(serde_json::to_value(&payload).expect("encode"))
@@ -844,7 +886,7 @@ mod tests {
                     keyframe_id: None,
                     point: ClipCurveAuthorPoint {
                         time: TimelineTime::new(2, 1).expect("outside"),
-                        value
+                        value: author_value
                     }
                 }
             )
@@ -868,18 +910,18 @@ mod tests {
         assert!(property.descriptor.schema.numeric.is_none());
         let time = TimelineTime::new(1, 3).expect("exact time");
         for author_value in [0.12345678901234568, f64::MAX, -f64::MAX, -0.0] {
-            let value = PropertyValue::Double(author_value);
+            let value = AnimationChannelValue::Number(author_value);
             let preview = preview_numeric_curve_edit(
                 &property,
                 mondrian_core::TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE)
                     .expect("owner range"),
                 &ClipCurveEditPayload::Upsert {
                     keyframe_id: None,
-                    point: ClipCurveAuthorPoint { time, value: value.clone() },
+                    point: ClipCurveAuthorPoint { time, value },
                 },
             )
             .expect("typed author admission independent of editor projection");
-            assert_eq!(preview.evaluate(time), value);
+            assert_eq!(preview.evaluate(time), PropertyValue::Double(author_value));
             assert_eq!(
                 preview.evaluate(time).as_f64().expect("Double").to_bits(),
                 author_value.to_bits()
@@ -1012,7 +1054,7 @@ mod tests {
             edit: ClipCurveEditPayload::Move {
                 keyframe_id: endpoint_id,
                 time: None,
-                value: Some(PropertyValue::Double(3.0)),
+                value: Some(AnimationChannelValue::Number(3.0)),
             },
         });
         state.dispatch_action(action.clone()).expect("author commit");
@@ -1648,10 +1690,10 @@ mod tests {
                     edit: ClipCurveEditPayload::Move {
                         keyframe_id,
                         time: Some(TimelineTime::new(1, 2).expect("valid owner time")),
-                        value: Some(PropertyValue::Float(if invalid_time {
+                        value: Some(AnimationChannelValue::Number(if invalid_time {
                             0.75
                         } else {
-                            invalid as f32
+                            invalid
                         })),
                     },
                 });
@@ -1726,7 +1768,7 @@ mod tests {
                     ClipNumericCurveEdit::Move {
                         keyframe_id,
                         time: None,
-                        value: Some(PropertyValue::Float(invalid as f32)),
+                        value: Some(AnimationChannelValue::Number(invalid)),
                     },
                 )
                 .expect_err("invalid supplied numeric value rejects");
@@ -1738,7 +1780,7 @@ mod tests {
                 ClipNumericCurveEdit::Move {
                     keyframe_id: KeyframeId::new(),
                     time: None,
-                    value: Some(PropertyValue::Float(0.5)),
+                    value: Some(AnimationChannelValue::Number(0.5)),
                 },
             )
             .expect_err("stale key rejects");

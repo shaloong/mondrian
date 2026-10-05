@@ -1498,6 +1498,8 @@ pub(super) fn execute_visual_stage(
             .property(BasicTitle::FONT_SIZE_PATH)
             .context("font size property is absent before Curve Editor edit")?;
         let keyframe = property
+            .channel(0)
+            .context("Bezier author channel is absent before Curve Editor edit")?
             .keyframe_at(end_time)
             .context("Bezier endpoint is absent before Curve Editor edit")?;
         (property.address(), keyframe.id, keyframe.value)

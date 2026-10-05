@@ -3563,3 +3563,24 @@ Integer curve projection uses the explicitly lossy as_numeric_f64/ channel
 projection APIs only for graph geometry. Core now retains exact Integer channel
 keys; preview/source reads and value nudges retain those bits independently of
 whether adjacent integer values occupy the same floating screen coordinate.
+
+### Exact scalar curve action coordinates
+
+Scalar curve author points and move payloads carry `AnimationChannelValue`.
+The inspector projects the raw author channel for geometry and comparison;
+pointer candidates carry absolute coordinates, retaining the exact original
+owner time and raw value for unchanged axes. Sparse direct actions resolve
+omitted coordinates against the current canonical key. Keyboard value nudges
+use the shared numeric offset contract with `Double` or `Int` author values,
+without an intermediate Float evaluation conversion.
+
+Preview and commit use the same canonical channel key mutation. During an
+absolute curve gesture, interpolation metadata comes from the origin key when
+that identity existed at gesture start, or from the current key for a key
+inserted during the gesture. Normalized manual controls from intermediate
+candidates cannot accumulate or overwrite origin metadata when returning to the
+origin or cancelling. No-op gestures preserve existing Redo history.
+
+This changes the alpha action payload value shape without a compatibility
+parser. Project storage remains schema 31. Native parameter evaluation,
+renderer and plugin execution continue using their existing typed seams.

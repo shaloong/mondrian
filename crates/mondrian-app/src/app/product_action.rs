@@ -2574,13 +2574,13 @@ pub enum ClipCurveEditPayload {
             deserialize_with = "mondrian_core::deserialize_present_coordinate"
         )]
         time: Option<TimelineTime>,
-        /// Absolute typed author value; omission retains the current author value.
+        /// Canonical scalar channel value; omission retains the current author value.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "mondrian_core::deserialize_present_coordinate"
         )]
-        value: Option<mondrian_core::automation::PropertyValue>,
+        value: Option<mondrian_core::automation::AnimationChannelValue>,
     },
     /// Insert a key, or edit one existing complete key.
     Upsert {

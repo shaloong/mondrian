@@ -8440,18 +8440,26 @@ fn live_visual_curve_return_to_origin_restores_exact_author_coordinates() {
         model.keys[index].point,
     ] {
         preview_source = model.curve_source.clone();
+        let action = inspector_curve_edit_action(
+            Some(selection),
+            &model,
+            CurveEdit::Move { target: numeric_target(&model, index), point },
+        )
+        .expect("canonical action");
+        let ParameterGestureEdit::ClipCurve(payload) =
+            ParameterGestureEdit::from_action(&action).expect("canonical curve action")
+        else {
+            panic!("Clip curve expected")
+        };
+        crate::app::preview_numeric_curve_edit(&preview_source, model.owner_range, &payload.edit)
+            .expect("absolute author candidate admission");
         preview_numeric_curve_points(
             &model,
             &mut preview_source,
             CurveEdit::Move { target: numeric_target(&model, index), point },
         )
         .expect("canonical curve preview");
-        let action = inspector_curve_edit_action(
-            Some(selection),
-            &model,
-            CurveEdit::Move { target: numeric_target(&model, index), point },
-        )
-        .unwrap();
+
         state
             .dispatch_action(
                 ParameterGestureAction::Update {
@@ -8587,7 +8595,9 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
                 ClipCurveEditPayload::Move {
                     keyframe_id,
                     time: Some(TimelineTime::new(3, 5).unwrap()),
-                    value: Some(PropertyValue::Float(0.7)),
+                    value: Some(mondrian_core::automation::AnimationChannelValue::Number(
+                        f64::from(0.7_f32)
+                    )),
                 }
             );
         }
@@ -8796,12 +8806,33 @@ fn effect_curve_value_nudges_preserve_full_integer_precision_and_history() {
             numeric,
             PropertyValue::Int(value),
             Some((delta, PropertyValue::Int(expected))),
+            None,
         );
     }
 }
 
+#[test]
+fn effect_curve_time_only_edits_preserve_raw_float_channel_precision() {
+    let numeric =
+        ParameterNumericContract::closed(0.1, 0.2, None, ParameterInvalidValuePolicy::Reject)
+            .expect("float hard bounds");
+    effect_curve_author_contract(
+        "float_raw_endpoint",
+        numeric,
+        PropertyValue::Float(0.2_f32.next_down()),
+        None,
+        Some(0.2),
+    );
+}
+
 fn effect_curve_axis_contract(case: &str, numeric: ParameterNumericContract, author_value: f64) {
-    effect_curve_author_contract(case, numeric, PropertyValue::Double(author_value), None);
+    effect_curve_author_contract(
+        case,
+        numeric,
+        PropertyValue::Double(author_value),
+        None,
+        None,
+    );
 }
 
 fn effect_curve_author_contract(
@@ -8809,6 +8840,7 @@ fn effect_curve_author_contract(
     numeric: ParameterNumericContract,
     value: PropertyValue,
     nudge: Option<(f64, PropertyValue)>,
+    raw_author_value: Option<f64>,
 ) {
     use mondrian_core::automation::{ParameterUnit, PropertyDescriptor};
     use mondrian_effects::{
@@ -8847,7 +8879,9 @@ fn effect_curve_author_contract(
         .build(),
     )
     .expect("canonical definition");
-    let axes: &[bool] = if nudge.is_some() {
+    let axes: &[bool] = if raw_author_value.is_some() {
+        &[true]
+    } else if nudge.is_some() {
         &[false]
     } else if min == max {
         &[true]
@@ -8872,8 +8906,19 @@ fn effect_curve_author_contract(
             .properties
             .apply_mutation(PropertyMutation::SetKeyframe { path: path.to_owned(), keyframe })
             .expect("key");
-        let mut clip = if nudge.is_some() {
-            Clip::new_basic_title("Integer", "Arial", TimelineTime::ZERO, TimelineTime::ONE)
+        if let Some(raw_value) = raw_author_value {
+            effect
+                .properties
+                .apply_mutation(PropertyMutation::UpdateChannelKeyframeValue {
+                    path: path.to_owned(),
+                    time,
+                    channel_index: 0,
+                    value: raw_value,
+                })
+                .expect("exact float author endpoint");
+        }
+        let mut clip = if nudge.is_some() || raw_author_value.is_some() {
+            Clip::new_basic_title("Precision", "Arial", TimelineTime::ZERO, TimelineTime::ONE)
                 .expect("synthetic owner")
         } else {
             Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("clip")
@@ -8931,7 +8976,7 @@ fn effect_curve_author_contract(
             )
             .expect("canonical edit");
         let after = state.active_sequence().expect("after").clone();
-        let key = after
+        let property = after
             .find_clip(clip_id)
             .expect("clip")
             .effects
@@ -8941,9 +8986,8 @@ fn effect_curve_author_contract(
             .properties
             .property_by_address(&model.property)
             .expect("same parameter")
-            .1
-            .keyframe_by_id(keyframe_id)
-            .expect("same key");
+            .1;
+        let key = property.keyframe_by_id(keyframe_id).expect("same key");
         if let Some((_, expected)) = &nudge {
             assert_eq!(&key.value, expected, "canonical integer increment");
             assert_eq!(key.time, time, "retain exact owner time");
@@ -8961,16 +9005,95 @@ fn effect_curve_author_contract(
             assert_eq!(key.time, time, "vertical effect drag retains exact third");
             assert_ne!(key.value, value);
         }
+        if let Some(raw_value) = raw_author_value {
+            let raw_key = property
+                .channel(0)
+                .expect("channel")
+                .keyframes()
+                .iter()
+                .find(|key| key.id == keyframe_id)
+                .expect("same author key")
+                .value;
+            assert_eq!(
+                raw_key.projection().to_bits(),
+                raw_value.to_bits(),
+                "retain raw author bits"
+            );
+        }
         assert!(state.undo_timeline().expect("Undo"));
         assert!(state
             .active_sequence()
             .expect("Undo state")
             .author_state_eq_ignoring_revision(&before));
-        let archive_directory =
-            nudge.as_ref().map(|_| tempfile::tempdir().expect("archive directory"));
+        if raw_author_value.is_some() {
+            use crate::app::parameter_gesture::{
+                ParameterCurveGestureTarget, ParameterGestureAction, ParameterGestureEdit,
+            };
+            for cancel in [false, true] {
+                assert!(state.can_redo_action());
+                let gesture_id = mondrian_core::AuthoringGestureId::new();
+                state
+                    .dispatch_action(
+                        ParameterGestureAction::BeginCurve {
+                            gesture_id,
+                            target: ParameterCurveGestureTarget::Effect {
+                                clip_id,
+                                effect_id,
+                                parameter: model.property.clone(),
+                            },
+                        }
+                        .action(),
+                    )
+                    .expect("begin exact Float gesture");
+                let candidates = if cancel {
+                    vec![CurvePoint { x: origin.x + 0.1, y: 0.18 }]
+                } else {
+                    vec![
+                        CurvePoint { x: origin.x + 0.1, y: 0.18 },
+                        CurvePoint { x: origin.x + 0.2, y: 0.16 },
+                        origin,
+                    ]
+                };
+                for candidate in candidates {
+                    let action = effect_curve_edit_action(
+                        Some(SelectedClipRef { track_id, clip_id, is_video_track: true }),
+                        effect_id,
+                        model,
+                        CurveEdit::Move {
+                            target: numeric_target(model, index),
+                            point: candidate,
+                        },
+                    )
+                    .expect("absolute Float candidate");
+                    let edit =
+                        ParameterGestureEdit::from_action(&action).expect("curve gesture edit");
+                    state
+                        .dispatch_action(
+                            ParameterGestureAction::Update { gesture_id, edit }.action(),
+                        )
+                        .expect("update exact Float gesture");
+                }
+                let end = if cancel {
+                    ParameterGestureAction::Cancel { gesture_id }
+                } else {
+                    ParameterGestureAction::Finish { gesture_id }
+                };
+                state.dispatch_action(end.action()).expect("end exact Float gesture");
+                assert!(state
+                    .active_sequence()
+                    .expect("restored sequence")
+                    .author_state_eq_ignoring_revision(&before));
+                assert!(
+                    state.can_redo_action(),
+                    "exact Float no-op retains previous Redo"
+                );
+            }
+        }
+        let archive_directory = (nudge.is_some() || raw_author_value.is_some())
+            .then(|| tempfile::tempdir().expect("archive directory"));
         if let Some(directory) = &archive_directory {
-            let path = directory.path().join("整数撤销😀.mdp");
-            state.save_project_file_as(path.clone()).expect("save undone exact integers");
+            let path = directory.path().join("撤销😀.mdp");
+            state.save_project_file_as(path.clone()).expect("save undone exact keys");
             assert!(state.can_redo_action(), "saving preserves live Redo");
             let mut reopened = AppState::new();
             reopened.open_project_file(path).expect("fresh undone reopen");
@@ -8986,8 +9109,8 @@ fn effect_curve_author_contract(
             .expect("Redo state")
             .author_state_eq_ignoring_revision(&after));
         if let Some(directory) = &archive_directory {
-            let path = directory.path().join("整数编辑😀.mdp");
-            state.save_project_file_as(path.clone()).expect("save edited exact integers");
+            let path = directory.path().join("编辑😀.mdp");
+            state.save_project_file_as(path.clone()).expect("save edited exact keys");
             let mut reopened = AppState::new();
             reopened.open_project_file(path).expect("fresh edited reopen");
             assert!(reopened

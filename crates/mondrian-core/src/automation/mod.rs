@@ -2428,6 +2428,78 @@ impl AnimatedProperty {
         Ok(())
     }
 
+    /// Atomically insert or move one canonical channel key by stable identity.
+    ///
+    /// The channel author value retains its numeric precision, independently of
+    /// the evaluated PropertyValue scalar. Schema bounds, scalar kind, controls
+    /// and interpolation are admitted before publication. An occupied destination
+    /// owned by another key is rejected. Temporal controls are normalized to
+    /// final neighbor spans before representability validation, including
+    /// inherited controls during a move. Other channels remain unchanged.
+    pub fn set_channel_keyframe(
+        &mut self,
+        channel_index: usize,
+        mut keyframe: Keyframe<AnimationChannelValue>,
+    ) -> Result<()> {
+        self.admit_channels(|candidate| {
+            if !candidate.descriptor.schema.is_animatable {
+                return Err(parameter_value_error(
+                    &candidate.descriptor.path,
+                    "property is not animatable",
+                ));
+            }
+            if channel_index >= candidate.channel_count() {
+                return Err(parameter_value_error(
+                    &candidate.descriptor.path,
+                    "author channel does not exist",
+                ));
+            }
+            validate_visual_handle_coordinates(
+                &candidate.descriptor.path,
+                keyframe.interp_in,
+                keyframe.interp_out,
+            )?;
+            candidate
+                .ensure_interpolation_allowed(channel_keyframe_interpolation_type(&keyframe))?;
+            keyframe.value = match (candidate.value_type(), keyframe.value) {
+                (PropertyValueType::Int, AnimationChannelValue::Integer(value)) => {
+                    let PropertyValue::Int(value) =
+                        candidate.normalize_value(PropertyValue::Int(value))?
+                    else {
+                        return Err(parameter_value_error(
+                            &candidate.descriptor.path,
+                            "invalid integer channel value",
+                        ));
+                    };
+                    AnimationChannelValue::Integer(value)
+                }
+                (PropertyValueType::Int, _) | (_, AnimationChannelValue::Integer(_)) => {
+                    return Err(parameter_value_error(
+                        &candidate.descriptor.path,
+                        "channel scalar kind does not match its property",
+                    ));
+                }
+                (_, AnimationChannelValue::Number(value)) => AnimationChannelValue::Number(
+                    candidate.normalize_numeric_channel(channel_index, value)?,
+                ),
+            };
+            let channel = &mut candidate.channels[channel_index];
+            if channel.keyframe_at(keyframe.time).is_some_and(|key| key.id != keyframe.id) {
+                return Err(parameter_value_error(
+                    &candidate.descriptor.path,
+                    "author time is occupied by another key",
+                ));
+            }
+            if let Some(existing) = channel.keyframes.iter().find(|key| key.id == keyframe.id) {
+                let old_time = existing.time;
+                let _ = channel.remove_keyframe(old_time);
+            }
+            channel.set_keyframe(keyframe);
+            candidate.animation_enabled = true;
+            candidate.normalize_channels()
+        })
+    }
+
     /// Atomically edit one complete property key by stable identity.
     ///
     /// Time and value change together against cloned channels, so no
@@ -3246,6 +3318,10 @@ impl AnimatedProperty {
                 self.set_animation_enabled(true);
                 self.set_exact_keyframe(keyframe)
             }
+            PropertyMutation::SetChannelKeyframe { path, channel_index, keyframe } => {
+                self.ensure_path(&path)?;
+                self.set_channel_keyframe(channel_index, keyframe)
+            }
             PropertyMutation::EditKeyframe { path, keyframe_id, time, value } => {
                 self.ensure_path(&path)?;
                 ensure_value_compatible(&path, &self.descriptor.schema.default_value, &value)?;
@@ -3791,6 +3867,9 @@ impl PropertyBag {
             }
             PropertyMutation::SetStaticValue { path, value } => self.set_static_value(&path, value),
             PropertyMutation::SetKeyframe { path, keyframe } => self.set_keyframe(&path, keyframe),
+            PropertyMutation::SetChannelKeyframe { path, channel_index, keyframe } => {
+                self.require_property_mut(&path)?.set_channel_keyframe(channel_index, keyframe)
+            }
             PropertyMutation::EditKeyframe { path, keyframe_id, time, value } => {
                 self.edit_keyframe(&path, keyframe_id, time, value)
             }
@@ -3856,6 +3935,15 @@ pub enum PropertyMutation {
     SetKeyframe {
         path: String,
         keyframe: Keyframe<PropertyValue>,
+    },
+    /// Insert or move one canonical channel key without evaluating its scalar.
+    SetChannelKeyframe {
+        /// Current property path resolved by its owning author interface.
+        path: String,
+        /// Declared channel index in the owning parameter schema.
+        channel_index: usize,
+        /// Exact author value, identity, time and interpolation metadata.
+        keyframe: Keyframe<AnimationChannelValue>,
     },
     /// Atomically change one complete key's time and value by stable identity.
     EditKeyframe {
@@ -3931,6 +4019,7 @@ impl PropertyMutation {
             Self::DefineProperty(descriptor) => &descriptor.path,
             Self::SetStaticValue { path, .. }
             | Self::SetKeyframe { path, .. }
+            | Self::SetChannelKeyframe { path, .. }
             | Self::EditKeyframe { path, .. }
             | Self::RemoveKeyframe { path, .. }
             | Self::MoveKeyframe { path, .. }
@@ -3958,6 +4047,9 @@ impl PropertyMutation {
             }
             SetStaticValue { path, value } => SetStaticValue { path: f(path), value },
             SetKeyframe { path, keyframe } => SetKeyframe { path: f(path), keyframe },
+            SetChannelKeyframe { path, channel_index, keyframe } => {
+                SetChannelKeyframe { path: f(path), channel_index, keyframe }
+            }
             EditKeyframe { path, keyframe_id, time, value } => {
                 EditKeyframe { path: f(path), keyframe_id, time, value }
             }
@@ -4690,6 +4782,58 @@ mod tests {
                 .expect("value"),
             PropertyValue::Int(i64::MIN + 1)
         );
+    }
+
+    #[test]
+    fn canonical_channel_key_moves_retain_float_precision_and_reject_collisions_atomically() {
+        let numeric =
+            ParameterNumericContract::closed(0.1, 0.2, None, ParameterInvalidValuePolicy::Reject)
+                .expect("bounds");
+        let mut property = AnimatedProperty::from_descriptor(
+            PropertyDescriptor::new("test.raw.float", "Float", PropertyValue::Float(0.15))
+                .with_animatable(true)
+                .with_numeric_contract(ParameterUnit::Unitless, numeric),
+        );
+        let mut key = Keyframe::linear(tt(1), AnimationChannelValue::Number(0.2));
+        property.set_channel_keyframe(0, key.clone()).expect("exact channel insert");
+        key.time = tt(2);
+        property.set_channel_keyframe(0, key.clone()).expect("move exact key");
+        assert_eq!(
+            property.channel(0).expect("channel").keyframes(),
+            std::slice::from_ref(&key)
+        );
+        assert_eq!(
+            property.keyframe_by_id(key.id).expect("typed key").value,
+            PropertyValue::Float(0.2_f32.next_down())
+        );
+        let encoded = serde_json::to_vec(&property).expect("encode");
+        let reopened: AnimatedProperty = serde_json::from_slice(&encoded).expect("decode");
+        reopened.validate().expect("validate");
+        assert_eq!(reopened, property);
+        let occupied = Keyframe::linear(tt(3), AnimationChannelValue::Number(0.15));
+        property.set_channel_keyframe(0, occupied).expect("neighbor");
+        let before = property.clone();
+        key.time = tt(3);
+        assert!(property.set_channel_keyframe(0, key.clone()).is_err());
+        assert_eq!(property, before, "collision is atomic");
+        key.time = tt(2);
+        key.value = AnimationChannelValue::Integer(1);
+        assert!(property.set_channel_keyframe(0, key.clone()).is_err());
+        assert_eq!(property, before, "wrong scalar kind is atomic");
+        key.value = AnimationChannelValue::Number(0.2);
+        key.interp_out = KeyframeInterpolation::Bezier(ExactBezierHandle {
+            time_offset: TimelineTime::ZERO,
+            value_offset: f64::NAN,
+        });
+        assert!(property.set_channel_keyframe(0, key).is_err());
+        assert_eq!(property, before, "invalid control is atomic");
+        assert!(property
+            .set_channel_keyframe(
+                1,
+                Keyframe::linear(tt(4), AnimationChannelValue::Number(0.15))
+            )
+            .is_err());
+        assert_eq!(property, before, "invalid channel is atomic");
     }
 
     #[test]

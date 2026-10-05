@@ -258,7 +258,7 @@ pub(super) fn numeric_curve_edit_from_payload(
         ClipCurveEditPayload::Move { keyframe_id, time, value } => Ok(ClipNumericCurveEdit::Move {
             keyframe_id: *keyframe_id,
             time: *time,
-            value: value.clone(),
+            value: *value,
         }),
         ClipCurveEditPayload::Upsert { keyframe_id, point } => {
             Ok(ClipNumericCurveEdit::Upsert { keyframe_id: *keyframe_id, point: point.clone() })

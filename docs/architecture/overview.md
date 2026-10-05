@@ -705,3 +705,16 @@ admission. Continuous numeric execution and UI use explicit projection().
 The alpha persisted key shape changes directly; no legacy numeric parser or
 parallel mirror is retained. Disabled animation still permits exact author-key
 lookup, sharing the same channel evaluator behind an explicit enable-state gate.
+
+### Canonical channel key admission
+
+`AnimatedProperty::set_channel_keyframe` and `PropertyMutation::SetChannelKeyframe`
+insert or move a key using its canonical `AnimationChannelValue`, exact owner time,
+stable identity and interpolation metadata. Integer channels retain all `i64`
+bits; numeric channels retain their `f64` author precision independently of the
+native evaluated `PropertyValue`. Admission validates the channel index, scalar
+kind, schema bounds and controls against a cloned candidate. A destination owned
+by another key is rejected atomically. The old slot for the same identity is
+removed before final neighbor normalization and complete validation; no partial
+state is published. Other channels retain their values. This uses the existing
+canonical normalization and evaluation contracts.
