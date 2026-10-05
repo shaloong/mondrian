@@ -55,7 +55,8 @@ impl CurveEditorVisualTokens {
 
 /// A normalized editable curve point.
 ///
-/// `x` and `y` are clamped to the inclusive `0.0..=1.0` range.
+/// [`Self::new`] clamps key coordinates to the inclusive `0.0..=1.0` range.
+/// Canonical tangent projections may carry finite values outside this viewport.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CurvePoint {
     /// Normalized horizontal position.
@@ -100,6 +101,29 @@ impl CurvePointPolicy {
 /// Adapter that maps the current curve points to an editor [`Action`].
 pub type CurveChangeAction = dyn Fn(&[CurvePoint]) -> Option<Action>;
 
+/// One canonical tangent projected into the curve viewport.
+/// Value coordinates may exceed the visible interval; they are never clamped.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CurveTangent {
+    /// Owning point index in this widget snapshot.
+    pub index: usize,
+    /// Canonical temporal side.
+    pub side: mondrian_core::BezierHandleSide,
+    /// Viewport coordinates of the actual control point.
+    pub point: CurvePoint,
+    /// Inclusive horizontal limits admitted by the neighboring author span.
+    pub time_limits: [f32; 2],
+}
+
+/// Canonical curve samples and tangent positions after one author intent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CurvePreview {
+    /// Evaluated samples for curve painting.
+    pub display_points: Vec<CurvePoint>,
+    /// Complete current tangent projection, including constrained partners.
+    pub tangents: Vec<CurveTangent>,
+}
+
 /// One control-point author intent.
 ///
 /// The index is ephemeral and valid only for the curve snapshot supplied to
@@ -118,6 +142,15 @@ pub enum CurveEdit {
     },
     /// Move an existing point without changing its identity.
     Move { index: usize, point: CurvePoint },
+    /// Move one Bezier control without changing its owner or temporal side.
+    Handle {
+        /// Owning key index in the supplied snapshot.
+        index: usize,
+        /// Canonical temporal side of the control.
+        side: mondrian_core::BezierHandleSide,
+        /// Finite viewport coordinates, with unconstrained value excursions.
+        point: CurvePoint,
+    },
     /// Delete one existing interior point.
     Delete { index: usize },
 }
@@ -146,7 +179,7 @@ pub type CurveGestureAction = dyn Fn(CurveGestureEvent) -> Option<Action>;
 
 /// Project gesture lifecycle and edits using the owner's canonical evaluator.
 /// Only `Edit` results replace display samples; boundaries maintain projection state.
-pub type CurvePreviewProjection = dyn FnMut(CurveGestureEvent) -> Option<Vec<CurvePoint>>;
+pub type CurvePreviewProjection = dyn FnMut(CurveGestureEvent) -> Option<CurvePreview>;
 
 /// Adapter for complete live curve values and their authoring boundaries.
 pub type CurveValueEditAction = dyn Fn(ValueEdit, &[CurvePoint]) -> Option<Action>;
@@ -158,6 +191,12 @@ struct CurvePointDrag {
     pointer_origin: Point,
     inserted: bool,
     keyframe_id: mondrian_core::KeyframeId,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TangentDrag {
+    tangent: CurveTangent,
+    pointer_origin: Point,
 }
 
 /// Interactive normalized curve editor.
@@ -172,6 +211,10 @@ pub struct CurveEditor {
     preview_projection: Option<Box<CurvePreviewProjection>>,
     drag_display_origin: Option<Option<Vec<CurvePoint>>>,
     selected: Option<usize>,
+    tangents: Vec<CurveTangent>,
+    selected_tangent: Option<(usize, mondrian_core::BezierHandleSide)>,
+    tangent_drag: Option<TangentDrag>,
+    tangent_origin: Option<Vec<CurveTangent>>,
     dragging: Option<CurvePointDrag>,
     drag_value_origin: Option<(Vec<CurvePoint>, Vec<CurvePointPolicy>)>,
     grid_columns: usize,
@@ -213,6 +256,10 @@ impl CurveEditor {
             preview_projection: None,
             drag_display_origin: None,
             selected: None,
+            tangents: Vec::new(),
+            selected_tangent: None,
+            tangent_drag: None,
+            tangent_origin: None,
             dragging: None,
             drag_value_origin: None,
             grid_columns: 4,
@@ -352,7 +399,7 @@ impl CurveEditor {
     /// Only edit events can replace the sampled display.
     pub fn with_preview_projection(
         mut self,
-        project: impl FnMut(CurveGestureEvent) -> Option<Vec<CurvePoint>> + 'static,
+        project: impl FnMut(CurveGestureEvent) -> Option<CurvePreview> + 'static,
     ) -> Self {
         self.preview_projection = Some(Box::new(project));
         self
@@ -417,7 +464,7 @@ impl CurveEditor {
         self.enabled = enabled;
         if !enabled {
             self.context_menu = None;
-            if self.dragging.is_some() {
+            if self.dragging.is_some() || self.tangent_drag.is_some() {
                 self.pending_capture_release = true;
             }
             self.cancel_drag_state();
@@ -433,9 +480,12 @@ impl CurveEditor {
 
     /// Replace curve points. Points are clamped and sorted by x.
     pub fn set_points(&mut self, points: Vec<CurvePoint>) {
-        if self.dragging.take().is_some() {
+        if self.dragging.take().is_some() || self.tangent_drag.take().is_some() {
             self.pending_capture_release = true;
         }
+        self.tangents.clear();
+        self.selected_tangent = None;
+        self.tangent_origin = None;
         self.points = normalize_points(points);
         Self::constrain_values(&mut self.points, self.fixed_value);
         self.point_policies = default_point_policies(self.points.len());
@@ -452,6 +502,91 @@ impl CurveEditor {
     /// Select a point by index.
     pub fn select(&mut self, index: Option<usize>) {
         self.selected = index.filter(|index| *index < self.points.len());
+        self.selected_tangent = None;
+    }
+
+    /// Attach controls projected by the owner evaluator, without changing author state.
+    pub fn with_tangents(mut self, tangents: Vec<CurveTangent>) -> Self {
+        self.set_tangents(tangents);
+        self
+    }
+
+    fn set_tangents(&mut self, tangents: Vec<CurveTangent>) {
+        self.tangents = tangents
+            .into_iter()
+            .filter(|tangent| {
+                tangent.index < self.points.len()
+                    && tangent.point.x.is_finite()
+                    && tangent.point.y.is_finite()
+                    && tangent.time_limits.iter().all(|value| value.is_finite())
+                    && tangent.time_limits[0] <= tangent.time_limits[1]
+            })
+            .collect();
+    }
+
+    fn hit_tangent(&self, position: Point) -> Option<CurveTangent> {
+        let tangent = self
+            .tangents
+            .iter()
+            .filter(|tangent| Some(tangent.index) == self.selected)
+            .copied()
+            .filter(|tangent| {
+                let screen = self.to_screen(tangent.point);
+                let dx = screen.x - position.x;
+                let dy = screen.y - position.y;
+                dx * dx + dy * dy <= HIT_RADIUS * HIT_RADIUS
+            })
+            .min_by(|a, b| {
+                let distance = |tangent: &CurveTangent| {
+                    let screen = self.to_screen(tangent.point);
+                    (screen.x - position.x).hypot(screen.y - position.y)
+                };
+                distance(a).total_cmp(&distance(b))
+            })?;
+        if let Some(index) = self.hit_point(position) {
+            let distance = |point| {
+                let screen = self.to_screen(point);
+                (screen.x - position.x).hypot(screen.y - position.y)
+            };
+            if distance(self.points[index]) <= distance(tangent.point) {
+                return None;
+            }
+        }
+        Some(tangent)
+    }
+
+    fn move_tangent(
+        &mut self,
+        tangent: CurveTangent,
+        mut point: CurvePoint,
+        ctx: &mut EventContext,
+    ) -> bool {
+        if !point.x.is_finite() || !point.y.is_finite() {
+            return false;
+        }
+        point.x = point.x.clamp(tangent.time_limits[0], tangent.time_limits[1]);
+        let Some(current) = self
+            .tangents
+            .iter_mut()
+            .find(|current| current.index == tangent.index && current.side == tangent.side)
+        else {
+            return false;
+        };
+        if current.point == point {
+            return false;
+        }
+        current.point = point;
+        let edit = CurveEdit::Handle { index: tangent.index, side: tangent.side, point };
+        if self.tangent_drag.is_some() {
+            self.dispatch_gesture(
+                CurveGestureEvent::Edit { gesture_id: self.gesture, edit },
+                ctx,
+            );
+        } else {
+            self.dispatch_edit(edit, ctx);
+        }
+        ctx.request_repaint();
+        true
     }
 
     fn geometry(&self) -> CurveGeometry {
@@ -533,7 +668,8 @@ impl CurveEditor {
         if matches!(event, CurveGestureEvent::Edit { .. })
             && let Some(points) = points
         {
-            self.set_display_points(points);
+            self.set_display_points(points.display_points);
+            self.set_tangents(points.tangents);
             ctx.request_repaint();
         }
         if let Some(callback) = &self.on_gesture
@@ -544,6 +680,11 @@ impl CurveEditor {
     }
 
     fn end_gesture(&mut self, cancel: bool, ctx: &mut EventContext) {
+        if let Some(origin) = self.tangent_origin.take()
+            && cancel
+        {
+            self.tangents = origin;
+        }
         if let Some(origin) = self.drag_display_origin.take()
             && cancel
         {
@@ -657,6 +798,29 @@ impl CurveEditor {
     }
 
     fn commit_drag_edit(&mut self, ctx: &mut EventContext) {
+        if let Some(drag) = self.tangent_drag.take() {
+            if self.on_gesture.is_none()
+                && let Some(tangent) = self
+                    .tangents
+                    .iter()
+                    .find(|tangent| {
+                        tangent.index == drag.tangent.index && tangent.side == drag.tangent.side
+                    })
+                    .copied()
+                && tangent.point != drag.tangent.point
+            {
+                self.dispatch_edit(
+                    CurveEdit::Handle {
+                        index: tangent.index,
+                        side: tangent.side,
+                        point: tangent.point,
+                    },
+                    ctx,
+                );
+            }
+            self.end_gesture(false, ctx);
+            return;
+        }
         let Some(drag) = self.dragging.take() else {
             return;
         };
@@ -686,6 +850,12 @@ impl CurveEditor {
     }
 
     fn cancel_drag_state(&mut self) -> bool {
+        if self.tangent_drag.take().is_some() {
+            if let Some(origin) = &self.tangent_origin {
+                self.tangents = origin.clone();
+            }
+            return true;
+        }
         let Some(drag) = self.dragging.take() else {
             return false;
         };
@@ -722,6 +892,29 @@ impl CurveEditor {
         modifiers: Modifiers,
         ctx: &mut EventContext,
     ) -> bool {
+        if let Some((index, side)) = self.selected_tangent {
+            if modifiers.ctrl || modifiers.alt || modifiers.meta {
+                return false;
+            }
+            let Some(tangent) = self
+                .tangents
+                .iter()
+                .find(|tangent| tangent.index == index && tangent.side == side)
+                .copied()
+            else {
+                return false;
+            };
+            let mut point = tangent.point;
+            let step = if modifiers.shift { 0.05 } else { 0.01 };
+            match key {
+                KeyCode::Left => point.x -= step,
+                KeyCode::Right => point.x += step,
+                KeyCode::Up => point.y += step,
+                KeyCode::Down => point.y -= step,
+                _ => return false,
+            }
+            return self.move_tangent(tangent, point, ctx);
+        }
         if modifiers.ctrl || modifiers.alt || modifiers.meta {
             return false;
         }
@@ -851,7 +1044,9 @@ impl Widget for CurveEditor {
                 return result;
             }
         }
-        if self.pending_capture_release || (!self.enabled && self.dragging.is_some()) {
+        if self.pending_capture_release
+            || (!self.enabled && (self.dragging.is_some() || self.tangent_drag.is_some()))
+        {
             ctx.release_pointer_capture(self.id);
             self.end_gesture(true, ctx);
             self.pending_capture_release = false;
@@ -860,6 +1055,7 @@ impl Widget for CurveEditor {
             self.focused = false;
             self.focus_visible = false;
             self.dragging = None;
+            self.tangent_drag = None;
             return EventResult::Ignored;
         }
 
@@ -872,6 +1068,7 @@ impl Widget for CurveEditor {
                     && items.iter().any(MenuItem::is_activatable)
                 {
                     self.selected = Some(index);
+                    self.selected_tangent = None;
                     let mut menu = ContextMenu::new(*position, items.clone());
                     menu.layout(self.bounds);
                     self.context_menu = Some(menu);
@@ -884,6 +1081,17 @@ impl Widget for CurveEditor {
                 if self.bounds.contains(*position) =>
             {
                 self.focus_visible = false;
+                if let Some(tangent) = self.hit_tangent(*position) {
+                    self.begin_drag(tangent.index, false, *position, ctx);
+                    self.dragging = None;
+                    self.tangent_origin = Some(self.tangents.clone());
+                    self.tangent_drag = Some(TangentDrag { tangent, pointer_origin: *position });
+                    self.selected_tangent = Some((tangent.index, tangent.side));
+                    ctx.request_pointer_capture(self.id);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                self.selected_tangent = None;
                 if let Some(index) = self.hit_point(*position) {
                     self.selected = Some(index);
                     self.begin_drag(index, false, *position, ctx);
@@ -902,6 +1110,24 @@ impl Widget for CurveEditor {
                 EventResult::Handled
             }
             UiEvent::MouseMove { position, .. } => {
+                if let Some(drag) = self.tangent_drag {
+                    let plot = self.plot_rect();
+                    let point = CurvePoint {
+                        x: if plot.width > 0.0 {
+                            drag.tangent.point.x + (position.x - drag.pointer_origin.x) / plot.width
+                        } else {
+                            drag.tangent.point.x
+                        },
+                        y: if plot.height > 0.0 {
+                            drag.tangent.point.y
+                                - (position.y - drag.pointer_origin.y) / plot.height
+                        } else {
+                            drag.tangent.point.y
+                        },
+                    };
+                    self.move_tangent(drag.tangent, point, ctx);
+                    return EventResult::Handled;
+                }
                 if let Some(drag) = self.dragging {
                     let plot = self.plot_rect();
                     let point = CurvePoint::new(
@@ -921,7 +1147,9 @@ impl Widget for CurveEditor {
                 }
                 EventResult::Ignored
             }
-            UiEvent::MouseUp { button: MouseButton::Left, .. } if self.dragging.is_some() => {
+            UiEvent::MouseUp { button: MouseButton::Left, .. }
+                if self.dragging.is_some() || self.tangent_drag.is_some() =>
+            {
                 self.commit_drag_edit(ctx);
                 ctx.release_pointer_capture(self.id);
                 EventResult::Handled
@@ -932,21 +1160,23 @@ impl Widget for CurveEditor {
                 EventResult::Handled
             }
             UiEvent::FocusLost => {
-                let was_dragging = self.dragging.is_some();
+                let was_dragging = self.dragging.is_some() || self.tangent_drag.is_some();
                 self.commit_drag_edit(ctx);
                 self.focused = false;
                 self.focus_visible = false;
                 self.selected = None;
+                self.selected_tangent = None;
                 if was_dragging {
                     ctx.release_pointer_capture(self.id);
                 }
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::Escape, .. } if self.selected.is_some() => {
-                let was_dragging = self.dragging.is_some();
+                let was_dragging = self.dragging.is_some() || self.tangent_drag.is_some();
                 let changed = self.cancel_drag_state();
                 self.end_gesture(true, ctx);
                 self.selected = None;
+                self.selected_tangent = None;
                 if changed && self.on_value_edit.is_none() {
                     self.dispatch_change(ctx);
                 }
@@ -954,6 +1184,11 @@ impl Widget for CurveEditor {
                     ctx.release_pointer_capture(self.id);
                 }
                 ctx.request_repaint();
+                EventResult::Handled
+            }
+            UiEvent::KeyDown { key: KeyCode::Delete | KeyCode::Backspace, .. }
+                if self.selected_tangent.is_some() =>
+            {
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::Delete | KeyCode::Backspace, .. }
@@ -1030,6 +1265,29 @@ impl Widget for CurveEditor {
             );
         }
 
+        ctx.encoder.push_clip(plot);
+        for tangent in self.tangents.iter().filter(|tangent| Some(tangent.index) == self.selected) {
+            let owner = self.to_screen(self.points[tangent.index]);
+            let control = self.to_screen(tangent.point);
+            ctx.encoder
+                .draw_line(owner, control, v.grid_line_width, colors.muted_foreground);
+            let radius = POINT_RADIUS;
+            ctx.encoder.draw_rect(
+                Rect::new(
+                    control.x - radius,
+                    control.y - radius,
+                    2.0 * radius,
+                    2.0 * radius,
+                ),
+                if self.selected_tangent == Some((tangent.index, tangent.side)) {
+                    colors.foreground
+                } else {
+                    colors.muted_foreground
+                },
+                radius,
+            );
+        }
+        ctx.encoder.pop_clip();
         let painted_curve = self.display_points.as_deref().unwrap_or(&self.points);
         for pair in painted_curve.windows(2) {
             let a = self.to_screen(pair[0]);
@@ -1072,7 +1330,7 @@ impl Widget for CurveEditor {
     }
 
     fn has_active_pointer_interaction(&self) -> bool {
-        self.dragging.is_some()
+        self.dragging.is_some() || self.tangent_drag.is_some()
     }
 
     fn can_focus(&self) -> bool {
@@ -1142,6 +1400,7 @@ mod tests {
             CurveEdit::Move { index, point } => {
                 format!("move:{index}:{:.4},{:.4}", point.x, point.y)
             }
+            CurveEdit::Handle { index, side, .. } => format!("handle:{index}:{side:?}"),
             CurveEdit::Delete { index } => format!("delete:{index}"),
         };
         Action::Custom {
@@ -1149,6 +1408,243 @@ mod tests {
             name,
             payload: Default::default(),
         }
+    }
+
+    fn tangent_editor(events: std::rc::Rc<RefCell<Vec<CurveGestureEvent>>>) -> CurveEditor {
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.5),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 0.5),
+        ])
+        .with_tangents(vec![CurveTangent {
+            index: 1,
+            side: mondrian_core::BezierHandleSide::Outgoing,
+            point: CurvePoint::new(0.75, 0.5),
+            time_limits: [0.5, 1.0],
+        }])
+        .on_gesture(move |event| {
+            events.borrow_mut().push(event);
+            None::<Action>
+        });
+        editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        editor.select(Some(1));
+        editor
+    }
+
+    fn grab_tangent(editor: &mut CurveEditor, ctx: &mut EventContext) -> Point {
+        let point = editor.to_screen(editor.tangents[0].point);
+        assert_eq!(
+            editor.event(
+                &UiEvent::MouseDown {
+                    position: point,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none()
+                },
+                ctx
+            ),
+            EventResult::Handled
+        );
+        point
+    }
+
+    #[test]
+    fn temporal_handle_selection_does_not_survive_selecting_another_key() {
+        for selection in [None, Some(0)] {
+            let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let mut editor = tangent_editor(events.clone());
+            let mut ctx = event_ctx();
+            let start = grab_tangent(&mut editor, &mut ctx);
+            editor.event(
+                &UiEvent::MouseUp {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            editor.select(selection);
+            assert_eq!(editor.selected_tangent, None);
+        }
+    }
+
+    #[test]
+    fn temporal_handle_collapsed_onto_owner_keeps_key_drag_accessible() {
+        let mut editor = tangent_editor(std::rc::Rc::new(RefCell::new(Vec::new())));
+        editor.tangents[0].point = editor.points[1];
+        let position = editor.to_screen(editor.points[1]);
+        editor.event(
+            &UiEvent::MouseDown {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut event_ctx(),
+        );
+        assert!(editor.dragging.is_some());
+        assert!(editor.tangent_drag.is_none());
+    }
+
+    #[test]
+    fn temporal_handle_keyboard_edits_are_atomic_and_never_delete_the_owner() {
+        let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut editor = tangent_editor(events.clone());
+        let mut ctx = event_ctx();
+        let start = grab_tangent(&mut editor, &mut ctx);
+        editor.event(
+            &UiEvent::MouseUp {
+                position: start,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        events.borrow_mut().clear();
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert!(matches!(
+            events.borrow().as_slice(),
+            [CurveGestureEvent::Edit {
+                gesture_id: None,
+                edit: CurveEdit::Handle { index: 1, .. }
+            }]
+        ));
+        let count = editor.points().len();
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(editor.points().len(), count);
+        assert_eq!(events.borrow().len(), 1);
+    }
+
+    #[test]
+    fn temporal_handle_on_edit_commits_once_after_pointer_release() {
+        let edits = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let recorded = edits.clone();
+        let mut editor =
+            tangent_editor(std::rc::Rc::new(RefCell::new(Vec::new()))).on_edit(move |edit| {
+                recorded.borrow_mut().push(edit);
+                None::<Action>
+            });
+        let mut ctx = event_ctx();
+        let start = grab_tangent(&mut editor, &mut ctx);
+        for offset in [10.0, 20.0] {
+            editor.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(start.x, start.y - offset),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+        }
+        assert!(edits.borrow().is_empty());
+        editor.event(
+            &UiEvent::MouseUp {
+                position: start,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(matches!(
+            edits.borrow().as_slice(),
+            [CurveEdit::Handle { index: 1, .. }]
+        ));
+    }
+
+    #[test]
+    fn temporal_handle_reports_active_capture() {
+        let mut editor = tangent_editor(std::rc::Rc::new(RefCell::new(Vec::new())));
+        grab_tangent(&mut editor, &mut event_ctx());
+        assert!(
+            editor.has_active_pointer_interaction(),
+            "router must retain this widget during a tangent draft"
+        );
+    }
+
+    #[test]
+    fn temporal_handle_disable_and_replacement_cancel_the_owned_draft() {
+        for replacement in [false, true] {
+            let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let mut editor = tangent_editor(events.clone());
+            let original = editor.tangents.clone();
+            let mut ctx = event_ctx();
+            let start = grab_tangent(&mut editor, &mut ctx);
+            let CurveGestureEvent::Begin(id) = events.borrow()[0] else {
+                panic!("begin");
+            };
+            editor.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(start.x + 20.0, start.y - 20.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            if replacement {
+                editor.set_points(editor.points().to_vec());
+            } else {
+                editor.set_enabled(false);
+            }
+            editor.event(
+                &UiEvent::MouseMove { position: start, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+            assert_eq!(
+                events.borrow().last(),
+                Some(&CurveGestureEvent::Cancel(id)),
+                "replacement={replacement}"
+            );
+            assert!(!editor.has_active_pointer_interaction());
+            if !replacement {
+                assert_eq!(editor.tangents, original);
+            }
+        }
+    }
+
+    #[test]
+    fn temporal_handle_pointer_keeps_world_value_excursions_and_restores_on_escape() {
+        let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut editor = tangent_editor(events.clone());
+        let original = editor.tangents.clone();
+        let original_points = editor.points().to_vec();
+        let mut ctx = event_ctx();
+        let start = grab_tangent(&mut editor, &mut ctx);
+        let CurveGestureEvent::Begin(id) = events.borrow()[0] else {
+            panic!("begin");
+        };
+        editor.event(
+            &UiEvent::MouseMove {
+                position: Point::new(start.x + 500.0, start.y - 200.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(editor.tangents[0].point.x, 1.0);
+        assert!(editor.tangents[0].point.y > 1.0);
+        assert_eq!(editor.points(), original_points);
+        editor.event(
+            &UiEvent::MouseMove { position: start, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(editor.tangents, original);
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(events.borrow().last(), Some(&CurveGestureEvent::Cancel(id)));
+        assert_eq!(editor.tangents, original);
+        let count = events.borrow().len();
+        editor.event(
+            &UiEvent::MouseUp {
+                position: start,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(events.borrow().len(), count);
     }
 
     #[test]
@@ -1756,14 +2252,20 @@ mod tests {
         .with_preview_projection(move |event| {
             projected.borrow_mut().push(event);
             match event {
-                CurveGestureEvent::Edit { edit: CurveEdit::Move { point, .. }, .. } => Some(vec![
-                    CurvePoint::new(0.0, 0.0),
-                    point,
-                    CurvePoint::new(1.0, 1.0),
-                ]),
-                CurveGestureEvent::Cancel(_) => {
-                    Some(vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 0.0)])
+                CurveGestureEvent::Edit { edit: CurveEdit::Move { point, .. }, .. } => {
+                    Some(CurvePreview {
+                        display_points: vec![
+                            CurvePoint::new(0.0, 0.0),
+                            point,
+                            CurvePoint::new(1.0, 1.0),
+                        ],
+                        tangents: Vec::new(),
+                    })
                 }
+                CurveGestureEvent::Cancel(_) => Some(CurvePreview {
+                    display_points: vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 0.0)],
+                    tangents: Vec::new(),
+                }),
                 _ => None,
             }
         })

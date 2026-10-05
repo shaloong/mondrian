@@ -3309,3 +3309,42 @@ resource. Redo in the original Session restores the exact six-sample RGBA output
 saving and reopening the bound snapshot preserves that same output. These are
 real cube/SQLite/MDP tests with deterministic chooser input, not physical native
 keyboard or picker qualification.
+
+### Canonical temporal tangent editing
+
+CurveEditor receives canonical CurveTangent projections and a CurvePreview with
+both evaluated samples and current controls. Selected-key controls are painted
+with semantic theme colors and clipped to the graph; hit testing owns only the
+currently selected key's handles. Pointer edits retain the grab offset, constrain
+temporal coordinates to the neighboring owner span, and leave finite value
+coordinates unclamped. Value control excursions are independent of key values.
+
+Visual adapters lower stable keys to sparse exact EditHandle author coordinates;
+audio adapters use the existing exact AudioAutomationEdit::EditHandle. Core
+resolves default controls, owns Auto/Continuous constraints and rejects invalid
+candidates. UI projection neither evaluates Bezier curves nor owns author state.
+Complete current controls returned by the canonical preview update constrained
+partners during the draft. Absolute pointer candidates derive from the Session
+origin; omitted coordinates in external visual actions resolve against current
+author state first. Unchanged screen axes preserve exact rational handle offsets.
+Wide opposite-sign finite value intervals project and lower without overflowing
+their span. Invalid/nonfinite screen edits do not construct an author action.
+
+Pointer capture reporting covers point and tangent drafts. Escape, disable and
+point replacement cancel the author gesture and release capture; ordinary release
+finishes it. A completed draft creates one reversible history entry, while cancel
+or return to exact origin creates none. Keyboard handle edits are atomic actions;
+Delete on a handle cannot remove its owning key. The non-live on_edit adapter
+receives a tangent edit only on release. Actual EventRouter acceptance covers
+visual continuous handles and audio Track-fader controls, exact axis preservation,
+partner alignment, completion/Undo/Redo, cancellation and return to origin.
+
+Selecting another key or opening its context menu clears the previous tangent
+selection. Nearest-hit ties prefer the key, preserving key dragging when a
+zero-length control coincides with its owner. Collapsed viewport axes retain
+their exact original coordinates instead of synthesizing a movement scale.
+
+Viewport zoom/pan, frame-grid nudge controls, keyboard-only handle selection,
+large-curve projection performance and physical/platform interaction acceptance
+require further implementation and qualification before claiming a complete
+professional temporal curve editor.

@@ -2562,6 +2562,15 @@ pub struct ClipNormalizedCurvePointPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClipCurveEditPayload {
+    /// Edit sparse exact coordinates of a stable key's temporal control.
+    EditHandle {
+        /// Existing canonical key identity.
+        keyframe_id: KeyframeId,
+        /// Incoming or outgoing control.
+        side: mondrian_core::BezierHandleSide,
+        /// Omitted coordinates retain their exact author values.
+        edit: mondrian_core::ExactBezierHandleEdit,
+    },
     /// Move supplied exact author coordinates of an existing complete key.
     Move {
         /// Existing complete key's stable identity.

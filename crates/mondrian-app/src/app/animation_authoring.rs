@@ -60,6 +60,15 @@ pub enum ClipNumericCurveEdit {
         /// New normalized time and value.
         point: NormalizedCurvePoint,
     },
+    /// Edit supplied exact coordinates of one canonical Bezier control.
+    EditHandle {
+        /// Stable identity of the owning key.
+        keyframe_id: KeyframeId,
+        /// Temporal side of the control being edited.
+        side: mondrian_core::BezierHandleSide,
+        /// Exact supplied coordinates; omitted axes retain current author values.
+        edit: mondrian_core::ExactBezierHandleEdit,
+    },
     /// Remove one existing key by stable identity.
     Remove { keyframe_id: KeyframeId },
     /// Change one complete key's interpolation using its stable identity.
@@ -342,6 +351,25 @@ fn complete_curve_targets(
         .property_by_address(address)
         .ok_or_else(|| curve_error("curve parameter is not owned by this target"))?;
     match edit {
+        ClipNumericCurveEdit::EditHandle { keyframe_id, side, edit } => {
+            let handle = property
+                .channel_keyframe_handle(0, keyframe_id, side)
+                .ok_or_else(|| curve_error("Bezier owner or temporal side is stale"))?;
+            if edit.time_offset.is_none() && edit.value_offset.is_none() {
+                return Err(curve_error("Bezier edit has no coordinates"));
+            }
+            Ok((
+                ClipNumericCurveEdit::EditHandle {
+                    keyframe_id,
+                    side,
+                    edit: mondrian_core::ExactBezierHandleEdit {
+                        time_offset: Some(edit.time_offset.unwrap_or(handle.time_offset)),
+                        value_offset: Some(edit.value_offset.unwrap_or(handle.value_offset)),
+                    },
+                },
+                None,
+            ))
+        }
         ClipNumericCurveEdit::Move { keyframe_id, time, value } => {
             let key = property.keyframe_by_id(keyframe_id).ok_or_else(|| {
                 curve_error(format!("keyframe {keyframe_id} is stale or incomplete"))
@@ -501,6 +529,45 @@ fn prepare_property_curve_edit(
     }
 
     match edit {
+        ClipNumericCurveEdit::EditHandle { keyframe_id, side, edit } => {
+            let key = property.channels()[0]
+                .keyframes()
+                .iter()
+                .find(|key| key.id == keyframe_id)
+                .ok_or_else(|| curve_error("Bezier owner key is stale"))?;
+            let original = property
+                .channel_keyframe_handle(0, keyframe_id, side)
+                .ok_or_else(|| curve_error("Bezier handle has no editable segment"))?;
+            if edit.time_offset.is_none() && edit.value_offset.is_none() {
+                return Err(curve_error("Bezier edit has no coordinates"));
+            }
+            let handle = mondrian_core::ExactBezierHandle {
+                time_offset: edit.time_offset.unwrap_or(original.time_offset),
+                value_offset: edit.value_offset.unwrap_or(original.value_offset),
+            };
+            let mutations = if handle == original {
+                Vec::new()
+            } else {
+                let (interp_in, interp_out) = match side {
+                    mondrian_core::BezierHandleSide::Incoming => (
+                        mondrian_core::KeyframeInterpolation::Bezier(handle),
+                        key.interp_out,
+                    ),
+                    mondrian_core::BezierHandleSide::Outgoing => (
+                        key.interp_in,
+                        mondrian_core::KeyframeInterpolation::Bezier(handle),
+                    ),
+                };
+                vec![PropertyMutation::UpdateChannelKeyframeHandles {
+                    path: path.to_owned(),
+                    time: key.time,
+                    channel_index: 0,
+                    interp_in,
+                    interp_out,
+                }]
+            };
+            Ok(PreparedCurveEdit { mutations, keyframe_id })
+        }
         ClipNumericCurveEdit::SetInterpolation { keyframe_id, interpolation } => {
             if !property
                 .descriptor

@@ -61,6 +61,44 @@ impl AudioAutomationCurveModel {
         self.keys.iter().any(|key| key.keyframe.is_some())
     }
 
+    pub(crate) fn tangents(&self) -> Vec<mondrian_ui_widgets::CurveTangent> {
+        self.keys
+            .iter()
+            .enumerate()
+            .flat_map(|(index, projected)| {
+                [
+                    mondrian_core::BezierHandleSide::Incoming,
+                    mondrian_core::BezierHandleSide::Outgoing,
+                ]
+                .into_iter()
+                .filter_map(move |side| {
+                    let id = projected.keyframe.as_ref()?.id;
+                    let position =
+                        self.source_curve.keyframes.iter().position(|key| key.id == id)?;
+                    let key = &self.source_curve.keyframes[position];
+                    let neighbor = match side {
+                        mondrian_core::BezierHandleSide::Incoming => {
+                            self.source_curve.keyframes.get(position.checked_sub(1)?)?
+                        }
+                        mondrian_core::BezierHandleSide::Outgoing => {
+                            self.source_curve.keyframes.get(position + 1)?
+                        }
+                    };
+                    let handle = self.source_curve.keyframe_handle(id, side)?;
+                    crate::app_ui::curve_tangents::project(
+                        index,
+                        side,
+                        (key.time, key.value),
+                        neighbor.time,
+                        handle,
+                        self.viewport.range,
+                        [self.view_min, self.view_max],
+                    )
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn points(&self) -> Vec<CurvePoint> {
         self.keys.iter().map(|key| key.point).collect()
     }
@@ -312,6 +350,24 @@ fn audio_curve_edit_intent(
         return None;
     }
     let edit = match edit {
+        CurveEdit::Handle { index, side, point } => {
+            let id = model.keys.get(index)?.keyframe.as_ref()?.id;
+            let key = model.source_curve.keyframes.iter().find(|key| key.id == id)?;
+            let handle = model.source_curve.keyframe_handle(id, side)?;
+            let tangent = model
+                .tangents()
+                .into_iter()
+                .find(|tangent| tangent.index == index && tangent.side == side)?;
+            let edit = crate::app_ui::curve_tangents::lower(
+                tangent,
+                point,
+                key.time,
+                handle,
+                model.viewport.range,
+                [model.view_min, model.view_max],
+            )?;
+            AudioAutomationEdit::EditHandle { keyframe_id: id, side, edit }
+        }
         CurveEdit::Insert { keyframe_id, point, .. } => {
             let time = denormalized_time(model.viewport.range, point.x)?;
             let value = denormalized_value(model, point.y)?;

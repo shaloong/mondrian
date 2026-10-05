@@ -712,6 +712,32 @@ impl ExactAutomationCurve {
         }
     }
 
+    /// Resolve the same exact Bezier control used by the canonical segment evaluator.
+    /// A non-Bezier segment or missing neighbor has no visible handle.
+    pub fn keyframe_handle(
+        &self,
+        keyframe_id: KeyframeId,
+        side: BezierHandleSide,
+    ) -> Option<ExactBezierHandle> {
+        let index = self.keyframes.iter().position(|key| key.id == keyframe_id)?;
+        let key = &self.keyframes[index];
+        let (neighbor, stored, interpolation) = match side {
+            BezierHandleSide::Incoming => {
+                let neighbor = self.keyframes.get(index.checked_sub(1)?)?;
+                (neighbor, key.in_handle, neighbor.interpolation_to_next)
+            }
+            BezierHandleSide::Outgoing => (
+                self.keyframes.get(index + 1)?,
+                key.out_handle,
+                key.interpolation_to_next,
+            ),
+        };
+        if interpolation != AutomationSegmentInterpolation::Bezier {
+            return None;
+        }
+        stored.or_else(|| initial_segment_handle(key, neighbor, None).ok())
+    }
+
     /// Validate once and materialize the ordered interpolation segments.
     ///
     /// Realtime consumers use these immutable segments to select interpolation

@@ -2558,6 +2558,45 @@ impl AnimatedProperty {
         Ok(())
     }
 
+    /// Resolve a visible Bezier control from the canonical channel and neighbor span.
+    /// Linear/Hold sides and sides without a corresponding segment have no handle.
+    pub fn channel_keyframe_handle(
+        &self,
+        channel_index: usize,
+        keyframe_id: KeyframeId,
+        side: crate::BezierHandleSide,
+    ) -> Option<ExactBezierHandle> {
+        let keys = self.channels.get(channel_index)?.keyframes();
+        let index = keys.iter().position(|key| key.id == keyframe_id)?;
+        let key = &keys[index];
+        let (neighbor, interpolation, opposite) = match side {
+            crate::BezierHandleSide::Incoming => {
+                let neighbor = keys.get(index.checked_sub(1)?)?;
+                (neighbor, key.interp_in, neighbor.interp_out)
+            }
+            crate::BezierHandleSide::Outgoing => {
+                let neighbor = keys.get(index + 1)?;
+                (neighbor, key.interp_out, neighbor.interp_in)
+            }
+        };
+        if matches!(opposite, KeyframeInterpolation::Hold) {
+            return None;
+        }
+        match interpolation {
+            KeyframeInterpolation::Bezier(handle) => Some(handle),
+            KeyframeInterpolation::DefaultBezier => Some(ExactBezierHandle {
+                time_offset: neighbor
+                    .time
+                    .checked_sub(key.time)
+                    .ok()?
+                    .checked_scale(crate::TimeScale::new(1, 3).ok()?)
+                    .ok()?,
+                value_offset: 0.0,
+            }),
+            _ => None,
+        }
+    }
+
     /// Atomically replace one channel's typed handles and admit the resulting constraints.
     pub fn update_channel_keyframe_handles(
         &mut self,

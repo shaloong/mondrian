@@ -818,3 +818,14 @@ wrong-side, over-span, nonfinite/unrepresentable, and forged constrained control
 before archive publication. The alpha format has no old normalized handle
 compatibility layer. Canonical control coordinates, mode and key identity remain
 author data across durable save/reopen.
+
+### Read-only temporal control projections
+
+AnimatedProperty::channel_keyframe_handle resolves a typed control by canonical
+channel/key identity and temporal side; Linear/Hold or absent-neighbor sides have
+no visible handle. DefaultBezier retains its exact one-third-span flat intent.
+ExactAutomationCurve::keyframe_handle resolves the same stored/default control
+used by its segment evaluator. These methods do not create author state or add a
+second interpolation model. Product handle gestures retain ExactBezierHandle's
+owner-time and world-value coordinates; persisted curves and constrained tangent
+admission remain the existing canonical contracts.

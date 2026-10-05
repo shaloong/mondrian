@@ -16,6 +16,7 @@ mod audio_processor_rack;
 mod background_runtime;
 mod color_management_controls;
 pub mod commands;
+mod curve_tangents;
 pub(crate) mod display_probe_impl;
 #[cfg(feature = "validation")]
 mod event_loop_owner;
