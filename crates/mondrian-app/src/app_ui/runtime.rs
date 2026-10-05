@@ -396,11 +396,7 @@ impl WinitUiRuntime {
         let now = Instant::now();
         let delta_ms = now.saturating_duration_since(self.last_timer_tick).as_millis();
         self.last_timer_tick = now;
-        let tooltip_was_visible = router.current_tooltip().is_some();
-        router.update_tooltip(delta_ms.min(u128::from(u64::MAX)) as u64);
-        if router.current_tooltip().is_some()
-            || (tooltip_was_visible && router.current_tooltip().is_none())
-        {
+        if advance_tooltip_timer(router, delta_ms.min(u128::from(u64::MAX)) as u64) {
             window.request_redraw();
         }
     }
@@ -440,6 +436,14 @@ impl WinitUiRuntime {
             window.request_redraw();
         }
     }
+}
+
+fn advance_tooltip_timer(router: &mut EventRouter, delta_ms: u64) -> bool {
+    let tooltip_was_visible = router.current_tooltip().is_some();
+    router.update_tooltip(delta_ms);
+    // The timer only reveals delayed tooltips. An unchanged visible tooltip
+    // must not request another redraw and keep the native event loop awake.
+    tooltip_was_visible != router.current_tooltip().is_some()
 }
 
 fn desktop_sample_to_ui_color(sample: DesktopRgba8) -> Color {
@@ -787,6 +791,28 @@ fn desktop_to_window_point(window: &winit::window::Window, point: DesktopPoint) 
 mod tests {
     use super::*;
     use mondrian_ui_core::widget::DrawCommandEncoder;
+
+    #[test]
+    fn tooltip_timer_redraws_once_when_delayed_tooltip_appears() {
+        use mondrian_ui_core::tooltip::TooltipManager;
+
+        let mut tooltip = mondrian_ui_tooltip::TooltipManagerImpl::new(450);
+        tooltip.show("Play".into(), Point::new(10.0, 20.0));
+        let mut router = EventRouter::with_platform_and_tooltip(
+            mondrian_ui_core::types::WidgetId::new(),
+            Box::new(mondrian_platform::NoopPlatformService),
+            Box::new(tooltip),
+        );
+
+        assert!(!advance_tooltip_timer(&mut router, 449));
+        assert!(advance_tooltip_timer(&mut router, 1));
+        assert_eq!(router.current_tooltip().unwrap().text, "Play");
+        assert_eq!(router.next_tooltip_update_in_ms(), None);
+        for _ in 0..1_000 {
+            assert!(!advance_tooltip_timer(&mut router, 1));
+        }
+        assert!(router.current_tooltip().is_some());
+    }
 
     #[test]
     fn retina_window_coordinates_keep_layout_and_hit_testing_in_points() {
