@@ -3,8 +3,8 @@
 ## Qualified snapshot
 
 Windows qualification on 2026-10-05 used clean, unchanged source
-`c977ce1a7da6cc59de3bb7316aaf78d66544eb26` and the rebuilt product SHA256
-`9ca0e1136d6278fc762af798fda94f8f2894974f6ff9cd3d182f66294b6e4956`.
+`6fb3c9edbeacb52fbea12b73969eb344793ece14` and the rebuilt product SHA256
+`9745947d43fedc264bd79ee2a433e9e68b5a69e2f1ed2f661d0e204fb244a7a1`.
 The accompanying documentation update does not change production code.
 
 | Scope | Evidence |
@@ -33,24 +33,29 @@ an execution environment failure, not a test result.
 
 The current App test binary separately passed 16 modal tests and 103 resource
 tests; the five ignored resource tests and the ignored native curve test were
-explicitly run and passed. These checks include the exact curve insert request
-contract and subsequent test-helper module relocation.
+explicitly run and passed. These checks include exact curve insert requests and the absolute temporal
+value coordinate change. Final curve filters passed 26 temporal and 46 App curve
+tests, with 78 Widget curve tests; these counts also overlap. Strict workspace
+Clippy (all targets/features, warnings denied), formatting and diff checks passed.
+An earlier full App run passed 2546 tests and failed one old dB screen-coordinate
+fixture. That fixture was corrected while retaining its router/history assertions;
+the final temporal filter passed it. This is not a green full-suite receipt.
 
 The exact-source complete output gate is
 `scripts/validation/invoke-complete-golden-project-gate.ps1`.
 This run's consecutive report is
-`target/validation/nle-backlog-complete/20261005T091432Z-complete-golden-662d02a7/complete-golden-consecutive-report.json`.
+`target/validation/nle-backlog-complete/20261005T105524Z-complete-golden-289c938f/complete-golden-consecutive-report.json`.
 It retains per-round reports, process logs, build log, source attestation,
 product hashes, pixel errors and encoder diagnostics.
 
 ## Execution environment
 
-The first current-source Golden attempt built successfully but failed at Project
+A previous c977ce1 Golden attempt built successfully but failed at Project
 startup with Windows access denied before any output stage. Product authority
 locks deliberately live in the fixed LocalAppData namespace, outside the
 workspace sandbox; changing TEMP must not split cross-process exclusion.
-Running the identical clean source/product with the required native execution
-permissions passed all three rounds. No lock bypass or alternate product
+The current clean source/product ran with the required native execution
+permissions and passed all three rounds. No lock bypass or alternate product
 interpretation was added. The failed attempt remains recorded in
 `target/validation/nle-backlog-complete/20261005T090302Z-complete-golden-4208cbd7/complete-golden-consecutive-report.json`.
 
@@ -61,6 +66,7 @@ is not a physical keyboard recording. Native helper, SDK, SQLite, project files,
 float pixels, GPU output and encoded roundtrips are real. This is Windows
 qualification, not macOS or a general third-party plugin compatibility claim.
 NVENC uses `cpu_rawvideo_pipe`; this evidence does not establish zero-copy
-transport. Full professional curve interaction, plugin author writes and
+transport. Full professional curve interaction, exact full-i64 value nudges, a dedicated
+out-of-soft-range UI-edit native output scenario, plugin author writes and
 vendor/bus/platform/localization matrices remain on the roadmap. The overall
 NLE goal remains active.
