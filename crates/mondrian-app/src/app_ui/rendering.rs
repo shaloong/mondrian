@@ -393,6 +393,24 @@ impl AppUiFrameRenderer {
         config: &wgpu::SurfaceConfiguration,
         commands: Vec<DrawCommand>,
     ) -> AppUiFrameResult {
+        let acquired = observe_ui_frame_stage("acquire_surface", || surface.get_current_texture());
+        let result = self.render_acquired_draw_commands(device, queue, acquired, config, commands);
+        if matches!(result, AppUiFrameResult::Reconfigured { .. }) {
+            surface.configure(device, config);
+        }
+        result
+    }
+
+    /// Record and present through the same renderer with a caller-owned drawable.
+    /// The caller keeps configure/acquire excluded until this operation returns.
+    pub(crate) fn render_acquired_draw_commands(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        acquired: wgpu::CurrentSurfaceTexture,
+        config: &wgpu::SurfaceConfiguration,
+        commands: Vec<DrawCommand>,
+    ) -> AppUiFrameResult {
         let frame_started = Instant::now();
         let resolved_text = observe_ui_frame_stage("resolve_text", || {
             resolve_text_commands(commands, &mut self.text_renderer)
@@ -409,7 +427,6 @@ impl AppUiFrameRenderer {
             mondrian_ui_renderer::GlyphUploadStats::default()
         };
 
-        let acquired = observe_ui_frame_stage("acquire_surface", || surface.get_current_texture());
         let (output, backend_event) = match acquired {
             wgpu::CurrentSurfaceTexture::Success(output) => (output, None),
             wgpu::CurrentSurfaceTexture::Suboptimal(output) => {
@@ -426,13 +443,11 @@ impl AppUiFrameRenderer {
                 };
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
-                surface.configure(device, config);
                 return AppUiFrameResult::Reconfigured {
                     backend_event: AppUiBackendEvent::SurfaceOutdated,
                 };
             }
             wgpu::CurrentSurfaceTexture::Lost => {
-                surface.configure(device, config);
                 return AppUiFrameResult::Reconfigured {
                     backend_event: AppUiBackendEvent::SurfaceLost,
                 };
@@ -453,7 +468,6 @@ impl AppUiFrameRenderer {
                 "discarding an outdated surface extent before recording UI attachments"
             );
             drop(output);
-            surface.configure(device, config);
             return AppUiFrameResult::Reconfigured {
                 backend_event: AppUiBackendEvent::SurfaceOutdated,
             };

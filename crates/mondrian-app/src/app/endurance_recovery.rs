@@ -462,7 +462,7 @@ impl EnduranceRecoveryOperationReceipt {
         device_generation_after: u64,
     ) -> Result<Self, EnduranceRecoveryReceiptError> {
         let shutdown_receipt_json = serde_json::to_string(&SurfaceShutdownReceiptEvidence {
-            schema_version: 4,
+            schema_version: 5,
             surface_generation: surface_generation_before,
             device_generation: device_generation_before,
             worker_shutdown: super::owned_worker_lifecycle::OwnedWorkerShutdown::Terminated,
@@ -492,6 +492,17 @@ impl EnduranceRecoveryOperationReceipt {
                 native_device_removed: false,
             }),
             generation_terminal_kind: None,
+            surface_acquisitions: crate::app_ui::surface_acquisition::SurfaceAcquisitionsShutdown {
+                active: crate::app_ui::surface_acquisition::SurfaceAcquisitionShutdown {
+                    surface_generation: surface_generation_before,
+                    worker_shutdown: super::owned_worker_lifecycle::OwnedWorkerShutdown::Terminated,
+                    ready_outputs: 0,
+                    in_use_outputs: 0,
+                    acquisition_in_flight: false,
+                    wake_failures: 0,
+                },
+                retired: Vec::new(),
+            },
         })
         .expect("canonical test GPU shutdown receipt");
         let display_contract_sha256 =
@@ -675,6 +686,7 @@ struct SurfaceShutdownReceiptEvidence {
     retirement_completed: bool,
     renderer_retirement: Option<mondrian_renderer::ViewerGpuRetirementReceipt>,
     generation_terminal_kind: Option<String>,
+    surface_acquisitions: crate::app_ui::surface_acquisition::SurfaceAcquisitionsShutdown,
 }
 
 fn valid_surface_shutdown_receipt(
@@ -686,7 +698,8 @@ fn valid_surface_shutdown_receipt(
         .ok()
         .is_some_and(|receipt| {
             serde_json::to_string(&receipt).is_ok_and(|normalized| normalized == canonical_json)
-                && receipt.schema_version == 4
+                && receipt.schema_version == 5
+                && receipt.surface_acquisitions.qualifies_for(expected_surface_generation, true)
                 && matches!(
                     receipt.worker_shutdown,
                     super::owned_worker_lifecycle::OwnedWorkerShutdown::Terminated
@@ -1122,6 +1135,14 @@ mod tests {
             "native_removed",
             "unknown_exit",
             "legacy",
+            "surface_missing",
+            "surface_wrong_generation",
+            "surface_timeout",
+            "surface_ready",
+            "surface_in_use",
+            "surface_acquiring",
+            "surface_wake_failed",
+            "surface_duplicate_retirement",
         ] {
             let receipt = EnduranceRecoveryOperationReceipt::surface_device_reopen(
                 0,
@@ -1167,6 +1188,33 @@ mod tests {
                     shutdown["renderer_retirement"]["cpu_yuv_upload"] = "assumed_idle".into()
                 }
                 "legacy" => shutdown["schema_version"] = 1.into(),
+                "surface_missing" => {
+                    shutdown.as_object_mut().expect("object").remove("surface_acquisitions");
+                }
+                "surface_wrong_generation" => {
+                    shutdown["surface_acquisitions"]["active"]["surface_generation"] = 99.into()
+                }
+                "surface_timeout" => {
+                    shutdown["surface_acquisitions"]["active"]["worker_shutdown"] =
+                        "timed_out_detached".into()
+                }
+                "surface_ready" => {
+                    shutdown["surface_acquisitions"]["active"]["ready_outputs"] = 1.into()
+                }
+                "surface_in_use" => {
+                    shutdown["surface_acquisitions"]["active"]["in_use_outputs"] = 1.into()
+                }
+                "surface_acquiring" => {
+                    shutdown["surface_acquisitions"]["active"]["acquisition_in_flight"] =
+                        true.into()
+                }
+                "surface_wake_failed" => {
+                    shutdown["surface_acquisitions"]["active"]["wake_failures"] = 1.into()
+                }
+                "surface_duplicate_retirement" => {
+                    let active = shutdown["surface_acquisitions"]["active"].clone();
+                    shutdown["surface_acquisitions"]["retired"] = serde_json::json!([active]);
+                }
                 _ => unreachable!(),
             }
             *shutdown_receipt_json = serde_json::to_string(&shutdown).expect("nested JSON");

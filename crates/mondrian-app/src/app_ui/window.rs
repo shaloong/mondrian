@@ -83,6 +83,9 @@ use crate::app_ui::runtime::{
 };
 use crate::app_ui::shortcuts::{register_shortcuts, AppUiShortcutOverride};
 use crate::app_ui::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
+use crate::app_ui::surface_acquisition::{
+    SurfaceAcquisition, SurfaceAcquisitionShutdown, SurfaceAcquisitionsShutdown,
+};
 #[cfg(feature = "validation")]
 use crate::app_ui::window_outer_receipt::AppUiWindowNativeReturnEvidence;
 #[cfg(feature = "validation")]
@@ -578,6 +581,7 @@ struct AppUiViewerGpuShutdownContract {
     retirement_completed: bool,
     renderer_retirement: Option<mondrian_renderer::ViewerGpuRetirementReceipt>,
     generation_terminal_kind: Option<&'static str>,
+    surface_acquisitions: SurfaceAcquisitionsShutdown,
 }
 
 #[cfg(feature = "validation")]
@@ -679,10 +683,12 @@ fn seal_clean_viewer_gpu_shutdown(
     evidence: ViewerGpuDeviceProgressShutdownEvidence,
     surface_generation: u64,
     device_generation: u64,
+    surface_acquisitions: SurfaceAcquisitionsShutdown,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
     if surface_generation == 0
         || device_generation == 0
         || !evidence.qualifies_normal_runtime()
+        || !surface_acquisitions.qualifies_for(surface_generation, true)
         || evidence.wake_callbacks.registrations_accepted == 0
     {
         return Err(
@@ -690,7 +696,7 @@ fn seal_clean_viewer_gpu_shutdown(
         );
     }
     canonical_json_and_sha256(&AppUiViewerGpuShutdownContract {
-        schema_version: 4,
+        schema_version: 5,
         surface_generation,
         device_generation,
         worker_shutdown: evidence.worker_shutdown,
@@ -712,6 +718,7 @@ fn seal_clean_viewer_gpu_shutdown(
             ViewerGpuDeviceGenerationTerminalKind::DeviceDestroyed => "device_destroyed",
             ViewerGpuDeviceGenerationTerminalKind::ProgressFailure => "progress_failure",
         }),
+        surface_acquisitions,
     })
     .map_err(Into::into)
 }
@@ -727,6 +734,9 @@ enum AppUiUserEvent {
     PreviewWorkAvailable,
     ViewerGpuCompletionAvailable,
     ViewerBackendPreparationAvailable,
+    SurfaceAvailable {
+        surface_generation: u64,
+    },
     #[cfg(target_os = "macos")]
     Accessibility(accesskit_winit::Event),
 }
@@ -1830,7 +1840,10 @@ struct AppUiWindowSession {
     accessibility_proxy: Option<winit::event_loop::EventLoopProxy<AppUiUserEvent>>,
     viewer_backend_event_proxy: Option<winit::event_loop::EventLoopProxy<AppUiUserEvent>>,
     window: Arc<winit::window::Window>,
-    surface: wgpu::Surface<'static>,
+    surface: Arc<wgpu::Surface<'static>>,
+    surface_acquisition: Option<SurfaceAcquisition>,
+    retiring_surface_acquisitions: Vec<SurfaceAcquisition>,
+    surface_acquisition_receipts: Vec<SurfaceAcquisitionShutdown>,
     config: wgpu::SurfaceConfiguration,
     display_output_contract: AppUiDisplayOutputContract,
     display_snapshot: Option<mondrian_core::display_contract::DisplayOutputSnapshot>,
@@ -2156,6 +2169,7 @@ pub(crate) struct AppUiActiveWindowGpuShutdownEvidence {
     device_generation: Option<u64>,
     publication_cleanup: Result<(), String>,
     retirement: AppUiWindowGpuRetirementEvidence,
+    surface_acquisitions: Result<SurfaceAcquisitionsShutdown, String>,
 }
 
 impl AppUiActiveWindowGpuShutdownEvidence {
@@ -2163,6 +2177,10 @@ impl AppUiActiveWindowGpuShutdownEvidence {
         self.surface_generation != 0
             && self.device_generation.is_some_and(|generation| generation != 0)
             && self.publication_cleanup.is_ok()
+            && self
+                .surface_acquisitions
+                .as_ref()
+                .is_ok_and(|evidence| evidence.qualifies_for(self.surface_generation, false))
             && matches!(
                 &self.retirement,
                 AppUiWindowGpuRetirementEvidence::Retired(evidence)
@@ -2654,6 +2672,9 @@ fn reopen_window_surface_and_device(
                 raw,
                 surface_generation_before,
                 device_generation_before,
+                shutdown.surface_acquisitions.map_err(|error| {
+                    format!("old Surface acquisition shutdown missing: {error}")
+                })?,
             )?;
             retired_session.window.set_visible(false);
             publish_active_window_session(host, active_session, bounds)?;
@@ -3789,6 +3810,9 @@ fn catch_window_viewer_gpu_shutdown(
                 retirement: AppUiWindowGpuRetirementEvidence::ShutdownPanicked(
                     diagnostic.to_string(),
                 ),
+                surface_acquisitions: Err(
+                    "Window shutdown panicked before complete surface closure evidence".into(),
+                ),
             }
         }
     }
@@ -4059,6 +4083,11 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     elwt.set_control_flow(ControlFlow::Poll);
                 }
             }
+            Event::UserEvent(AppUiUserEvent::SurfaceAvailable { surface_generation }) => {
+                if surface_generation == session.surface_generation_id.get() {
+                    session.window.request_redraw();
+                }
+            }
             Event::UserEvent(AppUiUserEvent::ViewerBackendPreparationAvailable) => {
                 // Only a wake hint. The current Renderer cache and canonical
                 // contract authorize readiness on the next recording turn;
@@ -4214,6 +4243,38 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             AppUiEventLoopStage::RefreshIfDirty,
                             refresh_started.elapsed(),
                         );
+                        // Native drawable acquisition must not suspend Clock/producer
+                        // observation on the event-loop thread. The worker has no
+                        // picture authority; paint uses the current production slots.
+                        if session.surface_acquisition.is_none() {
+                            let proxy = preview_work_event_proxy.clone();
+                            let surface_generation = session.surface_generation_id.get();
+                            match SurfaceAcquisition::start(
+                                surface_generation,
+                                Arc::clone(&session.surface),
+                                device.clone(),
+                                session.config.clone(),
+                                move || proxy.send_event(AppUiUserEvent::SurfaceAvailable {
+                                    surface_generation,
+                                }).is_ok(),
+                            ) {
+                                Ok(owner) => session.surface_acquisition = Some(owner),
+                                Err(error) => {
+                                    session.event_loop_failure = Some(format!("native surface worker could not start: {error}"));
+                                    elwt.exit();
+                                    return;
+                                }
+                            }
+                        }
+                        let frame = match session.surface_acquisition.as_ref().expect("started surface owner").poll() {
+                            Ok(Some(frame)) => frame,
+                            Ok(None) => return,
+                            Err(error) => {
+                                session.event_loop_failure = Some(error.into());
+                                elwt.exit();
+                                return;
+                            }
+                        };
                         let paint_started = Instant::now();
                         let mut encoder = DrawEncoder::new();
                         let theme = mondrian_ui_theme::current_theme();
@@ -4229,16 +4290,27 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             session.last_cursor,
                             &session.router,
                         );
-                        let frame_result = session.frame_renderer.render_draw_commands(
-                            device,
-                            queue,
-                            &session.surface,
-                            &session.config,
-                            encoder.finish_scaled(
-                                UiWindowCoordinates::from_window(&session.window)
-                                    .pixels_per_point(),
-                            ),
-                        );
+                        let frame_result = frame.paint(|acquired| {
+                            session.frame_renderer.render_acquired_draw_commands(
+                                device,
+                                queue,
+                                acquired,
+                                &session.config,
+                                encoder.finish_scaled(
+                                    UiWindowCoordinates::from_window(&session.window)
+                                        .pixels_per_point(),
+                                ),
+                            )
+                        });
+                        if matches!(frame_result, crate::app_ui::rendering::AppUiFrameResult::Reconfigured { .. }) {
+                            session.configure_surface(device);
+                        } else if matches!(frame_result, crate::app_ui::rendering::AppUiFrameResult::Skipped {
+                            backend_event: AppUiBackendEvent::SurfaceTimeout,
+                        }) {
+                            // Retry native admission through the same capacity-one
+                            // owner; no busy UI wait or renewed Playback deadline.
+                            session.window.request_redraw();
+                        }
                         if let Some(diagnostics) =
                             session.render_diagnostic_reporter.changed_failure(frame_result)
                         {
@@ -4557,6 +4629,11 @@ fn run_app_ui_with_initial_state_on_event_loop(
             }
 
             Event::AboutToWait => {
+                if let Err(error) = session.observe_surface_acquisitions() {
+                    session.event_loop_failure = Some(error);
+                    elwt.exit();
+                    return;
+                }
                 #[cfg(target_os = "macos")]
                 {
                     if Instant::now() >= session.next_native_display_observation {
@@ -4711,7 +4788,9 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         ),
                     ));
                 }
-                if session.pending_initial_redraw {
+                if session.pending_initial_redraw
+                    && session.surface_acquisition.as_ref().is_none_or(|owner| !owner.is_pending())
+                {
                     session.window.request_redraw();
                     elwt.set_control_flow(ControlFlow::Poll);
                 }
@@ -8515,7 +8594,7 @@ fn apply_surface_lifecycle_update(
     if update.reconfigure_surface {
         session.config.width = next_size.0;
         session.config.height = next_size.1;
-        session.surface.configure(device, &session.config);
+        session.configure_surface(device);
     }
     refresh_display_output_contract(
         DisplayOutputContractRefreshReason::SurfaceLifecycle(reason),
@@ -8671,7 +8750,7 @@ fn refresh_display_output_contract(
         invalidate_display_dependent_gpu_preview(session, host);
     }
     if renderer_rebuilt {
-        session.surface.configure(device, &session.config);
+        session.configure_surface(device);
         if let Some(renderer) = replacement_renderer {
             session.frame_renderer = renderer;
         }
@@ -8886,7 +8965,10 @@ impl AppUiPreparedWindowSession {
             accessibility_proxy: None,
             viewer_backend_event_proxy: None,
             window,
-            surface,
+            surface: Arc::new(surface),
+            surface_acquisition: None,
+            retiring_surface_acquisitions: Vec::new(),
+            surface_acquisition_receipts: Vec::new(),
             config: config.clone(),
             display_output_contract,
             display_snapshot: Some(initial_snapshot),
@@ -8979,6 +9061,63 @@ fn publish_active_window_session(
 }
 
 impl AppUiWindowSession {
+    fn configure_surface(&mut self, device: &wgpu::Device) {
+        if let Some(owner) = &self.surface_acquisition {
+            if let Err(error) = owner.configure(self.config.clone()) {
+                owner.close_admission();
+                self.event_loop_failure = Some(error.into());
+            } else {
+                self.window.request_redraw();
+            }
+        } else {
+            self.surface.configure(device, &self.config);
+        }
+    }
+
+    fn observe_surface_acquisitions(&mut self) -> Result<(), String> {
+        if let Some(owner) = &self.surface_acquisition {
+            owner.health().map_err(str::to_owned)?;
+        }
+        let mut index = 0;
+        while index < self.retiring_surface_acquisitions.len() {
+            if let Some(receipt) = self.retiring_surface_acquisitions[index].try_finish() {
+                let failed = !receipt.qualifies();
+                self.surface_acquisition_receipts.push(receipt.clone());
+                self.retiring_surface_acquisitions.swap_remove(index);
+                if failed {
+                    return Err(format!("retired native surface did not close: {receipt:?}"));
+                }
+            } else {
+                index += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn shutdown_surface_acquisitions_until(
+        &mut self,
+        deadline: Instant,
+    ) -> SurfaceAcquisitionsShutdown {
+        if let Some(owner) = &self.surface_acquisition {
+            owner.close_admission();
+        }
+        for owner in &self.retiring_surface_acquisitions {
+            owner.close_admission();
+        }
+        let active = self.surface_acquisition.as_mut().map_or_else(
+            || SurfaceAcquisitionShutdown::not_started(self.surface_generation_id.get()),
+            |owner| owner.shutdown_until(deadline),
+        );
+        for owner in &mut self.retiring_surface_acquisitions {
+            self.surface_acquisition_receipts.push(owner.shutdown_until(deadline));
+        }
+        self.retiring_surface_acquisitions.clear();
+        SurfaceAcquisitionsShutdown {
+            active,
+            retired: self.surface_acquisition_receipts.clone(),
+        }
+    }
+
     fn shutdown_viewer_gpu_until(
         &mut self,
         host: &AppUiHost,
@@ -8989,6 +9128,7 @@ impl AppUiWindowSession {
             .viewer_gpu_device_progress
             .generation_id()
             .map(ViewerGpuDeviceGenerationId::get);
+        let surface_acquisitions = Ok(self.shutdown_surface_acquisitions_until(deadline));
         let publication_cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             clear_viewer_spatial_presentation(self, host);
         }))
@@ -9019,6 +9159,7 @@ impl AppUiWindowSession {
             device_generation,
             publication_cleanup,
             retirement,
+            surface_acquisitions,
         }
     }
 
@@ -9191,6 +9332,22 @@ fn replace_window_session(
     // its publication authority is revoked.
     clear_viewer_spatial_presentation(session, host);
     session.window.set_visible(false);
+    next_session
+        .retiring_surface_acquisitions
+        .append(&mut session.retiring_surface_acquisitions);
+    next_session
+        .surface_acquisition_receipts
+        .append(&mut session.surface_acquisition_receipts);
+    if let Some(owner) = session.surface_acquisition.take() {
+        owner.close_admission();
+        next_session.retiring_surface_acquisitions.push(owner);
+    } else {
+        next_session
+            .surface_acquisition_receipts
+            .push(SurfaceAcquisitionShutdown::not_started(
+                session.surface_generation_id.get(),
+            ));
+    }
     handoff_window_viewer_gpu_device_generation(
         &mut session.viewer_gpu_device_progress,
         &mut next_session.viewer_gpu_device_progress,
@@ -9667,6 +9824,18 @@ mod tests {
             surface_generation: 2,
             device_generation: Some(4),
             publication_cleanup: Ok(()),
+            surface_acquisitions: Ok(SurfaceAcquisitionsShutdown {
+                active: SurfaceAcquisitionShutdown {
+                    surface_generation: 2,
+                    worker_shutdown:
+                        crate::app::owned_worker_lifecycle::OwnedWorkerShutdown::Terminated,
+                    ready_outputs: 0,
+                    in_use_outputs: 0,
+                    acquisition_in_flight: false,
+                    wake_failures: 0,
+                },
+                retired: Vec::new(),
+            }),
             retirement: AppUiWindowGpuRetirementEvidence::Retired(
                 ViewerGpuDeviceProgressShutdownEvidence {
                     worker_shutdown:

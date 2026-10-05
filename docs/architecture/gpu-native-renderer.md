@@ -950,6 +950,41 @@ When recording fails, the Window Adapter may unwrap a composite-graph error only
 to preserve the renderer's typed first-blocker telemetry; it must not reproduce
 graph scheduling or collapse effect-domain failures into a generic CPU fallback.
 
+### Window drawable acquisition
+
+The Window Adapter owns a capacity-one native surface acquisition worker.
+Window/Surface creation and the initial configuration stay on the event-loop
+thread. The worker retains the actual surface and calls `get_current_texture`
+without holding its short handoff lock. Subsequent configuration revisions are
+coalesced and applied on the event-loop thread, serialized with the Window's
+queue submissions, after the worker has released any obsolete drawable.
+Background configure must not race a Viewer submission: wgpu's device-idle
+wait can fail and terminate the Viewer GPU generation. Native drawable waits
+cannot suspend the event-loop's
+existing Playback clock, producer/result, or GPU-completion observation.
+It owns no Timeline, picture, color, Frame Demand, or presentation authority.
+
+A drawable is transferred only for the latest configuration. A move-only paint
+guard excludes configure and another acquisition until recording/present (or
+unwind) returns and the real texture is released. Revoking a ready drawable also
+holds that exclusion through its destructor; notification order alone cannot
+protect against a spurious wake. UI commands and texture registrations are
+resolved at consumption, not captured as an unbounded queue of old pictures.
+The shared UI renderer still records the same carrier, text, color, MSAA and
+present path. Surface availability events carry the Window generation and are
+wake hints only; retired-generation hints have no publication authority.
+
+Replacing a Window closes the old acquisition admission and retains its owner
+while the existing GPU generation is handed off. Finished acquisition workers
+are consumed without waiting on the realtime event-loop; final shutdown uses
+the same original caller deadline for every remaining surface and GPU owner.
+The strict Window closure inventory includes active and retired surface worker
+receipts. The device/surface reopen receipt requires the painted old active
+surface worker to have actually terminated. A blocked worker, failed wake,
+panic, missing field or duplicate/mismatched generation cannot qualify as
+released. Fallback Drop closes admission but never asserts successful closure.
+No new Clock, quality policy, native renderer or CPU fallback is introduced.
+
 GPU-resident media layers with log or display-encoded effect domains are
 preprocessed through the runtime-owned `OCIO -> point effect -> OCIO` route
 before working-linear affine/compositing. Procedural solids with those external

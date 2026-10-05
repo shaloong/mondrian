@@ -113,10 +113,14 @@ impl WindowGenerationHistory {
         object.remove("schema_version");
         object.remove("surface_generation");
         object.remove("device_generation");
+        let Some(surface_acquisitions) = object.remove("surface_acquisitions") else {
+            return false;
+        };
         let Ok(actual) = serde_json::to_value(shutdown) else {
             return false;
         };
         actual["retirement"]["retired"] == expected
+            && actual["surface_acquisitions"] == serde_json::json!({"Ok": surface_acquisitions})
     }
 
     pub(super) fn qualifies_recovery(

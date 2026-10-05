@@ -47,6 +47,7 @@ pub mod sequence_settings_dialog;
 pub mod shell;
 pub mod shortcuts;
 pub mod startup;
+pub(crate) mod surface_acquisition;
 #[cfg(feature = "validation")]
 pub mod surface_reopen_batch_receipt;
 #[cfg(feature = "validation")]
