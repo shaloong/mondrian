@@ -21,6 +21,15 @@ pub(crate) fn apply_external_filter_thread_args(
         .arg(threads);
 }
 
+/// Apply the frozen codec grant to the next FFmpeg input or output file.
+/// `-threads` is file-scoped, so each `-i` and the output need their own value.
+pub(crate) fn apply_external_codec_thread_args(
+    cmd: &mut Command,
+    policy: service::ExportExecutionResourcePolicy,
+) {
+    cmd.arg("-threads").arg(policy.ffmpeg_codec_threads.max(1).to_string());
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExportYuvMatrix {
     Bt709,

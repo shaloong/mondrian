@@ -3291,6 +3291,9 @@ fn render_professional_pcm24_wave(
     };
     let mut command = mondrian_media::ffmpeg_command()
         .map_err(|error| JobExecutionResult::Failed(error.to_string()))?;
+    let resource_policy = execution_gate.resource_policy();
+    apply_external_filter_thread_args(&mut command, resource_policy);
+    apply_external_codec_thread_args(&mut command, resource_policy);
     command
         .arg("-hide_banner")
         .arg("-nostdin")
@@ -3302,7 +3305,9 @@ fn render_professional_pcm24_wave(
         .arg("-ac")
         .arg("2")
         .arg("-i")
-        .arg(&raw_path)
+        .arg(&raw_path);
+    apply_external_codec_thread_args(&mut command, resource_policy);
+    command
         .arg("-map")
         .arg("0:a:0")
         .arg("-c:a")
@@ -3371,6 +3376,9 @@ fn render_professional_picture_essence(
     };
     let mut command = mondrian_media::ffmpeg_command()
         .map_err(|error| JobExecutionResult::Failed(error.to_string()))?;
+    let resource_policy = execution_gate.resource_policy();
+    apply_external_filter_thread_args(&mut command, resource_policy);
+    apply_external_codec_thread_args(&mut command, resource_policy);
     command
         .arg("-hide_banner")
         .arg("-nostdin")
@@ -3386,6 +3394,7 @@ fn render_professional_picture_essence(
         .arg("-i")
         .arg("pipe:0")
         .arg("-an");
+    apply_external_codec_thread_args(&mut command, resource_policy);
     match profile {
         ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25 => {
             command
@@ -3788,6 +3797,9 @@ fn execute_audio_stems_export(
             Ok(command) => command,
             Err(error) => return JobExecutionResult::Failed(error.to_string()),
         };
+        let resource_policy = execution_gate.resource_policy();
+        apply_external_filter_thread_args(&mut command, resource_policy);
+        apply_external_codec_thread_args(&mut command, resource_policy);
         command
             .arg("-y")
             .arg("-hide_banner")
@@ -3802,7 +3814,9 @@ fn execute_audio_stems_export(
             .arg("-ac")
             .arg(channel_layout.channel_count().to_string())
             .arg("-i")
-            .arg(&rendered.path)
+            .arg(&rendered.path);
+        apply_external_codec_thread_args(&mut command, resource_policy);
+        command
             .arg("-map")
             .arg("0:a:0")
             .arg("-c:a")
@@ -4613,6 +4627,7 @@ fn execute_timeline_export(
         let pix_fmt = frame_contract.ffmpeg_pix_fmt();
         cmd.arg("-y").arg("-hide_banner").arg("-loglevel").arg("error");
         apply_external_filter_thread_args(&mut cmd, resource_policy);
+        apply_external_codec_thread_args(&mut cmd, resource_policy);
         cmd.arg("-f")
             .arg("rawvideo")
             .arg("-pix_fmt")
@@ -4631,6 +4646,7 @@ fn execute_timeline_export(
                         "audio output layout {channel_layout:?} has no explicit FFmpeg lowering"
                     ));
                 };
+                apply_external_codec_thread_args(&mut cmd, resource_policy);
                 cmd.arg("-f")
                     .arg("f32le")
                     .arg("-ar")
@@ -4653,6 +4669,7 @@ fn execute_timeline_export(
                         "audio output layout {channel_layout:?} has no explicit FFmpeg lowering"
                     ));
                 };
+                apply_external_codec_thread_args(&mut cmd, resource_policy);
                 cmd.arg("-f")
                     .arg("lavfi")
                     .arg("-i")
@@ -4671,6 +4688,7 @@ fn execute_timeline_export(
             }
         }
 
+        apply_external_codec_thread_args(&mut cmd, resource_policy);
         match &delivery.artifact {
             ResolvedExportArtifactEncoding::MediaFile { container, video, audio } => {
                 let Some(encoder) = resolved_video_encoder else {
@@ -5076,6 +5094,9 @@ fn execute_resident_video_export(
             Ok(command) => command,
             Err(error) => return ResidentExportAttemptOutcome::Failed(error.to_string()),
         };
+        let resource_policy = execution_gate.resource_policy();
+        apply_external_filter_thread_args(&mut command, resource_policy);
+        apply_external_codec_thread_args(&mut command, resource_policy);
         command
             .arg("-y")
             .arg("-hide_banner")
@@ -5096,6 +5117,7 @@ fn execute_resident_video_export(
                         "resident video audio layout has no FFmpeg lowering".to_owned(),
                     );
                 };
+                apply_external_codec_thread_args(&mut command, resource_policy);
                 command
                     .arg("-f")
                     .arg("f32le")
@@ -5118,6 +5140,7 @@ fn execute_resident_video_export(
                         "resident video audio layout has no FFmpeg lowering".to_owned(),
                     );
                 };
+                apply_external_codec_thread_args(&mut command, resource_policy);
                 command
                 .arg("-f")
                 .arg("lavfi")
@@ -5139,6 +5162,7 @@ fn execute_resident_video_export(
         // field order, and sample aspect ratio into the coded stream. Adding the
         // generic pre-encode `scale`, `setsar`, or `pix_fmt` arguments here would
         // require a decode/filter/re-encode and is invalid with `-c:v copy`.
+        apply_external_codec_thread_args(&mut command, resource_policy);
         command.arg("-f").arg(container_format(container)).arg(output_path);
         report(ExportProgress::encoding(0.98));
         let output = mondrian_media::run_supervised_command(
@@ -5285,6 +5309,9 @@ fn try_execute_smart_render(
 
     let mut command = mondrian_media::ffmpeg_command()
         .map_err(|error| JobExecutionResult::Failed(error.to_string()))?;
+    let resource_policy = execution_gate.resource_policy();
+    apply_external_filter_thread_args(&mut command, resource_policy);
+    apply_external_codec_thread_args(&mut command, resource_policy);
     command
         .arg("-y")
         .arg("-hide_banner")
@@ -5297,6 +5324,7 @@ fn try_execute_smart_render(
             let Some(layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
                 return Ok(None);
             };
+            apply_external_codec_thread_args(&mut command, resource_policy);
             command
                 .arg("-f")
                 .arg("f32le")
@@ -5313,6 +5341,7 @@ fn try_execute_smart_render(
             let Some(layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
                 return Ok(None);
             };
+            apply_external_codec_thread_args(&mut command, resource_policy);
             command.arg("-f").arg("lavfi").arg("-i").arg(format!(
                 "anullsrc=channel_layout={layout}:sample_rate={sample_rate},atrim=end_sample={}",
                 analysis.sample_frames
@@ -5334,6 +5363,7 @@ fn try_execute_smart_render(
             command.arg("-an");
         }
     }
+    apply_external_codec_thread_args(&mut command, resource_policy);
     command.arg("-f").arg(container_format(container)).arg(output_path);
 
     if !execution_gate.wait_at_boundary(ExportProgressPhase::Encoding, cancel) {
@@ -10905,21 +10935,70 @@ mod tests {
     }
 
     #[test]
-    fn external_encoder_filter_threads_follow_the_frozen_attempt_policy() {
-        let mut command = mondrian_media::FfmpegCommand::new("ffmpeg");
+    fn external_encoder_thread_grants_apply_to_each_file() {
+        if !ffmpeg_is_available_for_test() {
+            eprintln!("skipping external encoder threading test: FFmpeg unavailable");
+            return;
+        }
+        let directory = tempfile::tempdir().expect("temporary threading artifact");
+        let path = directory.path().join("thread-grant.mp4");
         let policy = service::ExportExecutionResourcePolicy {
             ffmpeg_filter_threads: 2,
+            ffmpeg_codec_threads: 2,
             ..service::ExportExecutionResourcePolicy::default()
         };
+        let mut command = mondrian_media::ffmpeg_command().expect("admit threading encoder");
+        command.args(["-y", "-hide_banner", "-loglevel", "info"]);
         super::apply_external_filter_thread_args(&mut command, policy);
-        let arguments = command
-            .get_args()
-            .map(|argument| argument.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            arguments,
-            ["-filter_threads", "2", "-filter_complex_threads", "2"]
+        super::apply_external_codec_thread_args(&mut command, policy);
+        command.args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=30:duration=0.1",
+        ]);
+        super::apply_external_codec_thread_args(&mut command, policy);
+        command.args([
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=sample_rate=48000:channel_layout=stereo",
+        ]);
+        super::apply_external_codec_thread_args(&mut command, policy);
+        command.args([
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-shortest",
+        ]);
+        let encoded = command.arg(&path).output().expect("run threading encoder");
+        let stderr = String::from_utf8_lossy(&encoded.stderr);
+        assert!(encoded.status.success(), "{stderr}");
+        // Observe the actual codec, not just the requested CLI argument. A
+        // threads option attached only to an input leaves x264's output pool
+        // at its topology-derived default instead of this frozen grant.
+        assert!(
+            stderr.contains("threads=2 "),
+            "missing observed x264 thread grant: {stderr}"
+        );
+        let mut verify = mondrian_media::ffmpeg_command().expect("admit independent full decode");
+        super::apply_external_filter_thread_args(&mut verify, policy);
+        super::apply_external_codec_thread_args(&mut verify, policy);
+        verify.arg("-hide_banner").arg("-loglevel").arg("error").arg("-i").arg(&path);
+        super::apply_external_codec_thread_args(&mut verify, policy);
+        let decoded = verify
+            .args(["-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-"])
+            .output()
+            .expect("full video/audio decode");
+        assert!(
+            decoded.status.success(),
+            "{}",
+            String::from_utf8_lossy(&decoded.stderr)
         );
     }
 
