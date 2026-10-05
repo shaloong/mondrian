@@ -3656,3 +3656,24 @@ Real Inspector and audio EventRouter tests compare live projections to rebuilt
 owner models at both ends, after moving away, and after cancellation or single
 Undo/Redo. This does not qualify physical precision or native output for this
 subsequent source change.
+
+### Temporal curve rulers
+
+Inspector numeric curves and Mixer automation curves supply their existing exact
+owner interval to CurveEditor::with_time_axis. The widget reserves a value gutter
+and a seconds gutter in the same geometry used by painting and hit testing.
+Spacing comes from Theme spacing and metadata typography; layout bounds limit
+ruler reservation so narrow panels retain an editable plot. Labels use measured
+text widths and skip overlaps rather than truncate numeric content. Viewport
+zoom and pan update both axes without an author edit. Values retain absolute
+f64 units; fixed-value parameters display one actual value. Scientific labels
+remain finite at f64 extremes. Owner-time tick arithmetic uses checked rational
+operations; decimal seconds are display rounding only. When an extreme owner
+origin loses its visible duration in floating conversion, labels use exact
+rational time instead. Unrepresentable checked ticks are omitted.
+
+CurveEditor::plot_bounds and point_position expose the actual UI projection for
+routing tests. Actual Inspector and Mixer tests target authored points rather
+than assume the full widget center is a key. Transfer curves retain their
+normalized plot without temporal rulers. No project schema, author coordinates,
+Undo interpretation or renderer evaluation changes.

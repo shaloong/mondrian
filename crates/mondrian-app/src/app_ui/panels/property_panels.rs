@@ -1827,6 +1827,7 @@ pub(super) fn audio_automation_curve_control(
     let preview_action = pending_action.clone();
     let ids = model.keys.iter().map(|key| key.keyframe.as_ref().map(|key| key.id)).collect();
     let editor = CurveEditor::with_author_points(model.points(), model.value_axis)
+        .with_time_axis(model.viewport.range)
         .with_frame_time_step(model.frame_time_step)
         .with_keyboard_help(
             localizer.text("curve-editor-name"),
@@ -2642,6 +2643,7 @@ fn numeric_curve_editor(
     let preview_action = pending_action.clone();
     let ids = model.keys.iter().map(|key| key.keyframe_id).collect();
     let editor = CurveEditor::with_author_points(points, model.value_axis)
+        .with_time_axis(model.owner_range)
         .with_frame_time_step(model.frame_time_step)
         .with_keyboard_help(
             localizer.text("curve-editor-name"),
@@ -3878,10 +3880,15 @@ mod temporal_handle_tests {
             |_, _, _| None,
         );
         editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let plot = editor
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .expect("curve")
+            .plot_bounds();
         let screen = |point: CurvePoint| {
             Point::new(
-                10.0 + point.x * 200.0,
-                (10.0 + (1.0 - point.y) * 84.0) as f32,
+                plot.x + point.x * plot.width,
+                plot.y + ((1.0 - point.y) * f64::from(plot.height)) as f32,
             )
         };
         let mut router = EventRouter::new(editor.id());
@@ -3997,8 +4004,13 @@ mod temporal_handle_tests {
         let (mut state, selection, model, id) = temporal_curve_fixture(true);
         let original = state.active_sequence().expect("before").clone();
         let mut editor = fixture_curve_editor(selection, &model);
+        let plot = editor
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .expect("curve")
+            .plot_bounds();
         let mut router = EventRouter::new(editor.id());
-        let center = Point::new(110.0, 52.0);
+        let center = Point::new(plot.x + plot.width * 0.5, plot.y + plot.height * 0.5);
         for event in [
             UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
             UiEvent::MouseWheel {
@@ -4017,7 +4029,10 @@ mod temporal_handle_tests {
                 modifiers: Modifiers::none(),
             },
             UiEvent::MouseMove {
-                position: Point::new(130.0, 42.0),
+                position: Point::new(
+                    plot.x + plot.width * 0.6,
+                    plot.y + plot.height * (32.0 / 84.0),
+                ),
                 modifiers: Modifiers::none(),
             },
             UiEvent::MouseWheel {
@@ -4026,7 +4041,10 @@ mod temporal_handle_tests {
                 modifiers: Modifiers::ctrl(),
             },
             UiEvent::MouseUp {
-                position: Point::new(130.0, 42.0),
+                position: Point::new(
+                    plot.x + plot.width * 0.6,
+                    plot.y + plot.height * (32.0 / 84.0),
+                ),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -4310,14 +4328,19 @@ mod temporal_handle_tests {
             let before = state.active_sequence().expect("before").clone();
             let mut editor = fixture_curve_editor(selection, &model);
             let mut router = EventRouter::new(editor.id());
+            let plot = editor
+                .as_any()
+                .and_then(|any| any.downcast_ref::<CurveEditor>())
+                .expect("curve")
+                .plot_bounds();
             let point = if insertion {
                 CurvePoint::new(0.25, 0.7)
             } else {
                 model.keys[1].point
             };
             let position = Point::new(
-                10.0 + point.x * 200.0,
-                (10.0 + (1.0 - point.y) * 84.0) as f32,
+                plot.x + point.x * plot.width,
+                plot.y + ((1.0 - point.y) * f64::from(plot.height)) as f32,
             );
             for event in [
                 UiEvent::MouseDown {
@@ -4418,11 +4441,16 @@ mod temporal_handle_tests {
             let before = state.active_sequence().expect("before").clone();
             assert!(model.keys.iter().all(|key| key.keyframe_id.is_none()));
             let mut editor = fixture_curve_editor(selection, &model);
+            let plot = editor
+                .as_any()
+                .and_then(|any| any.downcast_ref::<CurveEditor>())
+                .expect("curve")
+                .plot_bounds();
             let mut router = EventRouter::new(editor.id());
             let point = model.keys[0].point;
             let origin = Point::new(
-                10.0 + point.x * 200.0,
-                (10.0 + (1.0 - point.y) * 84.0) as f32,
+                plot.x + point.x * plot.width,
+                plot.y + ((1.0 - point.y) * f64::from(plot.height)) as f32,
             );
             route_temporal(
                 &mut editor,
@@ -4567,8 +4595,13 @@ mod temporal_handle_tests {
                     Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs).expect("locale");
                 let mut widget = audio_automation_curve_control(&model, &localizer);
                 widget.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+                let plot = widget
+                    .as_any()
+                    .and_then(|any| any.downcast_ref::<CurveEditor>())
+                    .expect("curve")
+                    .plot_bounds();
                 let mut router = EventRouter::new(widget.id());
-                let center = Point::new(110.0, 52.0);
+                let center = Point::new(plot.x + plot.width * 0.5, plot.y + plot.height * 0.5);
                 route_temporal(
                     widget.as_mut(),
                     &mut router,
@@ -4579,7 +4612,10 @@ mod temporal_handle_tests {
                         modifiers: Modifiers::none(),
                     },
                 );
-                let boundary = Point::new(if at_end { 210.0 } else { 10.0 }, 52.0);
+                let boundary = Point::new(
+                    plot.x + if at_end { plot.width } else { 0.0 },
+                    plot.y + plot.height * 0.5,
+                );
                 for position in [boundary, center, boundary] {
                     route_temporal(
                         widget.as_mut(),
@@ -4689,8 +4725,13 @@ mod temporal_handle_tests {
             Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs).expect("locale");
         let mut editor = audio_automation_curve_control(&model, &localizer);
         editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let plot = editor
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .expect("curve")
+            .plot_bounds();
         let mut router = EventRouter::new(editor.id());
-        let position = Point::new(60.0, 52.0);
+        let position = Point::new(plot.x + plot.width * 0.25, plot.y + plot.height * 0.5);
         for event in [
             UiEvent::MouseDown {
                 position,
@@ -5047,11 +5088,16 @@ mod temporal_handle_tests {
                 Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs).expect("locale");
             let mut widget = audio_automation_curve_control(&model, &locale);
             widget.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+            let plot = widget
+                .as_any()
+                .and_then(|any| any.downcast_ref::<CurveEditor>())
+                .expect("curve")
+                .plot_bounds();
             let screen = |point: CurvePoint| {
                 Point::new(
-                    10.0 + 200.0 * point.x,
-                    (10.0
-                        + 84.0
+                    plot.x + plot.width * point.x,
+                    (f64::from(plot.y)
+                        + f64::from(plot.height)
                             * (1.0
                                 - model
                                     .value_axis
@@ -5197,10 +5243,15 @@ mod temporal_handle_tests {
                 |_, _, _| None,
             );
             editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+            let plot = editor
+                .as_any()
+                .and_then(|any| any.downcast_ref::<CurveEditor>())
+                .expect("curve")
+                .plot_bounds();
             let screen = |point: CurvePoint| {
                 Point::new(
-                    10.0 + point.x * 200.0,
-                    (10.0 + (1.0 - point.y) * 84.0) as f32,
+                    plot.x + point.x * plot.width,
+                    plot.y + ((1.0 - point.y) * f64::from(plot.height)) as f32,
                 )
             };
             let mut router = EventRouter::new(editor.id());

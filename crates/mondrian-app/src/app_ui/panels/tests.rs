@@ -8893,6 +8893,17 @@ fn inspector_dense_curve_reordering_preserves_exact_steps_and_durable_history() 
         let mut tree = WidgetTreeView::new(&mut panel);
         let curve = tree.get_mut(id).expect("curve");
         curve.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let plot = curve
+            .as_any()
+            .and_then(|any| any.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+            .expect("curve")
+            .plot_bounds();
+        let screen = |x: f32, y: f32| {
+            Point::new(
+                plot.x + plot.width * (x - 10.0) / 200.0,
+                plot.y + plot.height * (y - 10.0) / 84.0,
+            )
+        };
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
         let mut focus = DummyFocus;
@@ -8906,7 +8917,7 @@ fn inspector_dense_curve_reordering_preserves_exact_steps_and_durable_history() 
             &mut requests,
             &dispatch,
         );
-        let center = Point::new(110.0, 52.0);
+        let center = screen(110.0, 52.0);
         if collapsed {
             assert!(
                 editor(curve).points()[1..4].iter().all(|point| point.x == 0.5),
@@ -9191,6 +9202,17 @@ fn inspector_crossed_curve_escape_restores_author_and_projected_identity_order()
         let mut tree = WidgetTreeView::new(&mut panel);
         let curve = tree.get_mut(id).expect("curve");
         curve.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let plot = curve
+            .as_any()
+            .and_then(|any| any.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+            .expect("curve")
+            .plot_bounds();
+        let screen = |x: f32, y: f32| {
+            Point::new(
+                plot.x + plot.width * (x - 10.0) / 200.0,
+                plot.y + plot.height * (y - 10.0) / 84.0,
+            )
+        };
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
         let mut focus = DummyFocus;
@@ -9204,8 +9226,8 @@ fn inspector_crossed_curve_escape_restores_author_and_projected_identity_order()
             &mut requests,
             &dispatch,
         );
-        let center = Point::new(110.0, 52.0);
-        let destination = Point::new(if collision { 185.0 } else { 130.0 }, 52.0);
+        let center = screen(110.0, 52.0);
+        let destination = screen(if collision { 185.0 } else { 130.0 }, 52.0);
         let origin_points = editor(curve).points().to_vec();
         let targets = |curve: &dyn Widget| {
             (0..editor(curve).points().len())
@@ -9255,7 +9277,7 @@ fn inspector_crossed_curve_escape_restores_author_and_projected_identity_order()
             let admitted_targets = targets(curve);
             curve.event(
                 &UiEvent::MouseMove {
-                    position: Point::new(160.0, 52.0),
+                    position: screen(160.0, 52.0),
                     modifiers: Modifiers::none(),
                 },
                 &mut ctx,
@@ -9276,7 +9298,7 @@ fn inspector_crossed_curve_escape_restores_author_and_projected_identity_order()
             );
             curve.event(
                 &UiEvent::MouseMove {
-                    position: Point::new(170.0, 52.0),
+                    position: screen(170.0, 52.0),
                     modifiers: Modifiers::none(),
                 },
                 &mut ctx,
@@ -9426,6 +9448,17 @@ fn inspector_boundary_key_preview_matches_canonical_owner_model() {
         let mut tree = WidgetTreeView::new(&mut panel);
         let curve = tree.get_mut(id).expect("curve");
         curve.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let plot = curve
+            .as_any()
+            .and_then(|any| any.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+            .expect("curve")
+            .plot_bounds();
+        let screen = |x: f32, y: f32| {
+            Point::new(
+                plot.x + plot.width * (x - 10.0) / 200.0,
+                plot.y + plot.height * (y - 10.0) / 84.0,
+            )
+        };
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
         let mut focus = DummyFocus;
@@ -9439,7 +9472,7 @@ fn inspector_boundary_key_preview_matches_canonical_owner_model() {
             &mut requests,
             &dispatch,
         );
-        let center = Point::new(110.0, 52.0);
+        let center = screen(110.0, 52.0);
         curve.event(
             &UiEvent::MouseDown {
                 position: center,
@@ -9450,7 +9483,7 @@ fn inspector_boundary_key_preview_matches_canonical_owner_model() {
         );
         curve.event(
             &UiEvent::MouseMove {
-                position: Point::new(if at_end { 210.0 } else { 10.0 }, 52.0),
+                position: screen(if at_end { 210.0 } else { 10.0 }, 52.0),
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
@@ -9510,7 +9543,7 @@ fn inspector_boundary_key_preview_matches_canonical_owner_model() {
         );
         curve.event(
             &UiEvent::MouseMove {
-                position: Point::new(if at_end { 210.0 } else { 10.0 }, 52.0),
+                position: screen(if at_end { 210.0 } else { 10.0 }, 52.0),
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
@@ -9640,6 +9673,17 @@ fn effect_curve_rejected_native_float_preview_preserves_geometry_and_author_hist
     let mut tree = WidgetTreeView::new(&mut panel);
     let curve = tree.get_mut(id).expect("curve");
     curve.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+    let plot = curve
+        .as_any()
+        .and_then(|any| any.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+        .expect("curve")
+        .plot_bounds();
+    let screen = |x: f32, y: f32| {
+        Point::new(
+            plot.x + plot.width * (x - 10.0) / 200.0,
+            plot.y + plot.height * (y - 10.0) / 84.0,
+        )
+    };
     let actions = RefCell::new(Vec::new());
     let dispatch = |action| actions.borrow_mut().push(action);
     let mut focus = DummyFocus;
@@ -9653,7 +9697,7 @@ fn effect_curve_rejected_native_float_preview_preserves_geometry_and_author_hist
         &mut requests,
         &dispatch,
     );
-    let start = Point::new(110.0, 52.0);
+    let start = screen(110.0, 52.0);
     curve.event(
         &UiEvent::MouseDown {
             position: start,
@@ -9664,7 +9708,7 @@ fn effect_curve_rejected_native_float_preview_preserves_geometry_and_author_hist
     );
     curve.event(
         &UiEvent::MouseMove {
-            position: Point::new(120.0, 52.0),
+            position: screen(120.0, 52.0),
             modifiers: Modifiers::none(),
         },
         &mut ctx,
@@ -9677,7 +9721,7 @@ fn effect_curve_rejected_native_float_preview_preserves_geometry_and_author_hist
     assert!(!admitted.author_state_eq_ignoring_revision(&original));
     curve.event(
         &UiEvent::MouseMove {
-            position: Point::new(120.0, 42.0),
+            position: screen(120.0, 42.0),
             modifiers: Modifiers::none(),
         },
         &mut ctx,
@@ -9698,7 +9742,7 @@ fn effect_curve_rejected_native_float_preview_preserves_geometry_and_author_hist
         .author_state_eq_ignoring_revision(&admitted));
     curve.event(
         &UiEvent::MouseUp {
-            position: Point::new(120.0, 42.0),
+            position: screen(120.0, 42.0),
             button: MouseButton::Left,
             modifiers: Modifiers::none(),
         },
@@ -10077,6 +10121,17 @@ fn assert_fixed_curve_input_constraint(model: &InspectorPanelModel) {
         let mut tree = WidgetTreeView::new(&mut panel);
         let curve = tree.get_mut(id).expect("fixed curve route");
         curve.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let plot = curve
+            .as_any()
+            .and_then(|any| any.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+            .expect("curve")
+            .plot_bounds();
+        let screen = |x: f32, y: f32| {
+            Point::new(
+                plot.x + plot.width * (x - 10.0) / 200.0,
+                plot.y + plot.height * (y - 10.0) / 84.0,
+            )
+        };
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
         let mut focus = DummyFocus;
@@ -10091,7 +10146,7 @@ fn assert_fixed_curve_input_constraint(model: &InspectorPanelModel) {
             &dispatch,
         );
         let origin = editor(curve).points()[1];
-        let grab = Point::new(10.0 + 200.0 * origin.x, 52.0);
+        let grab = screen(10.0 + 200.0 * origin.x, 52.0);
         match input {
             0 => {
                 curve.event(
@@ -10151,7 +10206,7 @@ fn assert_fixed_curve_input_constraint(model: &InspectorPanelModel) {
             _ => {
                 curve.event(
                     &UiEvent::MouseDown {
-                        position: Point::new(160.0, 27.0),
+                        position: screen(160.0, 27.0),
                         button: MouseButton::Left,
                         modifiers: Modifiers::none(),
                     },

@@ -5,6 +5,7 @@
 //! representation and commit mutations outside the widget.
 
 mod model;
+mod rulers;
 
 use model::{constrained_point, normalize_points, CurveGeometry, CurvePointSpacing, CurveViewport};
 use mondrian_editor_state::Action;
@@ -344,6 +345,8 @@ pub struct CurveEditor {
     accessible_name: Option<String>,
     keyboard_help: Option<String>,
     frame_time_step: Option<mondrian_core::TimelineTime>,
+    time_axis: Option<mondrian_core::TimelineTimeRange>,
+    ruler_insets: (f32, f32),
     bounds: Rect,
     viewport: CurveViewport,
     panning: Option<ViewportDrag>,
@@ -394,6 +397,23 @@ impl CurveEditor {
         Self::from_points(points, None)
     }
 
+    /// Show owner-domain seconds and absolute value rulers for a temporal curve.
+    /// The interval is a display projection; authoring remains in the domain adapter.
+    pub fn with_time_axis(mut self, range: mondrian_core::TimelineTimeRange) -> Self {
+        self.time_axis = Some(range);
+        self
+    }
+
+    /// Plot bounds after reserving ruler space, in widget screen coordinates.
+    pub fn plot_bounds(&self) -> Rect {
+        self.plot_rect()
+    }
+
+    /// Project a displayed curve coordinate into the current screen viewport.
+    pub fn point_position(&self, point: CurvePoint) -> Point {
+        self.to_screen(point)
+    }
+
     /// Create a temporal curve with absolute f64 author values and a soft initial view.
     pub fn with_author_points(points: Vec<CurvePoint>, axis: CurveValueAxis) -> Self {
         Self::from_points(points, Some(axis))
@@ -406,6 +426,8 @@ impl CurveEditor {
             accessible_name: None,
             keyboard_help: None,
             frame_time_step: None,
+            time_axis: None,
+            ruler_insets: (0.0, 0.0),
             bounds: Rect::ZERO,
             viewport: value_axis.map_or_else(CurveViewport::default, |axis| {
                 CurveViewport::with_value_range(axis.initial_range())
@@ -1095,7 +1117,7 @@ impl CurveEditor {
     }
 
     fn geometry(&self) -> CurveGeometry {
-        CurveGeometry::new(self.bounds, self.viewport)
+        CurveGeometry::new(self.bounds, self.viewport).with_ruler_insets(self.ruler_insets)
     }
 
     fn plot_rect(&self) -> Rect {
@@ -1922,6 +1944,15 @@ impl Widget for CurveEditor {
 
     fn layout(&mut self, bounds: Rect) {
         self.bounds = bounds;
+        self.ruler_insets = if self.time_axis.is_some() {
+            let theme = mondrian_ui_theme::current_theme();
+            (
+                theme.spacing.curve_value_ruler_width,
+                theme.typography.metadata.line_height + theme.spacing.sm,
+            )
+        } else {
+            (0.0, 0.0)
+        };
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
@@ -2286,6 +2317,7 @@ impl Widget for CurveEditor {
             );
         }
 
+        self.paint_rulers(ctx);
         ctx.encoder.push_clip(plot);
         for tangent in self
             .tangents
@@ -2409,6 +2441,7 @@ mod tests {
     struct RecordingEncoder {
         rects: Vec<Rect>,
         lines: usize,
+        texts: Vec<(String, f32, Point)>,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
@@ -2424,7 +2457,9 @@ mod tests {
             self.lines += 1;
         }
 
-        fn draw_text(&mut self, _text: &str, _font_size: f32, _position: Point, _color: Color) {}
+        fn draw_text(&mut self, text: &str, font_size: f32, position: Point, _color: Color) {
+            self.texts.push((text.into(), font_size, position));
+        }
 
         fn push_translate(&mut self, _offset: glam::Vec2) {}
 
@@ -5792,6 +5827,87 @@ mod tests {
         assert_eq!(result, EventResult::Ignored);
         assert_eq!(editor.points().len(), 2);
         assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn temporal_rulers_reserve_plot_space_and_paint_readable_owner_units() {
+        let range = mondrian_core::TimelineTimeRange::new(
+            mondrian_core::TimelineTime::new(10, 1).expect("origin"),
+            mondrian_core::TimelineTime::new(2, 1).expect("duration"),
+        )
+        .expect("range");
+        let mut editor = CurveEditor::with_author_points(
+            vec![CurvePoint::new(0.0, 20.0), CurvePoint::new(1.0, 80.0)],
+            CurveValueAxis::new(
+                mondrian_core::automation::ParameterNumericRange::new(20.0, 80.0).expect("soft"),
+                mondrian_core::automation::ParameterNumericRange::new(0.0, 100.0).expect("hard"),
+                Some(1.0),
+            )
+            .expect("axis"),
+        )
+        .with_time_axis(range);
+        let theme = ThemePreset::Dark.build();
+        for bounds in [
+            Rect::new(0.0, 0.0, 220.0, 104.0),
+            Rect::new(7.0, 9.0, 80.0, 45.0),
+        ] {
+            editor.layout(bounds);
+            let plot = editor.plot_bounds();
+            assert!(plot.x > bounds.x + PADDING);
+            assert!(plot.y + plot.height < bounds.y + bounds.height - PADDING);
+            let mut encoder = RecordingEncoder::default();
+            editor.paint(&mut PaintContext {
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect: bounds,
+            });
+            for (text, font, point) in &encoder.texts {
+                let (width, _) = crate::text_metrics::measure_single_line(text, *font);
+                assert!(point.x >= bounds.x && point.x + width <= bounds.x + bounds.width);
+                assert!(!plot.contains(*point), "labels cannot cover editable keys");
+            }
+            if bounds.width > 100.0 {
+                assert!(encoder.texts.iter().any(|(text, _, _)| text == "10s"));
+                assert!(encoder.texts.iter().any(|(text, _, _)| text == "80"));
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_value_and_fractional_origin_rulers_do_not_invent_author_coordinates() {
+        use mondrian_core::automation::ParameterNumericRange;
+        use mondrian_core::{TimelineTime, TimelineTimeRange};
+        let axis = CurveValueAxis::new(
+            ParameterNumericRange::new(42.5, 42.5).expect("soft"),
+            ParameterNumericRange::new(42.5, 42.5).expect("hard"),
+            None,
+        )
+        .expect("axis");
+        let mut editor = CurveEditor::with_author_points(
+            vec![CurvePoint::new(0.0, 42.5), CurvePoint::new(1.0, 42.5)],
+            axis,
+        )
+        .with_time_axis(
+            TimelineTimeRange::new(TimelineTime::new(1, 30).expect("origin"), TimelineTime::ONE)
+                .expect("range"),
+        );
+        editor.layout(Rect::new(0.0, 0.0, 300.0, 120.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        editor.paint(&mut PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: editor.bounds,
+        });
+        let values = encoder
+            .texts
+            .iter()
+            .filter(|(text, _, _)| !text.ends_with('s'))
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].0, "42.5");
+        assert!(encoder.texts.iter().any(|(text, _, _)| text == "0.033s"));
+        assert!(editor.points.iter().all(|point| point.y == 42.5));
     }
 
     #[test]

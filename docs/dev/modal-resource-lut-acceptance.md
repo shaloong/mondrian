@@ -236,7 +236,42 @@ qualification, not macOS or general third-party plugin compatibility.
 NVENC uses `cpu_rawvideo_pipe`; this does not establish zero-copy transport.
 
 Full professional curve interaction, Float pointer primitive-range admission,
-a dedicated real-owner handle overflow scenario, rulers/multi-key editing,
+a dedicated real-owner handle overflow scenario, multi-key editing and long-span
+exact pointer input,
 a dedicated out-of-soft-range UI-edit native output scenario, plugin author
 writes and vendor/bus/platform/localization matrices remain open. The overall
 NLE goal remains active.
+
+
+## Temporal ruler continuation (2026-10-06)
+
+Inspector numeric and Mixer audio curves now display owner-domain seconds and
+absolute author value rulers. Both use the same plot geometry as input routing;
+zoom/pan change labels only. Theme tokens reserve the gutters. Measured labels
+avoid overlap and numeric truncation in narrow panels. Fixed parameters show
+one actual value. Scientific formatting stays finite at f64 extremes; extreme
+origins that lose visible duration in f64 display use exact rational labels.
+
+Final verification on this production source:
+
+- Curve widget/model/ruler module: **89 passed**, zero failed or ignored.
+- App library with all features: **2554 passed**, zero failed, **62 ignored**;
+  309.79 seconds. Includes modal Tab/focus, pending resource drafts, atomic
+  rejection, constrained Bezier boundaries/cancellation, Undo/Redo and save/reopen.
+- `resource_lut_draft_commit_undo_save_reopen_executes_real_cube` passed: actual
+  project persistence and real cube execution through the resource author path.
+- Strict workspace/all-targets/all-features Clippy passed in 2m33s; fmt and diff
+  checks passed.
+
+The initial curve App run had two failing pointer fixtures: full-widget centers
+became empty plot space after reserving rulers. Both now target the actual
+middle author key, retaining original complete-state and history assertions.
+The full regression passed both, and retains the pre-existing full transfer
+capacity and audio lifecycle tests. A mistaken broad test replacement was
+caught in diff review, restored from HEAD before App validation, and replaced
+with three bounded edits. Its interrupted run is not qualification.
+
+No fresh native golden executable was built for this UI source. The historical
+97e native/SDK/GPU/encoded evidence above remains identified with that source.
+This continuation does not close the overall NLE goal or the remaining plugin,
+platform, multi-key, pointer precision and native qualification scope.

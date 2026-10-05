@@ -197,15 +197,29 @@ impl CurveViewport {
 pub(super) struct CurveGeometry {
     bounds: Rect,
     viewport: CurveViewport,
+    ruler_insets: (f32, f32),
 }
 
 impl CurveGeometry {
     pub(super) fn new(bounds: Rect, viewport: CurveViewport) -> Self {
-        Self { bounds, viewport }
+        Self { bounds, viewport, ruler_insets: (0.0, 0.0) }
+    }
+
+    pub(super) fn with_ruler_insets(mut self, insets: (f32, f32)) -> Self {
+        self.ruler_insets = insets;
+        self
     }
 
     pub(super) fn plot_rect(&self) -> Rect {
-        self.bounds.inset(PADDING, PADDING)
+        let inner = self.bounds.inset(PADDING, PADDING);
+        let left = self.ruler_insets.0.min(inner.width * 0.35).max(0.0);
+        let bottom = self.ruler_insets.1.min(inner.height * 0.35).max(0.0);
+        Rect::new(
+            inner.x + left,
+            inner.y,
+            (inner.width - left).max(0.0),
+            (inner.height - bottom).max(0.0),
+        )
     }
 
     pub(super) fn curve_to_screen(&self, point: CurvePoint) -> Point {

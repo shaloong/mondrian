@@ -5548,21 +5548,13 @@ mod tests {
         let point = {
             let tree = WidgetTreeView::new(host.active_root_mut());
             let curve = tree.get(curve_id).expect("curve");
-            let mut min = Point::new(f32::MAX, f32::MAX);
-            let mut max = Point::new(0.0, 0.0);
-            for y in (0..1600).step_by(2) {
-                for x in (0..1280).step_by(2) {
-                    let point = Point::new(x as f32, y as f32);
-                    if curve.hit_test(point) {
-                        min.x = min.x.min(point.x);
-                        min.y = min.y.min(point.y);
-                        max.x = max.x.max(point.x);
-                        max.y = max.y.max(point.y);
-                    }
-                }
-            }
-            assert!(min.x < max.x && min.y < max.y, "visible Mixer curve");
-            Point::new((min.x + max.x) * 0.5, (min.y + max.y) * 0.5)
+            let editor = curve
+                .as_any()
+                .and_then(|any| any.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+                .expect("actual curve geometry");
+            let point = editor.point_position(editor.points()[1]);
+            assert!(curve.hit_test(point), "the authored middle key is visible");
+            point
         };
         let pending = PendingUiActions::default();
         let dispatch = |action| pending.push(action);
@@ -5801,21 +5793,13 @@ mod tests {
         let point = {
             let tree = WidgetTreeView::new(host.active_root_mut());
             let curve = tree.get(curve_id).expect("curve");
-            let mut min = Point::new(f32::MAX, f32::MAX);
-            let mut max = Point::new(0.0, 0.0);
-            for y in (0..1600).step_by(2) {
-                for x in (0..1280).step_by(2) {
-                    let point = Point::new(x as f32, y as f32);
-                    if curve.hit_test(point) {
-                        min.x = min.x.min(point.x);
-                        min.y = min.y.min(point.y);
-                        max.x = max.x.max(point.x);
-                        max.y = max.y.max(point.y);
-                    }
-                }
-            }
-            assert!(min.x < max.x && min.y < max.y);
-            Point::new((min.x + max.x) * 0.5, (min.y + max.y) * 0.5)
+            let editor = curve
+                .as_any()
+                .and_then(|any| any.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+                .expect("actual curve geometry");
+            let point = editor.point_position(editor.points()[1]);
+            assert!(curve.hit_test(point), "the authored middle key is visible");
+            point
         };
         let pending = PendingUiActions::default();
         let dispatch = |action| pending.push(action);
@@ -6073,21 +6057,13 @@ mod tests {
             let point = {
                 let tree = WidgetTreeView::new(host.active_root_mut());
                 let curve = tree.get(curve_id).expect("curve");
-                let mut min = Point::new(f32::MAX, f32::MAX);
-                let mut max = Point::new(0.0, 0.0);
-                for y in (0..1600).step_by(2) {
-                    for x in (0..1280).step_by(2) {
-                        let point = Point::new(x as f32, y as f32);
-                        if curve.hit_test(point) {
-                            min.x = min.x.min(point.x);
-                            min.y = min.y.min(point.y);
-                            max.x = max.x.max(point.x);
-                            max.y = max.y.max(point.y);
-                        }
-                    }
-                }
-                assert!(min.x < max.x && min.y < max.y);
-                Point::new((min.x + max.x) * 0.5, (min.y + max.y) * 0.5)
+                let editor = curve
+                    .as_any()
+                    .and_then(|any| any.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+                    .expect("actual curve geometry");
+                let point = editor.point_position(editor.points()[1]);
+                assert!(curve.hit_test(point), "the authored middle key is visible");
+                point
             };
             let pending = PendingUiActions::default();
             let dispatch = |action| pending.push(action);
