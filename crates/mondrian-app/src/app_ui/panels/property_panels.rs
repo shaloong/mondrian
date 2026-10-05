@@ -3952,6 +3952,101 @@ mod temporal_handle_tests {
     }
 
     #[test]
+    fn zoomed_temporal_pointer_edits_and_frame_nudge_share_author_history() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let (mut state, selection, model, id) = temporal_curve_fixture(true);
+        let original = state.active_sequence().expect("before").clone();
+        let mut editor = fixture_curve_editor(selection, &model);
+        let mut router = EventRouter::new(editor.id());
+        let center = Point::new(110.0, 52.0);
+        for event in [
+            UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+            UiEvent::MouseWheel {
+                position: center,
+                delta: -20.0,
+                modifiers: Modifiers::ctrl(),
+            },
+            UiEvent::MouseWheel {
+                position: center,
+                delta: -20.0,
+                modifiers: Modifiers { shift: true, ..Modifiers::ctrl() },
+            },
+            UiEvent::MouseDown {
+                position: center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseMove {
+                position: Point::new(130.0, 42.0),
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseWheel {
+                position: center,
+                delta: -100.0,
+                modifiers: Modifiers::ctrl(),
+            },
+            UiEvent::MouseUp {
+                position: Point::new(130.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            route_temporal(&mut editor, &mut router, &mut state, event);
+        }
+        assert!(router.captured().is_none());
+        let key = |state: &AppState| {
+            state
+                .active_sequence()
+                .expect("sequence")
+                .find_clip(selection.clip_id)
+                .expect("clip")
+                .intrinsic_parameter_bag()
+                .property(Transform2D::OPACITY_PATH)
+                .expect("opacity")
+                .keyframe_by_id(id)
+                .expect("key")
+                .clone()
+        };
+        let pointer = key(&state);
+        assert!(
+            (pointer.time.to_f64() - (0.5 + 0.1 * (-0.2_f64).exp())).abs() < 0.000001,
+            "zoomed pixels lower to author time"
+        );
+        assert!(
+            (pointer.value.as_f64().expect("value") - (0.5 + 10.0 / 84.0 * (-0.2_f64).exp())).abs()
+                < 0.000001,
+            "zoomed pixels lower to author value"
+        );
+        route_temporal(
+            &mut editor,
+            &mut router,
+            &mut state,
+            UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+        );
+        let nudged = key(&state);
+        assert_eq!(
+            nudged.time,
+            pointer.time.checked_add(model.frame_time_step).expect("exact frame")
+        );
+        assert_eq!(nudged.value, pointer.value);
+        let accepted = state.active_sequence().expect("accepted").clone();
+        assert!(state.undo_timeline().expect("Undo frame"));
+        assert_eq!(key(&state), pointer);
+        assert!(state.undo_timeline().expect("Undo pointer"));
+        assert!(state
+            .active_sequence()
+            .expect("restored")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(!state.can_undo_action());
+        assert!(state.redo_timeline().expect("Redo pointer"));
+        assert!(state.redo_timeline().expect("Redo frame"));
+        assert!(state
+            .active_sequence()
+            .expect("redo")
+            .author_state_eq_ignoring_revision(&accepted));
+    }
+
+    #[test]
     fn temporal_keyboard_time_nudge_uses_the_exact_sequence_frame_grid() {
         let _guard = crate::app_ui::test_utils::theme_test_guard();
         for rate in [

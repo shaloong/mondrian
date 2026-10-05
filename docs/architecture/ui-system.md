@@ -3462,3 +3462,35 @@ has no compatibility shim. Fractional-rate EventRouter regressions cover
 30, 30000/1001 and 24000/1001, repeated/Shift movements, unchanged values and
 three independent Undo/Redo operations. Boundary/collision and dense viewport
 admission checks do not use normalized minimum-point spacing.
+
+
+### Curve viewport interaction
+
+CurveEditor keeps time/value viewport ranges as local view state. Ctrl/Cmd wheel
+zooms time about the pointer; adding Shift zooms value. Ordinary wheel input
+continues to the surrounding scroll panel. Middle drag pans with an owned UI
+capture and no author gesture/action. Escape restores the pan origin; release
+or focus loss accepts the view. Disable or point replacement cancels pan and
+releases capture at the next routed event. Viewport state is copied through the
+existing same-owner/panel/author-session restoration seam; active captures are
+not transferable.
+
+Focused keyboard input supports Ctrl/Cmd PageUp/PageDown for time zoom (Shift
+for value), Ctrl/Cmd Shift arrows for pan, and Ctrl/Cmd 0 for the full normalized
+view. Author point/control navigation reveals offscreen selection. Viewport
+commands are contained during an author pointer draft. Exact frame nudges still
+use the sequence grid independently of view scale. Both help locales describe
+the controls; normalized transfer curves share the view interaction.
+
+Geometry, hit testing, insertion, point/control pointer deltas and painting use
+one viewport mapping. Invisible keys/controls cannot capture plot-edge clicks.
+Curve/control segments are clipped in f64 projection coordinates before screen
+f32/GPU submission; all markers stay under the plot clip. Zoom/pan ranges are
+bounded and extreme finite value selection retains a representable span.
+EventRouter author regressions verify zoomed pointer edits followed by an exact
+frame nudge, with two independent Undo/Redo operations and untouched key values
+on time-only edits. Temporal key/sample projections still clamp to the numeric soft range, unlike
+unclamped temporal controls. Full display/edit of legal values outside soft
+bounds remains unqualified and requires separating generic bounded transfer
+points from author value coordinates. Physical high-DPI/platform input, domain
+axis rulers and multi-key workflows remain separate qualification.

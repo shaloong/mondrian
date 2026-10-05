@@ -6,7 +6,7 @@
 
 mod model;
 
-use model::{constrained_point, normalize_points, CurveGeometry};
+use model::{constrained_point, normalize_points, CurveGeometry, CurveViewport};
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
@@ -224,6 +224,12 @@ struct CurvePointDrag {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct ViewportDrag {
+    origin: CurveViewport,
+    pointer_origin: Point,
+}
+
+#[derive(Debug, Clone, Copy)]
 struct TangentDrag {
     tangent: CurveTangent,
     pointer_origin: Point,
@@ -240,6 +246,7 @@ struct CurvePointMetadata {
 /// This snapshot contains no pointer capture, author draft or callbacks.
 #[derive(Debug, Clone)]
 pub struct CurveEditorViewState {
+    viewport: CurveViewport,
     view_key: String,
     id: WidgetId,
     points: Option<Vec<CurvePoint>>,
@@ -264,6 +271,8 @@ pub struct CurveEditor {
     keyboard_help: Option<String>,
     frame_time_step: Option<mondrian_core::TimelineTime>,
     bounds: Rect,
+    viewport: CurveViewport,
+    panning: Option<ViewportDrag>,
     points: Vec<CurvePoint>,
     fixed_value: Option<f32>,
     point_insertion_limit: Option<usize>,
@@ -313,6 +322,8 @@ impl CurveEditor {
             keyboard_help: None,
             frame_time_step: None,
             bounds: Rect::ZERO,
+            viewport: CurveViewport::default(),
+            panning: None,
             points: Vec::new(),
             fixed_value: None,
             point_insertion_limit: None,
@@ -533,8 +544,11 @@ impl CurveEditor {
         self.enabled = enabled;
         if !enabled {
             self.context_menu = None;
-            if self.dragging.is_some() || self.tangent_drag.is_some() {
+            if self.has_active_pointer_interaction() {
                 self.pending_capture_release = true;
+            }
+            if let Some(pan) = self.panning.take() {
+                self.viewport = pan.origin;
             }
             self.cancel_drag_state();
             self.focused = false;
@@ -549,8 +563,13 @@ impl CurveEditor {
 
     /// Replace curve points. Points are clamped and sorted by x.
     pub fn set_points(&mut self, points: Vec<CurvePoint>) {
-        if self.dragging.take().is_some() || self.tangent_drag.take().is_some() {
+        if self.has_active_pointer_interaction() {
             self.pending_capture_release = true;
+        }
+        self.dragging = None;
+        self.tangent_drag = None;
+        if let Some(pan) = self.panning.take() {
+            self.viewport = pan.origin;
         }
         self.tangents.clear();
         self.selected_tangent = None;
@@ -644,6 +663,7 @@ impl CurveEditor {
         }
         let selected = self.selected.and_then(|index| self.point_target(index));
         Some(CurveEditorViewState {
+            viewport: self.viewport,
             view_key: self.view_key.clone()?,
             id: self.id,
             points: selected
@@ -667,6 +687,7 @@ impl CurveEditor {
         {
             return false;
         }
+        self.viewport = state.viewport;
         self.id = state.id;
         self.selected = state.selected.and_then(|target| match target {
             CurvePointTarget::Keyframe(id) => self.keyframe_indices.get(&id).copied(),
@@ -718,6 +739,9 @@ impl CurveEditor {
     }
 
     fn hit_tangent(&self, position: Point) -> Option<CurveTangent> {
+        if !self.plot_rect().contains(position) {
+            return None;
+        }
         let tangent = self
             .tangents
             .iter()
@@ -725,6 +749,9 @@ impl CurveEditor {
             .copied()
             .filter(|tangent| {
                 let screen = self.to_screen(tangent.point);
+                if !self.plot_rect().contains(screen) {
+                    return false;
+                }
                 let dx = screen.x - position.x;
                 let dy = screen.y - position.y;
                 dx * dx + dy * dy <= HIT_RADIUS * HIT_RADIUS
@@ -785,7 +812,7 @@ impl CurveEditor {
     }
 
     fn geometry(&self) -> CurveGeometry {
-        CurveGeometry::new(self.bounds)
+        CurveGeometry::new(self.bounds, self.viewport)
     }
 
     fn plot_rect(&self) -> Rect {
@@ -870,6 +897,9 @@ impl CurveEditor {
             }
             self.set_display_points(points.display_points);
             self.set_tangents(points.tangents);
+            if !self.has_active_pointer_interaction() {
+                self.reveal_selection();
+            }
             ctx.request_repaint();
         }
         if let Some(callback) = &self.on_gesture
@@ -1109,6 +1139,67 @@ impl CurveEditor {
         }
     }
 
+    fn reveal_selection(&mut self) {
+        let point = self
+            .selected_tangent
+            .and_then(|(id, side)| {
+                self.tangents
+                    .iter()
+                    .find(|t| t.keyframe_id == id && t.side == side)
+                    .map(|t| t.point)
+            })
+            .or_else(|| self.selected.and_then(|index| self.points.get(index).copied()));
+        if let Some(point) = point {
+            self.viewport.reveal(point);
+        }
+    }
+
+    fn viewport_keyboard(
+        &mut self,
+        key: KeyCode,
+        modifiers: Modifiers,
+        ctx: &mut EventContext,
+    ) -> bool {
+        if ctx.focus.focused_widget() != Some(self.id)
+            || !self.focused
+            || !(modifiers.ctrl ^ modifiers.meta)
+            || modifiers.alt
+        {
+            return false;
+        }
+        let zoom = matches!(key, KeyCode::PageUp | KeyCode::PageDown);
+        let reset = key == KeyCode::Digit0 && !modifiers.shift;
+        let pan = modifiers.shift
+            && matches!(
+                key,
+                KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
+            );
+        if !zoom && !reset && !pan {
+            return false;
+        }
+        if self.has_active_pointer_interaction() {
+            return true;
+        }
+        if reset {
+            self.viewport = CurveViewport::default();
+        } else if zoom {
+            self.viewport.zoom(
+                [0.5, 0.5],
+                if key == KeyCode::PageUp { 0.8 } else { 1.25 },
+                modifiers.shift,
+            );
+        } else {
+            self.viewport.pan(match key {
+                KeyCode::Left => [-0.1, 0.0],
+                KeyCode::Right => [0.1, 0.0],
+                KeyCode::Up => [0.0, 0.1],
+                _ => [0.0, -0.1],
+            });
+        }
+        ctx.request_repaint();
+        true
+    }
+
     fn navigate_keyboard(
         &mut self,
         key: KeyCode,
@@ -1152,7 +1243,12 @@ impl CurveEditor {
         if self.points.is_empty() {
             return true;
         }
-        let before = (self.selected, self.selected_tangent, self.focus_visible);
+        let before = (
+            self.selected,
+            self.selected_tangent,
+            self.focus_visible,
+            self.viewport,
+        );
         self.focus_visible = true;
         if alt {
             if key == KeyCode::Up {
@@ -1182,7 +1278,15 @@ impl CurveEditor {
             });
             self.selected_tangent = None;
         }
-        if before != (self.selected, self.selected_tangent, self.focus_visible) {
+        self.reveal_selection();
+        if before
+            != (
+                self.selected,
+                self.selected_tangent,
+                self.focus_visible,
+                self.viewport,
+            )
+        {
             ctx.request_repaint();
         }
         true
@@ -1393,10 +1497,10 @@ impl Widget for CurveEditor {
                 return result;
             }
         }
-        if self.pending_capture_release
-            || (!self.enabled && (self.dragging.is_some() || self.tangent_drag.is_some()))
+        if self.pending_capture_release || (!self.enabled && self.has_active_pointer_interaction())
         {
             ctx.release_pointer_capture(self.id);
+            ctx.set_cursor(mondrian_ui_core::widget::CursorRequest::Default);
             self.end_gesture(true, ctx);
             self.pending_capture_release = false;
         }
@@ -1405,13 +1509,91 @@ impl Widget for CurveEditor {
             self.focus_visible = false;
             self.dragging = None;
             self.tangent_drag = None;
+            self.panning = None;
             return EventResult::Ignored;
+        }
+
+        if let Some(pan) = self.panning {
+            match event {
+                UiEvent::MouseMove { position, .. } => {
+                    let plot = self.plot_rect();
+                    self.viewport = pan.origin;
+                    if plot.width > 0.0 && plot.height > 0.0 {
+                        self.viewport.pan([
+                            -f64::from(position.x - pan.pointer_origin.x) / f64::from(plot.width),
+                            f64::from(position.y - pan.pointer_origin.y) / f64::from(plot.height),
+                        ]);
+                    }
+                    ctx.set_cursor(mondrian_ui_core::widget::CursorRequest::Grabbing);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                UiEvent::MouseUp { button: MouseButton::Middle, .. } => {
+                    self.panning = None;
+                    ctx.set_cursor(mondrian_ui_core::widget::CursorRequest::Default);
+                    ctx.release_pointer_capture(self.id);
+                    return EventResult::Handled;
+                }
+                UiEvent::KeyDown { key: KeyCode::Escape, .. } => {
+                    self.viewport = pan.origin;
+                    self.panning = None;
+                    ctx.set_cursor(mondrian_ui_core::widget::CursorRequest::Default);
+                    ctx.release_pointer_capture(self.id);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                UiEvent::FocusLost => {
+                    self.panning = None;
+                    ctx.set_cursor(mondrian_ui_core::widget::CursorRequest::Default);
+                    ctx.release_pointer_capture(self.id);
+                }
+                UiEvent::KeyDown { key: KeyCode::Tab, .. } => {}
+                UiEvent::KeyDown { .. }
+                | UiEvent::MouseDown { .. }
+                | UiEvent::MouseWheel { .. } => return EventResult::Handled,
+                _ => {}
+            }
         }
 
         if matches!(event, UiEvent::KeyDown { .. }) {
             ctx.tooltip.hide();
         }
         match event {
+            UiEvent::MouseWheel { position, delta, modifiers }
+                if self.plot_rect().contains(*position)
+                    && (modifiers.ctrl ^ modifiers.meta)
+                    && !modifiers.alt =>
+            {
+                if !self.has_active_pointer_interaction() && delta.is_finite() {
+                    let fraction = self.geometry().screen_fraction(*position);
+                    self.viewport.zoom(
+                        fraction,
+                        (f64::from(*delta).clamp(-400.0, 400.0) / 100.0).exp(),
+                        modifiers.shift,
+                    );
+                    ctx.tooltip.hide();
+                    ctx.request_repaint();
+                }
+                EventResult::Handled
+            }
+            UiEvent::MouseDown { position, button: MouseButton::Middle, .. }
+                if self.plot_rect().contains(*position) =>
+            {
+                if !self.has_active_pointer_interaction() {
+                    self.panning =
+                        Some(ViewportDrag { origin: self.viewport, pointer_origin: *position });
+                    ctx.request_pointer_capture(self.id);
+                    ctx.focus.request_focus(self.id);
+                    ctx.tooltip.hide();
+                    ctx.set_cursor(mondrian_ui_core::widget::CursorRequest::Grabbing);
+                }
+                EventResult::Handled
+            }
+            UiEvent::KeyDown { key, modifiers }
+                if self.viewport_keyboard(*key, *modifiers, ctx) =>
+            {
+                EventResult::Handled
+            }
             UiEvent::MouseDown { position, button: MouseButton::Right, .. }
                 if self.bounds.contains(*position) =>
             {
@@ -1471,13 +1653,20 @@ impl Widget for CurveEditor {
                     let plot = self.plot_rect();
                     let point = CurvePoint {
                         x: if plot.width > 0.0 {
-                            drag.tangent.point.x + (position.x - drag.pointer_origin.x) / plot.width
+                            drag.tangent.point.x
+                                + ((f64::from(position.x - drag.pointer_origin.x)
+                                    / f64::from(plot.width))
+                                    * self.viewport.time_span)
+                                    as f32
                         } else {
                             drag.tangent.point.x
                         },
                         y: if plot.height > 0.0 {
                             drag.tangent.point.y
-                                - (position.y - drag.pointer_origin.y) / plot.height
+                                - ((f64::from(position.y - drag.pointer_origin.y)
+                                    / f64::from(plot.height))
+                                    * self.viewport.value_span)
+                                    as f32
                         } else {
                             drag.tangent.point.y
                         },
@@ -1489,12 +1678,20 @@ impl Widget for CurveEditor {
                     let plot = self.plot_rect();
                     let point = CurvePoint::new(
                         if plot.width > 0.0 {
-                            drag.origin.x + (position.x - drag.pointer_origin.x) / plot.width
+                            drag.origin.x
+                                + ((f64::from(position.x - drag.pointer_origin.x)
+                                    / f64::from(plot.width))
+                                    * self.viewport.time_span)
+                                    as f32
                         } else {
                             drag.origin.x
                         },
                         if plot.height > 0.0 {
-                            drag.origin.y - (position.y - drag.pointer_origin.y) / plot.height
+                            drag.origin.y
+                                - ((f64::from(position.y - drag.pointer_origin.y)
+                                    / f64::from(plot.height))
+                                    * self.viewport.value_span)
+                                    as f32
                         } else {
                             drag.origin.y
                         },
@@ -1650,10 +1847,17 @@ impl Widget for CurveEditor {
             .iter()
             .filter(|tangent| Some(tangent.keyframe_id) == self.selected_keyframe())
         {
-            let owner = self.to_screen(self.points[self.keyframe_indices[&tangent.keyframe_id]]);
+            if let Some((owner, control)) = self.geometry().visible_segment(
+                self.points[self.keyframe_indices[&tangent.keyframe_id]],
+                tangent.point,
+            ) {
+                ctx.encoder
+                    .draw_line(owner, control, v.grid_line_width, colors.muted_foreground);
+            }
             let control = self.to_screen(tangent.point);
-            ctx.encoder
-                .draw_line(owner, control, v.grid_line_width, colors.muted_foreground);
+            if !plot.contains(control) {
+                continue;
+            }
             let radius = POINT_RADIUS;
             ctx.encoder.draw_rect(
                 Rect::new(
@@ -1670,12 +1874,11 @@ impl Widget for CurveEditor {
                 radius,
             );
         }
-        ctx.encoder.pop_clip();
         let painted_curve = self.display_points.as_deref().unwrap_or(&self.points);
         for pair in painted_curve.windows(2) {
-            let a = self.to_screen(pair[0]);
-            let b = self.to_screen(pair[1]);
-            ctx.encoder.draw_line(a, b, v.curve_line_width, curve);
+            if let Some((a, b)) = self.geometry().visible_segment(pair[0], pair[1]) {
+                ctx.encoder.draw_line(a, b, v.curve_line_width, curve);
+            }
         }
 
         for (index, point) in self.points.iter().enumerate() {
@@ -1686,6 +1889,9 @@ impl Widget for CurveEditor {
                 POINT_RADIUS
             };
             let center = self.to_screen(*point);
+            if !plot.contains(center) {
+                continue;
+            }
             let rect = Rect::new(
                 center.x - radius,
                 center.y - radius,
@@ -1706,6 +1912,7 @@ impl Widget for CurveEditor {
                 );
             }
         }
+        ctx.encoder.pop_clip();
     }
 
     fn hit_test(&self, point: Point) -> bool {
@@ -1713,7 +1920,7 @@ impl Widget for CurveEditor {
     }
 
     fn has_active_pointer_interaction(&self) -> bool {
-        self.dragging.is_some() || self.tangent_drag.is_some()
+        self.dragging.is_some() || self.tangent_drag.is_some() || self.panning.is_some()
     }
 
     fn can_focus(&self) -> bool {
@@ -1732,7 +1939,11 @@ impl Widget for CurveEditor {
             })
             .with_value(AccessibilityValue::Collection {
                 total_count: self.points.len(),
-                visible_count: self.points.len(),
+                visible_count: self
+                    .points
+                    .iter()
+                    .filter(|point| self.plot_rect().contains(self.to_screen(**point)))
+                    .count(),
                 selected_count: usize::from(self.selected.is_some()),
             });
         node.name = self.accessible_name.clone();
@@ -2103,6 +2314,249 @@ mod tests {
         editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
         editor.select(Some(1));
         editor
+    }
+
+    #[test]
+    fn viewport_pan_cancels_and_restores_across_owner_refresh_without_edits() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut editor = CurveEditor::new()
+            .with_view_key(Some("owner".into()))
+            .on_edit(curve_edit_action);
+        editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let mut focus = CurveFocus(Some(editor.id()));
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        editor.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        let zoom = UiEvent::MouseWheel {
+            position: Point::new(110.0, 52.0),
+            delta: -100.0,
+            modifiers: Modifiers::ctrl(),
+        };
+        editor.event(&zoom, &mut ctx);
+        let origin = editor.viewport;
+        let down = UiEvent::MouseDown {
+            position: Point::new(110.0, 52.0),
+            button: MouseButton::Middle,
+            modifiers: Modifiers::none(),
+        };
+        editor.event(&down, &mut ctx);
+        assert!(editor.has_active_pointer_interaction());
+        assert!(editor.view_state().is_none());
+        editor.event(
+            &UiEvent::MouseMove {
+                position: Point::new(140.0, 62.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(editor.viewport.time_start < origin.time_start);
+        assert!(editor.viewport.value_start > origin.value_start);
+        let moved = editor.viewport;
+        editor.event(&zoom, &mut ctx);
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(editor.viewport, moved);
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(editor.viewport, origin);
+        assert!(!editor.has_active_pointer_interaction());
+        editor.event(&down, &mut ctx);
+        editor.event(
+            &UiEvent::MouseMove {
+                position: Point::new(140.0, 62.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        editor.event(
+            &UiEvent::MouseUp {
+                position: Point::new(140.0, 62.0),
+                button: MouseButton::Middle,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(!editor.has_active_pointer_interaction());
+        let state = editor.view_state().expect("inactive view");
+        let mut refreshed = CurveEditor::new().with_view_key(Some("owner".into()));
+        refreshed.layout(Rect::new(20.0, 30.0, 440.0, 208.0));
+        assert!(refreshed.restore_view_state(&state));
+        assert_eq!(refreshed.viewport, editor.viewport);
+        let mut other = CurveEditor::new().with_view_key(Some("other".into()));
+        assert!(!other.restore_view_state(&state));
+        assert_eq!(other.viewport, CurveViewport::default());
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Digit0, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        assert_eq!(editor.viewport, CurveViewport::default());
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn viewport_pan_termination_releases_only_owned_capture_and_emits_no_author_events() {
+        for termination in 0..3 {
+            let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let mut editor = tangent_editor(events.clone());
+            let mut focus = CurveFocus(Some(editor.id()));
+            let mut shortcuts = DummyShortcut;
+            let mut tooltip = DummyTooltip;
+            let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &|_| {});
+            editor.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+            let origin = editor.viewport;
+            editor.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(110.0, 52.0),
+                    button: MouseButton::Middle,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            editor.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(130.0, 62.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            match termination {
+                0 => {
+                    editor.event(&UiEvent::FocusLost, &mut ctx);
+                }
+                1 => {
+                    editor.set_enabled(false);
+                    editor.event(
+                        &UiEvent::MouseMove {
+                            position: Point::new(130.0, 62.0),
+                            modifiers: Modifiers::none(),
+                        },
+                        &mut ctx,
+                    );
+                    assert_eq!(editor.viewport, origin);
+                }
+                _ => {
+                    editor.set_points(editor.points.clone());
+                    editor.event(
+                        &UiEvent::MouseMove {
+                            position: Point::new(130.0, 62.0),
+                            modifiers: Modifiers::none(),
+                        },
+                        &mut ctx,
+                    );
+                    assert_eq!(editor.viewport, origin);
+                }
+            }
+            assert!(!editor.has_active_pointer_interaction());
+            assert_eq!(
+                ctx.requests.pointer_capture,
+                Some(mondrian_ui_core::widget::PointerCaptureRequest::Release(
+                    editor.id()
+                ))
+            );
+            assert_eq!(
+                ctx.requests.cursor,
+                Some(mondrian_ui_core::widget::CursorRequest::Default)
+            );
+            assert!(
+                events.borrow().is_empty(),
+                "view capture never opens an author gesture"
+            );
+        }
+    }
+
+    #[test]
+    fn value_zoom_scales_handle_drag_and_leaves_time_exactly_unchanged() {
+        let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut editor = tangent_editor(events.clone());
+        let mut focus = CurveFocus(Some(editor.id()));
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &|_| {});
+        editor.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        editor.event(
+            &UiEvent::MouseWheel {
+                position: Point::new(110.0, 52.0),
+                delta: -100.0,
+                modifiers: Modifiers { shift: true, ..Modifiers::ctrl() },
+            },
+            &mut ctx,
+        );
+        assert_eq!(editor.viewport.time_span, 1.0);
+        let original = editor.tangents[0].point;
+        let span = editor.viewport.value_span;
+        let position = grab_tangent(&mut editor, &mut ctx);
+        let viewport = editor.viewport;
+        editor.event(
+            &UiEvent::MouseWheel {
+                position,
+                delta: -100.0,
+                modifiers: Modifiers::ctrl(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(editor.viewport, viewport, "draft projection remains stable");
+        editor.event(
+            &UiEvent::MouseMove {
+                position: Point::new(position.x, position.y - 8.4),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(editor.tangents[0].point.x, original.x);
+        assert!((f64::from(editor.tangents[0].point.y - original.y) - 0.1 * span).abs() < 0.000001);
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(editor.tangents[0].point, original);
+    }
+
+    #[test]
+    fn wheel_zoom_keeps_pointer_author_coordinate_and_creates_no_edit() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .on_edit(curve_edit_action);
+        editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let mut focus = CurveFocus(Some(editor.id()));
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        editor.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        let original = editor.points.clone();
+        let anchor = CurvePoint::new(0.25, 0.75);
+        let pointer = editor.to_screen(anchor);
+        let before = editor.to_screen(original[1]);
+        assert_eq!(
+            editor.event(
+                &UiEvent::MouseWheel {
+                    position: pointer,
+                    delta: -20.0,
+                    modifiers: Modifiers::ctrl()
+                },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        let after = editor.to_screen(original[1]);
+        assert!(after.x > before.x, "time zoom magnifies around pointer");
+        assert_eq!(after.y, before.y, "time zoom preserves the value axis");
+        assert!((editor.to_screen(anchor).x - pointer.x).abs() < 0.0001);
+        assert_eq!(editor.points, original);
+        assert!(
+            actions.borrow().is_empty(),
+            "viewport is not author history"
+        );
     }
 
     #[test]

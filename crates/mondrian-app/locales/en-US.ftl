@@ -1460,5 +1460,5 @@ export-essence-avc = AVC High 4:2:2 10-bit intra
 export-essence-jpeg2000 = JPEG 2000 XYZ 12-bit
 
 curve-editor-name = Curve editor
-curve-editor-keyboard-help = Home/End: first/last point; Ctrl/Cmd + Left/Right: previous/next point; Alt + Left/Right: incoming/outgoing handle; Alt + Up: return to point; Left/Right: one frame; Shift + Left/Right: five frames; Up/Down: value; Shift + F10: interpolation menu.
-curve-editor-shape-keyboard-help = Home/End: first/last point; Ctrl/Cmd + Left/Right: previous/next point; arrows: adjust; Shift + arrows: larger adjustment.
+curve-editor-keyboard-help = Home/End: first/last point; Ctrl/Cmd + Left/Right: previous/next point; Alt + Left/Right: incoming/outgoing handle; Alt + Up: return to point; Left/Right: one frame; Shift + Left/Right: five frames; Up/Down: value; Shift + F10: interpolation menu. Ctrl/Cmd + wheel: time zoom; add Shift: value zoom; middle drag: pan; Ctrl/Cmd + PageUp/PageDown: zoom; add Shift: value zoom; Ctrl/Cmd + Shift + arrows: pan; Ctrl/Cmd + 0: reset view.
+curve-editor-shape-keyboard-help = Home/End: first/last point; Ctrl/Cmd + Left/Right: previous/next point; arrows: adjust; Shift + arrows: larger adjustment. Ctrl/Cmd + wheel: time zoom; add Shift: value zoom; middle drag: pan; Ctrl/Cmd + PageUp/PageDown: zoom; add Shift: value zoom; Ctrl/Cmd + Shift + arrows: pan; Ctrl/Cmd + 0: reset view.
