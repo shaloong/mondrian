@@ -3603,3 +3603,30 @@ movement and no additional author state or evaluator is introduced.
 Recognized point and handle arrow edits remain handled when clamped or refused;
 geometry change and keyboard ownership are separate decisions. Rejected edits
 cannot leak their arrow keys to parent controls or global timeline shortcuts.
+
+
+### Dense temporal key spacing
+
+Transfer curves retain their normalized display spacing. Temporal insertion
+admits distinct representable projected coordinates without a fixed fraction of
+Clip duration. Temporal movement can cross neighbors inside the owner interval;
+exact owner admission rejects actual time collisions and parameter violations.
+Exact keyboard frame intents also permit crossing without floating conversion.
+
+Point coordinates and metadata reorder together after admitted projection, with
+selection and pointer capture following stable identity. The canonical key order
+resolves exact author times that share one projected coordinate. The existing
+ID map temporarily holds ranks and retains its allocation when rebuilt; points
+and metadata move in place, without a complete curve clone per pointer update.
+Rejected projection retains the last admitted local order. Cancel restores the
+origin geometry and identity order. Escape cancels an active draft while retaining
+an existing key/control selection; idle Escape clears selection. A cancelled
+new insertion cannot retain selection of its removed point.
+
+Actual Inspector acceptance uses Auto and Continuous Bezier keys in a long Clip,
+real wheel zoom/pointer editing, exact frame intents and stable canonical order.
+Unicode archives of undone/redone states compare the entire author Sequence;
+saving preserves live Redo and fresh reopen begins with empty history. Additional
+wide owner-time cases qualify exact keyboard crossing where projected coordinates
+coincide. These do not qualify physical pointer precision beyond its projection,
+all platform layouts, multi-key editing or full interactive performance.

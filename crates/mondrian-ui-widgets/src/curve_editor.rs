@@ -6,7 +6,7 @@
 
 mod model;
 
-use model::{constrained_point, normalize_points, CurveGeometry, CurveViewport};
+use model::{constrained_point, normalize_points, CurveGeometry, CurvePointSpacing, CurveViewport};
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
@@ -174,7 +174,8 @@ pub struct CurvePreview {
     pub display_points: Vec<CurvePoint>,
     /// Complete current tangent projection, including constrained partners.
     pub tangents: Vec<CurveTangent>,
-    /// Canonical positions of authored keys, bound by stable identity.
+    /// Canonical positions of authored keys in owner-time order, bound by identity.
+    /// Order distinguishes exact times that share one projected coordinate.
     pub key_points: Vec<(mondrian_core::KeyframeId, CurvePoint)>,
 }
 
@@ -703,15 +704,72 @@ impl CurveEditor {
     }
 
     fn rebuild_keyframe_indices(&mut self) {
-        self.keyframe_indices = self
-            .point_metadata
-            .iter()
-            .enumerate()
-            .filter_map(|(index, metadata)| match metadata.target {
+        self.keyframe_indices.clear();
+        self.keyframe_indices.extend(self.point_metadata.iter().enumerate().filter_map(
+            |(index, metadata)| match metadata.target {
                 CurvePointTarget::Keyframe(id) => Some((id, index)),
                 _ => None,
-            })
-            .collect();
+            },
+        ));
+    }
+
+    fn reorder_temporal_points(
+        &mut self,
+        canonical_order: Option<&[(mondrian_core::KeyframeId, CurvePoint)]>,
+    ) {
+        if self.value_axis.is_none() {
+            return;
+        }
+        // Reuse the ID map as canonical ranks while sorting. Exact owner order
+        // resolves distinct times that collapse to the same f32 projection.
+        if let Some(order) = canonical_order {
+            for (rank, (id, _)) in order.iter().enumerate() {
+                if let Some(index) = self.keyframe_indices.get_mut(id) {
+                    *index = rank;
+                }
+            }
+        }
+        let mut reordered = false;
+        for end in 1..self.points.len() {
+            let mut right = end;
+            while right > 0 {
+                let left = right - 1;
+                let mut ordering = self.points[left].x.total_cmp(&self.points[right].x);
+                if ordering.is_eq()
+                    && canonical_order.is_some()
+                    && let (CurvePointTarget::Keyframe(a), CurvePointTarget::Keyframe(b)) = (
+                        self.point_metadata[left].target,
+                        self.point_metadata[right].target,
+                    )
+                {
+                    ordering = self.keyframe_indices.get(&a).cmp(&self.keyframe_indices.get(&b));
+                }
+                if !ordering.is_gt() {
+                    break;
+                }
+                self.points.swap(left, right);
+                self.point_metadata.swap(left, right);
+                if let Some(selected) = self.selected.as_mut() {
+                    if *selected == left {
+                        *selected = right;
+                    } else if *selected == right {
+                        *selected = left;
+                    }
+                }
+                if let Some(drag) = self.dragging.as_mut() {
+                    if drag.index == left {
+                        drag.index = right;
+                    } else if drag.index == right {
+                        drag.index = left;
+                    }
+                }
+                reordered = true;
+                right = left;
+            }
+        }
+        if reordered || canonical_order.is_some() {
+            self.rebuild_keyframe_indices();
+        }
     }
 
     fn selected_keyframe(&self) -> Option<mondrian_core::KeyframeId> {
@@ -936,9 +994,23 @@ impl CurveEditor {
             }
     }
 
+    fn point_spacing(&self) -> CurvePointSpacing {
+        if self.value_axis.is_some() {
+            CurvePointSpacing::Temporal
+        } else {
+            CurvePointSpacing::Transfer
+        }
+    }
+
     fn constrained_point(&self, index: usize, point: CurvePoint) -> CurvePoint {
         let lock_x = self.point_metadata.get(index).is_none_or(|metadata| metadata.policy.lock_x);
-        constrained_point(&self.points, index, self.constrained_value(point), lock_x)
+        constrained_point(
+            &self.points,
+            index,
+            self.constrained_value(point),
+            lock_x,
+            self.point_spacing(),
+        )
     }
 
     fn move_point(&mut self, index: usize, point: CurvePoint) -> bool {
@@ -982,6 +1054,9 @@ impl CurveEditor {
             return false;
         }
         if self.dragging.is_some() {
+            if self.on_gesture.is_none() {
+                self.reorder_temporal_points(None);
+            }
             self.dispatch_change(ctx);
         }
         ctx.request_repaint();
@@ -1015,17 +1090,21 @@ impl CurveEditor {
         if matches!(event, CurveGestureEvent::Edit { .. })
             && let Some(points) = points
         {
-            for (id, point) in points.key_points {
-                if let Some(index) = self.keyframe_indices.get(&id).copied() {
-                    self.points[index] = point;
+            for (id, point) in &points.key_points {
+                if let Some(index) = self.keyframe_indices.get(id).copied() {
+                    self.points[index] = *point;
                 }
             }
+            self.reorder_temporal_points(Some(&points.key_points));
             self.set_display_points(points.display_points);
             self.set_tangents(points.tangents);
             if !self.has_active_pointer_interaction() {
                 self.reveal_selection();
             }
             ctx.request_repaint();
+        }
+        if matches!(event, CurveGestureEvent::Edit { .. }) && self.preview_projection.is_none() {
+            self.reorder_temporal_points(None);
         }
         if let Some(callback) = &self.on_gesture
             && let Some(action) = callback(event)
@@ -1221,11 +1300,18 @@ impl CurveEditor {
         }
         let virtual_boundary = matches!(drag.target_origin, CurvePointTarget::VirtualBoundary(_));
         let unchanged = point == Some(drag.origin);
-        if virtual_boundary && unchanged {
-            self.point_metadata[drag.index].target = drag.target_origin;
-            self.rebuild_keyframe_indices();
-        } else if virtual_boundary {
-            self.point_metadata[drag.index].policy = CurvePointPolicy::editable();
+        let index = self.keyframe_indices.get(&drag.keyframe_id).copied().or_else(|| {
+            self.point_metadata
+                .iter()
+                .position(|metadata| metadata.target == drag.target_origin)
+        });
+        if virtual_boundary && let Some(index) = index {
+            if unchanged {
+                self.point_metadata[index].target = drag.target_origin;
+                self.rebuild_keyframe_indices();
+            } else {
+                self.point_metadata[index].policy = CurvePointPolicy::editable();
+            }
         }
         self.end_gesture(virtual_boundary && unchanged, ctx);
     }
@@ -1245,13 +1331,20 @@ impl CurveEditor {
             self.points = points;
             self.point_metadata = policies;
             self.rebuild_keyframe_indices();
-            self.selected = self.selected.filter(|index| *index < self.points.len());
+            self.selected = if drag.inserted {
+                None
+            } else {
+                self.point_metadata
+                    .iter()
+                    .position(|metadata| metadata.target == drag.target_origin)
+            };
             return changed;
         }
         if drag.inserted {
             if drag.index < self.points.len() {
                 self.points.remove(drag.index);
                 self.point_metadata.remove(drag.index);
+                self.selected = None;
                 self.rebuild_keyframe_indices();
                 true
             } else {
@@ -1260,14 +1353,17 @@ impl CurveEditor {
         } else {
             self.point_metadata[drag.index].target = drag.target_origin;
             self.rebuild_keyframe_indices();
-            self.points
+            let changed = self
+                .points
                 .get_mut(drag.index)
                 .map(|point| {
                     let changed = *point != drag.origin;
                     *point = drag.origin;
                     changed
                 })
-                .unwrap_or(false)
+                .unwrap_or(false);
+            self.reorder_temporal_points(None);
+            changed
         }
     }
 
@@ -1547,7 +1643,7 @@ impl CurveEditor {
 
     fn insertion_at(&self, position: Point) -> Option<(usize, CurvePoint)> {
         self.geometry()
-            .insertion_at(&self.points, position)
+            .insertion_at(&self.points, position, self.point_spacing())
             .map(|(index, point)| (index, self.constrained_value(point)))
     }
 
@@ -1927,8 +2023,10 @@ impl Widget for CurveEditor {
                 let was_dragging = self.dragging.is_some() || self.tangent_drag.is_some();
                 let changed = self.cancel_drag_state();
                 self.end_gesture(true, ctx);
-                self.selected = None;
-                self.selected_tangent = None;
+                if !was_dragging {
+                    self.selected = None;
+                    self.selected_tangent = None;
+                }
                 if changed && self.on_value_edit.is_none() {
                     self.dispatch_change(ctx);
                 }
@@ -3393,6 +3491,167 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn temporal_curve_insertion_between_dense_keys_cancels_without_residue() {
+        use mondrian_core::automation::ParameterNumericRange;
+        let range = ParameterNumericRange::new(0.0, 1.0).expect("range");
+        let axis = CurveValueAxis::new(range, range, None).expect("axis");
+        let original = vec![
+            CurvePoint::new(0.0, 0.5),
+            CurvePoint::new(0.4995, 0.5),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(0.5005, 0.5),
+            CurvePoint::new(1.0, 0.5),
+        ];
+        let mut editor = CurveEditor::with_author_points(original.clone(), axis);
+        editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        editor.viewport.time_start = 0.499;
+        editor.viewport.time_span = 0.002;
+        let position = editor.to_screen(CurvePoint::new(0.49975, 0.8));
+        let mut ctx = event_ctx();
+        assert_eq!(
+            editor.event(
+                &UiEvent::MouseDown {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(editor.points.len(), original.len() + 1);
+        assert_eq!(editor.selected, Some(2));
+        assert!((editor.points[2].x - 0.49975).abs() < 0.0000001);
+        assert!(editor.has_active_pointer_interaction());
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(editor.points, original);
+        assert!(!editor.has_active_pointer_interaction());
+    }
+
+    #[test]
+    fn temporal_key_pointer_crossing_keeps_identity_capture_and_cancel_origin() {
+        use mondrian_core::automation::ParameterNumericRange;
+        let range = ParameterNumericRange::new(0.0, 1.0).expect("range");
+        let original = vec![
+            CurvePoint::new(0.0, 0.5),
+            CurvePoint::new(0.25, 0.5),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 0.5),
+        ];
+        let ids = (0..4).map(|_| mondrian_core::KeyframeId::new()).collect::<Vec<_>>();
+        let mut editor = CurveEditor::with_author_points(
+            original.clone(),
+            CurveValueAxis::new(range, range, None).expect("axis"),
+        )
+        .with_keyframe_ids(ids.iter().copied().map(Some).collect());
+        editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let start = editor.to_screen(original[1]);
+        let destination = editor.to_screen(CurvePoint::new(0.75, 0.5));
+        let mut ctx = event_ctx();
+        editor.event(
+            &UiEvent::MouseDown {
+                position: start,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        editor.event(
+            &UiEvent::MouseMove {
+                position: destination,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(editor.points[2], CurvePoint::new(0.75, 0.5));
+        assert_eq!(editor.selected_index(), Some(2));
+        assert_eq!(
+            editor.point_target(2),
+            Some(CurvePointTarget::Keyframe(ids[1]))
+        );
+        assert_eq!(
+            editor.point_target(1),
+            Some(CurvePointTarget::Keyframe(ids[2]))
+        );
+        assert!(editor.has_active_pointer_interaction());
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(editor.points, original);
+        assert_eq!(editor.selected_index(), Some(1));
+        for (index, id) in ids.into_iter().enumerate() {
+            assert_eq!(
+                editor.point_target(index),
+                Some(CurvePointTarget::Keyframe(id))
+            );
+        }
+        assert!(!editor.has_active_pointer_interaction());
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(editor.selected_index(), None);
+    }
+
+    #[test]
+    fn temporal_curve_drag_can_edit_dense_distinct_author_times() {
+        use mondrian_core::automation::ParameterNumericRange;
+        let range = ParameterNumericRange::new(0.0, 1.0).expect("range");
+        let axis = CurveValueAxis::new(range, range, None).expect("axis");
+        let original = vec![
+            CurvePoint::new(0.0, 0.5),
+            CurvePoint::new(0.4995, 0.5),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(0.5005, 0.5),
+            CurvePoint::new(1.0, 0.5),
+        ];
+        let mut editor = CurveEditor::with_author_points(original.clone(), axis);
+        editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        editor.viewport.time_start = 0.499;
+        editor.viewport.time_span = 0.002;
+        let start = editor.to_screen(editor.points[2]);
+        let destination = editor.to_screen(CurvePoint::new(0.5001, 0.5));
+        let mut ctx = event_ctx();
+        assert_eq!(
+            editor.event(
+                &UiEvent::MouseDown {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(editor.selected, Some(2));
+        editor.event(
+            &UiEvent::MouseMove {
+                position: destination,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(
+            (editor.points[2].x - 0.5001).abs() < 0.0000001,
+            "zoomed temporal keys must not inherit transfer-curve display spacing: {:?}",
+            editor.points[2]
+        );
+        assert_eq!(editor.points[1], original[1]);
+        assert_eq!(editor.points[3], original[3]);
+        assert!(editor.has_active_pointer_interaction());
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(editor.points, original);
+        assert!(!editor.has_active_pointer_interaction());
     }
 
     #[test]

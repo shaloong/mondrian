@@ -15,9 +15,7 @@ pub(super) fn nudge_key_time(
     if time == origin || time < range.start || time > range.end().ok()? {
         return None;
     }
-    if times.into_iter().any(|neighbor| {
-        (neighbor < origin && time <= neighbor) || (neighbor > origin && time >= neighbor)
-    }) {
+    if times.into_iter().any(|neighbor| neighbor != origin && neighbor == time) {
         return None;
     }
     Some(time)

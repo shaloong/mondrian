@@ -8812,6 +8812,264 @@ fn effect_curve_value_nudges_preserve_full_integer_precision_and_history() {
 }
 
 #[test]
+fn inspector_dense_curve_reordering_preserves_exact_steps_and_durable_history() {
+    use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    fn editor(widget: &dyn Widget) -> &CurveEditor {
+        widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .expect("curve")
+    }
+    fn find_curve(widget: &dyn Widget) -> Option<WidgetId> {
+        if widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .is_some_and(|curve| {
+                curve.points().len() == 5 && curve.points().iter().all(|point| point.y == 0.5)
+            })
+        {
+            return Some(widget.id());
+        }
+        (0..widget.child_count()).find_map(|i| widget.child(i).and_then(find_curve))
+    }
+    for (interpolation, collapsed) in [
+        (InterpolationType::AutoBezier, false),
+        (InterpolationType::ContinuousBezier, false),
+        (InterpolationType::AutoBezier, true),
+        (InterpolationType::ContinuousBezier, true),
+    ] {
+        let (duration, times) = if collapsed {
+            let origin = TimelineTime::new(16_777_216, 1).expect("wide owner time");
+            (
+                TimelineTime::new(33_554_432, 1).expect("wide interval"),
+                [
+                    origin
+                        .checked_sub(TimelineTime::new(1, 10).expect("previous offset"))
+                        .expect("previous"),
+                    origin,
+                    origin
+                        .checked_add(TimelineTime::new(1, 50).expect("next offset"))
+                        .expect("next"),
+                ],
+            )
+        } else {
+            (
+                TimelineTime::new(600, 1).expect("duration"),
+                [
+                    TimelineTime::new(2997, 10).expect("previous"),
+                    TimelineTime::new(300, 1).expect("middle"),
+                    TimelineTime::new(3003, 10).expect("next"),
+                ],
+            )
+        };
+        let mut clip = Clip::new_basic_title("Dense keys", "Arial", TimelineTime::ZERO, duration)
+            .expect("title");
+        let clip_id = clip.id;
+        let mut ids = Vec::new();
+        for time in times {
+            let key = Keyframe::from_preset(time, PropertyValue::Float(0.5), interpolation);
+            ids.push(key.id);
+            clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: Transform2D::OPACITY_PATH.into(),
+                keyframe: key,
+            })
+            .expect("seed canonical key");
+        }
+        let mut sequence = Sequence::new("Dense temporal authoring");
+        sequence.video_tracks[0].add_clip(clip).expect("place title");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("selection");
+        let original = state.active_sequence().expect("origin").clone();
+        let models = AppUiPanelModels::from_app_state(&state);
+        let frame = models.inspector.opacity_curve.as_ref().expect("model").frame_time_step;
+        let mut panel = inspector_panel(&models.inspector, &chinese_localizer());
+        let id = find_curve(&panel).expect("actual dense Inspector");
+        let mut tree = WidgetTreeView::new(&mut panel);
+        let curve = tree.get_mut(id).expect("curve");
+        curve.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let center = Point::new(110.0, 52.0);
+        if collapsed {
+            assert!(
+                editor(curve).points()[1..4].iter().all(|point| point.x == 0.5),
+                "the exact author times genuinely share one projected coordinate"
+            );
+            curve
+                .as_any_mut()
+                .and_then(|any| any.downcast_mut::<CurveEditor>())
+                .expect("curve")
+                .select(Some(2));
+        } else {
+            for _ in 0..3 {
+                curve.event(
+                    &UiEvent::MouseWheel {
+                        position: center,
+                        delta: -200.0,
+                        modifiers: Modifiers::ctrl(),
+                    },
+                    &mut ctx,
+                );
+            }
+            assert!(actions.borrow().is_empty(), "zoom never authors keys");
+            curve.event(
+                &UiEvent::MouseDown {
+                    position: center,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            assert_eq!(
+                editor(curve).point_target(editor(curve).selected_index().expect("selected")),
+                Some(CurvePointTarget::Keyframe(ids[1]))
+            );
+            let destination = Point::new(120.0, 52.0);
+            curve.event(
+                &UiEvent::MouseMove {
+                    position: destination,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            curve.event(
+                &UiEvent::MouseUp {
+                    position: destination,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            for action in actions.borrow_mut().drain(..) {
+                state.dispatch_action(action).expect("dense pointer gesture");
+            }
+            let dragged = state.active_sequence().expect("dragged").clone();
+            assert!(!dragged.author_state_eq_ignoring_revision(&original));
+        }
+        let key_time = |state: &AppState| {
+            state
+                .active_sequence()
+                .expect("sequence")
+                .find_clip(clip_id)
+                .expect("clip")
+                .intrinsic_parameter_bag()
+                .property(Transform2D::OPACITY_PATH)
+                .expect("opacity")
+                .keyframe_by_id(ids[1])
+                .expect("stable middle")
+                .time
+        };
+        let mut snapshots = vec![original.clone()];
+        if !collapsed {
+            snapshots.push(state.active_sequence().expect("dragged").clone());
+        }
+        while key_time(&state) <= times[2] {
+            assert!(snapshots.len() < 32, "bounded frame crossing");
+            let previous = key_time(&state);
+            curve.event(
+                &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::shift() },
+                &mut ctx,
+            );
+            for action in actions.borrow_mut().drain(..) {
+                state.dispatch_action(action).expect("exact frame intent");
+            }
+            assert_eq!(
+                key_time(&state),
+                previous
+                    .checked_add(
+                        frame
+                            .checked_scale(TimeScale::new(5, 1).expect("steps"))
+                            .expect("exact delta")
+                    )
+                    .expect("exact owner time")
+            );
+            snapshots.push(state.active_sequence().expect("step").clone());
+        }
+        assert!(
+            editor(curve).points().windows(2).all(|pair| pair[0].x <= pair[1].x),
+            "canonical time crossing must reorder local points"
+        );
+        let selected = editor(curve).selected_index().expect("same selected key");
+        assert_eq!(
+            editor(curve).point_target(selected),
+            Some(CurvePointTarget::Keyframe(ids[1]))
+        );
+        let displayed_ids = (0..editor(curve).points().len())
+            .filter_map(|index| match editor(curve).point_target(index) {
+                Some(CurvePointTarget::Keyframe(id)) => Some(id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let bag = state
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(clip_id)
+            .expect("clip")
+            .intrinsic_parameter_bag();
+        let canonical_ids = bag.property(Transform2D::OPACITY_PATH).expect("opacity").channels()[0]
+            .keyframes()
+            .iter()
+            .map(|key| key.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            displayed_ids, canonical_ids,
+            "exact canonical order survives collapsed screen coordinates"
+        );
+        let final_state = snapshots.last().expect("final").clone();
+        for expected in snapshots[..snapshots.len() - 1].iter().rev() {
+            assert!(state.undo_timeline().expect("one edit Undo"));
+            assert!(state
+                .active_sequence()
+                .expect("Undo state")
+                .author_state_eq_ignoring_revision(expected));
+        }
+        assert!(!state.can_undo_action());
+        let directory = tempfile::tempdir().expect("archives");
+        let undone_path = directory.path().join("密集撤销😀.mdp");
+        state.save_project_file_as(undone_path.clone()).expect("save undone");
+        assert!(state.can_redo_action());
+        {
+            let mut reopened = AppState::new();
+            reopened.open_project_file(undone_path).expect("fresh undone reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("saved origin")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        }
+        for expected in &snapshots[1..] {
+            assert!(state.redo_timeline().expect("one edit Redo"));
+            assert!(state
+                .active_sequence()
+                .expect("Redo state")
+                .author_state_eq_ignoring_revision(expected));
+        }
+        let redone_path = directory.path().join("密集编辑😀.mdp");
+        state.save_project_file_as(redone_path.clone()).expect("save redone");
+        let mut reopened = AppState::new();
+        reopened.open_project_file(redone_path).expect("fresh redone reopen");
+        assert!(reopened
+            .active_sequence()
+            .expect("saved edits")
+            .author_state_eq_ignoring_revision(&final_state));
+        assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+    }
+}
+
+#[test]
 fn effect_curve_rejected_native_float_preview_preserves_geometry_and_author_history() {
     use mondrian_core::automation::{ParameterUnit, PropertyDescriptor, PropertyMutation};
     use mondrian_effects::{

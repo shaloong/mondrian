@@ -1,12 +1,13 @@
 # Modal, resource and LUT acceptance
 
-## Qualified native-output snapshot
+## Latest qualified native-output snapshot
 
 Windows qualification on 2026-10-06 used clean, unchanged production source
 `4d2a21e420a99620a2a66279d4ed83e3503f9ef6` and rebuilt product SHA256
 `e5d5de9d274c30e38345d55c30e5da6ee7a0e7bd024fb23e51015d85f877a51f`.
 This receipt qualifies that exact clean source, including curve preview admission.
-The accompanying documentation update does not change production code.
+Later temporal UI changes are qualified separately below; this native receipt
+does not qualify a later production binary.
 
 | Scope | Evidence |
 | --- | --- |
@@ -84,6 +85,35 @@ The committed 4d2a21e source was then rebuilt and qualified by Golden 3/3,
 all six explicit native tests and modal/resource/integer/Float history tests.
 The source and product hashes remained unchanged throughout. Golden rounds
 exited naturally in 124.822, 120.500 and 123.331 seconds.
+
+## Dense temporal editing and exact crossing
+
+The subsequent temporal UI patch passed full Widgets (1083 passed, zero failed,
+zero ignored), full all-feature App (2551 passed, zero failed, 62 ignored), strict
+workspace all-target/all-feature Clippy, formatting and diff checks. These
+results supersede the earlier library counts for this patch, not the native
+product identity above. Ignored native tests require rebuilt-product execution.
+
+Transfer-curve display spacing had prevented moving and inserting distinct,
+closely spaced temporal keys. A genuine pointer regression reproduced the
+failure before separating temporal spacing. Actual Inspector keyboard crossing
+also reproduced the exact-time helper's refusal to cross neighboring keys.
+Temporal movement now permits crossing inside the owner interval, while the
+canonical author model rejects actual collisions. Points and metadata reorder
+in place; selected and captured keys retain stable identity. Canonical owner
+order distinguishes exact times sharing an f32 projected coordinate. Escape
+cancels the draft and retains an existing selection; a subsequent idle Escape
+clears it. Cancelled insertions retain no phantom selected key.
+
+Actual Inspector acceptance covers Auto/Continuous Bezier in both an ordinary
+dense interval and a wide interval with genuinely coincident projected key
+coordinates. Ordinary cases use wheel zoom and pointer events; wide cases select
+the stable key through the widget API and then use real exact keyboard intents.
+Each accepted step compares exact owner time, canonical identity order and the
+entire author Sequence. Undo and Redo compare every snapshot; Unicode archives
+save undone and redone states, saving retains live Redo, and fresh reopen restores
+the complete saved Sequence with empty history. This is not a physical pointer
+precision or native output claim for the changed source.
 
 ## Reproduce and locate evidence
 

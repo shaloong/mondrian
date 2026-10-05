@@ -32,22 +32,45 @@ pub(super) fn normalize_points(
     points
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum CurvePointSpacing {
+    Transfer,
+    Temporal,
+}
+
+impl CurvePointSpacing {
+    fn neighbor_bounds(self, previous: Option<f32>, next: Option<f32>) -> (f32, f32) {
+        let lower = previous.map_or(0.0, |value| match self {
+            Self::Transfer => value + MIN_POINT_GAP,
+            Self::Temporal => value.next_up(),
+        });
+        let upper = next.map_or(1.0, |value| match self {
+            Self::Transfer => value - MIN_POINT_GAP,
+            Self::Temporal => value.next_down(),
+        });
+        (lower, upper)
+    }
+}
+
 pub(super) fn constrained_point(
     points: &[CurvePoint],
     index: usize,
     mut point: CurvePoint,
     lock_x: bool,
+    spacing: CurvePointSpacing,
 ) -> CurvePoint {
     let Some(current) = points.get(index) else {
         return point;
     };
     if lock_x {
         point.x = current.x;
+    } else if matches!(spacing, CurvePointSpacing::Temporal) {
+        point.x = point.x.clamp(0.0, 1.0);
     } else {
-        let min_x = points
-            .get(index.wrapping_sub(1))
-            .map_or(0.0, |previous| previous.x + MIN_POINT_GAP);
-        let max_x = points.get(index + 1).map_or(1.0, |next| next.x - MIN_POINT_GAP);
+        let (min_x, max_x) = spacing.neighbor_bounds(
+            points.get(index.wrapping_sub(1)).map(|previous| previous.x),
+            points.get(index + 1).map(|next| next.x),
+        );
         point.x = if min_x <= max_x {
             point.x.clamp(min_x, max_x)
         } else {
@@ -324,6 +347,7 @@ impl CurveGeometry {
         &self,
         points: &[CurvePoint],
         position: Point,
+        spacing: CurvePointSpacing,
     ) -> Option<(usize, CurvePoint)> {
         let plot = self.plot_rect();
         if !plot.contains(position) || points.len() < 2 {
@@ -336,8 +360,8 @@ impl CurveGeometry {
             return None;
         }
 
-        let min_x = points[index - 1].x + MIN_POINT_GAP;
-        let max_x = points[index].x - MIN_POINT_GAP;
+        let (min_x, max_x) =
+            spacing.neighbor_bounds(Some(points[index - 1].x), Some(points[index].x));
         if min_x > max_x {
             return None;
         }
@@ -403,15 +427,35 @@ mod tests {
         ];
 
         assert_eq!(
-            constrained_point(&points, 0, CurvePoint::new(0.5, 0.2), true),
+            constrained_point(
+                &points,
+                0,
+                CurvePoint::new(0.5, 0.2),
+                true,
+                CurvePointSpacing::Transfer
+            ),
             CurvePoint::new(0.0, 0.2)
         );
         assert_close(
-            constrained_point(&points, 1, CurvePoint::new(0.9, 0.7), false).x,
+            constrained_point(
+                &points,
+                1,
+                CurvePoint::new(0.9, 0.7),
+                false,
+                CurvePointSpacing::Transfer,
+            )
+            .x,
             0.599,
         );
         assert_close(
-            constrained_point(&points, 2, CurvePoint::new(0.1, 0.7), false).x,
+            constrained_point(
+                &points,
+                2,
+                CurvePoint::new(0.1, 0.7),
+                false,
+                CurvePointSpacing::Transfer,
+            )
+            .x,
             0.401,
         );
     }
@@ -421,11 +465,24 @@ mod tests {
         let points = vec![CurvePoint::new(0.0, 0.25), CurvePoint::new(1.0, 0.75)];
 
         assert_eq!(
-            constrained_point(&points, 0, CurvePoint::new(0.4, 0.5), false),
+            constrained_point(
+                &points,
+                0,
+                CurvePoint::new(0.4, 0.5),
+                false,
+                CurvePointSpacing::Transfer
+            ),
             CurvePoint::new(0.4, 0.5)
         );
         assert_close(
-            constrained_point(&points, 0, CurvePoint::new(1.0, 0.5), false).x,
+            constrained_point(
+                &points,
+                0,
+                CurvePoint::new(1.0, 0.5),
+                false,
+                CurvePointSpacing::Transfer,
+            )
+            .x,
             0.999,
         );
     }
@@ -585,9 +642,13 @@ mod tests {
             CurvePoint::new(1.0, 1.0),
         ];
 
-        assert_eq!(geometry.insertion_at(&points, Point::new(10.0, 60.0)), None);
-        let (index, point) =
-            geometry.insertion_at(&points, Point::new(70.0, 40.0)).expect("interior insert");
+        assert_eq!(
+            geometry.insertion_at(&points, Point::new(10.0, 60.0), CurvePointSpacing::Transfer),
+            None
+        );
+        let (index, point) = geometry
+            .insertion_at(&points, Point::new(70.0, 40.0), CurvePointSpacing::Transfer)
+            .expect("interior insert");
         assert_eq!(index, 2);
         assert!(point.x > 0.5 && point.x < 1.0);
     }
