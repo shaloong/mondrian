@@ -5328,9 +5328,7 @@ mod tests {
 
     #[test]
     fn full_transfer_curve_rejects_insertion_without_capture_or_history_changes() {
-        use crate::app::product_action::{
-            ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
-        };
+        use crate::app::product_action::{ClipCurveEditPayload, ClipEditNumericCurvePayload};
         use crate::app::ui_actions::clip_edit_numeric_curve_action;
         use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
         use mondrian_ui_events::EventRouter;
@@ -5372,13 +5370,12 @@ mod tests {
             .dispatch_action(clip_edit_numeric_curve_action(
                 ClipEditNumericCurvePayload {
                     clip_id,
-                    parameter: opacity,
+                    parameter: opacity.clone(),
                     edit: ClipCurveEditPayload::Upsert {
                         keyframe_id: None,
-                        point: ClipNormalizedCurvePointPayload {
-                            time_ratio: 0.25,
-                            value_ratio: 0.8,
-                        },
+                        point: crate::app::test_curve_authoring::curve_author_point(
+                            &state, clip_id, &opacity, 0.25, 0.8,
+                        ),
                     },
                 },
             ))
@@ -5735,9 +5732,7 @@ mod tests {
     }
 
     fn curve_release_refresh_keyboard_matrix(shape: bool) {
-        use crate::app::product_action::{
-            ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
-        };
+        use crate::app::product_action::{ClipCurveEditPayload, ClipEditNumericCurvePayload};
         use crate::app::ui_actions::clip_edit_numeric_curve_action;
         use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
         use mondrian_ui_events::EventRouter;
@@ -5786,10 +5781,9 @@ mod tests {
                         parameter: parameter.clone(),
                         edit: ClipCurveEditPayload::Upsert {
                             keyframe_id: None,
-                            point: ClipNormalizedCurvePointPayload {
-                                time_ratio: ratio,
-                                value_ratio: ratio,
-                            },
+                            point: crate::app::test_curve_authoring::curve_author_point(
+                                &state, clip_id, &parameter, ratio, ratio,
+                            ),
                         },
                     },
                 ))
@@ -5947,9 +5941,7 @@ mod tests {
     }
 
     fn inspector_curve_capture_owner_matrix(structured: bool, boundaries: std::ops::Range<usize>) {
-        use crate::app::product_action::{
-            ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
-        };
+        use crate::app::product_action::{ClipCurveEditPayload, ClipEditNumericCurvePayload};
         use crate::app::ui_actions::{
             clip_edit_numeric_curve_action, track_set_author_control_action, TrackAuthorControl,
             TrackSetAuthorControlPayload,
@@ -5998,10 +5990,9 @@ mod tests {
                             parameter: parameter.clone(),
                             edit: ClipCurveEditPayload::Upsert {
                                 keyframe_id: None,
-                                point: ClipNormalizedCurvePointPayload {
-                                    time_ratio: 0.25,
-                                    value_ratio: 0.8,
-                                },
+                                point: crate::app::test_curve_authoring::curve_author_point(
+                                    &state, clip_id, &parameter, 0.25, 0.8,
+                                ),
                             },
                         },
                     ))
@@ -6016,10 +6007,9 @@ mod tests {
                                 parameter: parameter.clone(),
                                 edit: ClipCurveEditPayload::Upsert {
                                     keyframe_id: None,
-                                    point: ClipNormalizedCurvePointPayload {
-                                        time_ratio: ratio,
-                                        value_ratio: ratio,
-                                    },
+                                    point: crate::app::test_curve_authoring::curve_author_point(
+                                        &state, clip_id, &parameter, ratio, ratio,
+                                    ),
                                 },
                             },
                         ))
@@ -6255,10 +6245,13 @@ mod tests {
                     parameter: parameter.clone(),
                     edit: ClipCurveEditPayload::Upsert {
                         keyframe_id: None,
-                        point: ClipNormalizedCurvePointPayload {
-                            time_ratio: 0.25,
-                            value_ratio: 0.8,
-                        },
+                        point: crate::app::test_curve_authoring::curve_author_point(
+                            &host.app_state(),
+                            clip_id,
+                            &parameter,
+                            0.25,
+                            0.8,
+                        ),
                     },
                 }),
             });

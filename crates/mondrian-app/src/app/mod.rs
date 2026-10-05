@@ -112,6 +112,8 @@ mod audio_monitoring;
 mod clip_authoring;
 mod resource_authoring;
 #[cfg(test)]
+pub(crate) mod test_curve_authoring;
+#[cfg(test)]
 mod test_fixture;
 pub use audio_monitoring::ActiveAudioMonitoringPathEvidence;
 #[cfg(test)]

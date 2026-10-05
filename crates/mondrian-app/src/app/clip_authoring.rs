@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use mondrian_core::automation::{AnimationParameterAddress, PropertyHost, PropertyMutation};
 use mondrian_core::{BlendMode, ClipId, Color, MondrianError, Result};
 
-use super::animation_authoring::{ClipNumericCurveEdit, NormalizedCurvePoint};
+use super::animation_authoring::ClipNumericCurveEdit;
 use super::product_action::{
     ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipWriteParameterValuesPayload,
 };
@@ -260,10 +260,9 @@ pub(super) fn numeric_curve_edit_from_payload(
             time: *time,
             value: value.clone(),
         }),
-        ClipCurveEditPayload::Upsert { keyframe_id, point } => Ok(ClipNumericCurveEdit::Upsert {
-            keyframe_id: *keyframe_id,
-            point: NormalizedCurvePoint::new(point.time_ratio, point.value_ratio)?,
-        }),
+        ClipCurveEditPayload::Upsert { keyframe_id, point } => {
+            Ok(ClipNumericCurveEdit::Upsert { keyframe_id: *keyframe_id, point: point.clone() })
+        }
         ClipCurveEditPayload::Remove { keyframe_id } => {
             Ok(ClipNumericCurveEdit::Remove { keyframe_id: *keyframe_id })
         }

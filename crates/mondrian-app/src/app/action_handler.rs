@@ -2236,16 +2236,16 @@ mod tests {
         AssetsPrepareDragPayload, AssetsRebindAudioComponentPayload,
         AssetsRefreshAudioComponentsPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
         AssetsRenameFolderPayload, AssetsSetInterpretationPayload, AssetsSetProxyModePayload,
-        ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
-        ClipSetBlendModePayload, ClipSetEnabledPayload, ClipSetSolidColorPayload,
-        ClipWriteParameterValuesPayload, ExportDraftEdit, ParameterValueWrite,
-        ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
-        ProjectUpdateColorEnvironmentPayload, ProjectUpdateNewSequenceDefaultsPayload,
-        SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineDropAssetPayload,
-        TimelineDropFilePayload, TimelineExportRequest, TimelineInOutPointKind,
-        TimelineInsertAssetPayload, TimelineSeekSource, TimelineSetInOutPointPayload,
-        TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload,
-        TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
+        ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipSetBlendModePayload,
+        ClipSetEnabledPayload, ClipSetSolidColorPayload, ClipWriteParameterValuesPayload,
+        ExportDraftEdit, ParameterValueWrite, ProjectCreateWithSettingsPayload,
+        ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
+        ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload,
+        SequenceUpdateSettingsPayload, TimelineDropAssetPayload, TimelineDropFilePayload,
+        TimelineExportRequest, TimelineInOutPointKind, TimelineInsertAssetPayload,
+        TimelineSeekSource, TimelineSetInOutPointPayload, TimelineTrimClipsPayload,
+        TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload, TrackAuthorControl,
+        TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
         TrackSetEditPolicyPayload, ViewerSetPreviewResolutionScalePayload,
         VisualEffectAddToClipPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
         VisualEffectSetParameterValuePayload, VisualEffectTargetPayload,
@@ -7518,9 +7518,15 @@ mod tests {
         let property = opacity_parameter_address(&state, clip_id);
 
         for point in [
-            ClipNormalizedCurvePointPayload { time_ratio: 0.0, value_ratio: 0.0 },
-            ClipNormalizedCurvePointPayload { time_ratio: 0.5, value_ratio: 0.72 },
-            ClipNormalizedCurvePointPayload { time_ratio: 1.0, value_ratio: 1.0 },
+            crate::app::test_curve_authoring::curve_author_point(
+                &state, clip_id, &property, 0.0, 0.0,
+            ),
+            crate::app::test_curve_authoring::curve_author_point(
+                &state, clip_id, &property, 0.5, 0.72,
+            ),
+            crate::app::test_curve_authoring::curve_author_point(
+                &state, clip_id, &property, 1.0, 1.0,
+            ),
         ] {
             state
                 .dispatch_action(clip_edit_numeric_curve_action(
@@ -7575,7 +7581,13 @@ mod tests {
                 parameter: opacity_property,
                 edit: ClipCurveEditPayload::Upsert {
                     keyframe_id: None,
-                    point: ClipNormalizedCurvePointPayload { time_ratio: 0.0, value_ratio: 0.5 },
+                    point: crate::app::test_curve_authoring::curve_author_point(
+                        &state,
+                        clip_id,
+                        &opacity_parameter_address(&state, clip_id),
+                        0.0,
+                        0.5,
+                    ),
                 },
             }),
         ] {

@@ -2548,15 +2548,7 @@ pub struct ClipWriteParameterValuesPayload {
     pub writes: Vec<ParameterValueWrite>,
 }
 
-/// One finite normalized point in a Clip curve editor viewport.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClipNormalizedCurvePointPayload {
-    /// Ratio across the visible Clip-local author span, in `0..=1`.
-    pub time_ratio: f64,
-    /// Ratio across the Parameter Schema soft range, in `0..=1`.
-    pub value_ratio: f64,
-}
+pub use super::animation_authoring::ClipCurveAuthorPoint;
 
 /// One stable-key numeric curve edit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2594,8 +2586,8 @@ pub enum ClipCurveEditPayload {
     Upsert {
         /// Existing stable identity; `None` inserts or resolves by exact time.
         keyframe_id: Option<KeyframeId>,
-        /// New normalized editor point.
-        point: ClipNormalizedCurvePointPayload,
+        /// Exact owner time and typed author value.
+        point: ClipCurveAuthorPoint,
     },
     /// Remove one complete key by stable identity.
     Remove {

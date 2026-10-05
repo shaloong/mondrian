@@ -3494,3 +3494,24 @@ unclamped temporal controls. Full display/edit of legal values outside soft
 bounds remains unqualified and requires separating generic bounded transfer
 points from author value coordinates. Physical high-DPI/platform input, domain
 axis rulers and multi-key workflows remain separate qualification.
+
+
+### Exact visual curve insert requests
+
+ClipCurveAuthorPoint contains owner-domain TimelineTime and typed PropertyValue.
+Both Upsert and sparse Move enter the same author preparation, stable-key/time
+collision admission, parameter schema validation and author transaction. Upsert
+checks the exact owner interval and never interprets a soft-range ratio. The
+obsolete normalized insertion command/parser is removed for alpha. Preview
+uses this same preparation. Editor range availability is not an author
+admission rule; the canonical property schema owns value validation.
+
+The UI performs its current viewport-to-author lowering before dispatch. Golden
+author acceptance now passes the existing exact typed endpoint value directly,
+with an exact 7/8 owner-duration time, retaining its Bezier metadata. Regression
+fixtures lower UI seed positions before the author seam. Direct codec/preparation
+checks cover exact one-seventh time, Float/Double/Integer values outside soft
+but inside hard bounds, hard/time rejection, immutable source and a property
+without numeric editor metadata. Full UI display/edit of out-of-soft values
+still needs the subsequent value-projection change; this author contract is
+its prerequisite and does not claim that visual qualification.

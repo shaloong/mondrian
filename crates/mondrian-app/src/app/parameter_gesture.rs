@@ -511,7 +511,7 @@ fn gesture_error(reason: impl Into<String>) -> MondrianError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::product_action::{ClipCurveEditPayload, ClipNormalizedCurvePointPayload};
+    use crate::app::product_action::ClipCurveEditPayload;
     use mondrian_core::automation::{ParameterValueWrite, PropertyValue};
     use mondrian_core::{
         mask_data::{MaskComponent, MaskEvaluation, MASK_PROP_OPACITY},
@@ -634,13 +634,16 @@ mod tests {
                     },
                     ParameterGestureEdit::ClipCurve(ClipEditNumericCurvePayload {
                         clip_id: value.clip_id,
-                        parameter,
+                        parameter: parameter.clone(),
                         edit: ClipCurveEditPayload::Upsert {
                             keyframe_id: None,
-                            point: ClipNormalizedCurvePointPayload {
-                                time_ratio: 0.5,
-                                value_ratio: 0.8,
-                            },
+                            point: crate::app::test_curve_authoring::curve_author_point(
+                                &state,
+                                value.clip_id,
+                                &parameter,
+                                0.5,
+                                0.8,
+                            ),
                         },
                     }),
                 )
@@ -656,13 +659,16 @@ mod tests {
                     ParameterGestureEdit::EffectCurve(VisualEffectEditNumericCurvePayload {
                         clip_id: value.clip_id,
                         effect_id: value.effect_id,
-                        parameter,
+                        parameter: parameter.clone(),
                         edit: ClipCurveEditPayload::Upsert {
                             keyframe_id: None,
-                            point: ClipNormalizedCurvePointPayload {
-                                time_ratio: 0.5,
-                                value_ratio: 0.8,
-                            },
+                            point: crate::app::test_curve_authoring::curve_author_point(
+                                &state,
+                                value.clip_id,
+                                &parameter,
+                                0.5,
+                                0.8,
+                            ),
                         },
                     }),
                 )
@@ -729,6 +735,11 @@ mod tests {
                         .action(),
                 )
                 .expect("begin");
+            let (clip_id, parameter) = match &edit {
+                ParameterGestureEdit::ClipCurve(edit) => (edit.clip_id, &edit.parameter),
+                ParameterGestureEdit::EffectCurve(edit) => (edit.clip_id, &edit.parameter),
+                _ => panic!("curve owner"),
+            };
             for ratio in [0.25, 0.75] {
                 state
                     .dispatch_action(
@@ -738,10 +749,9 @@ mod tests {
                                 edit.clone(),
                                 ClipCurveEditPayload::Upsert {
                                     keyframe_id: None,
-                                    point: ClipNormalizedCurvePointPayload {
-                                        time_ratio: ratio,
-                                        value_ratio: 0.8,
-                                    },
+                                    point: crate::app::test_curve_authoring::curve_author_point(
+                                        &state, clip_id, parameter, ratio, 0.8,
+                                    ),
                                 },
                             ),
                         }

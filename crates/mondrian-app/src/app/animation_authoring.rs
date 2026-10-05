@@ -1,6 +1,6 @@
 //! Stable-identity authoring for Clip-owned numeric automation.
 //!
-//! UI Adapters submit normalized insertions or exact typed move targets. This module resolves
+//! UI Adapters submit exact typed insertion and move targets. This module resolves
 //! the current property path and keyframe time from stable identities, prepares
 //! the smallest exact mutation set, and commits it through one Author
 //! Transaction. Widgets never replace an entire curve or infer author identity
@@ -15,29 +15,14 @@ use mondrian_core::{EffectId, KeyframeId, MondrianError, Result, TimeScale, Time
 
 const CURVE_QUANTIZATION_DENOMINATOR: u32 = 1_000_000;
 
-/// One normalized point in an owner-local curve viewport.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct NormalizedCurvePoint {
-    /// Relative position across the visible Clip author span.
-    pub time_ratio: f64,
-    /// Relative value across the Parameter Schema soft range.
-    pub value_ratio: f64,
-}
-
-impl NormalizedCurvePoint {
-    /// Construct a finite point inside the inclusive unit square.
-    pub fn new(time_ratio: f64, value_ratio: f64) -> Result<Self> {
-        if !time_ratio.is_finite()
-            || !value_ratio.is_finite()
-            || !(0.0..=1.0).contains(&time_ratio)
-            || !(0.0..=1.0).contains(&value_ratio)
-        {
-            return Err(curve_error(
-                "normalized curve coordinates must be finite values inside 0..=1",
-            ));
-        }
-        Ok(Self { time_ratio, value_ratio })
-    }
+/// Exact Clip-owner coordinates submitted by a product author adapter.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipCurveAuthorPoint {
+    /// Absolute author time in the owning Clip domain.
+    pub time: TimelineTime,
+    /// Absolute typed parameter value; the owner schema governs admission.
+    pub value: PropertyValue,
 }
 
 /// One stable-identity curve edit requested by a product Adapter.
@@ -57,8 +42,8 @@ pub enum ClipNumericCurveEdit {
         /// Reserved or existing identity; `None` inserts at the
         /// requested time or updates the existing key already at that time.
         keyframe_id: Option<KeyframeId>,
-        /// New normalized time and value.
-        point: NormalizedCurvePoint,
+        /// Exact owner time and typed author value.
+        point: ClipCurveAuthorPoint,
     },
     /// Edit supplied exact coordinates of one canonical Bezier control.
     EditHandle {
@@ -94,7 +79,7 @@ struct PreparedCurveEdit {
 }
 
 impl AppState {
-    /// Apply one normalized numeric curve edit through stable author identities.
+    /// Apply one exact numeric curve edit through stable author identities.
     ///
     /// The current property path and key time are resolved from the canonical
     /// Sequence snapshot. A stale or ambiguous identity fails before the Author
@@ -108,7 +93,7 @@ impl AppState {
     ) -> Result<ClipNumericCurveEditOutcome> {
         let (_, clip) = numeric_curve_target(self, clip_id)?;
         let (edit, source_key) =
-            complete_curve_targets(&clip.intrinsic_parameter_bag(), clip, &address, edit)?;
+            complete_curve_targets(&clip.intrinsic_parameter_bag(), &address, edit)?;
         let generation = self.project_author_generation();
         let keyframe_id = self.commit_active_sequence_edit("调整关键帧", |sequence| {
             let clip = sequence
@@ -162,7 +147,7 @@ impl AppState {
                     "Effect {effect_id} does not belong to Clip {clip_id}"
                 ))
             })?;
-        let (edit, source_key) = complete_curve_targets(&effect.properties, clip, &address, edit)?;
+        let (edit, source_key) = complete_curve_targets(&effect.properties, &address, edit)?;
         let generation = self.project_author_generation();
         let keyframe_id = self.commit_active_sequence_edit("调整特效关键帧", |sequence| {
             let clip = sequence
@@ -343,7 +328,6 @@ fn numeric_curve_target(
 // deriving an absolute gesture candidate from its original geometry.
 fn complete_curve_targets(
     properties: &PropertyBag,
-    clip: &mondrian_timeline::Clip,
     address: &AnimationParameterAddress,
     edit: ClipNumericCurveEdit,
 ) -> Result<(ClipNumericCurveEdit, Option<Keyframe<PropertyValue>>)> {
@@ -384,8 +368,7 @@ fn complete_curve_targets(
             ))
         }
         ClipNumericCurveEdit::Upsert { keyframe_id: None, point } => {
-            let time =
-                numeric_curve_author_time(numeric_curve_owner_range(clip)?, point.time_ratio)?;
+            let time = point.time;
             Ok((
                 ClipNumericCurveEdit::Upsert {
                     keyframe_id: property.keyframe_at(time).map(|key| key.id),
@@ -508,26 +491,6 @@ fn prepare_property_curve_edit(
             address.parameter_id
         )));
     }
-    let numeric = property
-        .descriptor
-        .schema
-        .numeric
-        .as_ref()
-        .and_then(|contracts| contracts.first())
-        .copied()
-        .ok_or_else(|| {
-            curve_error(format!(
-                "parameter {} has no finite numeric editor range",
-                address.parameter_id
-            ))
-        })?;
-    if numeric.soft_range.normalized_position(numeric.soft_range.min).is_none() {
-        return Err(curve_error(format!(
-            "parameter {} has an unusable numeric editor range",
-            address.parameter_id
-        )));
-    }
-
     match edit {
         ClipNumericCurveEdit::EditHandle { keyframe_id, side, edit } => {
             let key = property.channels()[0]
@@ -678,10 +641,12 @@ fn prepare_property_curve_edit(
             prepare_key_position_edit(property, path, Some(keyframe_id), target_time, target_value)
         }
         ClipNumericCurveEdit::Upsert { keyframe_id, point } => {
-            let target_time = numeric_curve_author_time(range, point.time_ratio)?;
-            let target_value = numeric_curve_author_value(property, point.value_ratio)?;
-
-            prepare_key_position_edit(property, path, keyframe_id, target_time, target_value)
+            if point.time < range.start || point.time > range.end()? {
+                return Err(curve_error(
+                    "curve insert time is outside the owner interval",
+                ));
+            }
+            prepare_key_position_edit(property, path, keyframe_id, point.time, point.value)
         }
     }
 }
@@ -752,7 +717,9 @@ pub(crate) fn numeric_curve_author_time(
     range: mondrian_core::TimelineTimeRange,
     ratio: f64,
 ) -> Result<TimelineTime> {
-    NormalizedCurvePoint::new(ratio, 0.0)?;
+    if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
+        return Err(curve_error("invalid viewport time coordinate"));
+    }
     let ratio = TimelineTime::from_f64_quantized(ratio, CURVE_QUANTIZATION_DENOMINATOR)?;
     let scale = TimeScale::try_from(ratio)?;
     range
@@ -766,7 +733,9 @@ pub(crate) fn numeric_curve_author_value(
     property: &mondrian_core::automation::AnimatedProperty,
     ratio: f64,
 ) -> Result<PropertyValue> {
-    NormalizedCurvePoint::new(0.0, ratio)?;
+    if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
+        return Err(curve_error("invalid viewport value coordinate"));
+    }
     let numeric = property
         .descriptor
         .schema
@@ -816,6 +785,122 @@ mod tests {
     use mondrian_effects::{EffectNodeExt, EffectType};
     use mondrian_timeline::clip::Transform2D;
     use mondrian_timeline::{Clip, Sequence};
+
+    #[test]
+    fn exact_curve_insert_codec_preserves_values_outside_soft_and_rejects_invalid_requests() {
+        use crate::app::product_action::ClipCurveEditPayload;
+        use mondrian_core::automation::{
+            AnimatedProperty, ParameterInvalidValuePolicy, ParameterNumericContract,
+            ParameterNumericRange, ParameterUnit, PropertyDescriptor,
+        };
+        let range = mondrian_core::TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE)
+            .expect("owner range");
+        for (default, value, invalid) in [
+            (
+                PropertyValue::Double(0.5),
+                PropertyValue::Double(1.5000000000000002),
+                PropertyValue::Double(3.0),
+            ),
+            (
+                PropertyValue::Float(0.5),
+                PropertyValue::Float(1.5),
+                PropertyValue::Float(3.0),
+            ),
+            (
+                PropertyValue::Int(1),
+                PropertyValue::Int(2),
+                PropertyValue::Int(3),
+            ),
+        ] {
+            let mut numeric = ParameterNumericContract::closed(
+                0.0,
+                2.0,
+                None,
+                ParameterInvalidValuePolicy::Reject,
+            )
+            .expect("hard contract");
+            numeric.soft_range = ParameterNumericRange::new(0.0, 1.0).expect("soft view");
+            let property = AnimatedProperty::from_descriptor(
+                PropertyDescriptor::new("test.author.value", "Value", default)
+                    .with_animatable(true)
+                    .with_numeric_contract(ParameterUnit::Unitless, numeric),
+            );
+            let original = property.clone();
+            let id = KeyframeId::new();
+            let time = TimelineTime::new(1, 7).expect("free exact time");
+            let payload = ClipCurveEditPayload::Upsert {
+                keyframe_id: Some(id),
+                point: ClipCurveAuthorPoint { time, value: value.clone() },
+            };
+            let decoded: ClipCurveEditPayload =
+                serde_json::from_value(serde_json::to_value(&payload).expect("encode"))
+                    .expect("decode exact coordinates");
+            assert_eq!(decoded, payload);
+            let preview = preview_numeric_curve_edit(&property, range, &decoded)
+                .expect("legal absolute value beyond soft view");
+            let key = preview.keyframe_by_id(id).expect("reserved stable key");
+            assert_eq!(key.time, time);
+            assert_eq!(key.value, value);
+            assert_eq!(preview.evaluate(time), value);
+            assert!(preview_numeric_curve_edit(
+                &property,
+                range,
+                &ClipCurveEditPayload::Upsert {
+                    keyframe_id: None,
+                    point: ClipCurveAuthorPoint { time, value: invalid }
+                }
+            )
+            .is_err());
+            assert!(preview_numeric_curve_edit(
+                &property,
+                range,
+                &ClipCurveEditPayload::Upsert {
+                    keyframe_id: None,
+                    point: ClipCurveAuthorPoint {
+                        time: TimelineTime::new(2, 1).expect("outside"),
+                        value
+                    }
+                }
+            )
+            .is_err());
+            assert_eq!(
+                property, original,
+                "invalid requests never mutate the author source"
+            );
+        }
+        assert!(serde_json::from_value::<ClipCurveEditPayload>(serde_json::json!({"kind":"upsert", "keyframe_id":null, "point":{"time_ratio":0.5,"value_ratio":0.5}})).is_err(), "alpha has no obsolete normalized action parser");
+    }
+
+    #[test]
+    fn exact_curve_insert_does_not_require_a_numeric_editor_range() {
+        use crate::app::product_action::ClipCurveEditPayload;
+        use mondrian_core::automation::{AnimatedProperty, PropertyDescriptor};
+        let property = AnimatedProperty::from_descriptor(
+            PropertyDescriptor::new("test.author.no_editor", "Value", PropertyValue::Double(0.0))
+                .with_animatable(true),
+        );
+        assert!(property.descriptor.schema.numeric.is_none());
+        let time = TimelineTime::new(1, 3).expect("exact time");
+        for author_value in [0.12345678901234568, f64::MAX, -f64::MAX, -0.0] {
+            let value = PropertyValue::Double(author_value);
+            let preview = preview_numeric_curve_edit(
+                &property,
+                mondrian_core::TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE)
+                    .expect("owner range"),
+                &ClipCurveEditPayload::Upsert {
+                    keyframe_id: None,
+                    point: ClipCurveAuthorPoint { time, value: value.clone() },
+                },
+            )
+            .expect("typed author admission independent of editor projection");
+            assert_eq!(preview.evaluate(time), value);
+            assert_eq!(
+                preview.evaluate(time).as_f64().expect("Double").to_bits(),
+                author_value.to_bits()
+            );
+            assert!(property.keyframe_at(time).is_none());
+        }
+    }
 
     #[test]
     #[ignore = "requires current product and SessionProbe mode curve_authoring"]
@@ -1092,9 +1177,7 @@ mod tests {
         use crate::app::parameter_gesture::{
             ParameterCurveGestureTarget, ParameterGestureAction, ParameterGestureEdit,
         };
-        use crate::app::product_action::{
-            ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
-        };
+        use crate::app::product_action::{ClipCurveEditPayload, ClipEditNumericCurvePayload};
         for cancel in [false, true] {
             let (mut state, selection, _) = state_with_clip();
             state.select_clip_by_id(selection.clip_id).expect("select owner");
@@ -1124,10 +1207,13 @@ mod tests {
                                 parameter: parameter.clone(),
                                 edit: ClipCurveEditPayload::Upsert {
                                     keyframe_id: Some(keyframe_id),
-                                    point: ClipNormalizedCurvePointPayload {
+                                    point: crate::app::test_curve_authoring::curve_author_point(
+                                        &state,
+                                        selection.clip_id,
+                                        &parameter,
                                         time_ratio,
                                         value_ratio,
-                                    },
+                                    ),
                                 },
                             }),
                         }
@@ -1249,7 +1335,13 @@ mod tests {
                 address.clone(),
                 ClipNumericCurveEdit::Upsert {
                     keyframe_id: None,
-                    point: NormalizedCurvePoint::new(0.5, 0.5).expect("point"),
+                    point: crate::app::test_curve_authoring::curve_author_point(
+                        &state,
+                        selection.clip_id,
+                        &address,
+                        0.5,
+                        0.5,
+                    ),
                 },
             )
             .expect("integer curve insert");
@@ -1282,7 +1374,13 @@ mod tests {
                 address.clone(),
                 ClipNumericCurveEdit::Upsert {
                     keyframe_id: None,
-                    point: NormalizedCurvePoint::new(0.5, 0.5).expect("point"),
+                    point: crate::app::test_curve_authoring::curve_author_point(
+                        &state,
+                        selection.clip_id,
+                        &address,
+                        0.5,
+                        0.5,
+                    ),
                 },
             )
             .expect("insert key");
@@ -1364,7 +1462,13 @@ mod tests {
                 address.clone(),
                 ClipNumericCurveEdit::Upsert {
                     keyframe_id: None,
-                    point: NormalizedCurvePoint::new(0.5, 0.5).expect("point"),
+                    point: crate::app::test_curve_authoring::curve_author_point(
+                        &state,
+                        selection.clip_id,
+                        &address,
+                        0.5,
+                        0.5,
+                    ),
                 },
             )
             .expect_err("stale effect");
@@ -1488,10 +1592,16 @@ mod tests {
         let outcome = state
             .edit_clip_numeric_curve(
                 selection.clip_id,
-                address,
+                address.clone(),
                 ClipNumericCurveEdit::Upsert {
                     keyframe_id: Some(middle_id),
-                    point: NormalizedCurvePoint::new(0.6, 0.75).expect("point"),
+                    point: crate::app::test_curve_authoring::curve_author_point(
+                        &state,
+                        selection.clip_id,
+                        &address,
+                        0.6,
+                        0.75,
+                    ),
                 },
             )
             .expect("edit curve");
@@ -1690,7 +1800,13 @@ mod tests {
                 address.clone(),
                 ClipNumericCurveEdit::Upsert {
                     keyframe_id: Some(first_id),
-                    point: NormalizedCurvePoint::new(0.5, 0.5).expect("point"),
+                    point: crate::app::test_curve_authoring::curve_author_point(
+                        &state,
+                        selection.clip_id,
+                        &address,
+                        0.5,
+                        0.5,
+                    ),
                 },
             )
             .expect_err("occupied time rejects");
@@ -1728,7 +1844,13 @@ mod tests {
                 address.clone(),
                 ClipNumericCurveEdit::Upsert {
                     keyframe_id: None,
-                    point: NormalizedCurvePoint::new(0.25, 0.4).expect("point"),
+                    point: crate::app::test_curve_authoring::curve_author_point(
+                        &state,
+                        selection.clip_id,
+                        &address,
+                        0.25,
+                        0.4,
+                    ),
                 },
             )
             .expect("insert");

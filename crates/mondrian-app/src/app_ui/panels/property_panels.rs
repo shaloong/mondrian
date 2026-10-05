@@ -2797,7 +2797,7 @@ fn numeric_curve_edit_payload(
         }
         CurveEdit::Insert { keyframe_id, point, .. } => ClipCurveEditPayload::Upsert {
             keyframe_id: Some(keyframe_id),
-            point: inspector_curve_point_payload(point),
+            point: inspector_curve_point_payload(model, point)?,
         },
         CurveEdit::Move { target, point } => {
             let (identity, reference) = match target {
@@ -2820,26 +2820,25 @@ fn numeric_curve_edit_payload(
                 }
                 CurvePointTarget::Snapshot(_) => return None,
             };
-            let projected = inspector_curve_point_payload(point);
             if let Some(keyframe_id) = identity {
                 let time = if point.x == reference.x {
                     model.curve_source.keyframe_by_id(keyframe_id)?.time
                 } else {
-                    crate::app::numeric_curve_author_time(model.owner_range, projected.time_ratio)
+                    crate::app::numeric_curve_author_time(model.owner_range, f64::from(point.x))
                         .ok()?
                 };
                 let value = if point.y == reference.y {
                     model.curve_source.keyframe_by_id(keyframe_id)?.value
                 } else {
-                    crate::app::numeric_curve_author_value(
-                        &model.curve_source,
-                        projected.value_ratio,
-                    )
-                    .ok()?
+                    crate::app::numeric_curve_author_value(&model.curve_source, f64::from(point.y))
+                        .ok()?
                 };
                 ClipCurveEditPayload::Move { keyframe_id, time: Some(time), value: Some(value) }
             } else {
-                ClipCurveEditPayload::Upsert { keyframe_id: None, point: projected }
+                ClipCurveEditPayload::Upsert {
+                    keyframe_id: None,
+                    point: inspector_curve_point_payload(model, point)?,
+                }
             }
         }
         CurveEdit::Delete { target } => {
@@ -2885,11 +2884,15 @@ pub(super) fn effect_curve_edit_action(
     ))
 }
 
-pub(super) fn inspector_curve_point_payload(point: CurvePoint) -> ClipNormalizedCurvePointPayload {
-    ClipNormalizedCurvePointPayload {
-        time_ratio: f64::from(point.x.clamp(0.0, 1.0)),
-        value_ratio: f64::from(point.y.clamp(0.0, 1.0)),
-    }
+pub(super) fn inspector_curve_point_payload(
+    model: &InspectorCurveModel,
+    point: CurvePoint,
+) -> Option<ClipCurveAuthorPoint> {
+    Some(ClipCurveAuthorPoint {
+        time: crate::app::numeric_curve_author_time(model.owner_range, f64::from(point.x)).ok()?,
+        value: crate::app::numeric_curve_author_value(&model.curve_source, f64::from(point.y))
+            .ok()?,
+    })
 }
 
 pub(super) fn node_graph_node_action(
