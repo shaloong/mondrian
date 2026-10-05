@@ -505,8 +505,15 @@ impl AppState {
             cause,
             ?before,
             ?after,
-            ?evidence,
-            ?resources,
+            deliveries = ?evidence.deliveries,
+            demand_latency = ?evidence.demand_latency,
+            delivery_phase_error = ?evidence.delivery_phase_error,
+            audio_underrun_frames = evidence.audio_underrun_frames,
+            preview_scale_reductions = ?evidence.preview_scale_reductions,
+            resource_revision = resources.revision,
+            resource_pressure = ?resources.pressure,
+            resource_pressure_source = ?resources.pressure_source,
+            viewer_gpu_grant = ?resources.preview.viewer_gpu.grant,
             "Playback preview scale transition"
         );
     }
