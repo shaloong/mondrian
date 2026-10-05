@@ -466,6 +466,42 @@ impl ViewerGpuExecutionRuntime {
             .map_err(ViewerGpuExecutionError::BackendPreparation)
     }
 
+    /// Inspect the exact device-object contract without loaning or clearing caches.
+    ///
+    /// A prepared backend can record another queue-ordered frame while earlier
+    /// submitted output leases await completion. This is not frame readiness or
+    /// permission to loan a cold cache before its submitted resources retire.
+    pub fn backend_is_prepared_for(
+        &self,
+        plan: &crate::ViewerGpuBackendPreparation,
+        layers: &[ViewerGpuExecutionLayer],
+    ) -> Result<bool, ViewerGpuExecutionError> {
+        let native_plans = self.native_input_backend_plans(layers)?;
+        Ok(self.color_output.native_is_prepared(plan, &native_plans))
+    }
+
+    fn native_input_backend_plans(
+        &self,
+        layers: &[ViewerGpuExecutionLayer],
+    ) -> Result<
+        Vec<crate::viewer_execution::NativeVideoInputBackendPreparation>,
+        ViewerGpuExecutionError,
+    > {
+        let mut native_plans = Vec::new();
+        if self.native_video_import.support().renderer_backend_ready {
+            for frame in visible_native_video_sources(layers) {
+                let native =
+                    self.native_video_import.input_backend_preparation(frame).map_err(|error| {
+                        ViewerGpuExecutionError::InputPreparation(error.to_string())
+                    })?;
+                if !native_plans.contains(&native) {
+                    native_plans.push(native);
+                }
+            }
+        }
+        Ok(native_plans)
+    }
+
     /// Prepare the exact candidate's native input caches on the same bounded worker.
     /// Only validated descriptors, transforms and the original device cache cross
     /// the thread boundary. Decoder surfaces and presentation tickets stay local.
@@ -493,18 +529,7 @@ impl ViewerGpuExecutionRuntime {
         if self.color_output.is_pending() {
             return Ok(crate::ViewerGpuBackendPreparationStatus::Pending);
         }
-        let mut native_plans = Vec::new();
-        if self.native_video_import.support().renderer_backend_ready {
-            for frame in visible_native_video_sources(layers) {
-                let native =
-                    self.native_video_import.input_backend_preparation(frame).map_err(|error| {
-                        ViewerGpuExecutionError::InputPreparation(error.to_string())
-                    })?;
-                if !native_plans.contains(&native) {
-                    native_plans.push(native);
-                }
-            }
-        }
+        let native_plans = self.native_input_backend_plans(layers)?;
         if self.color_output.native_is_prepared(&plan, &native_plans) {
             return Ok(crate::ViewerGpuBackendPreparationStatus::Ready);
         }
@@ -3251,6 +3276,7 @@ mod tests {
             waveform_mode: None,
         };
         let before = runtime.color_output_diagnostics();
+        assert!(!runtime.backend_is_prepared_for(&plan, &[]).unwrap());
         assert_eq!(
             runtime
                 .prepare_backend_async(&context.device, &context.queue, plan.clone(), &[], || {},)
@@ -3275,12 +3301,67 @@ mod tests {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(1));
         }
+        assert!(runtime.backend_is_prepared_for(&plan, &[]).unwrap());
         assert_eq!(
             runtime.color_output_diagnostics().next_frame_id,
             before.next_frame_id
         );
+        let graph = Arc::new(
+            compile_reference_render_graph(EffectGraphBuilderState::new().finish()).unwrap(),
+        );
+        let effect_plan = Arc::new(lower_effect_graph_to_gpu_plan(&graph).unwrap());
+        let record_color = |runtime: &mut ViewerGpuExecutionRuntime, timeline_frame, color| {
+            let layer = ViewerGpuExecutionLayer::Source(Box::new(
+                crate::ViewerGpuSourceLayer::SolidColor {
+                    layer: TimelineSolidColorLayer {
+                        color,
+                        opacity: 1.0,
+                        blend_mode: BlendMode::Normal,
+                        transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                        effect_graph: Arc::clone(&graph),
+                        frame_seed: 0,
+                    },
+                    effect_plan: Arc::clone(&effect_plan),
+                },
+            ));
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("queued Viewer color fixture"),
+                });
+            let mut record = runtime
+                .record(
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    ViewerGpuExecutionRequest {
+                        sequence_id: SequenceId::new(),
+                        timeline_frame,
+                        width: 4,
+                        height: 4,
+                        working_color_space: plan.working_color_space,
+                        layers: &[layer],
+                        heterogeneous_inputs: Vec::new(),
+                        program_output_boundary: &plan.program_output_boundary,
+                        monitor_adaptation: &plan.monitor_adaptation,
+                        source_rect: ViewerSourceRect::FULL,
+                        output_width: 4,
+                        output_height: 4,
+                        output_precision: plan.output_precision,
+                        display_calibration: None,
+                        program_scopes: None,
+                        signal_monitoring: None,
+                    },
+                )
+                .unwrap();
+            assert_eq!(record.stage_diagnostics.upload_stages, 0);
+            assert_eq!(record.stage_diagnostics.readback_stages, 0);
+            let submission = context.queue.submit([encoder.finish()]);
+            let _submitted = record.assert_adapter_submission(submission);
+            record
+        };
         let prepared = runtime.color_output_diagnostics();
-        let _record = try_record_empty_viewer_frame(&context, &mut runtime, 0, None).unwrap();
+        let mut first = record_color(&mut runtime, 0, Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 });
+        let first_lease = runtime.take_presentation_output(&mut first).unwrap();
         let recorded = runtime.color_output_diagnostics();
         assert_eq!(
             recorded.backend_objects.misses,
@@ -3290,13 +3371,67 @@ mod tests {
             recorded.backend_objects.hits,
             prepared.backend_objects.hits + 1
         );
-        context
-            .device
-            .poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: Some(Duration::from_secs(5)),
-            })
+        // No device wait or callback retirement separates these submissions.
+        // Exact warm matching must preserve the first physical output while
+        // the ordinary recorder turns over its submitted working resources.
+        assert!(runtime.backend_is_prepared_for(&plan, &[]).unwrap());
+        let mut changed = plan.clone();
+        changed.waveform_mode = Some(WaveformMode::Luma);
+        assert!(!runtime.backend_is_prepared_for(&changed, &[]).unwrap());
+        let observed = runtime.color_output_diagnostics();
+        assert_eq!(observed.next_frame_id, recorded.next_frame_id);
+        assert_eq!(observed.frame_table_entries, recorded.frame_table_entries);
+        assert_eq!(observed.backend_objects.hits, recorded.backend_objects.hits);
+        assert_eq!(observed.resource_pool.detached_presentation_resources, 1);
+        let mut second = record_color(&mut runtime, 1, Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 });
+        let second_lease = runtime.take_presentation_output(&mut second).unwrap();
+        assert_ne!(first.output.id(), second.output.id());
+        assert_eq!(
+            runtime.color_output_diagnostics().resource_pool.detached_presentation_resources,
+            2
+        );
+        // Copy both outputs only after the second frame has been submitted.
+        // Distinct identities alone cannot detect a reused physical texture.
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("queued Viewer output verification"),
+        });
+        let readbacks = [&first_lease, &second_lease].map(|lease| {
+            let plan =
+                crate::GpuColorFrameReadbackPlan::encoded_rgba8(lease.handle().clone()).unwrap();
+            let buffer = crate::GpuColorFrameReadback::record_presentation_copy(
+                &context.device,
+                &mut encoder,
+                &plan,
+                lease,
+            )
             .unwrap();
+            (plan, buffer)
+        });
+        context.queue.submit([encoder.finish()]);
+        for ((plan, buffer), expected) in
+            readbacks.into_iter().zip([[255, 0, 0, 255], [0, 0, 255, 255]])
+        {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let slice = buffer.slice(..);
+            slice.map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+            context
+                .device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: Some(Duration::from_secs(5)),
+                })
+                .unwrap();
+            receiver.recv().unwrap().unwrap();
+            let mapped = slice.get_mapped_range().unwrap();
+            let actual = plan.unpack_mapped_rgba8(&mapped).unwrap();
+            assert!(actual.rgba().chunks_exact(4).all(|pixel| pixel == expected));
+            drop(mapped);
+            buffer.unmap();
+        }
+        drop(second_lease);
+        drop(first_lease);
         let mut retirement = runtime.into_retirement();
         let receipt = loop {
             if let Some(receipt) = retirement.poll().unwrap() {

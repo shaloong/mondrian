@@ -7398,12 +7398,6 @@ fn prepare_viewer_gpu_preview(
         finish_prepare!();
     }
     {
-        // Loan device caches only after the exact previous submission completes.
-        // Pending preparation does not consume or renew this candidate ticket.
-        if submission_in_flight {
-            retain_viewer_backend_candidate(session, frame);
-            finish_prepare!();
-        }
         let Some(event_proxy) = session.viewer_backend_event_proxy.clone() else {
             host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
                 feature: "viewer_program_backend_preparation".to_owned(),
@@ -7411,17 +7405,33 @@ fn prepare_viewer_gpu_preview(
             });
             finish_prepare!();
         };
-        match session.viewer_gpu_execution.prepare_backend_async(
-            device,
-            queue,
-            backend_plan.clone(),
-            match &frame.working_input {
-                PreviewGpuWorkingInput::GpuComposite { layers } => layers,
-            },
-            move || {
-                let _ = event_proxy.send_event(AppUiUserEvent::ViewerBackendPreparationAvailable);
-            },
-        ) {
+        let PreviewGpuWorkingInput::GpuComposite { layers } = &frame.working_input;
+        // Warm device objects need no cache loan. Record through the existing
+        // queue-ordered turnover even while earlier submitted owners retire.
+        // A cold contract still waits for their exact completion before the
+        // worker may clear/loan caches; neither path renews a picture ticket.
+        let preparation = session
+            .viewer_gpu_execution
+            .backend_is_prepared_for(&backend_plan, layers)
+            .and_then(|prepared| {
+                if prepared {
+                    Ok(mondrian_renderer::ViewerGpuBackendPreparationStatus::Ready)
+                } else if submission_in_flight {
+                    Ok(mondrian_renderer::ViewerGpuBackendPreparationStatus::Pending)
+                } else {
+                    session.viewer_gpu_execution.prepare_backend_async(
+                        device,
+                        queue,
+                        backend_plan.clone(),
+                        layers,
+                        move || {
+                            let _ = event_proxy
+                                .send_event(AppUiUserEvent::ViewerBackendPreparationAvailable);
+                        },
+                    )
+                }
+            });
+        match preparation {
             Ok(mondrian_renderer::ViewerGpuBackendPreparationStatus::Ready) => {}
             Ok(mondrian_renderer::ViewerGpuBackendPreparationStatus::Pending) => {
                 session.viewer_gpu_output_telemetry.record_loading_skip();

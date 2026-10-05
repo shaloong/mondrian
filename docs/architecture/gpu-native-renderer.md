@@ -2038,6 +2038,15 @@ execution timestamps or semantic presentation authority.
 
 ### Interactive scopes backend preparation
 
+Window asks the existing Renderer owner whether the exact Program, monitor,
+scopes and native input backend contract is prepared before gating on submitted
+cleanup owners. This read-only match creates no frame, clears no resources and
+loans no cache. A warm match uses ordinary queue-ordered recording while the
+bounded submission owners retain their physical output leases and real GPU
+completion obligations. A cache miss still waits for prior submissions to
+complete before asynchronous preparation may clear and loan the same caches.
+Presentation tickets, deadlines, resource grants and color semantics are unchanged.
+
 Visible scopes extend the existing bounded Viewer preparation job with the exact waveform mode. The same owner loans its Program cache and scope runtime together; hidden scopes compile nothing. The worker creates only device pipelines. Frame count buffers, textures, input surfaces, candidate identities, commands and publication remain on the production recording path. Luma and RGB Parade pipelines remain tied to this device and survive ordinary frame invalidation. A mode change requires its own preparation result; a previous mode result cannot authorize it. Consuming retirement joins the same worker and retains both caches. Native input preparation uses the same worker after the exact candidate exposes its decoded-source contract. The existing import validator derives source/working descriptors without frame IDs; only these descriptors, the input transform, the original input cache and its physical shader layout cross the worker boundary. CVPixelBuffer/IOSurface, platform adapters, frame resources and presentation tickets stay on the recording path. The import backend has no local input cache during the loan and rejects recording until that same cache returns. Contract equality excludes diagnostic frame labels, so unchanged decoded frames reuse the prepared pipeline. Monitor/calibration preparation is not covered by this seam yet.
 
 The Window retains one current candidate locally while its caches are pending, including the original opaque presentation ticket, Broker lease and media guards. The existing Preview owner resumes it only for the same generation, complete intent and identical ticket; preparation never replaces a demand or extends its deadline. Ticketless successors remain in the existing bounded staging horizon.
