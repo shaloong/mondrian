@@ -64,6 +64,11 @@ impl PreviewWorkNotificationState {
         let gate = lock_unpoisoned(&self.wait_gate);
         let next = self.revision.load(Ordering::Relaxed).saturating_add(1);
         self.revision.store(next, Ordering::Release);
+        // Publish under the wait gate, then release it before waking consumers.
+        // Their predicate sees this revision even if they acquire the gate
+        // before the notification; a woken realtime thread never waits for the
+        // publisher to finish its OS wake call while holding the same gate.
+        drop(gate);
         #[cfg(windows)]
         unsafe {
             // WaitOnAddress compares the value before sleeping, so this wake
@@ -71,7 +76,6 @@ impl PreviewWorkNotificationState {
             windows_sys::Win32::System::Threading::WakeByAddressAll(self.revision.as_ptr().cast());
         }
         self.changed.notify_all();
-        drop(gate);
         PreviewWorkRevision(next)
     }
 }
