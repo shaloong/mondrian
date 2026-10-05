@@ -266,6 +266,7 @@ pub type CurveGestureAction = dyn Fn(CurveGestureEvent) -> Option<Action>;
 
 /// Project gesture lifecycle and edits using the owner's canonical evaluator.
 /// Only `Edit` results replace display samples; boundaries maintain projection state.
+/// A missing `Edit` projection rejects its local candidate and author dispatch.
 pub type CurvePreviewProjection = dyn FnMut(CurveGestureEvent) -> Option<CurvePreview>;
 
 /// Adapter for complete live curve values and their authoring boundaries.
@@ -563,7 +564,8 @@ impl CurveEditor {
     /// Paint samples derived by the owner's canonical curve evaluator during edits.
     /// Lifecycle events let the projection restore its derived snapshot on cancel.
     /// The widget also restores samples present before the pointer gesture began.
-    /// Only edit events can replace the sampled display.
+    /// Only edit events can replace the sampled display. A missing edit projection
+    /// rejects the candidate; absent lifecycle projections still admit boundaries.
     pub fn with_preview_projection(
         mut self,
         project: impl FnMut(CurveGestureEvent) -> Option<CurvePreview> + 'static,
@@ -880,19 +882,28 @@ impl CurveEditor {
         if current.point == point {
             return false;
         }
+        let previous = current.point;
         current.point = point;
         let edit = CurveEdit::Handle {
             keyframe_id: tangent.keyframe_id,
             side: tangent.side,
             point,
         };
-        if self.tangent_drag.is_some() {
+        let accepted = if self.tangent_drag.is_some() {
             self.dispatch_gesture(
                 CurveGestureEvent::Edit { gesture_id: self.gesture, edit },
                 ctx,
-            );
+            )
         } else {
-            self.dispatch_edit(edit, ctx);
+            self.dispatch_edit(edit, ctx)
+        };
+        if !accepted {
+            if let Some(current) = self.tangents.iter_mut().find(|current| {
+                current.keyframe_id == tangent.keyframe_id && current.side == tangent.side
+            }) {
+                current.point = previous;
+            }
+            return false;
         }
         ctx.request_repaint();
         true
@@ -951,20 +962,27 @@ impl CurveEditor {
         point: CurvePoint,
         ctx: &mut EventContext,
     ) -> bool {
+        let Some(previous) = self.points.get(index).copied() else {
+            return false;
+        };
         if !self.move_point(index, point) {
             return false;
         }
-        self.dispatch_change(ctx);
         if self.on_gesture.is_some()
             && let Some(drag) = self.dragging
-        {
-            self.dispatch_gesture(
+            && !self.dispatch_gesture(
                 CurveGestureEvent::Edit {
                     gesture_id: self.gesture,
                     edit: self.drag_author_edit(drag),
                 },
                 ctx,
-            );
+            )
+        {
+            self.points[index] = previous;
+            return false;
+        }
+        if self.dragging.is_some() {
+            self.dispatch_change(ctx);
         }
         ctx.request_repaint();
         true
@@ -986,8 +1004,14 @@ impl CurveEditor {
         }
     }
 
-    fn dispatch_gesture(&mut self, event: CurveGestureEvent, ctx: &mut EventContext) {
+    fn dispatch_gesture(&mut self, event: CurveGestureEvent, ctx: &mut EventContext) -> bool {
         let points = self.preview_projection.as_mut().and_then(|project| project(event));
+        if matches!(event, CurveGestureEvent::Edit { .. })
+            && self.preview_projection.is_some()
+            && points.is_none()
+        {
+            return false;
+        }
         if matches!(event, CurveGestureEvent::Edit { .. })
             && let Some(points) = points
         {
@@ -1008,6 +1032,7 @@ impl CurveEditor {
         {
             (ctx.dispatch)(action);
         }
+        true
     }
 
     fn end_gesture(&mut self, cancel: bool, ctx: &mut EventContext) {
@@ -1046,16 +1071,19 @@ impl CurveEditor {
         }
     }
 
-    fn dispatch_edit(&mut self, edit: CurveEdit, ctx: &mut EventContext) {
-        self.dispatch_gesture(
+    fn dispatch_edit(&mut self, edit: CurveEdit, ctx: &mut EventContext) -> bool {
+        if !self.dispatch_gesture(
             CurveGestureEvent::Edit { gesture_id: self.gesture, edit },
             ctx,
-        );
+        ) {
+            return false;
+        }
         if let Some(action) = &self.on_edit
             && let Some(action) = action(edit)
         {
             (ctx.dispatch)(action);
         }
+        true
     }
 
     fn begin_value_gesture(&mut self, ctx: &mut EventContext) {
@@ -1115,14 +1143,17 @@ impl CurveEditor {
         if inserted
             && self.on_gesture.is_some()
             && let Some(drag) = self.dragging
-        {
-            self.dispatch_gesture(
+            && !self.dispatch_gesture(
                 CurveGestureEvent::Edit {
                     gesture_id: self.gesture,
                     edit: self.drag_author_edit(drag),
                 },
                 ctx,
-            );
+            )
+        {
+            self.cancel_drag_state();
+            self.selected = None;
+            self.end_gesture(true, ctx);
         }
     }
 
@@ -1465,7 +1496,8 @@ impl CurveEditor {
                 KeyCode::Down => point.y -= self.value_step(modifiers.shift),
                 _ => return false,
             }
-            return self.move_tangent(tangent, point, ctx);
+            self.move_tangent(tangent, point, ctx);
+            return true;
         }
         if modifiers.ctrl || modifiers.alt || modifiers.meta {
             return false;
@@ -1485,8 +1517,10 @@ impl CurveEditor {
             KeyCode::Down => next.y -= self.value_step(modifiers.shift),
             _ => return false,
         }
+        let previous = self.points[index];
+        let metadata = self.point_metadata[index].clone();
         if !self.move_point_from_input(index, next, ctx) {
-            return false;
+            return true;
         }
         let point = self.points[index];
         if self.dragging.is_none() {
@@ -1500,7 +1534,13 @@ impl CurveEditor {
             } else {
                 CurveEdit::Move { target, point }
             };
-            self.dispatch_edit(edit, ctx);
+            if !self.dispatch_edit(edit, ctx) {
+                self.points[index] = previous;
+                self.point_metadata[index] = metadata;
+                self.rebuild_keyframe_indices();
+                return true;
+            }
+            self.dispatch_change(ctx);
         }
         true
     }
@@ -1553,14 +1593,23 @@ impl CurveEditor {
             ctx.request_repaint();
             return true;
         }
-        let was_dragging = self.dragging.take().is_some();
-        self.points.remove(index);
-        let target = self.point_metadata.remove(index).target;
+        let drag = self.dragging.take();
+        let selection = self.selected;
+        let point = self.points.remove(index);
+        let metadata = self.point_metadata.remove(index);
+        let target = metadata.target;
         self.rebuild_keyframe_indices();
         self.selected = (!self.points.is_empty()).then(|| index.min(self.points.len() - 1));
+        if !self.dispatch_edit(CurveEdit::Delete { target }, ctx) {
+            self.points.insert(index, point);
+            self.point_metadata.insert(index, metadata);
+            self.selected = selection;
+            self.dragging = drag;
+            self.rebuild_keyframe_indices();
+            return true;
+        }
         self.dispatch_change(ctx);
-        self.dispatch_edit(CurveEdit::Delete { target }, ctx);
-        if was_dragging {
+        if drag.is_some() {
             self.end_gesture(false, ctx);
             ctx.release_pointer_capture(self.id);
         }
@@ -1762,9 +1811,14 @@ impl Widget for CurveEditor {
                 if self.point_insertion_limit.is_some_and(|maximum| self.points.len() >= maximum) {
                     return EventResult::Handled;
                 }
+                let previous_selection = self.selected;
                 if let Some(index) = self.insert_point_from_input(*position, ctx) {
                     self.begin_drag(index, true, *position, ctx);
-                    ctx.request_pointer_capture(self.id);
+                    if self.dragging.is_some() {
+                        ctx.request_pointer_capture(self.id);
+                    } else {
+                        self.selected = previous_selection;
+                    }
                     return EventResult::Handled;
                 }
                 self.selected = None;
@@ -3974,6 +4028,224 @@ mod tests {
     }
 
     #[test]
+    fn accepted_author_delete_reveals_the_new_selection_after_removal() {
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.5),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 0.5),
+        ])
+        .with_preview_projection(|event| {
+            matches!(
+                event,
+                CurveGestureEvent::Edit { edit: CurveEdit::Delete { .. }, .. }
+            )
+            .then(|| CurvePreview {
+                display_points: vec![CurvePoint::new(0.0, 0.5), CurvePoint::new(1.0, 0.5)],
+                key_points: Vec::new(),
+                tangents: Vec::new(),
+            })
+        })
+        .on_gesture(|_| None::<Action>);
+        editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        editor.viewport.time_start = 0.45;
+        editor.viewport.time_span = 0.1;
+        editor.select(Some(1));
+        let mut ctx = event_ctx();
+        assert_eq!(
+            editor.event(
+                &UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(editor.points.len(), 2);
+        assert_eq!(editor.selected, Some(1));
+        assert!(
+            editor.plot_rect().contains(editor.to_screen(editor.points[1])),
+            "the replacement selection must remain visible after canonical deletion"
+        );
+    }
+
+    #[test]
+    fn rejected_author_curve_edits_preserve_keyboard_handle_delete_and_insert_state() {
+        for operation in 0..6 {
+            let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let mut editor = tangent_editor(events.clone()).with_preview_projection(|_| None);
+            if operation == 5 {
+                editor.points[1].y = 1.0;
+            }
+            let original = editor.points.clone();
+            let controls = editor.tangents.clone();
+            let identities = editor.keyframe_indices.clone();
+            let selection = editor.selected;
+            let mut ctx = event_ctx();
+            match operation {
+                0 => {
+                    editor.event(
+                        &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+                        &mut ctx,
+                    );
+                }
+                1 => {
+                    editor.event(
+                        &UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
+                        &mut ctx,
+                    );
+                }
+                2 => {
+                    editor.selected_tangent = Some((controls[0].keyframe_id, controls[0].side));
+                    assert_eq!(
+                        editor.event(
+                            &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+                            &mut ctx,
+                        ),
+                        EventResult::Handled,
+                        "a rejected handle edit must not leak its arrow key"
+                    );
+                }
+                3 => {
+                    let start = editor.to_screen(controls[0].point);
+                    editor.event(
+                        &UiEvent::MouseDown {
+                            position: start,
+                            button: MouseButton::Left,
+                            modifiers: Modifiers::none(),
+                        },
+                        &mut ctx,
+                    );
+                    editor.event(
+                        &UiEvent::MouseMove {
+                            position: Point::new(start.x, start.y - 10.0),
+                            modifiers: Modifiers::none(),
+                        },
+                        &mut ctx,
+                    );
+                    assert!(editor.has_active_pointer_interaction());
+                }
+                4 => {
+                    let position = editor.to_screen(CurvePoint::new(0.25, 0.75));
+                    editor.event(
+                        &UiEvent::MouseDown {
+                            position,
+                            button: MouseButton::Left,
+                            modifiers: Modifiers::none(),
+                        },
+                        &mut ctx,
+                    );
+                    assert!(!editor.has_active_pointer_interaction());
+                }
+                _ => {
+                    assert_eq!(
+                        editor.event(
+                            &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+                            &mut ctx,
+                        ),
+                        EventResult::Handled,
+                        "a clamped point nudge retains keyboard ownership"
+                    );
+                }
+            }
+            assert_eq!(
+                editor.points, original,
+                "operation {operation} retains admitted keys"
+            );
+            assert_eq!(
+                editor.tangents, controls,
+                "operation {operation} retains admitted controls"
+            );
+            assert_eq!(editor.keyframe_indices, identities);
+            assert_eq!(editor.selected, selection);
+            assert!(
+                !events
+                    .borrow()
+                    .iter()
+                    .any(|event| matches!(event, CurveGestureEvent::Edit { .. })),
+                "rejected edits cannot dispatch author candidates"
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_author_preview_restores_last_admitted_geometry_and_keeps_capture() {
+        let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let captured = events.clone();
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .with_preview_projection(|event| match event {
+            CurveGestureEvent::Edit { edit: CurveEdit::Move { point, .. }, .. }
+                if point.y <= 0.6 =>
+            {
+                Some(CurvePreview {
+                    key_points: Vec::new(),
+                    display_points: vec![
+                        CurvePoint::new(0.0, 0.0),
+                        point,
+                        CurvePoint::new(1.0, 1.0),
+                    ],
+                    tangents: Vec::new(),
+                })
+            }
+            _ => None,
+        })
+        .on_gesture(move |event| {
+            captured.borrow_mut().push(event);
+            None
+        });
+        editor.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+        let mut ctx = event_ctx();
+        let start = editor.to_screen(editor.points()[1]);
+        editor.event(
+            &UiEvent::MouseDown {
+                position: start,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let valid = editor.to_screen(CurvePoint::new(0.55, 0.55));
+        editor.event(
+            &UiEvent::MouseMove { position: valid, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        let admitted = editor.points.clone();
+        let samples = editor.display_points.clone();
+        let invalid = editor.to_screen(CurvePoint::new(0.6, 0.8));
+        editor.event(
+            &UiEvent::MouseMove { position: invalid, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(
+            editor.points, admitted,
+            "rejected author candidate cannot leave a ghost key"
+        );
+        assert_eq!(editor.display_points, samples);
+        assert!(
+            editor.has_active_pointer_interaction(),
+            "rejection retains the pointer gesture"
+        );
+        editor.event(
+            &UiEvent::MouseMove { position: valid, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(
+            editor.points, admitted,
+            "the same gesture can recover to a valid candidate"
+        );
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(editor.points()[1], CurvePoint::new(0.5, 0.5));
+        assert!(matches!(
+            events.borrow().last(),
+            Some(CurveGestureEvent::Cancel(_))
+        ));
+    }
+
+    #[test]
     fn author_gesture_emits_current_key_position_before_pointer_release() {
         let events = std::rc::Rc::new(RefCell::new(Vec::new()));
         let captured = events.clone();
@@ -4884,7 +5156,11 @@ mod tests {
             &mut ctx,
         );
 
-        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            editor.points(),
+            &[CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)]
+        );
         assert!(actions.borrow().is_empty());
         assert!(!ctx.requests.repaint);
     }

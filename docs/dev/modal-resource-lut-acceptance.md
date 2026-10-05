@@ -1,11 +1,12 @@
 # Modal, resource and LUT acceptance
 
-## Qualified snapshot
+## Qualified native-output snapshot
 
 Windows qualification on 2026-10-06 used clean, unchanged production source
 `55cd95c86539ba3d023d5bd348644d0d1cbebeeb` and rebuilt product SHA256
 `8a1e0cfab72f1494191fba8d860c38470f08946d1785e9ac8701f59479945c90`.
-The accompanying documentation update does not change production code.
+This receipt qualifies that production source. The subsequent UI admission
+fix below has its own test scope; it does not inherit native-output attestation.
 
 | Scope | Evidence |
 | --- | --- |
@@ -50,6 +51,38 @@ This is an alpha action payload change with no previous PropertyValue decoder;
 project storage remains schema 31. Core full 463 and App curve 48 regressions
 passed; their ignored counts were 1 and 3 respectively.
 
+## Subsequent UI admission qualification
+
+The curve preview provider is the admission authority: an absent Edit projection
+rejects its candidate and author dispatch. Point/handle movement restores local
+coordinates, rejected keyboard edits restore metadata, rejected deletion restores
+the removed entry, and a refused initial insertion cancels without pointer capture.
+Existing capture permits recovery or Escape cancellation. Recognized arrow keys
+remain owned when a value is clamped or an edit is refused. Accepted deletion
+reveals the actual replacement selection in a zoomed viewport.
+
+Actual Inspector events cover finite author Numbers exceeding native Float range:
+the refused candidate leaves the last admitted geometry and entire author Sequence
+unchanged; one Undo/Redo restores the complete origin/admitted Sequence. Generic
+widget regressions cover point, keyboard, handle, deletion and insertion refusal.
+Three genuine REDs preceded the fixes: ghost geometry, leaked handle arrow input,
+and an offscreen replacement selection after accepted deletion.
+
+This patch passed the full Widgets library (1080 passed, zero failed) and App
+all-feature library (2550 passed, zero failed, 62 ignored), strict workspace
+all-target/all-feature Clippy, formatting and diff checks. These counts are not
+added to earlier workspace/native results. The first full App run exposed a
+retirement-test fixture that consumed queue-empty outcomes during idle polling.
+Forcing idle polls reproduced it deterministically. Its replacement models queue
+readiness as persistent state and exact submission readiness independently,
+keeping nonblocking handoff, independent release, real join and single-drop
+assertions. The final full App run and 20 forced-idle repetitions passed; product
+retirement logic and deadlines are unchanged.
+
+Native output for this subsequent UI source has not yet been requalified. The
+55cd95c LUT, Unicode archive, GPU and H.264 results above retain their exact-source
+scope.
+
 ## Reproduce and locate evidence
 
 Run `cargo test -p mondrian-app --all-features --lib modal -- --test-threads=1`
@@ -62,7 +95,7 @@ Missing loader setup is an execution environment failure, not a test result.
 
 The exact-source complete output gate is
 `scripts/validation/invoke-complete-golden-project-gate.ps1`.
-The current consecutive report is
+The qualified 55cd95c consecutive report is
 `target/validation/nle-backlog-complete/20261005T165658Z-complete-golden-5f191471/complete-golden-consecutive-report.json`.
 It retains per-round reports, process logs, build log, source attestation,
 product hashes, pixel errors and encoder diagnostics.
@@ -96,7 +129,7 @@ qualification, not macOS or general third-party plugin compatibility.
 NVENC uses `cpu_rawvideo_pipe`; this does not establish zero-copy transport.
 
 Full professional curve interaction, Float pointer primitive-range admission,
-rejected-handle draft restoration, rulers/multi-key editing,
+a dedicated real-owner handle overflow scenario, rulers/multi-key editing,
 a dedicated out-of-soft-range UI-edit native output scenario, plugin author
 writes and vendor/bus/platform/localization matrices remain open. The overall
 NLE goal remains active.

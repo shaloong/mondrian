@@ -8812,6 +8812,199 @@ fn effect_curve_value_nudges_preserve_full_integer_precision_and_history() {
 }
 
 #[test]
+fn effect_curve_rejected_native_float_preview_preserves_geometry_and_author_history() {
+    use mondrian_core::automation::{ParameterUnit, PropertyDescriptor, PropertyMutation};
+    use mondrian_effects::{
+        instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
+        EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
+        EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
+        EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
+    };
+    use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    let kind = EffectType::Plugin("plugin.test.rejected_float_preview".into());
+    let path = "plugin.test.rejected_float_preview.value";
+    let parameter_id = kind.parameter_id("value").expect("parameter");
+    let numeric = ParameterNumericContract::closed(
+        -f64::MAX,
+        f64::MAX,
+        None,
+        ParameterInvalidValuePolicy::Reject,
+    )
+    .expect("declared bounds");
+    register_effect_definition(
+        EffectPluginDefinitionBuilder::new(
+            kind.key(),
+            "Float preview",
+            EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            determinism: EffectDeterminism::Deterministic,
+            state_model: EffectStateModel::Stateless,
+            temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+            resource_lifetime: EffectResourceLifetime::Frame,
+            topology: EffectGraphTopology::LinearChain,
+        })
+        .with_branching_graph(|_, _, graph| {
+            graph.apply(EffectRenderOp::Sharpen { amount: 0.0 });
+        })
+        .property(
+            PropertyDescriptor::new(path, "Float", PropertyValue::Float(0.5))
+                .with_parameter_id(parameter_id.clone())
+                .with_animatable(true)
+                .with_numeric_contract(ParameterUnit::Unitless, numeric),
+        )
+        .build(),
+    )
+    .expect("definition");
+    let mut effect = instantiate_effect_node(kind).expect("effect");
+    let effect_id = effect.id;
+    let key = Keyframe::linear(
+        TimelineTime::new(1, 2).expect("time"),
+        PropertyValue::Float(0.5),
+    );
+    let key_id = key.id;
+    effect
+        .properties
+        .apply_mutation(PropertyMutation::SetKeyframe { path: path.into(), keyframe: key })
+        .expect("seed");
+    let mut clip = Clip::new_basic_title("Preview", "Arial", TimelineTime::ZERO, TimelineTime::ONE)
+        .expect("title");
+    let clip_id = clip.id;
+    clip.add_effect_node(effect);
+    let mut sequence = Sequence::new("Rejected Float preview");
+    sequence.video_tracks[0].add_clip(clip).expect("placement");
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    state.select_clip_by_id(clip_id).expect("selection");
+    let original = state.active_sequence().expect("origin").clone();
+    let models = AppUiPanelModels::from_app_state(&state);
+    fn find_curve(widget: &dyn Widget) -> Option<WidgetId> {
+        if widget
+            .as_any()
+            .and_then(|value| value.downcast_ref::<CurveEditor>())
+            .is_some_and(|curve| {
+                curve.points().len() == 3 && curve.points().iter().all(|point| point.y == 0.5)
+            })
+        {
+            return Some(widget.id());
+        }
+        (0..widget.child_count()).find_map(|index| widget.child(index).and_then(find_curve))
+    }
+    fn points(widget: &dyn Widget) -> Vec<CurvePoint> {
+        widget
+            .as_any()
+            .and_then(|value| value.downcast_ref::<CurveEditor>())
+            .expect("curve")
+            .points()
+            .to_vec()
+    }
+    let mut panel = inspector_panel(&models.inspector, &chinese_localizer());
+    let id = find_curve(&panel).expect("actual Float Inspector curve");
+    let mut tree = WidgetTreeView::new(&mut panel);
+    let curve = tree.get_mut(id).expect("curve");
+    curve.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+    let actions = RefCell::new(Vec::new());
+    let dispatch = |action| actions.borrow_mut().push(action);
+    let mut focus = DummyFocus;
+    let mut shortcut = DummyShortcut;
+    let mut tooltip = DummyTooltip;
+    let mut requests = EventRequests::default();
+    let mut ctx = event_ctx(
+        &mut focus,
+        &mut shortcut,
+        &mut tooltip,
+        &mut requests,
+        &dispatch,
+    );
+    let start = Point::new(110.0, 52.0);
+    curve.event(
+        &UiEvent::MouseDown {
+            position: start,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        &mut ctx,
+    );
+    curve.event(
+        &UiEvent::MouseMove {
+            position: Point::new(120.0, 52.0),
+            modifiers: Modifiers::none(),
+        },
+        &mut ctx,
+    );
+    for action in actions.borrow_mut().drain(..) {
+        state.dispatch_action(action).expect("admitted author update");
+    }
+    let admitted_points = points(curve);
+    let admitted = state.active_sequence().expect("admitted").clone();
+    assert!(!admitted.author_state_eq_ignoring_revision(&original));
+    curve.event(
+        &UiEvent::MouseMove {
+            position: Point::new(120.0, 42.0),
+            modifiers: Modifiers::none(),
+        },
+        &mut ctx,
+    );
+    assert!(
+        actions.borrow().is_empty(),
+        "finite editor value outside Float primitive range is rejected before author dispatch"
+    );
+    assert_eq!(
+        points(curve),
+        admitted_points,
+        "real canonical rejection cannot leave ghost geometry"
+    );
+    assert!(curve.has_active_pointer_interaction());
+    assert!(state
+        .active_sequence()
+        .expect("after rejection")
+        .author_state_eq_ignoring_revision(&admitted));
+    curve.event(
+        &UiEvent::MouseUp {
+            position: Point::new(120.0, 42.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        &mut ctx,
+    );
+    for action in actions.borrow_mut().drain(..) {
+        state.dispatch_action(action).expect("finish valid draft");
+    }
+    assert!(state.undo_timeline().expect("single Undo"));
+    assert!(state
+        .active_sequence()
+        .expect("Undo")
+        .author_state_eq_ignoring_revision(&original));
+    assert!(!state.can_undo_action());
+    assert!(state.redo_timeline().expect("Redo"));
+    assert!(state
+        .active_sequence()
+        .expect("Redo")
+        .author_state_eq_ignoring_revision(&admitted));
+    let property = &state
+        .active_sequence()
+        .expect("sequence")
+        .find_clip(clip_id)
+        .expect("clip")
+        .effects
+        .iter()
+        .find(|effect| effect.id == effect_id)
+        .expect("effect")
+        .properties
+        .iter()
+        .find(|(_, property)| property.descriptor.schema.parameter_id == parameter_id)
+        .expect("same stable parameter")
+        .1;
+    assert_eq!(
+        property.keyframe_by_id(key_id).expect("stable key").value,
+        PropertyValue::Float(0.5)
+    );
+}
+
+#[test]
 fn effect_curve_time_only_edits_preserve_raw_float_channel_precision() {
     let numeric =
         ParameterNumericContract::closed(0.1, 0.2, None, ParameterInvalidValuePolicy::Reject)

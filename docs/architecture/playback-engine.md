@@ -2692,3 +2692,13 @@ then advances from that authoritative timestamp using checked arithmetic.
 Frozen final output is explicitly older than the Engine clock, and the App loss
 adapter must still complete the Synthetic handoff. No fixed absolute startup
 timestamp or test-runner wall time is used to construct the stale-evidence case.
+
+
+### Progress-worker retirement test ordering
+
+The handoff regression exercises idle polling before submission admission and
+keeps the exact submission pending until its completion signal is observed.
+Its wait fixture represents a completed whole queue as a persistent state,
+not a consumable sequence that idle polls can exhaust. It retains the bounded
+nonblocking handoff, independent native readiness, real join and exactly-once
+resource release assertions; product retirement deadlines are unchanged.

@@ -3584,3 +3584,22 @@ origin or cancelling. No-op gestures preserve existing Redo history.
 This changes the alpha action payload value shape without a compatibility
 parser. Project storage remains schema 31. Native parameter evaluation,
 renderer and plugin execution continue using their existing typed seams.
+
+### Rejected curve preview admission
+
+An installed canonical curve preview provider owns edit admission: an absent
+Edit projection rejects the candidate; absent lifecycle projections still admit
+Begin/Finish/Cancel boundaries. The widget suppresses rejected author dispatch.
+Point and tangent movement restore just their previous local coordinate, keeping
+an existing pointer capture available for recovery or cancellation. Keyboard
+moves restore the original point metadata. Deletion stages one removed entry;
+a refusal restores its point, metadata, selection and capture before publication.
+An accepted projection reveals the replacement selection after removal.
+A rejected initial insertion cancels its gesture, removes the reserved local key
+and retains the previous selection without capturing the pointer. Owner-less
+curves continue to use local geometry. No full curve clone is added to pointer
+movement and no additional author state or evaluator is introduced.
+
+Recognized point and handle arrow edits remain handled when clamped or refused;
+geometry change and keyboard ownership are separate decisions. Rejected edits
+cannot leak their arrow keys to parent controls or global timeline shortcuts.

@@ -2369,15 +2369,46 @@ mod tests {
 
     #[test]
     fn teardown_handoff_is_non_blocking_and_retains_owner_until_reaped() {
-        let (mut worker, calls) = scripted_worker([
-            Ok(ViewerGpuDeviceWaitStatus::TimedOut),
-            Ok(ViewerGpuDeviceWaitStatus::Satisfied),
-            Ok(ViewerGpuDeviceWaitStatus::Satisfied),
-        ]);
+        struct CallbackGatedWait {
+            calls: WaitCallLog,
+            pending_polls: Arc<AtomicUsize>,
+        }
+
+        impl ViewerGpuDeviceWait<u64> for CallbackGatedWait {
+            fn wait(
+                &mut self,
+                submission_index: Option<&u64>,
+                _timeout: Duration,
+            ) -> Result<ViewerGpuDeviceWaitStatus, String> {
+                self.calls.lock().expect("wait call log").push(submission_index.copied());
+                if submission_index.is_some() {
+                    self.pending_polls.fetch_add(1, Ordering::Release);
+                    Ok(ViewerGpuDeviceWaitStatus::TimedOut)
+                } else {
+                    Ok(ViewerGpuDeviceWaitStatus::Satisfied)
+                }
+            }
+        }
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let pending_polls = Arc::new(AtomicUsize::new(0));
+        let mut worker = ViewerGpuDeviceProgressWorker::spawn(
+            "mondrian-viewer-gpu-retirement-handoff-test",
+            CallbackGatedWait {
+                calls: Arc::clone(&calls),
+                pending_polls: Arc::clone(&pending_polls),
+            },
+            ViewerGpuDeviceProgressPolicy::new(Duration::from_millis(1)).expect("valid policy"),
+            ViewerGpuDeviceGenerationHealth::for_test(ViewerGpuDeviceProgressWake::default()),
+            None,
+        )
+        .expect("spawn progress worker");
+        // Idle polls must not consume the later queue-empty evidence.
+        wait_for_calls(&calls, 3);
         let first = worker.reserve_submission().expect("first permit");
         let first_completion = first.completion_signal();
         first.commit(test_submission_id(10), 59);
-        wait_for_calls(&calls, 1);
+        wait_for_atomic(&pending_polls, 1);
         let safe_to_release = Arc::new(AtomicBool::new(false));
         let polls = Arc::new(AtomicUsize::new(0));
         let drops = Arc::new(AtomicUsize::new(0));
@@ -2399,7 +2430,7 @@ mod tests {
         assert_eq!(drops.load(Ordering::Acquire), 0);
         safe_to_release.store(true, Ordering::Release);
         let evidence = worker.shutdown_and_wait(true, handoff, Duration::from_secs(2));
-        assert!(progress_shutdown_complete(evidence));
+        assert!(progress_shutdown_complete(evidence), "{evidence:?}");
         assert!(evidence.retirement_completed);
         assert_eq!(drops.load(Ordering::Acquire), 1);
         assert_eq!(
