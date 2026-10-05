@@ -7062,6 +7062,41 @@ fn cold_preparation_coverage_uses_engine_rate_and_requires_bounded_observations(
     opened.elapsed_us = 5_000_001;
     service.record_startup_preroll_decode(opened, 0);
     assert_eq!(service.cold_activation_covering_frames(faster, 16), None);
+    let seek_service = WindowPreviewAdapter::new_without_workers_for_test();
+    let mut rewound = test_preview_decode_diagnostics(
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewHardwareDecodeDecision::GpuResidentNative,
+        PreviewHardwareDecodeBlocker::None,
+    );
+    rewound.session_disposition = PreviewDecodeSessionDisposition::Reused;
+    rewound.seek_performed = true;
+    rewound.elapsed_us = 70_000;
+    seek_service.record_preview_decode(rewound, MediaPreviewRequestPriority::Prefetch, 0, false);
+    assert_eq!(
+        seek_service
+            .diagnostics()
+            .decode_access_mode_profiles
+            .playback_cursor
+            .work_classes
+            .reused_seek
+            .frames,
+        1
+    );
+    assert_eq!(
+        seek_service.cold_activation_covering_frames(faster, 16),
+        Some(5)
+    );
+    assert_eq!(
+        seek_service.cold_activation_covering_frames(faster, 4),
+        None
+    );
+    rewound.elapsed_us = 5_000_001;
+    seek_service.record_preview_decode(rewound, MediaPreviewRequestPriority::Prefetch, 0, false);
+    assert_eq!(
+        seek_service.cold_activation_covering_frames(faster, 16),
+        None
+    );
+    seek_service.shutdown();
     service.shutdown();
     drop(state);
     std::fs::remove_dir_all(root).expect("cleanup");

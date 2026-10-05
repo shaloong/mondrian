@@ -1855,6 +1855,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         for duration in [
             self.metrics.decode_startup_preroll_max_duration_us.get(),
             classes.session_replaced.max_duration_us,
+            // A retained decoder Session still blocks its worker while a cold
+            // activation seeks. Its physical preparation cost must protect
+            // the near source just like opening or replacing that Session.
+            classes.reused_seek.max_duration_us,
         ] {
             if duration > 0 {
                 observed.record(duration);

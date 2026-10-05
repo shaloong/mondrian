@@ -2091,9 +2091,10 @@ An entirely ready window needs only its closest full-picture guards in this
 frontier plan. The ordinary complete-window planner keeps its full prefix guards.
 
 The coverage duration is the finite upper bound of the existing observed
-Playback Session open/replacement and startup latency buckets, divided by the
-Playback Engine's exact active-rate frame period, rounded up with one additional
-presentation boundary. It remains within the existing temporal ceiling. Unknown
+Playback Session open/replacement, reused-Session seek, and startup latency
+buckets, divided by the Playback Engine's exact active-rate frame period,
+rounded up with one additional presentation boundary. It remains within the
+existing temporal ceiling. Unknown
 cost, missing period, an open-ended latency bucket, or coverage beyond that
 ceiling retains conservative complete-window protection. This prediction neither
 renews a demand deadline nor guarantees that an unobserved future open meets it.
