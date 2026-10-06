@@ -1424,7 +1424,7 @@ milliseconds but marks it non-animatable and topology-affecting; audio plan
 preparation rounds it upward once to the concrete sample grid. A parameter that
 changes storage, latency, or continuity topology forces plan re-preparation
 rather than a live callback event.
-CLAP and VST3 processor definitions may store the selected binary's SHA-256
+Inserted CLAP and VST3 processor definitions store the selected binary's SHA-256
 revision; an all-zero revision is invalid. Processor parameters may also carry
 bounded plugin display metadata:
 the native default name and hidden-control flag. The `ui` snapshot is required
@@ -1432,15 +1432,20 @@ in the alpha Project format; built-ins use an empty display name and visible
 control. The display snapshot
 does not alter `ParameterSchema`, automation identity, saved opaque state, or
 binary revision binding; malformed control text is rejected during validation.
-An explicit CLAP rebind Rack edit
+An explicit CLAP or VST3 rebind Rack edit
 compares the old definition before replacing only that revision. It rejects a
 different plugin ID, schema version, or stale instance and commits only after
 complete Audio Program validation. The installed path remains machine-local.
 An explicitly unbound definition (`binary_sha256: null`) stays editable but
 fails native preparation until explicitly rebound. The alpha format requires
-this field in every plugin definition. VST3 discovery, rebind, and native
-preparation remain unimplemented; the persisted revision is only the necessary
-authoring identity contract for a future adapter.
+this field in every plugin definition: one required nullable decoder rejects
+omission while retaining explicit null. Processor definition objects reject
+unknown fields for built-in, CLAP and VST3 variants; loading cannot silently
+strip unsupported author intent. Canonical pinned and explicit-unbound payloads
+round-trip without migrations or aliases. VST3 discovery, insertion, explicit
+rebind and isolated native preparation are implemented by the application/audio
+adapters under the same author contract; the broader native bus/event/platform
+qualification remains separate from this persisted definition admission.
 
 Automation authoring uses `AnimationParameterAddress { animation_track_id,
 parameter_id }` as the stable property-instance address and `KeyframeId` as the
@@ -1472,8 +1477,12 @@ Exact audio automation also stores a per-key tangent constraint independent of
 the execution segment kind. The stable-ID `SetInterpolation` author edit maps
 hold, linear, manual Bezier, auto Bezier, and continuous Bezier to canonical
 exact handles. Neighbor changes regenerate constrained handles on a detached
-curve; absent legacy mode data means manual. Stale IDs and schema-disallowed
-interpolation families reject before Sequence publication.
+curve. The current alpha codec requires explicit tangent-mode data; missing
+mode fields reject instead of inferring an older manual format. Complete-selection
+`SetInterpolations` validates all unique stable IDs and the definition family,
+applies all constraints, then normalizes once before atomic publication. Stale
+IDs and schema-disallowed interpolation families reject before Sequence
+publication.
 
 Mask scalar properties are part of the persisted Property Bag, not runtime
 defaults. Every complete shape key owns a stable `KeyframeId`, exact Clip-local

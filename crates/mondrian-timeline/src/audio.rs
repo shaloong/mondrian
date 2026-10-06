@@ -191,6 +191,7 @@ pub fn lookahead_limiter_release_parameter_schema() -> ParameterSchema {
 
 /// A persistent reference to one processor definition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum AudioProcessorDefinitionRef {
     /// A Mondrian processor with a versioned parameter schema.
     BuiltIn {
@@ -204,6 +205,8 @@ pub enum AudioProcessorDefinitionRef {
         schema_version: u32,
         /// Exact installed binary revision captured when the author inserted it.
         /// An unbound definition uses an explicit `null` until rebind.
+        /// The field must be present in every canonical definition.
+        #[serde(deserialize_with = "deserialize_native_binary_revision")]
         binary_sha256: Option<[u8; 32]>,
     },
     /// A CLAP audio-effect definition.
@@ -212,8 +215,19 @@ pub enum AudioProcessorDefinitionRef {
         schema_version: u32,
         /// Exact installed binary revision captured when the author inserted it.
         /// An unbound definition uses an explicit `null` until rebind.
+        /// The field must be present in every canonical definition.
+        #[serde(deserialize_with = "deserialize_native_binary_revision")]
         binary_sha256: Option<[u8; 32]>,
     },
+}
+
+// Supplying a custom field decoder without a default makes field presence
+// mandatory while preserving the canonical explicit-null unbound state.
+fn deserialize_native_binary_revision<'de, D>(deserializer: D) -> Result<Option<[u8; 32]>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<[u8; 32]>::deserialize(deserializer)
 }
 
 /// One processor parameter definition snapshot and its exact author-time value.
@@ -2065,6 +2079,89 @@ mod tests {
             forged.validate(),
             Err(AudioAuthoringError::InvalidProcessorParameterDisplayName)
         );
+    }
+
+    fn native_revision_definitions() -> [AudioProcessorDefinitionRef; 2] {
+        [
+            AudioProcessorDefinitionRef::Clap {
+                plugin_id: "org.example.gain".to_owned(),
+                schema_version: 1,
+                binary_sha256: Some([7; 32]),
+            },
+            AudioProcessorDefinitionRef::Vst3 {
+                class_id: "00112233445566778899aabbccddeeff".to_owned(),
+                vendor: Some("Test Vendor".to_owned()),
+                schema_version: 1,
+                binary_sha256: Some([9; 32]),
+            },
+        ]
+    }
+
+    #[test]
+    fn native_processor_definition_rejects_missing_revision() {
+        for definition in native_revision_definitions() {
+            let payload = serde_json::to_value(&definition).expect("pinned definition");
+            assert_eq!(
+                serde_json::from_value::<AudioProcessorDefinitionRef>(payload.clone())
+                    .expect("canonical pinned definition"),
+                definition
+            );
+            let mut missing = payload.clone();
+            let fields = missing
+                .as_object_mut()
+                .expect("tagged definition")
+                .values_mut()
+                .next()
+                .expect("definition body")
+                .as_object_mut()
+                .expect("definition fields");
+            assert!(fields.remove("binary_sha256").is_some());
+            assert!(
+                serde_json::from_value::<AudioProcessorDefinitionRef>(missing).is_err(),
+                "an omitted revision cannot imply unbound author state: {definition:?}"
+            );
+            let mut unbound = payload;
+            unbound
+                .as_object_mut()
+                .expect("tagged definition")
+                .values_mut()
+                .next()
+                .expect("definition body")
+                .as_object_mut()
+                .expect("definition fields")
+                .insert("binary_sha256".to_owned(), serde_json::Value::Null);
+            assert!(matches!(
+                serde_json::from_value::<AudioProcessorDefinitionRef>(unbound)
+                    .expect("explicit canonical unbound state"),
+                AudioProcessorDefinitionRef::Clap { binary_sha256: None, .. }
+                    | AudioProcessorDefinitionRef::Vst3 { binary_sha256: None, .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn native_processor_definition_rejects_unknown_fields() {
+        let mut definitions = native_revision_definitions().to_vec();
+        definitions.push(AudioProcessorDefinitionRef::BuiltIn {
+            definition_id: BUILTIN_GAIN_DEFINITION_ID.to_owned(),
+            schema_version: 1,
+        });
+        for definition in definitions {
+            let mut payload = serde_json::to_value(&definition).expect("canonical definition");
+            payload
+                .as_object_mut()
+                .expect("tagged definition")
+                .values_mut()
+                .next()
+                .expect("definition body")
+                .as_object_mut()
+                .expect("definition fields")
+                .insert("unsupported_key".to_owned(), serde_json::json!(42));
+            assert!(
+                serde_json::from_value::<AudioProcessorDefinitionRef>(payload).is_err(),
+                "unknown definition fields must not disappear on load: {definition:?}"
+            );
+        }
     }
 
     #[test]

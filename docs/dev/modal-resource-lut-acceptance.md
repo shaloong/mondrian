@@ -1022,3 +1022,32 @@ independent diagnostic on the actual compiled Timeline enum also reproduced
 acceptance of omitted native audio binary revision fields; that explicit-null
 contract gap is tracked for a source fix, without invalidating the named valid
 resource/output acceptance above.
+
+
+## Required native audio definition revision fields
+
+A diagnostic against the actual compiled Timeline enum reproduced omission of
+`binary_sha256` being accepted as an unbound CLAP or VST3 definition. The initial
+diagnostic build selected incompatible cached Serde metadata and failed to
+compile; fingerprint-matched compilation then succeeded and reproduced both
+formats at runtime. The formal crate regressions also failed before the fix:
+missing revision fields were inferred, and unknown definition fields disappeared.
+Neither compiler errors nor the prior passing explicit-null tests proved this
+input contract.
+
+Both native revision fields now use one required nullable decoder, with no
+field default or migration alias. Explicit null remains a canonical unbound
+state for editing and explicit rebind; valid pinned revisions preserve their
+bytes. Built-in, CLAP and VST3 definition objects reject unknown fields. The new
+regressions cover both native formats for missing/pinned/null input and all three
+definition variants for unknown input, alongside the existing zero-revision
+validation and rebind tests.
+
+Current candidate Timeline regression: **240 passed**, zero failures/ignored,
+0.75s runtime after 1m50s build. Project persistence regression: **49 passed**,
+zero failures/ignored, 1.51s runtime after 2m44s build. Strict whole-workspace,
+all-target, all-feature Clippy with warnings as errors passed in **3m57s**.
+Final formatting and diff checks precede the source commit.
+The ce3edfb native/Golden receipt above qualifies its named earlier source;
+these parser tests do not claim a rebuilt native interpolation/audio output
+qualification. The full professional NLE goal remains active.
