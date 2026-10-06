@@ -1210,11 +1210,134 @@ impl ParameterNumericContract {
         }
     }
 
+    /// Move a nonempty homogeneous scalar group with one common bounded increment.
+    /// Integer source values remain exact; floating increments use fused arithmetic.
+    /// A boundary reduces the whole group's movement rather than clamping keys separately.
+    /// Invalid contracts, values, mixed types or non-finite increments reject the group.
+    pub fn offset_scalars(
+        self,
+        values: &[PropertyValue],
+        delta: f64,
+        steps: i8,
+    ) -> Option<Vec<PropertyValue>> {
+        self.validate().ok()?;
+        if values.is_empty() || !delta.is_finite() {
+            return None;
+        }
+        if matches!(values.first(), Some(PropertyValue::Int(_))) {
+            let (min, max) = self.integer_bounds()?;
+            let mut lower = i128::MIN;
+            let mut upper = i128::MAX;
+            for value in values {
+                let PropertyValue::Int(value) = value else {
+                    return None;
+                };
+                if !(min..=max).contains(value) {
+                    return None;
+                }
+                lower = lower.max(i128::from(min) - i128::from(*value));
+                upper = upper.min(i128::from(max) - i128::from(*value));
+            }
+            let requested = (delta.round() as i128).saturating_mul(i128::from(steps));
+            let offset = requested.clamp(lower, upper);
+            return values
+                .iter()
+                .map(|value| {
+                    let PropertyValue::Int(value) = value else {
+                        return None;
+                    };
+                    i64::try_from(i128::from(*value) + offset).ok().map(PropertyValue::Int)
+                })
+                .collect();
+        }
+        let is_float = matches!(values.first(), Some(PropertyValue::Float(_)));
+        let (min, max) = if is_float {
+            let mut min = self.hard_range.min.max(-f64::from(f32::MAX)) as f32;
+            let mut max = self.hard_range.max.min(f64::from(f32::MAX)) as f32;
+            if f64::from(min) < self.hard_range.min {
+                min = min.next_up();
+            }
+            if f64::from(max) > self.hard_range.max {
+                max = max.next_down();
+            }
+            if !min.is_finite() || !max.is_finite() || min > max {
+                return None;
+            }
+            (f64::from(min), f64::from(max))
+        } else {
+            (self.hard_range.min, self.hard_range.max)
+        };
+        let mut lower_steps = f64::NEG_INFINITY;
+        let mut upper_steps = f64::INFINITY;
+        let mut lower_offset = f64::NEG_INFINITY;
+        let mut upper_offset = f64::INFINITY;
+        for value in values {
+            let value = match value {
+                PropertyValue::Float(value) if is_float => f64::from(*value),
+                PropertyValue::Double(value) if !is_float => *value,
+                _ => return None,
+            };
+            if !value.is_finite() || !(min..=max).contains(&value) {
+                return None;
+            }
+            lower_offset = lower_offset.max(min - value);
+            upper_offset = upper_offset.min(max - value);
+            if delta != 0.0 {
+                let low = scalar_difference_ratio(min, value, delta);
+                let high = scalar_difference_ratio(max, value, delta);
+                lower_steps = lower_steps.max(low.min(high));
+                upper_steps = upper_steps.min(low.max(high));
+            }
+        }
+        if delta == 0.0 || steps == 0 {
+            return Some(values.to_vec());
+        }
+        let requested_offset = delta * f64::from(steps);
+        let bounded_offset = if requested_offset < lower_offset && lower_offset.is_finite() {
+            Some(lower_offset)
+        } else if requested_offset > upper_offset && upper_offset.is_finite() {
+            Some(upper_offset)
+        } else {
+            None
+        };
+        let effective_steps = f64::from(steps).clamp(lower_steps, upper_steps);
+        if bounded_offset == Some(0.0) || (bounded_offset.is_none() && effective_steps == 0.0) {
+            return Some(values.to_vec());
+        }
+        let apply = |value| match bounded_offset {
+            Some(offset) => value + offset,
+            None => delta.mul_add(effective_steps, value),
+        };
+        values
+            .iter()
+            .map(|value| match value {
+                PropertyValue::Float(value) if is_float => Some(PropertyValue::Float(
+                    apply(f64::from(*value)).clamp(min, max) as f32,
+                )),
+                PropertyValue::Double(value) if !is_float => {
+                    Some(PropertyValue::Double(apply(*value).clamp(min, max)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Revalidate a deserialized or directly constructed numeric contract.
     pub fn validate(self) -> std::result::Result<(), ParameterSchemaError> {
         let hard_range = ParameterNumericRange::new(self.hard_range.min, self.hard_range.max)?;
         let soft_range = ParameterNumericRange::new(self.soft_range.min, self.soft_range.max)?;
         Self::new(hard_range, soft_range, self.step, self.invalid_value_policy).map(|_| ())
+    }
+}
+
+// Opposite-sign finite endpoints may overflow their difference. Scale first
+// only in that case, avoiding both overflow and cancellation for nearby values.
+fn scalar_difference_ratio(bound: f64, value: f64, delta: f64) -> f64 {
+    let difference = bound - value;
+    if difference.is_finite() {
+        difference / delta
+    } else {
+        bound / delta - value / delta
     }
 }
 
@@ -2717,41 +2840,118 @@ impl AnimatedProperty {
         })
     }
 
+    fn complete_keyframe_selection(
+        &self,
+        ids: &[KeyframeId],
+    ) -> Result<std::collections::HashSet<KeyframeId>> {
+        let identities = ids.iter().copied().collect::<std::collections::HashSet<_>>();
+        if ids.is_empty() || identities.len() != ids.len() {
+            return Err(parameter_value_error(
+                &self.descriptor.path,
+                "key selection must be nonempty and unique",
+            ));
+        }
+        let complete = self
+            .channels
+            .first()
+            .into_iter()
+            .flat_map(|channel| &channel.keyframes)
+            .filter(|key| identities.contains(&key.id))
+            .filter(|key| {
+                self.channels.iter().skip(1).all(|channel| {
+                    channel
+                        .keyframes
+                        .binary_search_by_key(&key.time, |other| other.time)
+                        .ok()
+                        .is_some_and(|index| channel.keyframes[index].id == key.id)
+                })
+            })
+            .count();
+        if complete != ids.len() {
+            return Err(parameter_value_error(
+                &self.descriptor.path,
+                "key selection contains a stale or incomplete key",
+            ));
+        }
+        Ok(identities)
+    }
+
+    /// Offset selected complete keys in one numeric channel with a common bounded step.
+    /// Other channel values, exact author times and stable identities remain unchanged.
+    /// The complete selection and definition are admitted before one constraint normalization.
+    pub fn offset_keyframe_values(
+        &mut self,
+        ids: &[KeyframeId],
+        channel_index: usize,
+        delta: f64,
+        steps: i8,
+    ) -> Result<()> {
+        self.validate()?;
+        self.admit_channels(|candidate| {
+            let identities = candidate.complete_keyframe_selection(ids)?;
+            let contract = candidate
+                .descriptor
+                .schema
+                .numeric
+                .as_ref()
+                .and_then(|contracts| contracts.get(channel_index))
+                .copied()
+                .ok_or_else(|| {
+                    parameter_value_error(
+                        &candidate.descriptor.path,
+                        "numeric channel contract is absent",
+                    )
+                })?;
+            let channel = candidate.channels.get_mut(channel_index).ok_or_else(|| {
+                parameter_value_error(&candidate.descriptor.path, "numeric channel is absent")
+            })?;
+            let (indices, values): (Vec<_>, Vec<_>) = channel
+                .keyframes
+                .iter()
+                .enumerate()
+                .filter(|(_, key)| identities.contains(&key.id))
+                .map(|(index, key)| {
+                    (
+                        index,
+                        match key.value {
+                            AnimationChannelValue::Integer(value) => PropertyValue::Int(value),
+                            AnimationChannelValue::Number(value) => PropertyValue::Double(value),
+                        },
+                    )
+                })
+                .unzip();
+            let shifted = contract.offset_scalars(&values, delta, steps).ok_or_else(|| {
+                parameter_value_error(
+                    &candidate.descriptor.path,
+                    "numeric group increment is invalid",
+                )
+            })?;
+            if values == shifted {
+                return Ok(());
+            }
+            for (index, value) in indices.into_iter().zip(shifted) {
+                channel.keyframes[index].value = match value {
+                    PropertyValue::Int(value) => AnimationChannelValue::Integer(value),
+                    PropertyValue::Double(value) => AnimationChannelValue::Number(value),
+                    _ => {
+                        return Err(parameter_value_error(
+                            &candidate.descriptor.path,
+                            "numeric group changed its value type",
+                        ))
+                    }
+                };
+            }
+            candidate.normalize_channels()
+        })
+    }
+
     /// Translate a nonempty unique set of complete stable keys by an exact delta.
     /// All channels move together and validate the final topology before publication.
     /// Typed scalar values are never evaluated or reconstructed through a float projection.
     pub fn shift_keyframes(&mut self, ids: &[KeyframeId], delta: TimelineTime) -> Result<()> {
         self.validate()?;
         self.admit_channels(|candidate| {
-            let identities = ids.iter().copied().collect::<std::collections::HashSet<_>>();
-            if ids.is_empty() || identities.len() != ids.len() {
-                return Err(parameter_value_error(
-                    &candidate.descriptor.path,
-                    "key selection must be nonempty and unique",
-                ));
-            }
-            let complete = candidate
-                .channels
-                .first()
-                .into_iter()
-                .flat_map(|channel| &channel.keyframes)
-                .filter(|key| identities.contains(&key.id))
-                .filter(|key| {
-                    candidate.channels.iter().skip(1).all(|channel| {
-                        channel
-                            .keyframes
-                            .binary_search_by_key(&key.time, |other| other.time)
-                            .ok()
-                            .is_some_and(|index| channel.keyframes[index].id == key.id)
-                    })
-                })
-                .count();
-            if complete != ids.len() {
-                return Err(parameter_value_error(
-                    &candidate.descriptor.path,
-                    "key selection contains a stale or incomplete key",
-                ));
-            }
+            let identities = candidate.complete_keyframe_selection(ids)?;
             if delta.is_zero() {
                 return Ok(());
             }
@@ -3449,6 +3649,16 @@ impl AnimatedProperty {
                 self.ensure_path(&path)?;
                 self.shift_keyframes(&keyframe_ids, delta)
             }
+            PropertyMutation::OffsetKeyframeValues {
+                path,
+                channel_index,
+                keyframe_ids,
+                delta,
+                steps,
+            } => {
+                self.ensure_path(&path)?;
+                self.offset_keyframe_values(&keyframe_ids, channel_index, delta, steps)
+            }
             PropertyMutation::MoveKeyframe { path, from_time, to_time } => {
                 self.ensure_path(&path)?;
                 self.move_keyframe(from_time, to_time)
@@ -3997,6 +4207,18 @@ impl PropertyBag {
             PropertyMutation::ShiftKeyframes { path, keyframe_ids, delta } => {
                 self.require_property_mut(&path)?.shift_keyframes(&keyframe_ids, delta)
             }
+            PropertyMutation::OffsetKeyframeValues {
+                path,
+                channel_index,
+                keyframe_ids,
+                delta,
+                steps,
+            } => self.require_property_mut(&path)?.offset_keyframe_values(
+                &keyframe_ids,
+                channel_index,
+                delta,
+                steps,
+            ),
             PropertyMutation::MoveKeyframe { path, from_time, to_time } => {
                 self.move_keyframe(&path, from_time, to_time)
             }
@@ -4097,6 +4319,19 @@ pub enum PropertyMutation {
         /// Signed exact owner-time translation.
         delta: TimelineTime,
     },
+    /// Offset one channel of complete stable keys by a common bounded displacement.
+    OffsetKeyframeValues {
+        /// Address of the owning property.
+        path: String,
+        /// Declared numeric channel to edit.
+        channel_index: usize,
+        /// Nonempty unique complete key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Finite increment in author value units.
+        delta: f64,
+        /// Signed increment count.
+        steps: i8,
+    },
     MoveKeyframe {
         path: String,
         from_time: TimelineTime,
@@ -4165,6 +4400,7 @@ impl PropertyMutation {
             | Self::RemoveKeyframe { path, .. }
             | Self::RemoveKeyframes { path, .. }
             | Self::ShiftKeyframes { path, .. }
+            | Self::OffsetKeyframeValues { path, .. }
             | Self::MoveKeyframe { path, .. }
             | Self::UpdateKeyframeInterpolation { path, .. }
             | Self::UpdateChannelKeyframeHandles { path, .. }
@@ -4202,6 +4438,15 @@ impl PropertyMutation {
             }
             ShiftKeyframes { path, keyframe_ids, delta } => {
                 ShiftKeyframes { path: f(path), keyframe_ids, delta }
+            }
+            OffsetKeyframeValues { path, channel_index, keyframe_ids, delta, steps } => {
+                OffsetKeyframeValues {
+                    path: f(path),
+                    channel_index,
+                    keyframe_ids,
+                    delta,
+                    steps,
+                }
             }
             MoveKeyframe { path, from_time, to_time } => {
                 MoveKeyframe { path: f(path), from_time, to_time }
@@ -4865,6 +5110,216 @@ impl crate::AuthoringFootprint for PropertyBag {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn selected_key_value_offset_preserves_exact_author_keys_and_constraints() {
+        for mode in [
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let contract = ParameterNumericContract::closed(
+                0.0,
+                1.0,
+                Some(0.1),
+                ParameterInvalidValuePolicy::Reject,
+            )
+            .expect("range");
+            let mut property = AnimatedProperty::from_descriptor(
+                PropertyDescriptor::new("test.group.value", "Value", PropertyValue::Double(0.0))
+                    .with_animatable(true)
+                    .with_numeric_contract(ParameterUnit::Unitless, contract),
+            );
+            property.set_animation_enabled(true);
+            let mut keys = Vec::new();
+            for (n, value) in [(1, 0.2), (2, 0.8)] {
+                let time = TimelineTime::new(n, 7).expect("exact time");
+                property
+                    .write_channels(time, &[(0, value)], InterpolationType::Linear)
+                    .expect("seed");
+                keys.push((time, property.keyframe_at(time).expect("key").id));
+            }
+            for (time, _) in &keys {
+                property.update_keyframe_interpolation(*time, mode).expect("mode");
+            }
+            let original = property.clone();
+            let ids = keys.iter().map(|(_, id)| *id).collect::<Vec<_>>();
+            for selection in [
+                vec![],
+                vec![ids[0], ids[0]],
+                vec![ids[0], KeyframeId::new()],
+            ] {
+                assert!(property.offset_keyframe_values(&selection, 0, 0.0, 0).is_err());
+                assert_eq!(property, original);
+            }
+            assert!(property.offset_keyframe_values(&ids, 9, 1.0, 1).is_err());
+            assert_eq!(property, original);
+            property.offset_keyframe_values(&ids, 0, 0.1, 5).expect("one group shift");
+            property.validate().expect("constraints");
+            for (index, (time, id)) in keys.iter().enumerate() {
+                let key = property.keyframe_at(*time).expect("same author time");
+                assert_eq!(key.id, *id);
+                let PropertyValue::Double(value) = key.value else {
+                    panic!("double");
+                };
+                assert!((value - [0.4, 1.0][index]).abs() < 1e-15);
+            }
+            let changed = property.clone();
+            let restored: AnimatedProperty =
+                serde_json::from_slice(&serde_json::to_vec(&property).expect("encode"))
+                    .expect("decode");
+            assert_eq!(restored, changed);
+            property.offset_keyframe_values(&ids, 0, 1.0, 5).expect("bound no-op");
+            assert_eq!(property, changed);
+        }
+    }
+
+    #[test]
+    fn numeric_group_bound_noop_retains_signed_zero_bits() {
+        let contract = ParameterNumericContract::closed(
+            -f64::MAX,
+            f64::MAX,
+            None,
+            ParameterInvalidValuePolicy::Reject,
+        )
+        .expect("range");
+        let shifted = contract
+            .offset_scalars(
+                &[PropertyValue::Double(-0.0), PropertyValue::Double(f64::MAX)],
+                f64::MAX,
+                5,
+            )
+            .expect("bounded zero");
+        let PropertyValue::Double(zero) = shifted[0] else {
+            panic!("double");
+        };
+        assert_eq!(zero.to_bits(), (-0.0f64).to_bits());
+    }
+
+    #[test]
+    fn numeric_group_offset_reaches_tiny_common_bound_with_huge_increment() {
+        use super::{ParameterInvalidValuePolicy, ParameterNumericContract, PropertyValue};
+        let tiny = f64::MIN_POSITIVE;
+        let contract =
+            ParameterNumericContract::closed(0.0, tiny, None, ParameterInvalidValuePolicy::Reject)
+                .expect("tiny range");
+        let values = [
+            PropertyValue::Double(0.0),
+            PropertyValue::Double(tiny / 2.0),
+        ];
+        assert_eq!(
+            contract.offset_scalars(&values, f64::MAX, 5),
+            Some(vec![
+                PropertyValue::Double(tiny / 2.0),
+                PropertyValue::Double(tiny)
+            ])
+        );
+    }
+
+    #[test]
+    fn numeric_group_offset_preserves_relative_values_at_common_bounds() {
+        let contract = super::ParameterNumericContract::closed(
+            0.0,
+            1.0,
+            None,
+            super::ParameterInvalidValuePolicy::Reject,
+        )
+        .expect("contract");
+        let values = [
+            super::PropertyValue::Double(0.2),
+            super::PropertyValue::Double(0.8),
+        ];
+        let shifted = contract.offset_scalars(&values, 0.1, 5).expect("group");
+        assert_eq!(shifted[1], super::PropertyValue::Double(1.0));
+        let super::PropertyValue::Double(first) = shifted[0] else {
+            panic!("double");
+        };
+        assert!((first - 0.4).abs() < 1e-15);
+        let reversed = contract.offset_scalars(&values, -0.1, 5).expect("reverse");
+        assert_eq!(reversed[0], super::PropertyValue::Double(0.0));
+        let super::PropertyValue::Double(second) = reversed[1] else {
+            panic!("double");
+        };
+        assert!((second - 0.6).abs() < 1e-15);
+        assert_eq!(
+            contract.offset_scalars(&values, 0.0, 5),
+            Some(values.to_vec())
+        );
+        assert!(contract.offset_scalars(&[], 1.0, 1).is_none());
+        assert!(contract
+            .offset_scalars(
+                &[
+                    super::PropertyValue::Double(0.1),
+                    super::PropertyValue::Int(0)
+                ],
+                0.1,
+                1
+            )
+            .is_none());
+        assert!(contract
+            .offset_scalars(&[super::PropertyValue::Double(f64::NAN)], 0.1, 0)
+            .is_none());
+    }
+
+    #[test]
+    fn numeric_group_offset_preserves_wide_integer_bits_and_extreme_float_span() {
+        use super::{ParameterInvalidValuePolicy, ParameterNumericContract, PropertyValue};
+        let integer = ParameterNumericContract::closed(
+            i64::MIN as f64,
+            i64::MAX as f64,
+            None,
+            ParameterInvalidValuePolicy::Reject,
+        )
+        .expect("integer");
+        let wide = 9_007_199_254_740_993i64;
+        assert_eq!(
+            integer.offset_scalars(
+                &[PropertyValue::Int(wide), PropertyValue::Int(wide + 2)],
+                1.0,
+                1
+            ),
+            Some(vec![
+                PropertyValue::Int(wide + 1),
+                PropertyValue::Int(wide + 3)
+            ])
+        );
+        let endpoints = [PropertyValue::Int(i64::MIN), PropertyValue::Int(i64::MAX)];
+        assert_eq!(
+            integer.offset_scalars(&endpoints, f64::MAX, 5),
+            Some(endpoints.to_vec())
+        );
+        assert_eq!(
+            integer.offset_scalars(&endpoints, f64::MAX, -5),
+            Some(endpoints.to_vec())
+        );
+        let float = ParameterNumericContract::closed(
+            -f64::MAX,
+            f64::MAX,
+            None,
+            ParameterInvalidValuePolicy::Reject,
+        )
+        .expect("float");
+        assert_eq!(
+            float.offset_scalars(
+                &[
+                    PropertyValue::Double(-f64::MAX),
+                    PropertyValue::Double(-f64::MAX / 2.0)
+                ],
+                f64::MAX,
+                5
+            ),
+            Some(vec![
+                PropertyValue::Double(f64::MAX / 2.0),
+                PropertyValue::Double(f64::MAX)
+            ])
+        );
+        let original = [PropertyValue::Double(-0.0), PropertyValue::Double(0.2)];
+        let unchanged = float.offset_scalars(&original, 0.0, 5).expect("zero");
+        let PropertyValue::Double(zero) = unchanged[0] else {
+            panic!("double");
+        };
+        assert_eq!(zero.to_bits(), (-0.0f64).to_bits());
+        assert_eq!(unchanged[1], original[1]);
+    }
+
     use super::*;
 
     #[test]

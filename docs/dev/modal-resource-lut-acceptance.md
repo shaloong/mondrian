@@ -719,3 +719,44 @@ so this is not a zero-copy or performance qualification. Earlier fda9b23 receipt
 remain historical. Group value/pointer/interpolation/rubber-band work, native
 audio group execution corners and the broad vendor/platform/performance matrices
 remain open. The overall NLE goal stays active.
+
+
+## Complete-key common value displacement: domain qualification
+
+The Core mutation `OffsetKeyframeValues` addresses a nonempty unique set of
+complete stable key identities and one declared numeric channel. It derives one
+common displacement from the intersection of every selected key's legal motion
+interval. Integer source values never pass through floating projection. Floating
+boundary displacements are applied directly when finite; scaled step intervals
+and fused arithmetic retain support for overflowing finite spans. A subnormal
+step fraction cannot suppress a nonzero finite boundary displacement. True
+zero-motion groups preserve signed-zero bits.
+
+`AnimatedProperty` and `PropertyBag` publish only an admitted complete candidate,
+normalizing Auto/Continuous tangents once. Exact times, IDs and other channel
+values survive. The command has path remapping and rejects empty, duplicate,
+stale, incomplete-channel and invalid numeric requests even when the requested
+increment is zero. Original singleton arithmetic remains unchanged.
+
+Candidate-source evidence: `group-value-core-full.log` passes **469 unit tests**
+with one existing ignored test, six public batch tests and nine other integration
+tests. The final expanded public batch run `group-value-core-batch-final.log`
+passes **8/8**, adding Float inward representable bounds and visual control
+admission. These runs cover **486 distinct passing tests** in total. Actual
+tiny-range underflow and the subsequent zero-motion guard regression retain their
+RED logs and corrected assertions. An initial control test incorrectly assumed
+visual controls must remain in key hard bounds; it was corrected against the
+existing visual contract. Finite visual Bezier overshoot remains legal, while
+nonfinite absolute controls refuse the whole edit. Audio definition admission
+continues to own its stricter control-value contract.
+
+This qualification covers the domain command and canonical serialization.
+Widget lowering, audio definition integration, one-command Undo/Redo, project
+save/reopen and native output for group **value** edits remain open. The earlier
+clean native/Golden receipts qualify their recorded group **time** revisions;
+they do not qualify these new source changes. The full NLE goal stays active.
+
+Final domain gate: whole-workspace, all-target, all-feature Clippy with warnings
+as errors passed in **5m14s** (`group-value-workspace-clippy.log`); formatting and
+diff whitespace checks passed. These are local candidate-source gates, not a
+remote CI or native production requalification.

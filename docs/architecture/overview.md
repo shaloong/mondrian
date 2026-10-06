@@ -6,6 +6,17 @@ Mondrian is a native video editor organized around strict crate boundaries. The 
 
 ## Layers
 
+Core complete-key value edits address stable IDs and one declared numeric channel.
+The numeric contract derives one shared bounded displacement, retaining group
+spacing at hard limits instead of clamping each key independently. Integer source
+values stay in widened integer arithmetic; floating groups use finite boundary
+displacements and scaled step intervals for overflowing spans. Tiny nonzero
+boundary displacements remain distinct from zero-step no-ops. Admission rejects
+empty, duplicate, stale and channel-incomplete selections before publication,
+then normalizes constrained tangents once on the complete candidate. Other
+channels, exact key times and identities remain unchanged. This is a domain
+mutation contract; UI and authoring-session integration require their own gates.
+
 Core's `ParameterNumericRange` owns finite editor projection and normalized value
 mapping for author parameters. Valid ordered endpoints may have an overflowing
 difference or be equal. Mapping retains exact endpoints, uses weighted
