@@ -55,6 +55,28 @@ pub(crate) fn interpolation_defaults(
     }
 }
 
+pub(super) fn apply_keyframe_interpolation<T>(
+    key: &mut Keyframe<T>,
+    interpolation: InterpolationType,
+) {
+    let (default_in, default_out, temporal_flags) = interpolation_defaults(interpolation);
+    match interpolation {
+        InterpolationType::Bezier | InterpolationType::ContinuousBezier => {
+            if !matches!(key.interp_in, KeyframeInterpolation::Bezier(_)) {
+                key.interp_in = default_in;
+            }
+            if !matches!(key.interp_out, KeyframeInterpolation::Bezier(_)) {
+                key.interp_out = default_out;
+            }
+        }
+        _ => {
+            key.interp_in = default_in;
+            key.interp_out = default_out;
+        }
+    }
+    key.temporal_flags = temporal_flags;
+}
+
 /// Resolve the stored side intents and constraints to a displayed interpolation family.
 pub fn interpolation_mode_from_keyframe(
     interp_in: KeyframeInterpolation,
@@ -79,6 +101,10 @@ pub fn interpolation_mode_from_keyframe(
         InterpolationType::AutoBezier
     } else if temporal_flags.continuous && !temporal_flags.broken_handles && has_bezier {
         InterpolationType::ContinuousBezier
+    } else if !valid_in && valid_out {
+        InterpolationType::EaseIn
+    } else if valid_in && !valid_out {
+        InterpolationType::EaseOut
     } else if valid_in || valid_out {
         InterpolationType::Bezier
     } else {

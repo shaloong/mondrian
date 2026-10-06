@@ -599,3 +599,134 @@ fn exact_selected_value_offset_normalizes_constraints_atomically() {
         assert_eq!(reopened, curve);
     }
 }
+
+#[test]
+fn selected_interpolation_is_order_independent_preserves_values_and_roundtrips() {
+    for mode in [
+        InterpolationType::Hold,
+        InterpolationType::Linear,
+        InterpolationType::Bezier,
+        InterpolationType::AutoBezier,
+        InterpolationType::ContinuousBezier,
+        InterpolationType::EaseIn,
+        InterpolationType::EaseOut,
+    ] {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "position",
+            "Position",
+            PropertyValue::Vec2(Vec2::ZERO),
+        ));
+        let mut keys = Vec::new();
+        for (time, value) in [(0, 0.1_f32), (1, 0.7), (4, -0.2), (7, 0.3)] {
+            let key = Keyframe::linear(
+                TimelineTime::new(time, 7).expect("exact time"),
+                PropertyValue::Vec2(Vec2::new(value, -value)),
+            );
+            keys.push(key.clone());
+            bag.apply_mutation(PropertyMutation::SetKeyframe {
+                path: "position".into(),
+                keyframe: key,
+            })
+            .expect("seed");
+        }
+        let before = bag.clone();
+        let ids = vec![keys[1].id, keys[2].id];
+        let mut reversed = bag.clone();
+        let mutation = PropertyMutation::UpdateKeyframesInterpolation {
+            path: "nested.position".into(),
+            keyframe_ids: ids.clone(),
+            interpolation: mode,
+        }
+        .map_path(|path| path.trim_start_matches("nested.").to_owned());
+        assert_eq!(mutation.path(), "position");
+        bag.apply_mutation(mutation).expect("complete preset");
+        reversed
+            .apply_mutation(PropertyMutation::UpdateKeyframesInterpolation {
+                path: "position".into(),
+                keyframe_ids: ids.iter().rev().copied().collect(),
+                interpolation: mode,
+            })
+            .expect("reverse selection");
+        assert_eq!(
+            bag, reversed,
+            "selection order must not alter constrained geometry: {mode:?}"
+        );
+        let property = bag.property("position").expect("position");
+        property.validate().expect("normalized constraints");
+        for channel in property.channels() {
+            for key in channel.keyframes() {
+                let old = before.property("position").expect("before").channels()[channel.index]
+                    .keyframes()
+                    .iter()
+                    .find(|old| old.id == key.id)
+                    .expect("identity");
+                assert_eq!(key.time, old.time);
+                assert_eq!(key.value, old.value, "raw channel values remain exact");
+                if ids.contains(&key.id) {
+                    assert_eq!(
+                        mondrian_core::automation::interpolation_mode_from_keyframe(
+                            key.interp_in,
+                            key.interp_out,
+                            key.temporal_flags
+                        ),
+                        mode
+                    );
+                } else {
+                    assert_eq!(key.temporal_flags, old.temporal_flags);
+                }
+            }
+        }
+        let changed = bag.clone();
+        bag.apply_mutation(PropertyMutation::UpdateKeyframesInterpolation {
+            path: "position".into(),
+            keyframe_ids: ids,
+            interpolation: mode,
+        })
+        .expect("same preset");
+        assert_eq!(bag, changed, "same complete preset is idempotent: {mode:?}");
+        let reopened: PropertyBag =
+            serde_json::from_slice(&serde_json::to_vec(&bag).expect("serialize")).expect("reopen");
+        assert_eq!(reopened, bag);
+    }
+}
+
+#[test]
+fn selected_interpolation_rejects_incomplete_stale_duplicate_and_schema_without_publication() {
+    use mondrian_core::automation::ParameterInterpolation;
+    let mut bag = PropertyBag::default();
+    let mut descriptor =
+        PropertyDescriptor::new("position", "Position", PropertyValue::Vec2(Vec2::ZERO));
+    descriptor.schema.allowed_interpolations = vec![ParameterInterpolation::Linear];
+    bag.define(descriptor);
+    let key = Keyframe::linear(TimelineTime::ZERO, PropertyValue::Vec2(Vec2::new(0.2, 0.7)));
+    let id = key.id;
+    bag.apply_mutation(PropertyMutation::SetKeyframe { path: "position".into(), keyframe: key })
+        .expect("seed");
+    let independent = Keyframe::linear(TimelineTime::ONE, AnimationChannelValue::Number(0.3));
+    let independent_id = independent.id;
+    bag.apply_mutation(PropertyMutation::SetChannelKeyframe {
+        path: "position".into(),
+        channel_index: 1,
+        keyframe: independent,
+    })
+    .expect("independent");
+    let before = bag.clone();
+    for (ids, mode) in [
+        (vec![], InterpolationType::Linear),
+        (vec![id, id], InterpolationType::Linear),
+        (vec![id, KeyframeId::new()], InterpolationType::Linear),
+        (vec![id, independent_id], InterpolationType::Linear),
+        (vec![id], InterpolationType::AutoBezier),
+        (vec![id], InterpolationType::Hold),
+    ] {
+        assert!(bag
+            .apply_mutation(PropertyMutation::UpdateKeyframesInterpolation {
+                path: "position".into(),
+                keyframe_ids: ids,
+                interpolation: mode,
+            })
+            .is_err());
+        assert_eq!(bag, before, "whole-set refusal must retain every channel");
+    }
+}

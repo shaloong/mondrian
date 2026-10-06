@@ -872,3 +872,32 @@ The packaged product worker SHA256 matches the native qualification product.
 These are current Windows contract results; group pointer/bulk interpolation,
 audio group native output, arbitrary vendor plugins, macOS and remaining
 professional/performance matrices are still open. The full NLE goal is active.
+
+
+## Complete-selection interpolation domain and preset display
+
+A new Core complete-key interpolation mutation validates nonempty unique stable
+identities across all channels, applies the preset to the complete selected set,
+and normalizes constraints once before publication. Public tests cover all seven
+presets, reversed selection order, raw channel values, exact owner times, stable
+identities, idempotence, nested path mapping and serialization. Empty, duplicate,
+stale, independent-channel and current-schema-incompatible selections reject
+without any channel changing.
+
+A real runtime RED found that correctly stored EaseIn/EaseOut asymmetric sides
+were collapsed to Bezier by the shared current-mode resolver. The resolver now
+retains the asymmetric preset after Hold and constrained-mode precedence. The
+exact-mode assertion was retained. Actual App selection tests verify both ease
+modes and exclusion of the current preset from available menu actions.
+
+Core full suite: **489 passed**, zero failures, one ignored performance test;
+public complete-key batch tests account for 11 of those passes. Actual App
+animation-selection suite: **6 passed**, zero failures/ignored, runtime 0.39s.
+This is domain and selection-display qualification. Bulk Inspector menus, audio
+batch interpolation admission, one-command batch UI Undo/save/reopen and new
+native output remain open; earlier native/encoded receipts qualify their named
+source revisions. The complete NLE goal remains active.
+
+Final domain/display gate: whole-workspace all-target/all-feature Clippy with
+warnings as errors passed in **5m11s**. No remote CI or current native output
+qualification is inferred from this gate.

@@ -764,3 +764,20 @@ contract. The complete stable ID set is admitted before candidate cloning;
 constraints normalize once and manual offsets remain unchanged. The owning
 adapter supplies the numeric contract and retains definition-specific validation
 of absolute control values. A no-op does not rewrite constrained handles.
+
+
+### Complete-key interpolation intent
+
+`AnimatedProperty::update_keyframes_interpolation` and
+`PropertyMutation::UpdateKeyframesInterpolation` admit a nonempty unique set of
+complete stable keys. All selected channel-side presets and temporal flags are
+set before one constrained-tangent normalization and candidate validation.
+Selection enumeration never determines constraint geometry. Raw scalar values,
+exact owner times and key identities are retained; stale, independent-channel
+or schema-incompatible selections publish nothing. Singleton and group commands
+share the preset application helper. Editor/audio wiring and interactive group
+menu admission require separate integration qualification.
+
+The shared interpolation display resolver retains asymmetric manual EaseIn/
+EaseOut intents instead of collapsing them to the Bezier family. Hold and
+constrained Auto/Continuous modes retain precedence.

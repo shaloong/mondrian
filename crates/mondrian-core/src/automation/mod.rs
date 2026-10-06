@@ -3034,6 +3034,38 @@ impl AnimatedProperty {
         Ok(())
     }
 
+    /// Set one interpolation preset on a nonempty unique selection of complete keys.
+    /// All channel intents change before constraints are normalized once; values,
+    /// exact owner times and identities are preserved. Invalid selections publish nothing.
+    pub fn update_keyframes_interpolation(
+        &mut self,
+        ids: &[KeyframeId],
+        interpolation: InterpolationType,
+    ) -> Result<()> {
+        self.validate()?;
+        self.admit_channels(|candidate| {
+            let identities = candidate.complete_keyframe_selection(ids)?;
+            if !candidate.descriptor.schema.is_animatable
+                || !candidate.value_type().supports_animation()
+            {
+                return Err(parameter_value_error(
+                    &candidate.descriptor.path,
+                    "property does not support keyframe interpolation",
+                ));
+            }
+            let normalized = candidate.value_type().normalized_interpolation(interpolation);
+            candidate.ensure_interpolation_allowed(normalized.parameter_interpolation())?;
+            for channel in &mut candidate.channels {
+                for key in &mut channel.keyframes {
+                    if identities.contains(&key.id) {
+                        apply_keyframe_interpolation(key, normalized);
+                    }
+                }
+            }
+            candidate.normalize_channels()
+        })
+    }
+
     /// Select one key's interpolation preset, retaining existing Bezier controls.
     /// Explicit Bezier presets also retain both currently unconnected temporal sides,
     /// so adding a neighbor cannot discard the selected interpolation intent.
@@ -3067,29 +3099,7 @@ impl AnimatedProperty {
             if let Some(index) = channel.keyframes.iter().position(|keyframe| keyframe.time == time)
             {
                 let existing = &mut channel.keyframes[index];
-                let (default_in, default_out, temporal_flags) = interpolation_defaults(normalized);
-                match normalized {
-                    InterpolationType::Bezier | InterpolationType::ContinuousBezier => {
-                        existing.interp_in = match existing.interp_in {
-                            KeyframeInterpolation::Bezier(handle) => {
-                                KeyframeInterpolation::Bezier(handle)
-                            }
-                            _ => default_in,
-                        };
-                        existing.interp_out = match existing.interp_out {
-                            KeyframeInterpolation::Bezier(handle) => {
-                                KeyframeInterpolation::Bezier(handle)
-                            }
-                            _ => default_out,
-                        };
-                        existing.temporal_flags = temporal_flags;
-                    }
-                    _ => {
-                        existing.interp_in = default_in;
-                        existing.interp_out = default_out;
-                        existing.temporal_flags = temporal_flags;
-                    }
-                }
+                apply_keyframe_interpolation(existing, normalized);
                 updated_any = true;
             }
         }
@@ -3663,6 +3673,14 @@ impl AnimatedProperty {
                 self.ensure_path(&path)?;
                 self.move_keyframe(from_time, to_time)
             }
+            PropertyMutation::UpdateKeyframesInterpolation {
+                path,
+                keyframe_ids,
+                interpolation,
+            } => {
+                self.ensure_path(&path)?;
+                self.update_keyframes_interpolation(&keyframe_ids, interpolation)
+            }
             PropertyMutation::UpdateKeyframeInterpolation { path, time, interpolation } => {
                 self.ensure_path(&path)?;
                 self.update_keyframe_interpolation(time, interpolation)
@@ -4222,6 +4240,13 @@ impl PropertyBag {
             PropertyMutation::MoveKeyframe { path, from_time, to_time } => {
                 self.move_keyframe(&path, from_time, to_time)
             }
+            PropertyMutation::UpdateKeyframesInterpolation {
+                path,
+                keyframe_ids,
+                interpolation,
+            } => self
+                .require_property_mut(&path)?
+                .update_keyframes_interpolation(&keyframe_ids, interpolation),
             PropertyMutation::UpdateKeyframeInterpolation { path, time, interpolation } => {
                 self.update_keyframe_interpolation(&path, time, interpolation)
             }
@@ -4337,6 +4362,15 @@ pub enum PropertyMutation {
         from_time: TimelineTime,
         to_time: TimelineTime,
     },
+    /// Apply one interpolation intent to a complete stable key selection atomically.
+    UpdateKeyframesInterpolation {
+        /// Owning property path.
+        path: String,
+        /// Nonempty unique complete key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Preset governed by the property's current schema.
+        interpolation: InterpolationType,
+    },
     UpdateKeyframeInterpolation {
         path: String,
         time: TimelineTime,
@@ -4402,6 +4436,7 @@ impl PropertyMutation {
             | Self::ShiftKeyframes { path, .. }
             | Self::OffsetKeyframeValues { path, .. }
             | Self::MoveKeyframe { path, .. }
+            | Self::UpdateKeyframesInterpolation { path, .. }
             | Self::UpdateKeyframeInterpolation { path, .. }
             | Self::UpdateChannelKeyframeHandles { path, .. }
             | Self::UpdateChannelKeyframeValue { path, .. }
@@ -4450,6 +4485,9 @@ impl PropertyMutation {
             }
             MoveKeyframe { path, from_time, to_time } => {
                 MoveKeyframe { path: f(path), from_time, to_time }
+            }
+            UpdateKeyframesInterpolation { path, keyframe_ids, interpolation } => {
+                UpdateKeyframesInterpolation { path: f(path), keyframe_ids, interpolation }
             }
             UpdateKeyframeInterpolation { path, time, interpolation } => {
                 UpdateKeyframeInterpolation { path: f(path), time, interpolation }

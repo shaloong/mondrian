@@ -3857,3 +3857,7 @@ and integral queries across instance, edit, render and destruction actions.
 Both Undo/Redo states and fresh Unicode project reopens use real native execution.
 Each mode needs its current explicitly rebuilt product and fixture qualification;
 an ignored test or earlier time-mode receipt is not value-mode evidence.
+
+The App animation selection resolves manual asymmetric Linear/Bezier sides as
+EaseIn or EaseOut through the Core resolver. Current-mode and available-preset
+menus therefore retain the authored side intent for complete selections.
