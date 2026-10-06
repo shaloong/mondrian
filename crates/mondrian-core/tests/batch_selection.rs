@@ -730,3 +730,81 @@ fn selected_interpolation_rejects_incomplete_stale_duplicate_and_schema_without_
         assert_eq!(bag, before, "whole-set refusal must retain every channel");
     }
 }
+
+#[test]
+fn exact_selected_interpolation_preserves_bits_and_is_order_independent() {
+    use mondrian_core::{ExactAutomationCurve, ExactAutomationKeyframe, ParameterId};
+    for mode in [
+        InterpolationType::Hold,
+        InterpolationType::Linear,
+        InterpolationType::Bezier,
+        InterpolationType::AutoBezier,
+        InterpolationType::ContinuousBezier,
+    ] {
+        let mut source =
+            ExactAutomationCurve::new(ParameterId::new_static("test.presets"), 0.0).expect("curve");
+        for (time, value) in [(0, -0.0_f64), (1, 0.2), (4, -0.7), (7, 1.1)] {
+            source
+                .set_keyframe(ExactAutomationKeyframe::linear(
+                    TimelineTime::new(time, 7).expect("time"),
+                    value,
+                ))
+                .expect("key");
+        }
+        let ids = source.keyframes[1..3].iter().map(|key| key.id).collect::<Vec<_>>();
+        let mut forward = source.clone();
+        forward.set_keyframes_interpolation(&ids, mode).expect("complete preset");
+        let mut reverse = source.clone();
+        reverse
+            .set_keyframes_interpolation(&ids.iter().rev().copied().collect::<Vec<_>>(), mode)
+            .expect("reverse preset");
+        assert_eq!(forward, reverse, "canonical constraint order");
+        forward.validate().expect("constraints");
+        for (old, new) in source.keyframes.iter().zip(&forward.keyframes) {
+            assert_eq!(new.id, old.id);
+            assert_eq!(new.time, old.time);
+            assert_eq!(new.value.to_bits(), old.value.to_bits());
+        }
+        let changed = forward.clone();
+        forward.set_keyframes_interpolation(&ids, mode).expect("same preset");
+        assert_eq!(forward, changed, "idempotent {mode:?}");
+        let reopened: ExactAutomationCurve =
+            serde_json::from_slice(&serde_json::to_vec(&forward).expect("encode")).expect("decode");
+        assert_eq!(reopened, forward);
+        let mut singleton = source.clone();
+        let mut one_set = source.clone();
+        singleton.set_keyframe_interpolation(ids[0], mode).expect("singleton");
+        one_set.set_keyframes_interpolation(&ids[..1], mode).expect("one-element set");
+        assert_eq!(singleton, one_set);
+    }
+}
+
+#[test]
+fn exact_selected_interpolation_refuses_invalid_sets_and_unsupported_presets_atomically() {
+    use mondrian_core::{ExactAutomationCurve, ExactAutomationKeyframe, ParameterId};
+    let mut curve = ExactAutomationCurve::new(ParameterId::new_static("test.refuse.presets"), 0.0)
+        .expect("curve");
+    for (time, value) in [(0, 0.2), (1, 0.7), (2, 0.4)] {
+        curve
+            .set_keyframe(ExactAutomationKeyframe::linear(
+                TimelineTime::new(time, 1).expect("time"),
+                value,
+            ))
+            .expect("key");
+    }
+    let ids = curve.keyframes.iter().map(|key| key.id).collect::<Vec<_>>();
+    let before = curve.clone();
+    for (selection, mode) in [
+        (vec![], InterpolationType::AutoBezier),
+        (vec![ids[0], ids[0]], InterpolationType::ContinuousBezier),
+        (
+            vec![ids[0], KeyframeId::new()],
+            InterpolationType::AutoBezier,
+        ),
+        (ids.clone(), InterpolationType::EaseIn),
+        (ids.clone(), InterpolationType::EaseOut),
+    ] {
+        assert!(curve.set_keyframes_interpolation(&selection, mode).is_err());
+        assert_eq!(curve, before, "complete refusal");
+    }
+}

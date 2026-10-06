@@ -1647,3 +1647,6 @@ stable-address automation editor. The candidate shares preview and canonical
 admission, retaining exact times, IDs, and unaffected curves. Audio-specific
 control-value limits and shared owner locks are checked before sequence
 publication; no sequential per-key transaction is used.
+
+
+Audio batch interpolation is one AudioAutomationEditRequest, with definition-backed complete-selection preparation. Constraint-created controls must fit current hard bounds; refusal preserves the whole Sequence, and later legal edits remain usable.

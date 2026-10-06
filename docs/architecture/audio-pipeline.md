@@ -1652,3 +1652,6 @@ contract to exact curve editing and validates the complete candidate afterward.
 Preview and fresh author admission therefore share key bounds, control bounds,
 interpolation and lock semantics. The UI submits one increment and stable ID set;
 it does not clamp individual keys or replace the curve from display samples.
+
+
+AudioAutomationEdit::SetInterpolations lowers complete-key interpolation through ExactAutomationCurve. AudioAutomationCurveContract admits its interpolation family against the current definition before preparing the candidate and checks all new absolute controls before preview or author publication. Owner locks and no-op outcomes retain the shared authoring semantics.

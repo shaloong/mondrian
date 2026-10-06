@@ -901,3 +901,35 @@ source revisions. The complete NLE goal remains active.
 Final domain/display gate: whole-workspace all-target/all-feature Clippy with
 warnings as errors passed in **5m11s**. No remote CI or current native output
 qualification is inferred from this gate.
+
+
+## Exact audio complete-selection interpolation admission
+
+ExactAutomationCurve now prepares a complete nonempty unique stable-key selection
+in canonical owner-time order, applies one supported preset, initializes entering
+Continuous constraints and normalizes once before validation/publication. The
+singleton API delegates to that primitive. Public batch tests pass **13/13**,
+including scalar bit retention (negative zero), stable IDs and exact times,
+reversed selection order, idempotence, serialization, singleton equivalence and
+atomic rejection of invalid selections/unsupported asymmetric presets.
+
+AudioAutomationEdit::SetInterpolations uses the same current definition-family
+admission as singleton edits and checks the entire prepared curve, including
+new absolute controls, before either preview or author publication. Timeline
+full regression passes **238/238**. New cases check all five supported presets,
+preview/author equality, intent codec, complete-set refusal, no-op and owner locks;
+integer parameter definitions refuse unsupported batch interpolation families.
+A legal manual source can produce a Continuous control below the gain floor:
+preview and author both refuse the complete edit with the same InvalidGain error,
+retain the whole Sequence, then permit a legal Auto recovery. These are local
+candidate-domain results; UI batch context menus, session Undo/save/reopen and
+native audio group output still require separate qualification. Full NLE goal
+remains active.
+
+Full Core regression after singleton delegation: **491 passed**, zero failures,
+one ignored performance test; unit runtime 6.81s, build 1m54s. The public 13-case
+batch suite is included in that count. Timeline build was 3m40s.
+
+Final exact-audio domain gate: whole-workspace all-target/all-feature Clippy
+with warnings as errors passed in **5m23s**; format and diff checks passed before
+commit. This qualifies the current domain source, not end-to-end UI/native audio.

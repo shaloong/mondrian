@@ -320,12 +320,35 @@ impl ExactAutomationCurve {
         keyframe_id: KeyframeId,
         interpolation: InterpolationType,
     ) -> Result<(), AutomationError> {
-        let mut candidate = self.clone();
-        let index = candidate
+        self.set_keyframes_interpolation(&[keyframe_id], interpolation)
+    }
+
+    /// Set one preset on a nonempty unique selection with one constraint normalization.
+    /// Stable identities, exact owner times and raw scalar values are retained.
+    /// Invalid or unsupported selections are rejected before publication.
+    pub fn set_keyframes_interpolation(
+        &mut self,
+        ids: &[KeyframeId],
+        interpolation: InterpolationType,
+    ) -> Result<(), AutomationError> {
+        self.validate()?;
+        if ids.is_empty() {
+            return Err(AutomationError::EmptyKeySelection);
+        }
+        let identities = ids.iter().copied().collect::<HashSet<_>>();
+        if identities.len() != ids.len() {
+            return Err(AutomationError::DuplicateKeyframeIdentity);
+        }
+        let indices = self
             .keyframes
             .iter()
-            .position(|keyframe| keyframe.id == keyframe_id)
-            .ok_or(AutomationError::UnknownKeyframe)?;
+            .enumerate()
+            .filter(|(_, key)| identities.contains(&key.id))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if indices.len() != ids.len() {
+            return Err(AutomationError::UnknownKeyframe);
+        }
         let (segment, mode) = match interpolation {
             InterpolationType::Hold => (
                 AutomationSegmentInterpolation::Hold,
@@ -351,17 +374,20 @@ impl ExactAutomationCurve {
                 return Err(AutomationError::UnsupportedInterpolationPreset);
             }
         };
-        let previous_mode = candidate.keyframes[index].tangent_mode;
-        candidate.keyframes[index].interpolation_to_next = segment;
-        candidate.keyframes[index].tangent_mode = mode;
-        if mode != ExactAutomationTangentMode::Manual && index > 0 {
-            candidate.keyframes[index - 1].interpolation_to_next =
-                AutomationSegmentInterpolation::Bezier;
-        }
-        if mode == ExactAutomationTangentMode::Continuous
-            && previous_mode != ExactAutomationTangentMode::Continuous
-        {
-            candidate.initialize_continuous_constraint(index);
+        let mut candidate = self.clone();
+        for index in indices {
+            let previous_mode = candidate.keyframes[index].tangent_mode;
+            candidate.keyframes[index].interpolation_to_next = segment;
+            candidate.keyframes[index].tangent_mode = mode;
+            if mode != ExactAutomationTangentMode::Manual && index > 0 {
+                candidate.keyframes[index - 1].interpolation_to_next =
+                    AutomationSegmentInterpolation::Bezier;
+            }
+            if mode == ExactAutomationTangentMode::Continuous
+                && previous_mode != ExactAutomationTangentMode::Continuous
+            {
+                candidate.initialize_continuous_constraint(index);
+            }
         }
         candidate.normalize_constrained_tangents()?;
         candidate.validate()?;

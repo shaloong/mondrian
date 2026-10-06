@@ -781,3 +781,6 @@ menu admission require separate integration qualification.
 The shared interpolation display resolver retains asymmetric manual EaseIn/
 EaseOut intents instead of collapsing them to the Bezier family. Hold and
 constrained Auto/Continuous modes retain precedence.
+
+
+ExactAutomationCurve also admits complete stable selections with one preset and one normalization. Singleton preset edits delegate to this primitive. Empty/duplicate/stale selections and unsupported asymmetric presets publish nothing; scalar author bits and exact times remain intact.
