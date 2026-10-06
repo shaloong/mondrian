@@ -28,6 +28,13 @@ pub struct ClipCurveAuthorPoint {
 /// One stable-identity curve edit requested by a product Adapter.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClipNumericCurveEdit {
+    /// Translate complete stable keys together in their exact owner-time domain.
+    ShiftMany {
+        /// Nonempty unique complete canonical key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Signed exact owner-time translation.
+        delta: TimelineTime,
+    },
     /// Remove a unique nonempty key set in one author transaction.
     RemoveMany {
         /// Complete canonical key identities.
@@ -539,6 +546,32 @@ fn prepare_property_curve_edit(
 ) -> Result<PreparedCurveEdit> {
     validate_numeric_curve_property(property, address)?;
     match edit {
+        ClipNumericCurveEdit::ShiftMany { keyframe_ids, delta } => {
+            let keyframe_id = keyframe_ids
+                .first()
+                .copied()
+                .ok_or_else(|| curve_error("key selection is empty"))?;
+            let mut candidate = property.clone();
+            candidate.shift_keyframes(&keyframe_ids, delta)?;
+            let end = range.end()?;
+            let identities = keyframe_ids.iter().copied().collect::<std::collections::HashSet<_>>();
+            if candidate.channels()[0]
+                .keyframes()
+                .iter()
+                .filter(|key| identities.contains(&key.id))
+                .any(|key| key.time < range.start || key.time > end)
+            {
+                return Err(curve_error("shifted key is outside the owner interval"));
+            }
+            Ok(PreparedCurveEdit {
+                mutations: vec![PropertyMutation::ShiftKeyframes {
+                    path: path.to_owned(),
+                    keyframe_ids,
+                    delta,
+                }],
+                keyframe_id,
+            })
+        }
         ClipNumericCurveEdit::RemoveMany { keyframe_ids, retain_time } => {
             if retain_time < range.start || retain_time > range.end()? {
                 return Err(curve_error(

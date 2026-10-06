@@ -3764,3 +3764,30 @@ This does not relax full-address admission for queued author/navigation actions.
 retains multiple selected IDs but loses batch admission, Delete consumes the
 input without emitting a singleton edit, changing geometry or losing selection.
 Production time-context construction is shared by Mixer and Inspector callers.
+
+
+### Exact keyboard movement of selected curve keys
+
+Temporal curve owners explicitly admit `NudgeTimeMany` alongside stable selection.
+Left/Right applies one exact owner frame-grid increment to the whole key set;
+Shift uses five increments. Transfer curves do not acquire this capability by
+restoring a view snapshot. Capability loss, a locked time policy or an active
+pointer gesture consumes the key without falling back to the primary key.
+The Widget never reconstructs author times or values from projected points.
+
+Clip and audio owner adapters lower the closed group edit to the shared canonical
+primitive. Clip preparation checks the final owner interval before one Author
+Transaction; audio projection checks its exact occurrence viewport. Refused
+projection emits no author action and leaves the key set and geometry intact.
+Successful keyboard movement is one reversible edit and preserves all stable
+identities; pointer group movement, value changes and interpolation use separate
+future group edit contracts. Selection and author history remain session state,
+while saves persist the exact canonical shifted curve.
+
+Selection is admitted when either whole-set deletion or whole-set time movement
+is supported. Shift-click and Ctrl/Cmd+A select authored keys independently of
+deletability; virtual boundaries never join the author key set. Deletion and time
+movement each validate their complete set against their own capability and point
+policies. A time-only owner therefore does not acquire group deletion merely to
+make its keys selectable. Read-only selected keys cause whole-set edit refusal,
+not silent omission or a primary-key fallback.

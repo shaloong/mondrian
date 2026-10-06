@@ -732,3 +732,17 @@ the unkeyed value. The existing typed scalar and interpolation contracts admit
 that result. PropertyMutation::RemoveKeyframes preserves this operation through
 PropertyBag and nested path mapping. No alternate evaluator or project schema
 is introduced.
+
+
+## Exact selected-key translation
+
+The authoring foundation exposes `AnimatedProperty::shift_keyframes` and
+`ExactAutomationCurve::shift_keyframes` over nonempty unique stable KeyframeIds
+and one signed exact TimelineTime delta. Both admit a complete final candidate:
+apply the delta to original coordinates, sort, reject collisions/overflow, then
+normalize constrained tangents once and validate. Movement between selected
+neighbors therefore never collides with an intermediate old position. Property
+channels retain typed values and complete-key identity; incomplete channel sets
+and a later-channel failure cannot publish earlier changes. Owner domains impose
+bounds at their authoring adapter; the generic time primitive does not invent a
+Clip interval for Sequence or shareable Scope author time.

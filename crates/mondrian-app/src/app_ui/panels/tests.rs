@@ -12236,3 +12236,335 @@ fn audio_scope_occurrence_view_survives_track_move_but_not_instance_switch() {
     assert!(actions.borrow().is_empty());
     assert!(!state.can_undo_action());
 }
+
+#[test]
+fn selected_key_time_keyboard_routes_one_transaction_and_preserves_saved_redo() {
+    use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    fn find_curve(widget: &dyn Widget, id: KeyframeId) -> Option<WidgetId> {
+        if widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .is_some_and(|curve| {
+                (0..curve.points().len())
+                    .any(|index| curve.point_target(index) == Some(CurvePointTarget::Keyframe(id)))
+            })
+        {
+            return Some(widget.id());
+        }
+        (0..widget.child_count())
+            .find_map(|index| widget.child(index).and_then(|child| find_curve(child, id)))
+    }
+    for mode in [
+        InterpolationType::AutoBezier,
+        InterpolationType::ContinuousBezier,
+    ] {
+        let mut sequence = Sequence::new("Selected temporal keys");
+        let frame =
+            TimelineTime::new(sequence.time_base().num, sequence.time_base().den).expect("frame");
+        let mut clip =
+            Clip::new_basic_title("Group", "Arial", TimelineTime::ZERO, TimelineTime::ONE)
+                .expect("title");
+        let clip_id = clip.id;
+        let mut ids = Vec::new();
+        for count in [5, 6, 24] {
+            let key = Keyframe::from_preset(
+                frame
+                    .checked_scale(TimeScale::new(count, 1).expect("frame count"))
+                    .expect("time"),
+                PropertyValue::Float(0.5),
+                mode,
+            );
+            ids.push(key.id);
+            clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: Transform2D::OPACITY_PATH.into(),
+                keyframe: key,
+            })
+            .expect("seed canonical curve");
+        }
+        sequence.video_tracks[0].add_clip(clip).expect("place");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("select");
+        let original = state.active_sequence().expect("origin").clone();
+        assert!(!state.can_undo_action());
+        let models = AppUiPanelModels::from_app_state(&state);
+        let mut panel = inspector_panel(&models.inspector, &chinese_localizer());
+        let curve_id = find_curve(&panel, ids[0]).expect("actual Inspector curve");
+        let mut panel_tree = WidgetTreeView::new(&mut panel);
+        let widget = panel_tree.get_mut(curve_id).expect("curve");
+        widget.layout(Rect::new(0.0, 0.0, 320.0, 104.0));
+        let mut router = EventRouter::new(curve_id);
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        {
+            let mut tree = WidgetTreeView::new(widget);
+            for (key, modifiers) in [
+                (KeyCode::Tab, Modifiers::none()),
+                (KeyCode::A, Modifiers::ctrl()),
+                (KeyCode::Right, Modifiers::none()),
+            ] {
+                router.route(UiEvent::KeyDown { key, modifiers }, &mut tree, &dispatch);
+            }
+        }
+        assert_eq!(actions.borrow().len(), 1, "one closed group author action");
+        state
+            .dispatch_action(actions.borrow_mut().remove(0))
+            .expect("translate adjacent selected keys together");
+        let moved = state.active_sequence().expect("moved").clone();
+        let bag = moved.find_clip(clip_id).expect("clip").intrinsic_parameter_bag();
+        let property = bag.property(Transform2D::OPACITY_PATH).expect("opacity");
+        for id in &ids {
+            let before = original
+                .find_clip(clip_id)
+                .expect("clip")
+                .intrinsic_parameter_bag()
+                .property(Transform2D::OPACITY_PATH)
+                .expect("opacity")
+                .keyframe_by_id(*id)
+                .expect("origin key");
+            let after = property.keyframe_by_id(*id).expect("stable shifted key");
+            assert_eq!(
+                after.time,
+                before.time.checked_add(frame).expect("one frame")
+            );
+            assert_eq!(after.value, before.value);
+            assert_eq!(after.temporal_flags, before.temporal_flags);
+        }
+        property.validate().expect("constrained topology");
+        let points = widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .expect("curve")
+            .points()
+            .to_vec();
+        let generation = state.project_author_generation();
+        let history = state.authoring_history().expect("history").diagnostics();
+        {
+            let mut tree = WidgetTreeView::new(widget);
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::shift() },
+                &mut tree,
+                &dispatch,
+            );
+        }
+        assert!(
+            actions.borrow().is_empty(),
+            "one key beyond the owner interval rejects the whole group"
+        );
+        assert_eq!(
+            widget
+                .as_any()
+                .and_then(|any| any.downcast_ref::<CurveEditor>())
+                .expect("curve")
+                .points(),
+            points
+        );
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
+        assert!(state.undo_timeline().expect("single undo"));
+        assert!(state
+            .active_sequence()
+            .expect("undone")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(!state.can_undo_action() && state.can_redo_action());
+        let directory = tempfile::tempdir().expect("archives");
+        let path = directory.path().join("整组时间🙂.mdp");
+        state.save_project_file_as(path.clone()).expect("save undone");
+        assert!(state.can_redo_action(), "save cannot consume group redo");
+        let mut reopened = AppState::new();
+        reopened.open_project_file(path).expect("fresh saved reopen");
+        assert!(reopened
+            .active_sequence()
+            .expect("reopened")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        assert!(state.redo_timeline().expect("single redo"));
+        assert!(state
+            .active_sequence()
+            .expect("redone")
+            .author_state_eq_ignoring_revision(&moved));
+    }
+}
+
+#[test]
+fn selected_audio_key_time_keyboard_preserves_owner_domain_and_saved_redo() {
+    use mondrian_core::ExactAutomationKeyframe;
+    use mondrian_timeline::{
+        apply_audio_automation_edit, inspect_audio_automation, AudioAutomationEdit,
+        AudioAutomationEditRequest, AudioAutomationTarget,
+    };
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    for scope in [false, true] {
+        let mut sequence = Sequence::new("Audio group time");
+        let frame =
+            TimelineTime::new(sequence.time_base().num, sequence.time_base().den).expect("frame");
+        let track_id = sequence.audio_tracks[0].id;
+        let clip = Clip::new(
+            AssetId::new(),
+            TimelineTime::new(3, 1).expect("placement"),
+            TimelineTime::ONE,
+        )
+        .expect("clip");
+        let clip_id = clip.id;
+        sequence
+            .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+            .expect("audio placement");
+        let component = &mut sequence.audio_tracks[0].clips[0].audio_components[0];
+        component.processing.scope_in = TimelineTime::new(7, 1).expect("Scope origin");
+        component.local_time_in = TimelineTime::new(11, 1).expect("Component origin");
+        let target = if scope {
+            AudioAutomationTarget::ProcessingScopeInputGain {
+                scope_id: component.processing.scope_id,
+            }
+        } else {
+            AudioAutomationTarget::ComponentVolume { track_id, clip_id, edit_id: component.id }
+        };
+        let origin = if scope {
+            component.processing.scope_in
+        } else {
+            component.local_time_in
+        };
+        let mut ids = Vec::new();
+        for (count, value) in [(5, -24.0), (6, -23.0), (24, -18.0)] {
+            let keyframe = ExactAutomationKeyframe::linear(
+                origin
+                    .checked_add(
+                        frame
+                            .checked_scale(TimeScale::new(count, 1).expect("count"))
+                            .expect("offset"),
+                    )
+                    .expect("owner time"),
+                value,
+            );
+            ids.push(keyframe.id);
+            apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                },
+            )
+            .expect("seed curve");
+        }
+        for keyframe_id in &ids {
+            apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::SetInterpolation {
+                        keyframe_id: *keyframe_id,
+                        interpolation: if scope {
+                            InterpolationType::AutoBezier
+                        } else {
+                            InterpolationType::ContinuousBezier
+                        },
+                    },
+                },
+            )
+            .expect("seed constrained mode");
+        }
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("inspect");
+        let original = state.active_sequence().expect("original").clone();
+        let locale = chinese_localizer();
+        let inspector = InspectorPanelModel::from_app_state(&state, &locale);
+        let model = if scope {
+            inspector.audio_processor_racks[0]
+                .scope_input_gain_automation
+                .as_ref()
+                .expect("Scope curve")
+        } else {
+            inspector.audio_components[0]
+                .volume_automation
+                .as_ref()
+                .expect("Component curve")
+        };
+        assert_eq!(model.viewport.range.start, origin);
+        assert!(model.current_author_time.is_ok());
+        let mut widget = audio_automation_curve_control(model, &locale);
+        widget.layout(Rect::new(0.0, 0.0, 320.0, 104.0));
+        let mut router = EventRouter::new(widget.id());
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        {
+            let mut tree = WidgetTreeView::new(widget.as_mut());
+            for (key, modifiers) in [
+                (KeyCode::Tab, Modifiers::none()),
+                (KeyCode::A, Modifiers::ctrl()),
+                (KeyCode::Right, Modifiers::none()),
+            ] {
+                router.route(UiEvent::KeyDown { key, modifiers }, &mut tree, &dispatch);
+            }
+        }
+        assert_eq!(actions.borrow().len(), 1, "one complete group intent");
+        state
+            .dispatch_action(actions.borrow_mut().remove(0))
+            .expect("canonical group shift");
+        let moved = state.active_sequence().expect("moved").clone();
+        let before = inspect_audio_automation(&original, &target).expect("original owner");
+        let after = inspect_audio_automation(&moved, &target).expect("shifted owner");
+        assert_eq!(before.time_domain(), after.time_domain());
+        for (before, after) in before
+            .curve()
+            .expect("original curve")
+            .keyframes
+            .iter()
+            .zip(&after.curve().expect("moved curve").keyframes)
+        {
+            assert_eq!(before.id, after.id);
+            assert_eq!(
+                after.time,
+                before.time.checked_add(frame).expect("exact delta")
+            );
+            assert_eq!(after.value, before.value);
+            assert_eq!(after.tangent_mode, before.tangent_mode);
+        }
+        after.curve().expect("moved curve").validate().expect("constraints");
+        let generation = state.project_author_generation();
+        let history = state.authoring_history().expect("history").diagnostics();
+        {
+            let mut tree = WidgetTreeView::new(widget.as_mut());
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::shift() },
+                &mut tree,
+                &dispatch,
+            );
+        }
+        assert!(
+            actions.borrow().is_empty(),
+            "viewport boundary refusal is whole-set"
+        );
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
+        assert!(state.undo_timeline().expect("one Undo"));
+        assert!(state
+            .active_sequence()
+            .expect("Undo state")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(!state.can_undo_action() && state.can_redo_action());
+        let directory = tempfile::tempdir().expect("archives");
+        let path = directory.path().join("音频整组时间🙂.mdp");
+        state.save_project_file_as(path.clone()).expect("save undone");
+        assert!(state.can_redo_action(), "save retains live Redo");
+        let mut reopened = AppState::new();
+        reopened.open_project_file(path).expect("fresh reopen");
+        assert!(reopened
+            .active_sequence()
+            .expect("reopened")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        assert!(state.redo_timeline().expect("one Redo"));
+        assert!(state
+            .active_sequence()
+            .expect("Redo state")
+            .author_state_eq_ignoring_revision(&moved));
+    }
+}

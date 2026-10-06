@@ -2717,6 +2717,62 @@ impl AnimatedProperty {
         })
     }
 
+    /// Translate a nonempty unique set of complete stable keys by an exact delta.
+    /// All channels move together and validate the final topology before publication.
+    /// Typed scalar values are never evaluated or reconstructed through a float projection.
+    pub fn shift_keyframes(&mut self, ids: &[KeyframeId], delta: TimelineTime) -> Result<()> {
+        self.validate()?;
+        self.admit_channels(|candidate| {
+            let identities = ids.iter().copied().collect::<std::collections::HashSet<_>>();
+            if ids.is_empty() || identities.len() != ids.len() {
+                return Err(parameter_value_error(
+                    &candidate.descriptor.path,
+                    "key selection must be nonempty and unique",
+                ));
+            }
+            let complete = candidate
+                .channels
+                .first()
+                .into_iter()
+                .flat_map(|channel| &channel.keyframes)
+                .filter(|key| identities.contains(&key.id))
+                .filter(|key| {
+                    candidate.channels.iter().skip(1).all(|channel| {
+                        channel
+                            .keyframes
+                            .binary_search_by_key(&key.time, |other| other.time)
+                            .ok()
+                            .is_some_and(|index| channel.keyframes[index].id == key.id)
+                    })
+                })
+                .count();
+            if complete != ids.len() {
+                return Err(parameter_value_error(
+                    &candidate.descriptor.path,
+                    "key selection contains a stale or incomplete key",
+                ));
+            }
+            if delta.is_zero() {
+                return Ok(());
+            }
+            for channel in &mut candidate.channels {
+                for key in &mut channel.keyframes {
+                    if identities.contains(&key.id) {
+                        key.time = key.time.checked_add(delta)?;
+                    }
+                }
+                channel.keyframes.sort_by_key(|key| key.time);
+                if channel.keyframes.windows(2).any(|pair| pair[0].time == pair[1].time) {
+                    return Err(parameter_value_error(
+                        &candidate.descriptor.path,
+                        "key selection collides with an unselected key",
+                    ));
+                }
+            }
+            candidate.normalize_channels()
+        })
+    }
+
     /// Atomically move a complete key while retaining its identity and typed value.
     pub fn move_keyframe(&mut self, from_time: TimelineTime, to_time: TimelineTime) -> Result<()> {
         self.admit_channels(|candidate| candidate.move_keyframe_candidate(from_time, to_time))
@@ -3389,6 +3445,10 @@ impl AnimatedProperty {
                 self.ensure_path(&path)?;
                 self.remove_keyframes(&keyframe_ids, retain_time)
             }
+            PropertyMutation::ShiftKeyframes { path, keyframe_ids, delta } => {
+                self.ensure_path(&path)?;
+                self.shift_keyframes(&keyframe_ids, delta)
+            }
             PropertyMutation::MoveKeyframe { path, from_time, to_time } => {
                 self.ensure_path(&path)?;
                 self.move_keyframe(from_time, to_time)
@@ -3934,6 +3994,9 @@ impl PropertyBag {
             PropertyMutation::RemoveKeyframes { path, keyframe_ids, retain_time } => {
                 self.require_property_mut(&path)?.remove_keyframes(&keyframe_ids, retain_time)
             }
+            PropertyMutation::ShiftKeyframes { path, keyframe_ids, delta } => {
+                self.require_property_mut(&path)?.shift_keyframes(&keyframe_ids, delta)
+            }
             PropertyMutation::MoveKeyframe { path, from_time, to_time } => {
                 self.move_keyframe(&path, from_time, to_time)
             }
@@ -4025,6 +4088,15 @@ pub enum PropertyMutation {
         /// Exact owner time sampled before deleting the final keys.
         retain_time: TimelineTime,
     },
+    /// Translate complete stable keys together without reconstructing typed values.
+    ShiftKeyframes {
+        /// Address of the owning property.
+        path: String,
+        /// Nonempty unique complete key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Signed exact owner-time translation.
+        delta: TimelineTime,
+    },
     MoveKeyframe {
         path: String,
         from_time: TimelineTime,
@@ -4092,6 +4164,7 @@ impl PropertyMutation {
             | Self::EditKeyframe { path, .. }
             | Self::RemoveKeyframe { path, .. }
             | Self::RemoveKeyframes { path, .. }
+            | Self::ShiftKeyframes { path, .. }
             | Self::MoveKeyframe { path, .. }
             | Self::UpdateKeyframeInterpolation { path, .. }
             | Self::UpdateChannelKeyframeHandles { path, .. }
@@ -4126,6 +4199,9 @@ impl PropertyMutation {
             RemoveKeyframe { path, time } => RemoveKeyframe { path: f(path), time },
             RemoveKeyframes { path, keyframe_ids, retain_time } => {
                 RemoveKeyframes { path: f(path), keyframe_ids, retain_time }
+            }
+            ShiftKeyframes { path, keyframe_ids, delta } => {
+                ShiftKeyframes { path: f(path), keyframe_ids, delta }
             }
             MoveKeyframe { path, from_time, to_time } => {
                 MoveKeyframe { path: f(path), from_time, to_time }

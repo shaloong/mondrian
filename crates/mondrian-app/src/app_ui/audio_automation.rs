@@ -394,6 +394,21 @@ fn audio_curve_edit_intent(
                 .as_f64()?;
             AudioAutomationEdit::UpsertKeyframe { keyframe: key }
         }
+        CurveEdit::NudgeTimeMany { keyframe_ids, delta } => {
+            let mut candidate = model.source_curve.clone();
+            candidate.shift_keyframes(&keyframe_ids, delta).ok()?;
+            let end = model.viewport.range.end().ok()?;
+            let identities = keyframe_ids.iter().copied().collect::<std::collections::HashSet<_>>();
+            if candidate
+                .keyframes
+                .iter()
+                .filter(|key| identities.contains(&key.id))
+                .any(|key| key.time < model.viewport.range.start || key.time > end)
+            {
+                return None;
+            }
+            AudioAutomationEdit::ShiftKeyframes { keyframe_ids, delta }
+        }
         CurveEdit::NudgeTime { keyframe_id, side, delta } => {
             if let Some(side) = side {
                 let control = model

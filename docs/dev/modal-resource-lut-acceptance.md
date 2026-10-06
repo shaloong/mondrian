@@ -517,3 +517,51 @@ qualification. Windows contract paths are accepted within this scope; physical
 keyboard/file picker, high-DPI layouts, macOS and the broader vendor/plugin
 matrix remain unqualified. Key-group move/value/interpolation and rubber-band
 selection remain open. Overall goal stays active.
+
+
+## Exact selected-key time movement (2026-10-06)
+
+Core translates a nonempty unique complete key set by one exact signed author-time
+delta. It sorts the final topology before collision admission and normalizes
+constraints once, so adjacent selected keys may pass through one another's old
+coordinates. Typed property values, stable IDs and tangent modes survive; stale
+or incomplete multichannel selections, collisions and arithmetic overflow reject
+the whole candidate. A later channel cannot publish earlier channel changes.
+
+Inspector and audio Left/Right use one exact Sequence frame-grid increment;
+Shift uses five. Clip preparation checks the owner interval, and audio projection
+checks its explicit Component/Scope viewport. Each accepted key group enters one
+author transaction. Capability loss, one locked time policy or an active pointer
+operation cannot fall back to a primary-only edit. Transfer curves do not acquire
+these operations through view restoration.
+
+An actual component regression exposed that Ctrl/Cmd+A was coupled to group
+deletion permission: a movement-only owner could not select its keys. Shift-click
+and Ctrl/Cmd+A now admit selection when either group operation is supported and
+select authored keys independently of deletability. Virtual boundaries remain
+excluded. Movement and deletion separately admit the entire set; movement alone
+cannot enable group deletion. The original failure and corrected test are kept
+as distinct evidence.
+
+Actual production Inspector/EventRouter tests cover Auto/Continuous visual
+curves and audio Component11/Scope7 origins, adjacent group movement, boundary
+refusal without generation/history changes, one Undo/Redo, saving an undone
+snapshot while retaining live Redo, and fresh Unicode project reopening without
+persisted history. Early test setup failures (borrowed temporary and audio
+continuous control outside its hard gain range) were corrected in fixtures;
+production lifetime and gain validation were not relaxed.
+
+Final current-source gates pass: public Core integration **4/0**, full Core
+**464/0/1 ignored**, Timeline **232/0**, Widgets **1093/0** (318.93s), and
+all-features App **2564/0/63 ignored** (328.04s). Strict whole-workspace /
+all-targets / all-features Clippy with warnings denied passes (5m27s); fmt and
+diff checks pass. The App run includes actual modal Tab containment/pending
+resource focus, cancelled/locked/replaced/Save As resource admission, and the
+real Cube LUT commit/Undo/saved Redo/fresh reopen/pixel workflow. Ignored native
+cases were not rerun for this group edit source.
+
+The previously recorded native/encoded qualification remains pinned to fda9b23.
+This continuation does not claim that historical Golden processes exercised its
+new group operation. Dedicated native group-action/output, group value/pointer/
+interpolation, rubber-band selection and broad vendor/platform/performance
+matrices remain open. The overall NLE goal stays active.

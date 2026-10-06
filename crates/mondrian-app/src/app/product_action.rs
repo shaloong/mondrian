@@ -2580,6 +2580,13 @@ pub use super::animation_authoring::ClipCurveAuthorPoint;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClipCurveEditPayload {
+    /// Translate complete stable keys together in their exact owner-time domain.
+    ShiftMany {
+        /// Nonempty unique complete canonical key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Signed exact owner-time translation.
+        delta: TimelineTime,
+    },
     /// Remove a unique nonempty key set in one author transaction.
     RemoveMany {
         /// Complete canonical key identities.

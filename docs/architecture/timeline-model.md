@@ -1614,3 +1614,14 @@ Timeline reexports only Core's `Keyframe` value DTO and `InterpolationType`.
 The unused generic `KeyframeTrack`/`Interpolatable` API is removed from both
 crates. Author numeric curves remain Core property channels and exact curves;
 Timeline does not provide a competing curve evaluator or mutation authority.
+
+
+### Atomic audio key-set time edits
+
+`AudioAutomationEdit::ShiftKeyframes` names one unique complete stable key set
+and an exact signed owner-time delta. The Timeline delegates final-topology
+admission to ExactAutomationCurve, preserves scalar values and tangent mode, and
+uses the same lock, numeric-contract and author generation rules as other audio
+edits. A Processing Scope curve remains Scope-owned even when the Inspector
+projects a chosen Clip occurrence; its canonical author bounds are not replaced
+by that Clip's visible viewport.

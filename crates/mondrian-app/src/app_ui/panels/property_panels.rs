@@ -1919,7 +1919,7 @@ pub(super) fn audio_automation_curve_control(
         .with_point_context_menus(interpolation_menus)
         .enabled(model.is_editable);
     if model.current_author_time.is_ok() {
-        editor = editor.with_selection_deletion();
+        editor = editor.with_selection_deletion().with_selection_time_movement();
     }
     Box::new(editor.on_gesture(move |event| {
         match event {
@@ -2690,6 +2690,7 @@ fn numeric_curve_editor(
         .with_view_key(target.as_ref().and_then(|target| serde_json::to_string(target).ok()))
         .with_keyframe_ids(ids)
         .with_selection_deletion()
+        .with_selection_time_movement()
         .with_tangents(tangents)
         .with_preview_projection(move |event| match event {
             CurveGestureEvent::Begin(_) => {
@@ -2811,6 +2812,9 @@ fn numeric_curve_edit_payload(
                 _ => return None,
             };
             ClipCurveEditPayload::Move { keyframe_id, time: None, value: Some(value) }
+        }
+        CurveEdit::NudgeTimeMany { keyframe_ids, delta } => {
+            ClipCurveEditPayload::ShiftMany { keyframe_ids, delta }
         }
         CurveEdit::NudgeTime { keyframe_id, side, delta } => {
             if let Some(side) = side {

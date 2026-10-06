@@ -83,6 +83,13 @@ pub enum AudioAutomationEdit {
         /// Original evaluation retained when deleting every key.
         retain_time: TimelineTime,
     },
+    /// Translate a complete unique key set by one exact owner-time delta.
+    ShiftKeyframes {
+        /// Stable keys in the addressed curve.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Signed exact owner-time translation.
+        delta: TimelineTime,
+    },
     /// Edit one Bezier handle using canonical constrained geometry.
     EditHandle {
         /// Stable keyframe to edit.
@@ -822,6 +829,9 @@ fn edit_curve(
         AudioAutomationEdit::RemoveKeyframes { keyframe_ids, retain_time } => {
             curve.remove_keyframes(keyframe_ids, *retain_time).map_err(invalid_automation)?;
         }
+        AudioAutomationEdit::ShiftKeyframes { keyframe_ids, delta } => {
+            curve.shift_keyframes(keyframe_ids, *delta).map_err(invalid_automation)?;
+        }
         AudioAutomationEdit::EditHandle { keyframe_id, side, edit } => {
             curve.edit_keyframe_handle(*keyframe_id, *side, *edit).map_err(
                 |error| match error {
@@ -1286,6 +1296,145 @@ mod tests {
             )
             .expect_err("locked target");
             assert!(matches!(error, AudioAutomationEditError::Blocked(_)));
+        }
+    }
+
+    #[test]
+    fn selected_time_shift_is_atomic_in_owner_domain_and_obeys_shared_locks() {
+        let mut sequence = Sequence::new("Group owner translation");
+        let track_id = sequence.audio_tracks[0].id;
+        let clip = crate::Clip::new(
+            mondrian_core::AssetId::new(),
+            TimelineTime::ZERO,
+            TimelineTime::ONE,
+        )
+        .expect("Clip");
+        let clip_id = clip.id;
+        sequence
+            .add_media_audio_clip(
+                track_id,
+                clip,
+                mondrian_core::AudioSourceComponentId::primary(),
+            )
+            .expect("audio");
+        let component = &sequence.audio_tracks[0].clips[0].audio_components[0];
+        let scope_id = component.processing.scope_id;
+        let edit_id = component.id;
+        for target in [
+            AudioAutomationTarget::ComponentVolume { track_id, clip_id, edit_id },
+            AudioAutomationTarget::ProcessingScopeInputGain { scope_id },
+        ] {
+            let mut ids = Vec::new();
+            for time in [7, 8, 11] {
+                let keyframe = ExactAutomationKeyframe::linear(
+                    TimelineTime::new(time, 1).expect("owner time"),
+                    -6.0,
+                );
+                ids.push(keyframe.id);
+                apply_audio_automation_edit(
+                    &mut sequence,
+                    &AudioAutomationEditRequest {
+                        target: target.clone(),
+                        edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                    },
+                )
+                .expect("seed owner");
+            }
+            let original = sequence.clone();
+            let request = AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::ShiftKeyframes {
+                    keyframe_ids: vec![ids[1], ids[0]],
+                    delta: TimelineTime::ONE,
+                },
+            };
+            let encoded = serde_json::to_vec(&request).expect("encode closed intent");
+            let decoded: AudioAutomationEditRequest =
+                serde_json::from_slice(&encoded).expect("decode closed intent");
+            assert_eq!(decoded, request);
+            let curve = inspect_audio_automation(&sequence, &target)
+                .expect("owner")
+                .curve()
+                .expect("curve")
+                .clone();
+            let projected = preview_audio_automation_curve_edit(&curve, &request.edit)
+                .expect("canonical projection");
+            assert!(
+                apply_audio_automation_edit(&mut sequence, &decoded)
+                    .expect("one group edit")
+                    .changed
+            );
+            assert_eq!(
+                inspect_audio_automation(&sequence, &target).expect("owner").curve(),
+                Some(&projected)
+            );
+            assert_eq!(
+                projected.keyframes[0].time,
+                TimelineTime::new(8, 1).expect("time")
+            );
+            assert_eq!(
+                projected.keyframes[1].time,
+                TimelineTime::new(9, 1).expect("time")
+            );
+            assert_eq!(projected.keyframes[2], curve.keyframes[2]);
+            let moved = sequence.clone();
+            for (keyframe_ids, delta) in [
+                (vec![], TimelineTime::ZERO),
+                (vec![ids[0], ids[0]], TimelineTime::ZERO),
+                (vec![ids[0], KeyframeId::new()], TimelineTime::ZERO),
+                (
+                    vec![ids[0], ids[1]],
+                    TimelineTime::new(2, 1).expect("collision"),
+                ),
+            ] {
+                assert!(apply_audio_automation_edit(
+                    &mut sequence,
+                    &AudioAutomationEditRequest {
+                        target: target.clone(),
+                        edit: AudioAutomationEdit::ShiftKeyframes { keyframe_ids, delta }
+                    }
+                )
+                .is_err());
+                assert_eq!(sequence, moved, "no partial mutation on refusal");
+            }
+            assert!(
+                !apply_audio_automation_edit(
+                    &mut sequence,
+                    &AudioAutomationEditRequest {
+                        target: target.clone(),
+                        edit: AudioAutomationEdit::ShiftKeyframes {
+                            keyframe_ids: ids[..2].to_vec(),
+                            delta: TimelineTime::ZERO
+                        }
+                    }
+                )
+                .expect("valid zero delta")
+                .changed
+            );
+            assert_eq!(sequence, moved);
+            sequence.audio_tracks[0].is_locked = true;
+            let locked = sequence.clone();
+            assert!(matches!(
+                apply_audio_automation_edit(&mut sequence, &request),
+                Err(AudioAutomationEditError::Blocked(_))
+            ));
+            assert_eq!(sequence, locked);
+            sequence.audio_tracks[0].is_locked = false;
+            assert!(
+                apply_audio_automation_edit(
+                    &mut sequence,
+                    &AudioAutomationEditRequest {
+                        target,
+                        edit: AudioAutomationEdit::ShiftKeyframes {
+                            keyframe_ids: ids[..2].to_vec(),
+                            delta: TimelineTime::new(-1, 1).expect("reverse")
+                        }
+                    }
+                )
+                .expect("reverse group")
+                .changed
+            );
+            assert_eq!(sequence, original);
         }
     }
 }

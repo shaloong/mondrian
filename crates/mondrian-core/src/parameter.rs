@@ -403,6 +403,44 @@ impl ExactAutomationCurve {
         Ok(())
     }
 
+    /// Translate unique stable keys by one exact delta, admitting the final set atomically.
+    /// Values and manual handle offsets are retained; constraints normalize once.
+    /// Empty, duplicate or stale selections, overflow and final collisions leave this curve unchanged.
+    pub fn shift_keyframes(
+        &mut self,
+        ids: &[KeyframeId],
+        delta: TimelineTime,
+    ) -> Result<(), AutomationError> {
+        self.validate()?;
+        if ids.is_empty() {
+            return Err(AutomationError::EmptyKeySelection);
+        }
+        let identities = ids.iter().copied().collect::<HashSet<_>>();
+        if identities.len() != ids.len() {
+            return Err(AutomationError::DuplicateKeyframeIdentity);
+        }
+        if self.keyframes.iter().filter(|key| identities.contains(&key.id)).count() != ids.len() {
+            return Err(AutomationError::UnknownKeyframe);
+        }
+        if delta.is_zero() {
+            return Ok(());
+        }
+        let mut candidate = self.clone();
+        for key in &mut candidate.keyframes {
+            if identities.contains(&key.id) {
+                key.time = key.time.checked_add(delta)?;
+            }
+        }
+        candidate.keyframes.sort_by_key(|key| key.time);
+        if candidate.keyframes.windows(2).any(|pair| pair[0].time == pair[1].time) {
+            return Err(AutomationError::NonIncreasingTime);
+        }
+        candidate.normalize_constrained_tangents()?;
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Remove a key and refresh the constraints of its surviving neighbors.
     pub fn remove_keyframe(&mut self, keyframe_id: KeyframeId) -> Result<(), AutomationError> {
         let mut candidate = self.clone();
