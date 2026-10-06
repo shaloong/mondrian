@@ -1355,16 +1355,42 @@ mod tests {
     #[test]
     #[ignore = "requires current product and SessionProbe mode curve_group_authoring"]
     fn native_effect_group_time_undo_save_reopen_preserves_queries_and_output() {
-        qualify_native_effect_group_history(false);
+        qualify_native_effect_group_history(NativeCurveGroupEdit::Time);
     }
 
     #[test]
     #[ignore = "requires current product and SessionProbe mode curve_group_value_authoring"]
     fn native_effect_group_value_undo_save_reopen_preserves_queries_and_output() {
-        qualify_native_effect_group_history(true);
+        qualify_native_effect_group_history(NativeCurveGroupEdit::Value);
     }
 
-    fn qualify_native_effect_group_history(value_edit: bool) {
+    #[test]
+    #[ignore = "requires current product and SessionProbe mode curve_group_interpolation_authoring"]
+    fn native_effect_group_interpolation_undo_save_reopen_preserves_queries_and_output() {
+        qualify_native_effect_group_history(NativeCurveGroupEdit::Interpolation);
+    }
+
+    #[derive(Clone, Copy)]
+    enum NativeCurveGroupEdit {
+        Time,
+        Value,
+        Interpolation,
+    }
+
+    impl NativeCurveGroupEdit {
+        fn fixture_mode(self) -> &'static str {
+            match self {
+                Self::Time => "curve_group_authoring",
+                Self::Value => "curve_group_value_authoring",
+                Self::Interpolation => "curve_group_interpolation_authoring",
+            }
+        }
+    }
+
+    fn qualify_native_effect_group_history(edit: NativeCurveGroupEdit) {
+        let value_edit = matches!(edit, NativeCurveGroupEdit::Value);
+        let interpolation_edit = matches!(edit, NativeCurveGroupEdit::Interpolation);
+        let time_edit = matches!(edit, NativeCurveGroupEdit::Time);
         use super::super::ui_actions::{
             visual_effect_edit_numeric_curve_action, ClipCurveEditPayload,
             VisualEffectEditNumericCurvePayload,
@@ -1375,11 +1401,7 @@ mod tests {
         let _guard = crate::app_ui::test_utils::theme_test_guard();
         assert_eq!(
             std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
-            if value_edit {
-                "curve_group_value_authoring"
-            } else {
-                "curve_group_authoring"
-            }
+            edit.fixture_mode()
         );
         let helper =
             PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").expect("product"));
@@ -1422,13 +1444,20 @@ mod tests {
             ];
             let mut ids = Vec::new();
             for (index, time) in times.iter().copied().enumerate() {
+                let value = if interpolation_edit && index == 1 {
+                    2.5
+                } else {
+                    index as f64 + 1.0
+                };
                 property
-                    .write_channels(time, &[(0, index as f64 + 1.0)], InterpolationType::Linear)
+                    .write_channels(time, &[(0, value)], InterpolationType::Linear)
                     .expect("seed key");
                 ids.push(property.keyframe_at(time).expect("key").id);
             }
-            for time in times {
-                property.update_keyframe_interpolation(time, mode).expect("constraint");
+            if !interpolation_edit {
+                for time in times {
+                    property.update_keyframe_interpolation(time, mode).expect("constraint");
+                }
             }
             let parameter = property.address();
             effect.properties.upsert(property);
@@ -1474,7 +1503,17 @@ mod tests {
                     gain
                 );
                 let sample = numeric(TimelineTime::new(1, 8).expect("off-key frame three"));
-                if value_edit && gain == 3.5 {
+                if interpolation_edit {
+                    let first = curve.keyframe_at(TimelineTime::ZERO).expect("first key");
+                    if first.temporal_flags.auto_bezier {
+                        assert!(
+                            (sample - 1.75).abs() > 1e-6,
+                            "Auto must reshape the nonuniform linear source"
+                        );
+                    } else if !first.temporal_flags.continuous {
+                        assert!((sample - 1.75).abs() < 1e-12, "original linear source");
+                    }
+                } else if value_edit && gain == 3.5 {
                     assert!(
                         sample > 1.5,
                         "selected value edit must affect off-key native output"
@@ -1531,7 +1570,16 @@ mod tests {
             let before = execute(&state, 3.0);
             let generation = state.project_author_generation();
             let action = |valid| {
-                let edit = if value_edit {
+                let edit = if interpolation_edit {
+                    ClipCurveEditPayload::SetInterpolations {
+                        keyframe_ids: if valid {
+                            ids.clone()
+                        } else {
+                            vec![ids[1], KeyframeId::new()]
+                        },
+                        interpolation: mode,
+                    }
+                } else if value_edit {
                     ClipCurveEditPayload::OffsetValuesMany {
                         keyframe_ids: if valid {
                             ids[1..].to_vec()
@@ -1565,26 +1613,49 @@ mod tests {
             state.dispatch_action(action(true)).expect("one group author transaction");
             assert_eq!(state.project_author_generation(), generation + 1);
             let edited = snapshot(&state);
-            let edited_times = if value_edit {
-                times
-            } else {
+            let edited_times = if time_edit {
                 [
                     TimelineTime::ZERO,
                     TimelineTime::new(1, 2).expect("middle"),
                     TimelineTime::new(3, 4).expect("end"),
                 ]
+            } else {
+                times
             };
             for (index, time) in edited_times.iter().copied().enumerate() {
                 let key = edited.keyframe_at(time).expect("moved key");
                 assert_eq!(key.id, ids[index]);
                 assert_eq!(
                     key.value.as_numeric_f64().expect("numeric"),
-                    index as f64 + 1.0 + if value_edit && index > 0 { 0.5 } else { 0.0 }
+                    if interpolation_edit && index == 1 {
+                        2.5
+                    } else {
+                        index as f64 + 1.0 + if value_edit && index > 0 { 0.5 } else { 0.0 }
+                    }
                 );
+                if interpolation_edit {
+                    assert_eq!(
+                        mondrian_core::automation::interpolation_mode_from_keyframe(
+                            key.interp_in,
+                            key.interp_out,
+                            key.temporal_flags,
+                        ),
+                        mode,
+                        "every selected key retains its exact constraint intent"
+                    );
+                }
             }
-            let edited_gain = if value_edit { 3.5 } else { 2.0 };
+            let edited_gain = if value_edit {
+                3.5
+            } else if interpolation_edit {
+                3.0
+            } else {
+                2.0
+            };
             let after = execute(&state, edited_gain);
-            assert_ne!(before, after);
+            if !interpolation_edit || mode == InterpolationType::AutoBezier {
+                assert_ne!(before, after);
+            }
             assert!(state.undo_timeline().expect("single Undo"));
             assert_eq!(snapshot(&state), original);
             assert!(!state.can_undo_action() && state.can_redo_action());

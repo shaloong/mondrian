@@ -1051,3 +1051,41 @@ Final formatting and diff checks precede the source commit.
 The ce3edfb native/Golden receipt above qualifies its named earlier source;
 these parser tests do not claim a rebuilt native interpolation/audio output
 qualification. The full professional NLE goal remains active.
+
+
+## Native complete-selection interpolation candidate
+
+The new native group interpolation probe passed **1/1** (5.18s), covering Auto
+and Continuous from nonuniform Linear keys at frames 0/6/12 with values 1/2.5/3.
+One stable-ID complete-selection author request preserves exact IDs, times and
+values and sets every constraint intent. A stale member refuses the complete
+edit without generation or history changes. One Undo restores the original
+curve and pixels; saving undone retains live Redo. Redo and fresh Unicode
+undone/redone archive reopening preserve complete author snapshots, native SDK
+queries and shared-graph float pixels, with empty history in fresh sessions.
+
+The fixture samples off-key frame 3. Auto must change the nonuniform Linear
+shape. Continuous is checked for canonical constraints and matching native
+output, allowing legitimate unchanged geometry. SDK key queries retain all
+three exact key coordinates; independent symmetric derivative queries and
+Simpson integration split at keys/clamped tails keep their original tolerances.
+The shared test helper uses a Time/Value/Interpolation enum, and the owned C++
+fixture centralizes admission of those modes. Existing native time **1/1**
+(4.26s) and value **1/1** (4.83s) regressions passed after the fixture change.
+
+Candidate baseline: `f83d25612a26f1a5b34d5f1b7b6ed6cf0a55ee22`, with test-only
+Rust and owned-fixture edits. Official SDK source remained clean at
+`e40728885390ec16276d11e00025de9b4282060c`. C++ fixture build passed in 7.07s;
+App all-feature test compilation passed in 7m23s; product rebuild was 15m10s.
+
+| Candidate execution identity | SHA256 |
+| --- | --- |
+| Product | `b3e285576773d238279d5ef9bccfdadeec9f986687d1a7eb7af940da4a57e489` |
+| SessionProbe fixture | `ba8734fe2fc3cef93d0973415b8c4fee64b1a1c0cea9ecdbd409b2401781978a` |
+
+Source/product/fixture hashes stayed stable during the run. This was an
+**uncommitted candidate**, not a clean-source receipt. Strict whole-workspace,
+all-target, all-feature Clippy with warnings as errors passed in **2m03s**.
+Final format/diff checks precede commit and clean-source native qualification. No current encoded or native
+audio group output is claimed by this probe. Professional group pointer,
+rubber-band, copy/reset and all broader original NLE matrices remain open.

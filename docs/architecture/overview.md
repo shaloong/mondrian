@@ -787,3 +787,14 @@ ExactAutomationCurve also admits complete stable selections with one preset and 
 
 
 Visual App curve preparation lowers complete selection interpolation into one Core mutation; singleton requests reuse the same candidate preparation. No-op admission compares complete normalized author state, rather than reconstructing mode-specific equality in the application.
+
+
+Native visual group-history acceptance uses one test-only Time/Value/Interpolation
+edit enum and the shared author action/compiled graph path. The interpolation
+case begins with nonuniform linear keys, applies one complete Auto/Continuous
+selection, preserves scalar/time/identity, and checks Undo, saved Redo and fresh
+reopen against native off-key queries/output. Independent fixture derivative and
+split-integral oracles qualify calculus; Continuous may legally retain geometry
+while changing constraint intent. Explicit ignored candidate tests passed for Interpolation, Time and Value with
+stable source/product/fixture hashes. Named clean-source receipts remain separate
+from an uncommitted candidate run.

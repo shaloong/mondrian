@@ -286,3 +286,29 @@ and Failed/-1 for searches in either direction. Sample-only bindings retain outp
 sentinels and report MissingHostFeature. Nonfinite searches reject with Value and
 retain the index sentinel. These are empty/snapshot-absent contracts, not animated
 key enumeration qualification.
+
+
+### Complete-selection interpolation history probe
+
+`curve_group_interpolation_authoring` extends the same owned fixture family as
+`curve_group_authoring` (time) and `curve_group_value_authoring` (value). Keys stay
+at frames 0/6/12 with values 1/2.5/3, beginning as Linear. One stable-ID group
+request applies Auto or Continuous. Every SDK key/value query must retain those
+exact coordinates. The fixture samples frame 3 for output, independently checks
+the derivative by symmetric value queries, and integrates with Simpson sections
+split at exact keys and the clamped tail. No quadrature tolerance is relaxed.
+Continuous constraint changes need not change otherwise collinear geometry.
+
+After rebuilding the current product and SessionProbe fixture, set the product
+and fixture binary variables described above and the mode to
+`curve_group_interpolation_authoring`, then explicitly run:
+
+```powershell
+cargo test -p mondrian-app --all-features --lib native_effect_group_interpolation_undo_save_reopen_preserves_queries_and_output -- --ignored --test-threads=1
+```
+
+The test also checks complete-set refusal, one author generation/Undo, saved
+undone state retaining live Redo, and Unicode archives reopened in fresh sessions
+with empty history and identical shared-graph native pixels. Time/value sibling
+probes must still pass after fixture changes. This fixture mode describes the
+intended acceptance; it is not itself a receipt of a successful run.
