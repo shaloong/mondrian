@@ -4,8 +4,8 @@
 
 The latest clean-source native group/resource qualification is
 [18b3a82 qualification](#clean-source-native-qualification-for-18b3a82).
-The latest complete encoded Golden remains
-[fda9b23 qualification](#clean-source-output-qualification-for-fda9b23).
+The latest complete encoded Golden is
+[d2b22be qualification](#current-complete-encoded-golden-for-d2b22be).
 Source-level tests and native results qualify their named source and binary;
 they do not automatically cover later edits.
 The complete NLE goal remains active while the listed professional matrices are
@@ -685,3 +685,37 @@ new complete encoded Golden, physical keyboard/file-picker/high-DPI interaction,
 macOS or broad vendor/plugin/performance matrices. Complete encoded Golden
 remains pinned to fda9b23. Group value/pointer/interpolation/rubber-band work and
 the original full professional NLE scope remain open; the goal stays active.
+
+
+### Current complete encoded Golden for d2b22be
+
+The complete Golden gate passes **3/3** on clean committed source
+`d2b22be0ce80ccbec41a94d4be2af45ab8df7cc8`. Starting and ending revisions match,
+both trees are clean, baseline eligibility is true, and the unchanged contract
+owns the 3600s build and 1800s process timeouts. Every round executes all seven
+stages and exits naturally with code 0; no terminal-report forced termination
+was needed. Three distinct Project IDs and fresh durable-reopen Session IDs
+are recorded, while Project and authored Sequence identities survive reopening.
+
+Report:
+`E:/dev/mondrian/target/validation/nle-backlog-complete/20261006T072224Z-complete-golden-c36aa254/complete-golden-consecutive-report.json`.
+Build elapsed time: 26833ms. Round durations: 122068/120518/132848ms.
+Golden binary SHA256:
+`827638de8b85e867504e4791bb9805e3abdeeabb73ce2a9ff4c32ef25f8fdd55`.
+Product worker SHA256:
+`c59f8667af36e884cc745c5d7e67e73d5529fca550cf801c8f79f2f0ac878c8f`.
+
+The product worker is exactly the binary from the clean 18b3a82 native group,
+resource, modal, retained-window and history qualification. The difference
+between those source commits is documentation only. Golden additionally covers
+foundation audio authoring, editorial transport, proxy/relink, generated delivery
+roundtrip, visual authoring roundtrip, recovery/nesting and color/media roundtrip.
+It does not replace the explicit native group action test with a presumed Golden
+operation.
+
+Color-stage encoded reimport maximum channel error is **4/255** in every round;
+GPU-output CPU fallbacks are **0**. Frame transport remains `cpu_rawvideo_pipe`,
+so this is not a zero-copy or performance qualification. Earlier fda9b23 receipts
+remain historical. Group value/pointer/interpolation/rubber-band work, native
+audio group execution corners and the broad vendor/platform/performance matrices
+remain open. The overall NLE goal stays active.
