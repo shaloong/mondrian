@@ -672,6 +672,55 @@ bool authorCurveQueries(const void* handle) {
       std::abs(integral - 12.0*(1.0 + endpoint)) > 1e-12) { return false; }
   return true;
 }
+bool groupAuthorCurveQueries(const void* handle) {
+  OfxParamSetHandle params = nullptr;
+  OfxParamHandle scale = nullptr;
+  unsigned count = 999;
+  double current = -999, middle = -999, end = -999;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+      gParamHost->paramGetHandle(params, "scale", &scale, nullptr) != kOfxStatOK ||
+      gParamHost->paramGetNumKeys(scale, &count) != kOfxStatOK || count != 3 ||
+      gParamHost->paramGetKeyTime(scale, 1, &middle) != kOfxStatOK ||
+      gParamHost->paramGetKeyTime(scale, 2, &end) != kOfxStatOK ||
+      !((middle == 6.0 && end == 12.0) || (middle == 12.0 && end == 18.0)) ||
+      gParamHost->paramGetValue(scale, &current) != kOfxStatOK || current != 1.0) { return false; }
+  const double times[] = {0.0, middle, end};
+  for (unsigned index = 0; index < 3; ++index) {
+    double time = -999, value = -999;
+    int keyIndex = -999;
+    if (gParamHost->paramGetKeyTime(scale, index, &time) != kOfxStatOK || time != times[index] ||
+        gParamHost->paramGetKeyIndex(scale, time, 0, &keyIndex) != kOfxStatOK || keyIndex != static_cast<int>(index) ||
+        gParamHost->paramGetValueAtTime(scale, time, &value) != kOfxStatOK || value != 1.0 + index) { return false; }
+  }
+  double sentinel = -999;
+  if (gParamHost->paramGetKeyTime(scale, 3, &sentinel) != kOfxStatErrBadIndex || sentinel != -999) { return false; }
+  // Check the derivative independently by a symmetric value query inside a segment.
+  double lower = -999, upper = -999, derivative = -999;
+  const double epsilon = 1e-3;
+  if (gParamHost->paramGetValueAtTime(scale, 3.0 - epsilon, &lower) != kOfxStatOK ||
+      gParamHost->paramGetValueAtTime(scale, 3.0 + epsilon, &upper) != kOfxStatOK ||
+      gParamHost->paramGetDerivative(scale, 3.0, &derivative) != kOfxStatOK ||
+      !std::isfinite(derivative) || std::abs(derivative - (upper - lower)/(2.0*epsilon)) > 1e-6) { return false; }
+  // Independent Simpson quadrature, split at exact keys to include clamped tails.
+  double expectedIntegral = 0.0;
+  const double boundaries[] = {0.0, middle, end, 18.0};
+  constexpr int subdivisions = 384;
+  for (int segment = 0; segment < 3; ++segment) {
+    const double width = boundaries[segment + 1] - boundaries[segment];
+    if (width == 0.0) { continue; }
+    double sum = 0.0;
+    for (int sample = 0; sample <= subdivisions; ++sample) {
+      const double time = boundaries[segment] + width*sample/subdivisions;
+      double value = -999;
+      if (gParamHost->paramGetValueAtTime(scale, time, &value) != kOfxStatOK || !std::isfinite(value)) { return false; }
+      sum += value*((sample == 0 || sample == subdivisions) ? 1.0 : sample % 2 ? 4.0 : 2.0);
+    }
+    expectedIntegral += width*sum/(3.0*subdivisions);
+  }
+  double integral = -999;
+  return gParamHost->paramGetIntegral(scale, 0.0, 18.0, &integral) == kOfxStatOK &&
+         std::isfinite(integral) && std::abs(integral - expectedIntegral) < 1e-6;
+}
 bool lifecycleOutput(const void* handle, OfxPropertySetHandle in) {
   OfxParamSetHandle params = nullptr;
   OfxParamHandle scale = nullptr;
@@ -679,7 +728,7 @@ bool lifecycleOutput(const void* handle, OfxPropertySetHandle in) {
   double gain = -999;
   if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
       gParamHost->paramGetHandle(params, "scale", &scale, nullptr) != kOfxStatOK ||
-      gParamHost->paramGetValueAtTime(scale, mode() == "curve_lifecycle" && (phase == 6 || phase == 7) ? 0.0 : 24.0, &gain) != kOfxStatOK) { return false; }
+      gParamHost->paramGetValueAtTime(scale, mode() == "curve_group_authoring" ? 3.0 : mode() == "curve_lifecycle" && (phase == 6 || phase == 7) ? 0.0 : 24.0, &gain) != kOfxStatOK) { return false; }
   OfxImageClipHandle clip = nullptr;
   OfxPropertySetHandle image = nullptr;
   double time = 0;
@@ -709,6 +758,11 @@ OfxStatus probe(const char* action, const void* handle,
        operation == kOfxActionInstanceChanged || operation == kOfxActionEndInstanceChanged ||
        operation == kOfxImageEffectActionRender || operation == kOfxActionDestroyInstance) &&
       !authorCurveQueries(handle)) { return kOfxStatFailed; }
+  if (selected == "curve_group_authoring" &&
+      (operation == kOfxActionCreateInstance || operation == kOfxActionBeginInstanceChanged ||
+       operation == kOfxActionInstanceChanged || operation == kOfxActionEndInstanceChanged ||
+       operation == kOfxImageEffectActionRender || operation == kOfxActionDestroyInstance) &&
+      !groupAuthorCurveQueries(handle)) { return kOfxStatFailed; }
   if (selected == "curve_lifecycle" &&
       (operation == kOfxActionCreateInstance || operation == kOfxActionBeginInstanceChanged ||
        operation == kOfxActionInstanceChanged || operation == kOfxActionEndInstanceChanged ||
@@ -808,7 +862,7 @@ OfxStatus probe(const char* action, const void* handle,
         gParamHost->paramGetHandle(params, "scaleComponents", &toggle, nullptr) != kOfxStatOK ||
         gParamHost->paramGetValue(scalar, &scale) != kOfxStatOK ||
         gParamHost->paramGetValue(toggle, &enabled) != kOfxStatOK ||
-        gParamHost->paramSetValue(scalar, scale) != ((selected == "canonical_curves" || selected == "curve_lifecycle" || selected == "curve_authoring") ? kOfxStatErrUnsupported : kOfxStatOK) ||
+        gParamHost->paramSetValue(scalar, scale) != ((selected == "canonical_curves" || selected == "curve_lifecycle" || selected == "curve_authoring" || selected == "curve_group_authoring") ? kOfxStatErrUnsupported : kOfxStatOK) ||
         gParamHost->paramSetValue(toggle, enabled) != kOfxStatOK) { return kOfxStatFailed; }
     if (selected == "choice" || selected.find("strchoice") == 0) {
       OfxParamHandle parameter = nullptr, integer = nullptr;
@@ -839,7 +893,7 @@ OfxStatus probe(const char* action, const void* handle,
        operation == kOfxActionInstanceChanged || operation == kOfxImageEffectActionRender ||
        operation == kOfxActionDestroyInstance) && !canonicalCurves(handle)) { return kOfxStatFailed; }
   const OfxStatus result = pluginMain(action, handle, in, out);
-  if ((selected == "curve_lifecycle" || selected == "curve_authoring") && result == kOfxStatOK &&
+  if ((selected == "curve_lifecycle" || selected == "curve_authoring" || selected == "curve_group_authoring") && result == kOfxStatOK &&
       operation == kOfxImageEffectActionRender && !lifecycleOutput(handle, in)) { return kOfxStatFailed; }
   if ((selected == "compound" || selected == "compound_author" || selected == "compound_constant_animatable" || selected == "compound_frame_sample" || selected == "canonical_curves") && result == kOfxStatOK &&
       operation == kOfxImageEffectActionDescribeInContext && !defineCompounds(handle)) {

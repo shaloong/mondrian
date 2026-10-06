@@ -614,3 +614,37 @@ remains pinned to fda9b23;
 this source-level run does not qualify a new binary. Specific native group
 output, group value/pointer/interpolation, rubber-band selection and the broad
 vendor/platform/performance matrices remain open. The full NLE goal is active.
+
+
+## Native group time and constrained curve output
+
+The dedicated `curve_group_authoring` SessionProbe mode asserts exactly three
+keys, their key-index/time/value queries, and out-of-range index refusal through
+native instance lifecycle callbacks. Derivative queries are compared to symmetric
+value samples. Integral queries are compared to independent Simpson quadrature
+split at exact keys, including the clamped tail. Native output uses the curve
+value at off-key frame 3, compared with canonical author evaluation. Selected
+keys move from frames 6/12 to 12/18; queries at frame 12 change from 3 to 2.
+The moved author curve must differ from a linear downgrade at frame 3, and
+native pixels must match its constrained value.
+
+The App test uses production `ShiftMany` actions for Auto and Continuous Bezier.
+A collision with the unselected key refuses the complete group without author
+state, generation, history or output changes. Legal movement retains all stable
+key IDs in one transaction. One Undo restores the original native output; saving
+that state retains live Redo, and a fresh Unicode `.mdp` reopen restores the
+original curve with empty history. Redo and a separately saved edited archive
+restore the changed native output. SQLite library snapshots remain empty.
+
+Runtime qualification status is recorded only after the explicit ignored tests
+run against the rebuilt product. Existing single-key native assertions remain
+unchanged and are rerun separately to detect fixture regression. This contract
+adds no second authoring or execution interpretation.
+
+The candidate-source explicit ignored group test passes **1/0** (both constraints,
+4.71s); the existing single-key native test passes **1/0** (2.18s). Product build
+completed in 18m20s; the test executable rebuilt in 2m17s. Candidate source,
+product and fixture hashes remained stable. The source was uncommitted during
+this run, so it is not represented as a clean-source encoded qualification.
+Final strict workspace/all-target/all-feature Clippy passes (1m59s), as do fmt and diff checks. Clean committed-source native attestation follows separately.
+Complete Golden remains pinned to fda9b23, and the full NLE goal remains active.

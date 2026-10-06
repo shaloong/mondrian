@@ -1354,6 +1354,232 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore = "requires current product and SessionProbe mode curve_group_authoring"]
+    fn native_effect_group_time_undo_save_reopen_preserves_queries_and_output() {
+        use super::super::ui_actions::{
+            visual_effect_edit_numeric_curve_action, ClipCurveEditPayload,
+            VisualEffectEditNumericCurvePayload,
+        };
+        use mondrian_core::{SampleAspectRatio, TimelineTimeRange, WorkingColorSpace};
+        use mondrian_effects::{EffectFrameContext, LutPreparationCache, PreparedEffectProgram};
+        use std::path::PathBuf;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        assert_eq!(
+            std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
+            "curve_group_authoring"
+        );
+        let helper =
+            PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").expect("product"));
+        let binary =
+            PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));
+        let inspection =
+            crate::openfx_adapter::inspect_openfx_binary(&helper, &binary).expect("inspect");
+        let kind = crate::openfx_effect::register_selected_openfx_filter(
+            &helper,
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+        )
+        .expect("register");
+        let description = crate::openfx_host::describe_openfx_filter(
+            &helper,
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+        )
+        .expect("describe");
+        let label =
+            &description.parameters.iter().find(|p| p.name == "scale").expect("scale").label;
+        for mode in [
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let mut effect =
+                mondrian_effects::instantiate_effect_node(kind.clone()).expect("effect");
+            let mut property = effect
+                .properties
+                .iter()
+                .find(|(_, p)| &p.descriptor.display_name == label)
+                .expect("canonical property")
+                .1
+                .clone();
+            property.set_animation_enabled(true);
+            let times = [
+                TimelineTime::ZERO,
+                TimelineTime::new(1, 4).expect("six frames"),
+                TimelineTime::new(1, 2).expect("twelve frames"),
+            ];
+            let mut ids = Vec::new();
+            for (index, time) in times.iter().copied().enumerate() {
+                property
+                    .write_channels(time, &[(0, index as f64 + 1.0)], InterpolationType::Linear)
+                    .expect("seed key");
+                ids.push(property.keyframe_at(time).expect("key").id);
+            }
+            for time in times {
+                property.update_keyframe_interpolation(time, mode).expect("constraint");
+            }
+            let parameter = property.address();
+            effect.properties.upsert(property);
+            let effect_id = effect.id;
+            let mut clip = Clip::new_basic_title(
+                "Group curve",
+                "Arial",
+                TimelineTime::ZERO,
+                TimelineTime::new(2, 1).expect("duration"),
+            )
+            .expect("title");
+            let clip_id = clip.id;
+            clip.add_effect_node(effect);
+            let mut sequence = Sequence::new("Native group curve");
+            sequence.video_tracks[0].add_clip(clip).expect("clip");
+            let mut state = AppState::new();
+            state.test_set_sequence(Some(sequence));
+            let snapshot = |state: &AppState| {
+                state
+                    .active_sequence()
+                    .expect("sequence")
+                    .find_clip(clip_id)
+                    .expect("clip")
+                    .effects
+                    .iter()
+                    .find(|effect| effect.id == effect_id)
+                    .expect("effect")
+                    .properties
+                    .property_by_address(&parameter)
+                    .expect("property")
+                    .1
+                    .clone()
+            };
+            let execute = |state: &AppState, gain: f32| {
+                let curve = snapshot(state);
+                let numeric = |time| match curve.evaluate(time) {
+                    mondrian_core::PropertyValue::Double(value) => value,
+                    mondrian_core::PropertyValue::Float(value) => f64::from(value),
+                    other => panic!("native scale must stay numeric: {other:?}"),
+                };
+                assert_eq!(
+                    numeric(TimelineTime::new(1, 2).expect("frame twelve")) as f32,
+                    gain
+                );
+                let sample = numeric(TimelineTime::new(1, 8).expect("off-key frame three"));
+                if curve.keyframe_at(TimelineTime::new(1, 4).expect("original middle")).is_none() {
+                    assert!(
+                        (sample - 1.25).abs() > 1e-6,
+                        "moved constrained curve must differ from linear interpolation"
+                    );
+                } else {
+                    assert!((sample - 1.5).abs() < 1e-12, "original uniform curve");
+                }
+                let sampled_gain = sample as f32;
+                let clip =
+                    state.active_sequence().expect("sequence").find_clip(clip_id).expect("clip");
+                let context = EffectFrameContext::new(
+                    Rational::FPS_24,
+                    SampleAspectRatio::SQUARE,
+                    TimelineTimeRange::new(
+                        TimelineTime::ZERO,
+                        TimelineTime::new(2, 1).expect("duration"),
+                    )
+                    .expect("range"),
+                )
+                .expect("context");
+                let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+                    &clip.effects,
+                    &[],
+                    &[],
+                    &[],
+                    WorkingColorSpace::LinearRec709,
+                    context,
+                    &LutPreparationCache::uncached(),
+                )
+                .expect("shared production graph");
+                let graph = program.evaluate(TimelineTime::ZERO).expect("author evaluation");
+                let input = vec![[-0.25, 0.5, 2.0, 0.25]; 4];
+                let pixels =
+                    mondrian_effects::apply_compiled_effect_graph_rgba_f32(&input, 2, 2, &graph, 0)
+                        .expect("native group queries/output");
+                assert_eq!(
+                    pixels,
+                    input
+                        .iter()
+                        .map(|pixel| pixel.map(|value| value * sampled_gain))
+                        .collect::<Vec<_>>()
+                );
+                pixels
+            };
+            let original = snapshot(&state);
+            let before = execute(&state, 3.0);
+            let generation = state.project_author_generation();
+            let action = |delta| {
+                visual_effect_edit_numeric_curve_action(VisualEffectEditNumericCurvePayload {
+                    clip_id,
+                    effect_id,
+                    parameter: parameter.clone(),
+                    edit: ClipCurveEditPayload::ShiftMany {
+                        keyframe_ids: ids[1..].to_vec(),
+                        delta,
+                    },
+                })
+            };
+            state
+                .dispatch_action(action(TimelineTime::new(-1, 4).expect("collision delta")))
+                .expect_err("whole group collides with unselected key");
+            assert_eq!(snapshot(&state), original);
+            assert_eq!(state.project_author_generation(), generation);
+            assert!(!state.can_undo_action() && !state.can_redo_action());
+            assert_eq!(execute(&state, 3.0), before);
+            state
+                .dispatch_action(action(TimelineTime::new(1, 4).expect("exact group delta")))
+                .expect("one group author transaction");
+            assert_eq!(state.project_author_generation(), generation + 1);
+            let edited = snapshot(&state);
+            for (index, time) in [
+                TimelineTime::ZERO,
+                TimelineTime::new(1, 2).expect("middle"),
+                TimelineTime::new(3, 4).expect("end"),
+            ]
+            .iter()
+            .copied()
+            .enumerate()
+            {
+                assert_eq!(edited.keyframe_at(time).expect("moved key").id, ids[index]);
+            }
+            let after = execute(&state, 2.0);
+            assert_ne!(before, after);
+            assert!(state.undo_timeline().expect("single Undo"));
+            assert_eq!(snapshot(&state), original);
+            assert!(!state.can_undo_action() && state.can_redo_action());
+            assert_eq!(execute(&state, 3.0), before);
+            let directory = tempfile::tempdir().expect("archives");
+            let undone_path = directory.path().join("分组撤销🙂.mdp");
+            state.save_project_file_as(undone_path.clone()).expect("save undone");
+            assert!(state.can_redo_action());
+            let mut reopened = AppState::new();
+            reopened.open_project_file(undone_path).expect("fresh undone reopen");
+            assert_eq!(snapshot(&reopened), original);
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            assert_eq!(execute(&reopened, 3.0), before);
+            drop(reopened);
+            assert!(state.redo_timeline().expect("Redo after save"));
+            assert_eq!(snapshot(&state), edited);
+            assert_eq!(execute(&state, 2.0), after);
+            let edited_path = directory.path().join("分组重做🙂.mdp");
+            state.save_project_file_as(edited_path.clone()).expect("save edited");
+            drop(state);
+            let mut reopened = AppState::new();
+            reopened.open_project_file(edited_path).expect("fresh edited reopen");
+            assert_eq!(snapshot(&reopened), edited);
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            assert_eq!(execute(&reopened, 2.0), after);
+            assert!(reopened
+                .asset_library()
+                .expect("SQLite library")
+                .list_assets()
+                .expect("assets")
+                .is_empty());
+        }
+    }
+
     fn tt(frame: i64, time_base: Rational) -> TimelineTime {
         TimelineTime::new(
             frame.checked_mul(time_base.num).expect("test time fits"),

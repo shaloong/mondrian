@@ -3808,3 +3808,18 @@ not create a generation or Undo entry. Legal crossing preserves stable IDs,
 uses one author transaction, and retains normal Undo/Redo and save/reopen
 semantics. Commit resolves the current owner and definition again; a stale UI
 snapshot does not bypass current locks or author-session admission.
+
+### Native group curve qualification contract
+
+The ignored App native group test submits the production `ShiftMany` action for
+Auto/Continuous Bezier keys. Its dedicated OpenFX SessionProbe mode checks exact
+key times, indices and values during native instance lifecycle callbacks,
+compares derivative queries to symmetric value samples, and compares integral
+queries to independent Simpson quadrature split at exact key boundaries.
+Native output consumes the queried curve value at off-key frame 3. Rust
+compares it with the canonical constrained author curve and proves the moved
+curve differs from a linear downgrade, so the accepted group move must change
+rendered pixels without losing its shape. Collision refusal, one Undo/Redo and
+fresh undone/redone Unicode project archives use the same plugin execution.
+This test requires an explicitly rebuilt product and fixture; an ignored result
+or an earlier single-key native test does not qualify the group operation.
