@@ -44,13 +44,66 @@ their own implementation and evidence.
 ## Qualification scope
 
 The latest clean-source modal/resource and complete encoded Golden qualification is
-[fb24582 qualification](#clean-fb24582-modal-resource-lut-and-native-plugin-acceptance).
-Native visual and audio group qualification retain the separately named sources
-in their receipts below.
+[b846010 qualification](#clean-b846010-modal-resource-lut-and-native-plugin-acceptance).
+The same clean source also passed the explicitly executed native visual/audio
+group, SDK queue, state-restoration and preview cases listed there.
 Source-level tests and native results qualify their named source and binary;
 they do not automatically cover later edits.
 The complete NLE goal remains active while the listed professional matrices are
 open.
+
+## Clean b846010 modal resource LUT and native plugin acceptance
+
+Windows qualification on 2026-10-07 rebuilt and tested clean, unchanged source
+`b846010209da92753cbb0fac7dcbc7fead092130`, including canonical visual clipboard
+capture, atomic complete-key paste, durable history and complete selection
+restoration. Both author and committer are Shalom Wang. No push was made.
+
+The complete Golden gate passed **3/3**, each with seven stages and a distinct
+project. Each process exited naturally with code 0; none was forced after a
+terminal report. Elapsed process times were 130278, 125688 and 122771 ms. Every
+round decoded the final H.264 output with maximum channel error **4/255** and
+reported **0 GPU-output CPU fallbacks**. Encoder transport was
+`cpu_rawvideo_pipe`; this is not a zero-copy or latency qualification. The
+source attestation stayed clean/stable and baseline eligible. Product/Golden
+build completed in 1153807 ms without timeout; the declared build/process
+timeouts remained 3600/1800 seconds.
+
+Aggregate evidence:
+`E:/dev/mondrian/target/validation/nle-backlog-complete/20261006T200214Z-complete-golden-1cc7515c/complete-golden-consecutive-report.json`.
+
+| Executed scope | Passed / failed / ignored | Runtime |
+| --- | --- | --- |
+| Actual EventRouter modal containment, replacement, empty and removed owners | 1 / 0 / 0 | 0.00 s |
+| Real resource helper, Host confirmation, native paths/Undo/reopen/pixels and supervised child cancellation/retry | 5 / 0 / 0 | 8.45 s |
+| App modal routing and focus restoration | 16 / 0 / 0 | 23.26 s |
+| Ordinary resource suite | 103 / 0 / 5 | 26.85 s |
+| Native OpenFX group interpolation, Undo, saved Redo/reopen, queries and pixels | 1 / 0 / 0 | 5.76 s |
+| Native OpenFX group time, Undo/reopen, queries and pixels | 1 / 0 / 0 | 5.54 s |
+| Native OpenFX group values, Undo/reopen, queries and pixels | 1 / 0 / 0 | 5.95 s |
+| CLAP/VST3 group interpolation, Undo/saved Redo/reopen and native audio | 2 / 0 / 0 | 38.04 s |
+| Owned CLAP SDK event-range oracle | 1 / 0 / 0 | 0.82 s |
+| Owned VST3 SDK linear-queue oracle | 1 / 0 / 0 | 1.53 s |
+| Owned VST3 state restoration and isolated worker audio | 1 / 0 / 0 | 1.04 s |
+| Real installed CLAP/VST3 shared preview execution | 2 / 0 / 0 | 2.26 s |
+
+All five ignored resource cases were explicitly executed in the native resource
+row; ignored cases were not counted as passes. The filters overlap and their
+counts must not be summed as unique coverage. All six product/plugin binaries
+remained unchanged throughout the native run. Product SHA256:
+`C3D07CAEC162C7FF21611C55B8A5B39FF3DB6E673FDE00DB1BC954CF2F5313AB`;
+Golden SHA256:
+`EFED576445AC7D080A85A26EB5DBF5B8E8E221E45FD5AEE52AB1BBBD359024D1`.
+The owned OpenFX, CLAP sample-gain and VST3 stateful-gain fixtures and the two
+external static references retain their hashes recorded in the fb24582 receipt.
+The external gain references remain static-only evidence, not automation oracles.
+
+The source-bound native receipt is
+`.scratch/curve-viewport/acceptance-canonical-clipboard-modal-resource-lut.json`,
+with per-step `qualified-canonical-clipboard-*.log` files. This supersedes the
+older fb24582 receipt for these executed cases. It does not qualify physical
+macOS interaction, arbitrary third-party vendors or unexecuted capability and
+performance matrices. The overall NLE goal remains active.
 
 ## Earlier qualified native-output snapshot
 
