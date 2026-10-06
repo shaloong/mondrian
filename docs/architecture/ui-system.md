@@ -3718,8 +3718,15 @@ Audio automation projections require AudioAutomationTimeContext containing the
 current domain-qualified Sequence time. Mixer faders, routes and processor racks
 use AppState's current timeline coordinate. Inspector Component curves use the
 same live coordinate. A selected Clip Scope rack supplies its Component address
-only when that Clip has exactly one binding of the Scope. Multiple bindings in
-the same Clip remain ambiguous until a product occurrence selector is supplied.
+directly when that Clip has exactly one binding of the Scope. Multiple bindings
+in the same Clip expose a localized per-Scope time-reference Dropdown. No
+occurrence is selected implicitly. A closed SelectScopeOccurrence product action
+validates the active Sequence, inspected Clip, Component address and Scope binding
+before updating Session-only SelectionState navigation. Choices are retained
+independently for Scopes in the inspected Clip, never in the Project or Undo.
+The retained navigation set is bounded to the last explicitly navigated Clip;
+clearing selection clears it. Read-only Track navigation remains available while
+canonical shared-Scope author lock admission still rejects curve mutations.
 No global first-binding or viewport-origin fallback chooses retention time.
 
 The model retains Timeline's Result<DomainTime, AudioAutomationTimeError>.
@@ -3728,12 +3735,15 @@ time. DeleteMany uses the canonical AudioAutomationEdit::RemoveKeyframes and one
 author transaction, including original-value retention when every key disappears.
 Preview uses the existing Timeline edit preparation and evaluator. Current-time
 projection does not create history; underlying shared Scope lock checks remain
-whole-definition admission. Group movement/interpolation and ambiguous-occurrence
-selection are still open and not presented as completed professional qualification.
+whole-definition admission. Group movement/interpolation remain open and are not
+presented as completed professional qualification.
 
-Audio view identity includes the explicit Scope occurrence, excluding transient
-playhead time. Playback refresh preserves selection in the same owner; changing
-occurrence cannot inherit another occurrence's view state. If a refreshed widget
+Audio view identity includes the explicit Scope occurrence's Clip/Component IDs,
+excluding transient playhead time and Track locator. Playback and cross-Track
+refresh preserve selection in the same occurrence; changing occurrence cannot
+inherit another occurrence's view state. Navigation resolves stable IDs against
+the current Clip's actual Scope bindings to obtain the current Track address.
+This does not relax full-address admission for queued author/navigation actions. If a refreshed widget
 retains multiple selected IDs but loses batch admission, Delete consumes the
 input without emitting a singleton edit, changing geometry or losing selection.
 Production time-context construction is shared by Mixer and Inspector callers.

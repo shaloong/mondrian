@@ -1554,6 +1554,27 @@ pub(super) fn inspector_blend_mode_dropdown(
         .enabled(can_edit)
 }
 
+pub(super) fn audio_scope_occurrence_control(
+    selector: &crate::app_ui::audio_processor_rack::AudioScopeOccurrenceSelectorModel,
+) -> Dropdown {
+    let items = selector
+        .options
+        .iter()
+        .map(|option| {
+            MenuItem::new(
+                option.label.clone(),
+                crate::app::product_action::ProductAction::Audio(
+                    crate::app::product_action::AudioProductAction::SelectScopeOccurrence(
+                        option.intent,
+                    ),
+                )
+                .into_external_action(),
+            )
+        })
+        .collect();
+    Dropdown::new(selector.selected_label.clone(), items).with_max_visible_items(8)
+}
+
 pub(super) fn with_audio_processor_rack_sections(
     mut panel: PropertyPanel,
     racks: &[AudioProcessorRackModel],
@@ -1605,6 +1626,12 @@ pub(super) fn with_audio_processor_rack_sections(
                         .enabled(rack_can_edit),
                 ),
             ));
+        if let Some(selector) = &rack.scope_occurrence_selector {
+            rack_section = rack_section.with_row(PropertyRow::new(
+                localizer.text("audio-rack-occurrence-row"),
+                Box::new(audio_scope_occurrence_control(selector)),
+            ));
+        }
         if let Some(reason) = &rack.edit_disabled_reason {
             rack_section = rack_section.with_row(PropertyRow::new(
                 localizer.text("mixer-read-only"),
@@ -1840,7 +1867,10 @@ pub(super) fn audio_automation_curve_control(
         .with_view_key(
             serde_json::to_string(&(
                 ParameterCurveGestureTarget::Audio { target: model.target.clone() },
-                model.time_context.scope_occurrence,
+                model
+                    .time_context
+                    .scope_occurrence
+                    .map(|address| (address.clip_id, address.edit_id)),
             ))
             .ok(),
         )

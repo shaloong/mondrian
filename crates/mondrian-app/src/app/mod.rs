@@ -357,6 +357,12 @@ pub struct SelectionState {
     pub selected_effect: Option<SelectedEffectRef>,
     /// Currently selected mask (canvas → effect controls).
     pub selected_mask: Option<(MaskId, ClipId, TrackId)>,
+    /// Transient per-Scope occurrence navigation, qualified by Sequence identity.
+    /// This is never persisted or included in author Undo history.
+    pub audio_scope_occurrences: HashMap<
+        (SequenceId, mondrian_core::AudioProcessingScopeId),
+        mondrian_timeline::AudioComponentAddress,
+    >,
 }
 
 #[derive(Debug, Clone, Default)]

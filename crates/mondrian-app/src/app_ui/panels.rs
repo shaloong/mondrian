@@ -2716,6 +2716,13 @@ impl InspectorPanelModel {
                     crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
                         sequence, time,
                     ),
+                    |scope_id| {
+                        state
+                            .selection
+                            .audio_scope_occurrences
+                            .get(&(sequence.id, scope_id))
+                            .copied()
+                    },
                 );
                 if let Ok(descriptors) = state.installed_clap_processors() {
                     append_clap_insert_options(&mut racks, &descriptors);

@@ -125,6 +125,7 @@ impl AppState {
     /// Clearing selection resets all of them together so subsequent commands do
     /// not accidentally target stale sub-selection state.
     pub fn clear_selection(&mut self) {
+        self.selection.audio_scope_occurrences.clear();
         self.selection.selected_track_ids.clear();
         self.selection.selected_clips.clear();
         self.selection.selected_video_transition = None;

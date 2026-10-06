@@ -107,7 +107,20 @@ pub(crate) struct AudioProcessorRackModel {
     pub(crate) edit_disabled_reason: Option<String>,
     pub(crate) processors: Vec<AudioProcessorInstanceModel>,
     pub(crate) scope_input_gain_automation: Option<AudioAutomationCurveModel>,
+    pub(crate) scope_occurrence_selector: Option<AudioScopeOccurrenceSelectorModel>,
     pub(crate) insert_options: Vec<AudioProcessorInsertOptionModel>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AudioScopeOccurrenceSelectorModel {
+    pub(crate) selected_label: String,
+    pub(crate) options: Vec<AudioScopeOccurrenceOptionModel>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AudioScopeOccurrenceOptionModel {
+    pub(crate) label: String,
+    pub(crate) intent: crate::app::product_action::AudioScopeOccurrencePayload,
 }
 
 /// Project every unique Processing Scope bound by one selected Clip.
@@ -119,6 +132,9 @@ pub(crate) fn clip_processing_scope_racks(
     clip: &Clip,
     localizer: &Localizer,
     time_context: crate::app_ui::audio_automation::AudioAutomationTimeContext,
+    selected_occurrence: impl Fn(
+        mondrian_core::AudioProcessingScopeId,
+    ) -> Option<mondrian_timeline::AudioComponentAddress>,
 ) -> Vec<AudioProcessorRackModel> {
     let mut scope_ids = clip
         .audio_components
@@ -130,33 +146,92 @@ pub(crate) fn clip_processing_scope_racks(
     scope_ids
         .into_iter()
         .map(|scope_id| {
+            let track_id = sequence
+                .clip_track_location(clip.id)
+                .filter(|location| !location.is_video_track)
+                .map(|location| location.track_id);
             let mut bindings =
                 clip.audio_components.iter().filter(|edit| edit.processing.scope_id == scope_id);
             let first = bindings.next();
-            let occurrence = if bindings.next().is_none() {
-                first.and_then(|edit| {
-                    sequence
-                        .clip_track_location(clip.id)
-                        .filter(|location| !location.is_video_track)
-                        .map(|location| mondrian_timeline::AudioComponentAddress {
-                            track_id: location.track_id,
-                            clip_id: clip.id,
-                            edit_id: edit.id,
-                        })
+            if bindings.next().is_none() {
+                let occurrence = first.and_then(|edit| {
+                    Some(mondrian_timeline::AudioComponentAddress {
+                        track_id: track_id?,
+                        clip_id: clip.id,
+                        edit_id: edit.id,
+                    })
+                });
+                return project_audio_processor_rack(
+                    sequence,
+                    AudioProcessorRackAddress::ProcessingScope { scope_id },
+                    localizer,
+                    crate::app_ui::audio_automation::AudioAutomationTimeContext {
+                        scope_occurrence: occurrence,
+                        ..time_context
+                    },
+                );
+            }
+            let options = clip
+                .audio_components
+                .iter()
+                .enumerate()
+                .filter(|(_, edit)| edit.processing.scope_id == scope_id)
+                .filter_map(|(index, edit)| {
+                    let address = mondrian_timeline::AudioComponentAddress {
+                        track_id: track_id?,
+                        clip_id: clip.id,
+                        edit_id: edit.id,
+                    };
+                    let mut args = FluentArgs::new();
+                    args.set("index", (index + 1).to_string());
+                    let time = edit.processing.scope_in;
+                    let label_time = if time.denominator() == 1 {
+                        time.numerator().to_string()
+                    } else {
+                        format!("{}/{}", time.numerator(), time.denominator())
+                    };
+                    args.set("time", label_time);
+                    Some(AudioScopeOccurrenceOptionModel {
+                        label: localizer.format("audio-rack-occurrence-option", Some(&args)),
+                        intent: crate::app::product_action::AudioScopeOccurrencePayload {
+                            sequence_id: sequence.id,
+                            scope_id,
+                            address,
+                        },
+                    })
                 })
-            } else {
-                None
-            };
+                .collect::<Vec<_>>();
+            let explicit = selected_occurrence(scope_id);
+            let occurrence = explicit.and_then(|selected| {
+                options
+                    .iter()
+                    .find(|option| {
+                        option.intent.address.clip_id == selected.clip_id
+                            && option.intent.address.edit_id == selected.edit_id
+                    })
+                    .map(|option| option.intent.address)
+            });
             let time_context = crate::app_ui::audio_automation::AudioAutomationTimeContext {
                 scope_occurrence: occurrence,
                 ..time_context
             };
-            project_audio_processor_rack(
+            let mut rack = project_audio_processor_rack(
                 sequence,
                 AudioProcessorRackAddress::ProcessingScope { scope_id },
                 localizer,
                 time_context,
-            )
+            );
+            if options.len() > 1 {
+                rack.scope_occurrence_selector = Some(AudioScopeOccurrenceSelectorModel {
+                    selected_label: options
+                        .iter()
+                        .find(|option| Some(option.intent.address) == occurrence)
+                        .map(|option| option.label.clone())
+                        .unwrap_or_else(|| localizer.text("audio-rack-occurrence-choose")),
+                    options,
+                });
+            }
+            rack
         })
         .collect()
 }
@@ -206,6 +281,7 @@ pub(crate) fn project_audio_processor_rack(
         is_editable,
         edit_disabled_reason,
         processors,
+        scope_occurrence_selector: None,
         scope_input_gain_automation: match address {
             AudioProcessorRackAddress::ProcessingScope { scope_id } => automation_viewport
                 .and_then(|viewport| {
@@ -679,6 +755,7 @@ mod tests {
                 &sequence,
                 sequence.playhead,
             ),
+            |_| None,
         );
 
         assert_eq!(racks.len(), 1);
@@ -700,6 +777,7 @@ mod tests {
                 &sequence,
                 sequence.playhead,
             ),
+            |_| None,
         );
         assert!(!locked[0].is_editable);
         assert!(locked[0].edit_disabled_reason.is_some());
@@ -718,6 +796,7 @@ mod tests {
                 &sequence,
                 sequence.playhead,
             ),
+            |_| None,
         )[0];
         let chinese_rack = &clip_processing_scope_racks(
             &sequence,
@@ -727,6 +806,7 @@ mod tests {
                 &sequence,
                 sequence.playhead,
             ),
+            |_| None,
         )[0];
         assert_eq!(english_rack.title, "Audio Processor Rack");
         assert_eq!(english_rack.processors[0].label, "Gain");
@@ -808,6 +888,7 @@ mod tests {
                 &sequence,
                 sequence.playhead,
             ),
+            |_| None,
         );
         let rack = &racks[0];
         let processor = &rack.processors[0];
@@ -835,6 +916,7 @@ mod tests {
                     sequence,
                     sequence.playhead,
                 ),
+                |_| None,
             )[0]
             .processors[0]
                 .parameters[0]
@@ -861,6 +943,7 @@ mod tests {
                 &sequence,
                 sequence.playhead,
             ),
+            |_| None,
         );
         let rack = &racks[0];
         let processor = &rack.processors[0];
@@ -905,6 +988,7 @@ mod tests {
                 &sequence,
                 sequence.playhead,
             ),
+            |_| None,
         );
         let processor = &racks[0].processors[0];
         let parameter = &processor.parameters[0];
@@ -924,6 +1008,7 @@ mod tests {
                 &sequence,
                 sequence.playhead,
             ),
+            |_| None,
         );
         let action = insert_action(&racks[0], AudioProcessorBuiltInPreset::LookaheadLimiter);
 
@@ -950,6 +1035,7 @@ mod tests {
                 &sequence,
                 sequence.playhead,
             ),
+            |_| None,
         );
         append_clap_insert_options(
             &mut racks,
@@ -987,6 +1073,7 @@ mod tests {
                 &sequence,
                 sequence.playhead,
             ),
+            |_| None,
         );
         let class_id = "0123456789ABCDEF0123456789ABCDEF".to_owned();
         append_vst3_insert_options(
@@ -1110,5 +1197,71 @@ mod tests {
             .find(|scope| scope.id == scope_id)
             .expect("authored scope");
         assert_eq!(authored.processors.processors[0].parameters.len(), 2);
+    }
+
+    #[test]
+    fn scope_occurrence_navigation_survives_track_move_without_adopting_other_clip() {
+        let (mut sequence, clip_id) = sequence_with_gain_scope();
+        let old_track_id = sequence.audio_tracks[0].id;
+        let scope_id = sequence.audio_tracks[0].clips[0].audio_components[0].processing.scope_id;
+        let mut second = mondrian_timeline::audio::AudioComponentEdit::media(
+            AudioSourceComponentId::new(),
+            scope_id,
+        );
+        second.processing.scope_in = TimelineTime::new(9, 1).expect("selected Scope origin");
+        let old_address = mondrian_timeline::AudioComponentAddress {
+            track_id: old_track_id,
+            clip_id,
+            edit_id: second.id,
+        };
+        sequence.audio_tracks[0].clips[0].audio_components.push(second);
+        let clip = sequence.audio_tracks[0].clips.remove(0);
+        let mut destination = mondrian_timeline::Track::new_audio("Destination");
+        let new_track_id = destination.id;
+        destination.add_clip(clip).expect("moved fixture");
+        sequence.audio_tracks.push(destination);
+        let clip = sequence.find_clip(clip_id).expect("moved Clip");
+        let context = crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+            &sequence,
+            TimelineTime::ZERO,
+        );
+        let racks = clip_processing_scope_racks(&sequence, clip, &chinese(), context, |_| {
+            Some(old_address)
+        });
+        let curve = racks[0].scope_input_gain_automation.as_ref().expect("Scope curve");
+        assert_eq!(
+            curve
+                .current_author_time
+                .as_ref()
+                .expect("stable occurrence survives Track move")
+                .time,
+            TimelineTime::new(9, 1).expect("second origin")
+        );
+        assert_eq!(
+            curve.time_context.scope_occurrence,
+            Some(mondrian_timeline::AudioComponentAddress {
+                track_id: new_track_id,
+                ..old_address
+            })
+        );
+        for stale in [
+            mondrian_timeline::AudioComponentAddress {
+                clip_id: mondrian_core::ClipId::new(),
+                ..old_address
+            },
+            mondrian_timeline::AudioComponentAddress {
+                edit_id: mondrian_core::AudioComponentEditId::new(),
+                ..old_address
+            },
+        ] {
+            let racks =
+                clip_processing_scope_racks(&sequence, clip, &chinese(), context, |_| Some(stale));
+            assert!(racks[0]
+                .scope_input_gain_automation
+                .as_ref()
+                .expect("Scope curve")
+                .current_author_time
+                .is_err());
+        }
     }
 }

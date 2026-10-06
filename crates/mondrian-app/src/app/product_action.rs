@@ -232,6 +232,8 @@ pub const AUDIO_EDIT_AUTOMATION: &str = "edit_automation";
 pub const AUDIO_EDIT_COMPONENT: &str = "edit_component";
 /// External action name for one open-Session Track solo change.
 pub const AUDIO_SET_TRACK_SOLO: &str = "set_track_solo";
+/// External action name for navigating an Inspector Scope occurrence without authoring.
+pub const AUDIO_SELECT_SCOPE_OCCURRENCE: &str = "select_scope_occurrence";
 
 /// External custom-action namespace for Project Asset Library operations.
 pub const ASSET_NAMESPACE: &str = "ui.asset";
@@ -455,6 +457,8 @@ pub enum ViewerProductAction {
 /// Closed Sequence audio authoring operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioProductAction {
+    /// Navigate a shared Scope curve using an explicit Component occurrence.
+    SelectScopeOccurrence(AudioScopeOccurrencePayload),
     /// Change one transient Track audition flag without mutating author state.
     SetTrackSolo(AudioTrackSoloPayload),
     /// Apply one exact owner-time curve mutation.
@@ -717,6 +721,11 @@ impl ProductAction {
                 _ => Ok(None),
             },
             AUDIO_NAMESPACE => match name.as_str() {
+                AUDIO_SELECT_SCOPE_OCCURRENCE => Ok(Some(Self::Audio(
+                    AudioProductAction::SelectScopeOccurrence(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
                 AUDIO_EDIT_AUTOMATION => Ok(Some(Self::Audio(AudioProductAction::EditAutomation(
                     decode_payload(namespace, name, payload)?,
                 )))),
@@ -1094,6 +1103,11 @@ impl ProductAction {
     /// names or payloads.
     pub fn into_external_action(self) -> Action {
         let (namespace, name, payload) = match self {
+            Self::Audio(AudioProductAction::SelectScopeOccurrence(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_SELECT_SCOPE_OCCURRENCE,
+                serde_json::json!(payload),
+            ),
             Self::Audio(AudioProductAction::SetTrackSolo(payload)) => (
                 AUDIO_NAMESPACE,
                 AUDIO_SET_TRACK_SOLO,
@@ -1822,6 +1836,18 @@ pub struct AudioProcessorRebindVst3Payload {
     pub address: mondrian_timeline::AudioProcessorRackAddress,
     /// Stable processor instance identity.
     pub processor_id: AudioProcessorInstanceId,
+}
+
+/// Inspector navigation into one shared Scope occurrence in the active Sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioScopeOccurrencePayload {
+    /// Sequence owning the occurrence; stale cross-Sequence actions are rejected.
+    pub sequence_id: SequenceId,
+    /// Shared author definition whose current-time coordinate is selected.
+    pub scope_id: mondrian_core::AudioProcessingScopeId,
+    /// Explicit placement-local Component occurrence.
+    pub address: mondrian_timeline::AudioComponentAddress,
 }
 
 /// Transient Track audition intent owned by the open App Session.

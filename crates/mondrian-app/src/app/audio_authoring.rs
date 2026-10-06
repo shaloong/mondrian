@@ -27,11 +27,49 @@ use super::product_action::{
 use super::AppState;
 
 impl AppState {
+    fn select_audio_scope_occurrence(
+        &mut self,
+        payload: super::product_action::AudioScopeOccurrencePayload,
+    ) -> Result<()> {
+        let failure = |reason: String| MondrianError::WorkflowStepFailed {
+            step_id: "audio_select_scope_occurrence".into(),
+            reason,
+        };
+        let sequence =
+            self.active_sequence().ok_or_else(|| failure("No active Sequence".into()))?;
+        if sequence.id != payload.sequence_id
+            || self
+                .primary_selected_clip()
+                .is_none_or(|clip| clip.clip_id != payload.address.clip_id)
+        {
+            return Err(failure(
+                "Scope occurrence no longer belongs to the inspected Clip".into(),
+            ));
+        }
+        let occurrence = inspect_audio_component(sequence, payload.address)
+            .map_err(|error| failure(error.to_string()))?;
+        if occurrence.component().processing.scope_id != payload.scope_id {
+            return Err(failure(
+                "Component occurrence belongs to another Scope".into(),
+            ));
+        }
+        self.selection.audio_scope_occurrences.retain(|(sequence_id, _), address| {
+            *sequence_id == payload.sequence_id && address.clip_id == payload.address.clip_id
+        });
+        self.selection
+            .audio_scope_occurrences
+            .insert((payload.sequence_id, payload.scope_id), payload.address);
+        Ok(())
+    }
+
     pub(super) fn dispatch_audio_product_action(
         &mut self,
         action: AudioProductAction,
     ) -> Result<()> {
         match action {
+            AudioProductAction::SelectScopeOccurrence(payload) => {
+                self.select_audio_scope_occurrence(payload)
+            }
             AudioProductAction::SetTrackSolo(payload) => self.set_audio_track_solo(payload),
             AudioProductAction::EditAutomation(request) => self.edit_audio_automation(request),
             AudioProductAction::EditComponent(request) => self.edit_audio_component(request),

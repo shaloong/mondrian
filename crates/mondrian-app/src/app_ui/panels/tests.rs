@@ -10307,6 +10307,7 @@ fn audio_rack_numeric_widget_preserves_double_and_rejects_fractional_integer_inp
                 sequence,
                 sequence.playhead,
             ),
+            |_| None,
         );
         let rack = &racks[0];
         let processor = &rack.processors[index];
@@ -10387,6 +10388,7 @@ fn audio_rack_numeric_widget_preserves_double_and_rejects_fractional_integer_inp
                     sequence,
                     sequence.playhead,
                 ),
+                |_| None,
             )[0]
             .processors[index]
                 .parameters[0]
@@ -11841,4 +11843,396 @@ fn native_audio_layout_labels_follow_locale_and_retain_exact_layout_names() {
         native_audio_layout_label(&surround, &english),
         native_audio_layout_label(&surround, &chinese)
     );
+}
+
+#[test]
+fn audio_scope_occurrence_dropdown_routes_navigation_and_atomic_delete_through_reopen() {
+    use crate::app::product_action::{
+        AudioProductAction, AudioScopeOccurrencePayload, ProductAction,
+    };
+    use mondrian_core::{AudioProcessingScopeId, ExactAutomationKeyframe, SequenceId};
+    use mondrian_timeline::{
+        apply_audio_automation_edit, inspect_audio_automation, AudioAutomationEdit,
+        AudioAutomationEditRequest, AudioAutomationTarget, AudioComponentAddress,
+    };
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    let mut sequence = Sequence::new("Shared Scope navigation");
+    let track_id = sequence.audio_tracks[0].id;
+    let clip = Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("clip");
+    let clip_id = clip.id;
+    sequence
+        .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+        .expect("audio");
+    let clip = &mut sequence.audio_tracks[0].clips[0];
+    let scope_id = clip.audio_components[0].processing.scope_id;
+    clip.audio_components[0].processing.scope_in = TimelineTime::new(7, 1).expect("first origin");
+    let mut second = mondrian_timeline::audio::AudioComponentEdit::media(
+        AudioSourceComponentId::new(),
+        scope_id,
+    );
+    second.processing.scope_in = TimelineTime::new(9, 1).expect("second origin");
+    let address = AudioComponentAddress { track_id, clip_id, edit_id: second.id };
+    clip.audio_components.push(second);
+    let target = AudioAutomationTarget::ProcessingScopeInputGain { scope_id };
+    for (time, value) in [(7, -24.0), (9, -6.0), (10, -18.0)] {
+        apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::UpsertKeyframe {
+                    keyframe: ExactAutomationKeyframe::linear(
+                        TimelineTime::new(time, 1).expect("time"),
+                        value,
+                    ),
+                },
+            },
+        )
+        .expect("seed canonical curve");
+    }
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    state.select_clip_by_id(clip_id).expect("inspect clip");
+    let original = state.active_sequence().expect("sequence").clone();
+    let chinese = chinese_localizer();
+    let english = Localizer::new(AppUiLocale::EnUs).expect("English");
+    let initial = InspectorPanelModel::from_app_state(&state, &english);
+    let rack = &initial.audio_processor_racks[0];
+    assert!(rack
+        .scope_input_gain_automation
+        .as_ref()
+        .expect("curve")
+        .current_author_time
+        .is_err());
+    let selector = rack.scope_occurrence_selector.as_ref().expect("ambiguous selector");
+    assert_eq!(selector.options.len(), 2);
+    assert!(selector.options[1].label.contains("9"));
+    let translated = InspectorPanelModel::from_app_state(&state, &chinese);
+    let translated = translated.audio_processor_racks[0]
+        .scope_occurrence_selector
+        .as_ref()
+        .expect("Chinese selector");
+    assert_ne!(selector.options[1].label, translated.options[1].label);
+    assert_eq!(selector.options[1].intent, translated.options[1].intent);
+    let mut dropdown = audio_scope_occurrence_control(selector);
+    dropdown.layout(Rect::new(0.0, 0.0, 320.0, 28.0));
+    let mut router = EventRouter::new(dropdown.id());
+    let actions = RefCell::new(Vec::new());
+    let dispatch = |action| actions.borrow_mut().push(action);
+    {
+        let mut tree = WidgetTreeView::new(&mut dropdown);
+        for key in [KeyCode::Tab, KeyCode::Enter, KeyCode::Down, KeyCode::Enter] {
+            router.route(
+                UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                &mut tree,
+                &dispatch,
+            );
+        }
+    }
+    assert_eq!(actions.borrow().len(), 1, "one explicit navigation action");
+    let action = actions.borrow_mut().remove(0);
+    let expected = AudioScopeOccurrencePayload { sequence_id: original.id, scope_id, address };
+    assert_eq!(
+        ProductAction::decode_external(&action).expect("codec"),
+        Some(ProductAction::Audio(
+            AudioProductAction::SelectScopeOccurrence(expected)
+        ))
+    );
+    state.dispatch_action(action).expect("navigate second occurrence");
+    assert!(state
+        .active_sequence()
+        .expect("sequence")
+        .author_state_eq_ignoring_revision(&original));
+    assert_eq!(
+        state.active_sequence().expect("navigation revision").revision,
+        original.revision
+    );
+    assert!(!state.can_undo_action());
+    assert_eq!(
+        state.selection.audio_scope_occurrences.get(&(original.id, scope_id)),
+        Some(&address)
+    );
+    for rejected in [
+        AudioScopeOccurrencePayload { sequence_id: SequenceId::new(), ..expected },
+        AudioScopeOccurrencePayload {
+            scope_id: AudioProcessingScopeId::new(),
+            ..expected
+        },
+        AudioScopeOccurrencePayload {
+            address: AudioComponentAddress {
+                edit_id: mondrian_core::AudioComponentEditId::new(),
+                ..address
+            },
+            ..expected
+        },
+    ] {
+        assert!(state
+            .dispatch_action(
+                ProductAction::Audio(AudioProductAction::SelectScopeOccurrence(rejected))
+                    .into_external_action()
+            )
+            .is_err());
+        assert!(state
+            .active_sequence()
+            .expect("unchanged")
+            .author_state_eq_ignoring_revision(&original));
+        assert_eq!(
+            state.active_sequence().expect("rejection revision").revision,
+            original.revision
+        );
+        assert_eq!(state.selection.audio_scope_occurrences.len(), 1);
+        assert!(!state.can_undo_action());
+    }
+    state.active_sequence_mut_uncommitted().expect("lock fixture").audio_tracks[0].is_locked = true;
+    state
+        .dispatch_action(
+            ProductAction::Audio(AudioProductAction::SelectScopeOccurrence(expected))
+                .into_external_action(),
+        )
+        .expect("read-only navigation on locked Track");
+    let locked = InspectorPanelModel::from_app_state(&state, &english);
+    let locked_curve = locked.audio_processor_racks[0]
+        .scope_input_gain_automation
+        .as_ref()
+        .expect("locked curve");
+    assert!(!locked_curve.is_editable);
+    assert!(
+        locked_curve.current_author_time.is_ok(),
+        "navigation remains readable"
+    );
+    let mut disabled = audio_automation_curve_control(locked_curve, &english);
+    disabled.layout(Rect::new(0.0, 0.0, 320.0, 104.0));
+    let mut locked_router = EventRouter::new(disabled.id());
+    {
+        let mut tree = WidgetTreeView::new(disabled.as_mut());
+        for (key, modifiers) in [
+            (KeyCode::Tab, Modifiers::none()),
+            (KeyCode::A, Modifiers::ctrl()),
+            (KeyCode::Delete, Modifiers::none()),
+        ] {
+            locked_router.route(UiEvent::KeyDown { key, modifiers }, &mut tree, &dispatch);
+        }
+    }
+    assert!(
+        actions.borrow().is_empty(),
+        "locked curve cannot publish any author edit"
+    );
+    assert!(!state.can_undo_action());
+    state.active_sequence_mut_uncommitted().expect("unlock fixture").audio_tracks[0].is_locked =
+        false;
+    let refreshed = InspectorPanelModel::from_app_state(&state, &english);
+    let model = refreshed.audio_processor_racks[0]
+        .scope_input_gain_automation
+        .as_ref()
+        .expect("current curve");
+    assert_eq!(
+        model.current_author_time.as_ref().expect("selected coordinate").time,
+        TimelineTime::new(9, 1).expect("second origin")
+    );
+    let mut curve = audio_automation_curve_control(model, &english);
+    curve.layout(Rect::new(0.0, 0.0, 320.0, 104.0));
+    let mut router = EventRouter::new(curve.id());
+    {
+        let mut tree = WidgetTreeView::new(curve.as_mut());
+        for (key, modifiers) in [
+            (KeyCode::Tab, Modifiers::none()),
+            (KeyCode::A, Modifiers::ctrl()),
+            (KeyCode::Delete, Modifiers::none()),
+        ] {
+            router.route(UiEvent::KeyDown { key, modifiers }, &mut tree, &dispatch);
+        }
+    }
+    let edits = actions.borrow_mut().drain(..).collect::<Vec<_>>();
+    assert!(!edits.is_empty(), "actual curve must publish author edit");
+    for edit in edits {
+        state.dispatch_action(edit).expect("canonical delete");
+    }
+    let inspect = inspect_audio_automation(state.active_sequence().expect("sequence"), &target)
+        .expect("Scope");
+    assert!(inspect.curve().is_none());
+    assert_eq!(
+        inspect.default_value(),
+        -6.0,
+        "retain second occurrence, never first's -24"
+    );
+    let accepted = state.active_sequence().expect("accepted").clone();
+    assert!(state.undo_timeline().expect("Undo"));
+    assert!(state
+        .active_sequence()
+        .expect("restored")
+        .author_state_eq_ignoring_revision(&original));
+    assert!(
+        !state.can_undo_action(),
+        "navigation must not be in author history"
+    );
+    assert!(state.redo_timeline().expect("Redo"));
+    assert!(state
+        .active_sequence()
+        .expect("redo")
+        .author_state_eq_ignoring_revision(&accepted));
+    let directory =
+        std::env::temp_dir().join(format!("mondrian-scope-choice-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).expect("directory");
+    let project = directory.join("共享实例🙂.mdp");
+    state.save_project_file_as(project.clone()).expect("save");
+    let mut reopened = AppState::new();
+    reopened.open_project_file(project).expect("fresh reopen");
+    assert!(reopened
+        .active_sequence()
+        .expect("reopened")
+        .author_state_eq_ignoring_revision(&accepted));
+    assert!(
+        reopened.selection.audio_scope_occurrences.is_empty(),
+        "navigation is Session-only"
+    );
+    assert!(!reopened.can_undo_action());
+    state.clear_selection();
+    assert!(state.selection.audio_scope_occurrences.is_empty());
+}
+
+#[test]
+fn audio_scope_occurrence_view_survives_track_move_but_not_instance_switch() {
+    use crate::app::product_action::{
+        AudioProductAction, AudioScopeOccurrencePayload, ProductAction,
+    };
+    use mondrian_core::ExactAutomationKeyframe;
+    use mondrian_timeline::{
+        apply_audio_automation_edit, AudioAutomationEdit, AudioAutomationEditRequest,
+        AudioAutomationTarget, AudioComponentAddress,
+    };
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    let mut sequence = Sequence::new("Occurrence view identity");
+    let track_id = sequence.audio_tracks[0].id;
+    let clip = Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("clip");
+    let clip_id = clip.id;
+    sequence
+        .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+        .expect("audio");
+    let scope_id = sequence.audio_tracks[0].clips[0].audio_components[0].processing.scope_id;
+    let first = AudioComponentAddress {
+        track_id,
+        clip_id,
+        edit_id: sequence.audio_tracks[0].clips[0].audio_components[0].id,
+    };
+    let component = mondrian_timeline::audio::AudioComponentEdit::media(
+        AudioSourceComponentId::new(),
+        scope_id,
+    );
+    let second = AudioComponentAddress { edit_id: component.id, ..first };
+    sequence.audio_tracks[0].clips[0].audio_components.push(component);
+    for (time, value) in [
+        (TimelineTime::ZERO, -24.0),
+        (TimelineTime::new(1, 2).expect("middle"), -6.0),
+        (TimelineTime::ONE, -18.0),
+    ] {
+        apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest {
+                target: AudioAutomationTarget::ProcessingScopeInputGain { scope_id },
+                edit: AudioAutomationEdit::UpsertKeyframe {
+                    keyframe: ExactAutomationKeyframe::linear(time, value),
+                },
+            },
+        )
+        .expect("seed curve");
+    }
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    state.select_clip_by_id(clip_id).expect("inspect");
+    let sequence_id = state.active_sequence().expect("sequence").id;
+    state
+        .dispatch_action(
+            ProductAction::Audio(AudioProductAction::SelectScopeOccurrence(
+                AudioScopeOccurrencePayload { sequence_id, scope_id, address: second },
+            ))
+            .into_external_action(),
+        )
+        .expect("select second");
+    let locale = chinese_localizer();
+    let before = InspectorPanelModel::from_app_state(&state, &locale);
+    let mut widget = audio_automation_curve_control(
+        before.audio_processor_racks[0]
+            .scope_input_gain_automation
+            .as_ref()
+            .expect("curve"),
+        &locale,
+    );
+    widget.layout(Rect::new(0.0, 0.0, 320.0, 104.0));
+    let mut router = EventRouter::new(widget.id());
+    let actions = RefCell::new(Vec::new());
+    let dispatch = |action| actions.borrow_mut().push(action);
+    {
+        let mut tree = WidgetTreeView::new(widget.as_mut());
+        for (key, modifiers) in [
+            (KeyCode::Tab, Modifiers::none()),
+            (KeyCode::A, Modifiers::ctrl()),
+        ] {
+            router.route(UiEvent::KeyDown { key, modifiers }, &mut tree, &dispatch);
+        }
+    }
+    let editor = widget
+        .as_any()
+        .and_then(|any| any.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+        .expect("editor");
+    let selected = editor.selected_keyframe_ids();
+    assert_eq!(selected.len(), 3);
+    let snapshot = editor.view_state().expect("inactive selected view");
+    let mut moved = state.active_sequence().expect("sequence").clone();
+    let new_track_id = moved.add_audio_track();
+    let destination = moved
+        .audio_tracks
+        .iter()
+        .position(|track| track.id == new_track_id)
+        .expect("destination");
+    assert!(moved.move_clip_to_track_at_time(false, clip_id, destination, TimelineTime::ZERO));
+    state.test_set_sequence(Some(moved));
+    let after = InspectorPanelModel::from_app_state(&state, &locale);
+    let model = after.audio_processor_racks[0]
+        .scope_input_gain_automation
+        .as_ref()
+        .expect("moved curve");
+    assert_eq!(
+        model.time_context.scope_occurrence,
+        Some(AudioComponentAddress { track_id: new_track_id, ..second })
+    );
+    let mut replacement = audio_automation_curve_control(model, &locale);
+    let editor = replacement
+        .as_any_mut()
+        .and_then(|any| any.downcast_mut::<mondrian_ui_widgets::CurveEditor>())
+        .expect("replacement");
+    assert!(
+        editor.restore_view_state(&snapshot),
+        "same occurrence survives Track locator change"
+    );
+    assert_eq!(editor.selected_keyframe_ids(), selected);
+    state
+        .dispatch_action(
+            ProductAction::Audio(AudioProductAction::SelectScopeOccurrence(
+                AudioScopeOccurrencePayload {
+                    sequence_id,
+                    scope_id,
+                    address: AudioComponentAddress { track_id: new_track_id, ..first },
+                },
+            ))
+            .into_external_action(),
+        )
+        .expect("switch occurrence");
+    let switched = InspectorPanelModel::from_app_state(&state, &locale);
+    let mut replacement = audio_automation_curve_control(
+        switched.audio_processor_racks[0]
+            .scope_input_gain_automation
+            .as_ref()
+            .expect("other occurrence"),
+        &locale,
+    );
+    let editor = replacement
+        .as_any_mut()
+        .and_then(|any| any.downcast_mut::<mondrian_ui_widgets::CurveEditor>())
+        .expect("other editor");
+    assert!(
+        !editor.restore_view_state(&snapshot),
+        "different occurrence must not inherit selection"
+    );
+    assert!(editor.selected_keyframe_ids().is_empty());
+    assert!(actions.borrow().is_empty());
+    assert!(!state.can_undo_action());
 }

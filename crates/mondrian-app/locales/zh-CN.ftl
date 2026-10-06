@@ -1399,3 +1399,7 @@ curve-editor-keyboard-help = Home/End：首尾点；Ctrl/Cmd＋左右：上一�
 curve-editor-shape-keyboard-help = Home/End：首尾点；Ctrl/Cmd＋左右：上一个／下一个点；方向键：微调；Shift＋方向键：较大幅度微调。 Ctrl/Cmd＋滚轮：时间缩放，加 Shift：数值缩放；中键拖动：平移；Ctrl/Cmd＋PageUp/PageDown：缩放，加 Shift：数值缩放；Ctrl/Cmd＋Shift＋方向键：平移；Ctrl/Cmd＋0：复位视图。
 
 curve-editor-selection-keyboard-help = { curve-editor-keyboard-help } Shift＋点选：切换关键帧选择；Ctrl/Cmd＋A：全选作者关键帧；Delete/Backspace：整组删除，一次撤销；Escape：清空选择。暂不支持整组移动或修改插值。
+
+audio-rack-occurrence-row = 时间参照
+audio-rack-occurrence-choose = 选择音频组件
+audio-rack-occurrence-option = 音频组件 { $index } · 起点 { $time } 秒

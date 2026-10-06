@@ -415,3 +415,36 @@ confirms the same source, same product hash and clean/stable worktree.
 Physical keyboard/file picker, high-DPI layouts and macOS remain separately
 unqualified. This validates the stated Windows contract paths, not the full
 vendor/plugin/platform matrix or completion of the overall NLE goal.
+
+
+## Shared Scope time-reference selector continuation (2026-10-06)
+
+Ambiguous selected-Clip Scope racks now offer a localized time-reference Dropdown.
+Options identify the audio Component and exact Scope start; each Scope remembers
+its own explicit choice in Session navigation. The choice validates Sequence,
+inspected Clip, full Component address and Scope binding before touching state.
+It never mutates author generations/history or persistence and does not prepare
+an audio execution generation. Unique bindings retain the direct projection path,
+without selector-item construction. Locked Tracks may navigate, but their actual
+curve Widget emits no author edit.
+
+Actual keyboard routing selects the second occurrence, updates the Inspector,
+and deletes all Scope keys through one canonical command. The retained value is
+-6 from the second occurrence rather than -24 from the first. Full author Undo/
+Redo and Unicode save/fresh reopen pass; no navigation history is restored.
+Stale Sequence, Scope and Component intent refusal and locale-independent action
+identity pass. An actual failing cross-Track regression exposed complete-address
+navigation matching that discarded an occurrence after a move. Navigation now
+resolves stable Clip/Component IDs into the current Track address. Scope curve
+view identity also excludes Track locator: key-set snapshots survive that move,
+but cannot transfer to another occurrence. Queued action admission stays strict.
+
+Three dedicated current-source cases pass, followed by the full App library:
+**2561 passed / 0 failed / 62 ignored** (334.71s). Strict whole-workspace,
+all-targets/all-features Clippy passed (2m10s), as did final fmt and diff checks.
+Public SelectionState now carries occurrence navigation and AudioProductAction
+adds a closed navigation variant; no compatibility shim is introduced for these
+alpha Rust API changes. The fresh native/encoded report above remains pinned to
+99db114, not to this subsequent selector source. Group movement/interpolation, rubber-band
+selection and the broader vendor/platform qualification remain open; overall
+NLE goal active.
