@@ -1719,6 +1719,7 @@ impl AppState {
                     require_action_executed(changed, "clip_write_parameter_values", "Clip parameters already have the requested values at the current author time")
                 }
             }
+            ClipProductAction::CurveClipboard(payload) => self.dispatch_curve_clipboard(*payload),
             ClipProductAction::EditNumericCurve(payload) => {
                 let clip_id = payload.clip_id;
                 let property = payload.parameter.clone();

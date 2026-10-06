@@ -124,6 +124,7 @@ mod messages;
 pub use messages::{AppMessage, AppMessageValue};
 mod clip_clipboard;
 mod clip_retime;
+mod curve_clipboard;
 mod dynamic_hdr_authoring;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_ancillary;

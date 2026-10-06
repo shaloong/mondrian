@@ -1468,3 +1468,15 @@ curve-editor-selection-keyboard-help = { curve-editor-keyboard-help } Shift + cl
 audio-rack-occurrence-row = Time reference
 audio-rack-occurrence-choose = Choose an audio component
 audio-rack-occurrence-option = Audio component { $index } · Start { $time } s
+
+# Focused curve clipboard
+error-curve-clipboard-owner-changed = The curve selection changed. Select the target curve again.
+error-curve-clipboard-parameter-missing = The target parameter changed. Select the curve again.
+error-curve-clipboard-not-animated = This parameter cannot contain keyframes.
+error-curve-clipboard-invalid-selection = The key selection changed. Select the complete key group again.
+error-curve-clipboard-incompatible = Copy keys from one compatible parameter before pasting into this curve.
+error-curve-clipboard-empty = The keyframe clipboard is empty.
+error-curve-clipboard-missing-playhead = Select a sequence and position the playhead before pasting.
+error-curve-clipboard-out-of-bounds = The whole key group must fit inside the target clip. Move the playhead or select fewer keys.
+
+curve-editor-visual-clipboard-keyboard-help = { curve-editor-selection-keyboard-help } Ctrl/Cmd+C: copy the selected keys; Ctrl/Cmd+V: paste into this curve at the playhead in one Undo.

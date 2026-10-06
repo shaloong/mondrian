@@ -1403,3 +1403,15 @@ curve-editor-selection-keyboard-help = { curve-editor-keyboard-help } Shift＋�
 audio-rack-occurrence-row = 时间参照
 audio-rack-occurrence-choose = 选择音频组件
 audio-rack-occurrence-option = 音频组件 { $index } · 起点 { $time } 秒
+
+# Focused curve clipboard
+error-curve-clipboard-owner-changed = 曲线选择已改变，请重新选择目标曲线。
+error-curve-clipboard-parameter-missing = 目标参数已改变，请重新选择曲线。
+error-curve-clipboard-not-animated = 此参数不支持关键帧。
+error-curve-clipboard-invalid-selection = 关键帧选择已改变，请重新选择完整关键帧组。
+error-curve-clipboard-incompatible = 请先从单个兼容参数复制关键帧，再粘贴到此曲线。
+error-curve-clipboard-empty = 关键帧剪贴板为空。
+error-curve-clipboard-missing-playhead = 请先选择序列并设置播放头位置，再粘贴关键帧。
+error-curve-clipboard-out-of-bounds = 整组关键帧必须位于目标片段内，请移动播放头或减少所选关键帧。
+
+curve-editor-visual-clipboard-keyboard-help = { curve-editor-selection-keyboard-help } Ctrl/Cmd＋C：复制所选关键帧；Ctrl/Cmd＋V：在播放头位置粘贴到此曲线，一次撤销。

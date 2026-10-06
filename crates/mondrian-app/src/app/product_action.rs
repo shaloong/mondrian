@@ -115,6 +115,8 @@ pub const CLIP_HOLD_FRAME: &str = "hold_frame";
 pub const CLIP_WRITE_PARAMETER_VALUES: &str = "write_parameter_values";
 /// External action name for editing one numeric Clip curve by stable identity.
 pub const CLIP_EDIT_NUMERIC_CURVE: &str = "edit_numeric_curve";
+/// Clipboard command for one exact Clip-contained curve.
+pub const CLIP_CURVE_CLIPBOARD: &str = "curve_clipboard";
 
 /// External custom-action namespace for Project product operations.
 pub const PROJECT_NAMESPACE: &str = "ui.project";
@@ -445,6 +447,8 @@ pub enum ClipProductAction {
     WriteParameterValues(Box<ClipWriteParameterValuesPayload>),
     /// Insert, edit, or remove one complete numeric key by stable identity.
     EditNumericCurve(Box<ClipEditNumericCurvePayload>),
+    /// Copy or paste keys using the explicit focused curve target.
+    CurveClipboard(Box<ClipCurveClipboardPayload>),
 }
 
 /// Closed Viewer operations that mutate product state.
@@ -860,6 +864,9 @@ impl ProductAction {
                         Box::new(decode_payload(namespace, name, payload)?),
                     ))))
                 }
+                CLIP_CURVE_CLIPBOARD => Ok(Some(Self::Clip(ClipProductAction::CurveClipboard(
+                    Box::new(decode_payload(namespace, name, payload)?),
+                )))),
                 CLIP_EDIT_NUMERIC_CURVE => {
                     Ok(Some(Self::Clip(ClipProductAction::EditNumericCurve(
                         Box::new(decode_payload(namespace, name, payload)?),
@@ -1365,6 +1372,11 @@ impl ProductAction {
             Self::Clip(ClipProductAction::WriteParameterValues(payload)) => (
                 CLIP_NAMESPACE,
                 CLIP_WRITE_PARAMETER_VALUES,
+                serde_json::json!(payload),
+            ),
+            Self::Clip(ClipProductAction::CurveClipboard(payload)) => (
+                CLIP_NAMESPACE,
+                CLIP_CURVE_CLIPBOARD,
                 serde_json::json!(payload),
             ),
             Self::Clip(ClipProductAction::EditNumericCurve(payload)) => (
@@ -2670,6 +2682,31 @@ impl ClipCurveEditPayload {
     }
 }
 
+/// Clipboard intent for a complete stable selection or the focused paste target.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ClipCurveClipboardOperation {
+    /// Capture a unique nonempty set of complete keys.
+    Copy {
+        /// Stable authored identities in the addressed property.
+        keyframe_ids: Vec<KeyframeId>,
+    },
+    /// Paste at the current playhead into exactly the addressed property.
+    Paste {},
+}
+
+/// Focus-qualified clipboard request; parameter identity names its exact instance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipCurveClipboardPayload {
+    /// Current Clip containing the intrinsic or effect-owned property.
+    pub clip_id: ClipId,
+    /// Exact property instance; no display path or parameter-name fallback.
+    pub parameter: AnimationParameterAddress,
+    /// Complete selection capture or explicit target paste.
+    pub operation: ClipCurveClipboardOperation,
+}
+
 /// Edit one Clip-owned numeric curve through stable author identity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2974,6 +3011,9 @@ impl<'a> ProductActionAvailability<'a> {
             }
             ClipProductAction::EditNumericCurve(payload) => {
                 self.state.clip_numeric_curve_payload_would_change(payload).unwrap_or(false)
+            }
+            ClipProductAction::CurveClipboard(payload) => {
+                self.state.curve_clipboard_available(payload)
             }
         }
     }
@@ -3874,6 +3914,41 @@ mod tests {
                 .expect("valid external payload")
                 .expect("recognized Clip timing action");
             assert_eq!(decoded, expected);
+        }
+    }
+
+    #[test]
+    fn focused_curve_clipboard_codec_requires_exact_targets_and_closed_operations() {
+        let parameter = AnimationParameterAddress {
+            animation_track_id: mondrian_core::AnimationTrackId::new(),
+            parameter_id: mondrian_core::ParameterId::new("transform.opacity")
+                .expect("parameter ID"),
+        };
+        for operation in [
+            ClipCurveClipboardOperation::Copy { keyframe_ids: vec![KeyframeId::new()] },
+            ClipCurveClipboardOperation::Paste {},
+        ] {
+            let expected = ProductAction::Clip(ClipProductAction::CurveClipboard(Box::new(
+                ClipCurveClipboardPayload {
+                    clip_id: ClipId::new(),
+                    parameter: parameter.clone(),
+                    operation,
+                },
+            )));
+            let action = expected.clone().into_external_action();
+            assert_eq!(
+                ProductAction::decode_external(&action).expect("decode"),
+                Some(expected)
+            );
+            let Action::Custom { namespace, name, mut payload } = action else {
+                panic!("custom transport");
+            };
+            payload["operation"]["unexpected"] = serde_json::json!(true);
+            assert!(
+                ProductAction::decode_external(&Action::Custom { namespace, name, payload })
+                    .is_err(),
+                "Copy and Paste both reject unknown operation fields"
+            );
         }
     }
 

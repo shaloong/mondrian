@@ -2637,6 +2637,27 @@ fn numeric_key_points(
         .collect()
 }
 
+fn focused_curve_clipboard_action(
+    clip_id: ClipId,
+    parameter: &AnimationParameterAddress,
+    command: mondrian_ui_widgets::CurveClipboardCommand,
+    ids: &[KeyframeId],
+) -> Action {
+    use crate::app::product_action::{
+        ClipCurveClipboardOperation, ClipCurveClipboardPayload, ClipProductAction,
+    };
+    let operation = match command {
+        mondrian_ui_widgets::CurveClipboardCommand::Copy => {
+            ClipCurveClipboardOperation::Copy { keyframe_ids: ids.to_vec() }
+        }
+        mondrian_ui_widgets::CurveClipboardCommand::Paste => ClipCurveClipboardOperation::Paste {},
+    };
+    ProductAction::Clip(ClipProductAction::CurveClipboard(Box::new(
+        ClipCurveClipboardPayload { clip_id, parameter: parameter.clone(), operation },
+    )))
+    .into_external_action()
+}
+
 fn numeric_curve_editor(
     localizer: &Localizer,
     target: Option<ParameterCurveGestureTarget>,
@@ -2701,6 +2722,16 @@ fn numeric_curve_editor(
         (mode, localizer.text(id), id)
     })
     .collect::<Vec<_>>();
+    let clipboard_target = target.as_ref().and_then(|target| match target {
+        ParameterCurveGestureTarget::Clip { clip_id, parameter }
+        | ParameterCurveGestureTarget::Effect { clip_id, parameter, .. } => {
+            Some((*clip_id, parameter.clone()))
+        }
+        ParameterCurveGestureTarget::Audio { .. } => None,
+    });
+    let menu_clipboard_target = clipboard_target.clone();
+    let copy_label = localizer.text("command-edit-copy");
+    let paste_label = localizer.text("command-edit-paste");
     let menu_model = model.clone();
     let display_points = model.display_points.clone();
     let preview_model = model.clone();
@@ -2709,12 +2740,12 @@ fn numeric_curve_editor(
     let pending_action = std::rc::Rc::new(std::cell::RefCell::new(None));
     let preview_action = pending_action.clone();
     let ids = model.keys.iter().map(|key| key.keyframe_id).collect();
-    let editor = CurveEditor::with_author_points(points, model.value_axis)
+    let mut editor = CurveEditor::with_author_points(points, model.value_axis)
         .with_time_axis(model.owner_range)
         .with_frame_time_step(model.frame_time_step)
         .with_keyboard_help(
             localizer.text("curve-editor-name"),
-            localizer.text("curve-editor-selection-keyboard-help"),
+            localizer.text("curve-editor-visual-clipboard-keyboard-help"),
         )
         .with_view_key(target.as_ref().and_then(|target| serde_json::to_string(target).ok()))
         .with_keyframe_ids(ids)
@@ -2771,7 +2802,7 @@ fn numeric_curve_editor(
         .with_point_policies(point_policies)
         .with_display_points(display_points)
         .with_selection_context_menu(move |ids| {
-            interpolation_choices
+            let mut items: Vec<_> = interpolation_choices
                 .iter()
                 .map(|(mode, label, message)| {
                     let checked = !ids.is_empty()
@@ -2786,9 +2817,47 @@ fn numeric_curve_editor(
                         .with_message_id(*message)
                         .checked(checked)
                 })
-                .collect()
+                .collect();
+            if let Some((clip_id, parameter)) = &menu_clipboard_target {
+                use mondrian_ui_widgets::CurveClipboardCommand;
+                items.push(MenuItem::separator());
+                items.push(
+                    MenuItem::new(
+                        copy_label.clone(),
+                        (!ids.is_empty()).then(|| {
+                            focused_curve_clipboard_action(
+                                *clip_id,
+                                parameter,
+                                CurveClipboardCommand::Copy,
+                                ids,
+                            )
+                        }),
+                    )
+                    .with_message_id("command-edit-copy"),
+                );
+                items.push(
+                    MenuItem::new(
+                        paste_label.clone(),
+                        focused_curve_clipboard_action(
+                            *clip_id,
+                            parameter,
+                            CurveClipboardCommand::Paste,
+                            ids,
+                        ),
+                    )
+                    .with_message_id("command-edit-paste"),
+                );
+            }
+            items
         })
         .enabled(can_edit);
+    if let Some((clip_id, parameter)) = clipboard_target {
+        editor = editor.on_clipboard(move |command, ids| {
+            Some(focused_curve_clipboard_action(
+                clip_id, &parameter, command, ids,
+            ))
+        });
+    }
     editor.on_gesture(move |event| match event {
         CurveGestureEvent::Begin(gesture_id) => target
             .clone()
@@ -3945,6 +4014,188 @@ mod temporal_handle_tests {
         )
         .expect("model");
         (state, selection, model, key_id)
+    }
+
+    #[test]
+    fn focused_numeric_curve_copy_uses_complete_local_selection() {
+        use mondrian_ui_core::shortcut::ShortcutBinding;
+        use mondrian_ui_core::FocusManager;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let (mut state, selection, model, _) = temporal_curve_fixture(true);
+        let localizer =
+            Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs).expect("locale");
+        let before = state.active_sequence().expect("before").clone();
+        let generation = state.project_author_generation();
+        let history = state.authoring_history().expect("history").diagnostics();
+        let expected_ids = model.keys.iter().filter_map(|key| key.keyframe_id).collect::<Vec<_>>();
+        let mut editor = numeric_curve_editor(
+            &localizer,
+            Some(ParameterCurveGestureTarget::Clip {
+                clip_id: selection.clip_id,
+                parameter: model.property.clone(),
+            }),
+            model,
+            true,
+            None,
+            move |model, edit| inspector_curve_edit_action(Some(selection), model, edit),
+            |_, _, _| None,
+        );
+        editor.layout(Rect::new(0.0, 0.0, 480.0, 160.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut router = EventRouter::new(editor.id());
+        router
+            .shortcut_manager_mut()
+            .register_global(ShortcutBinding::ctrl(KeyCode::C), Action::Copy);
+        for event in [
+            UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+            UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+        ] {
+            router.route(event, &mut WidgetTreeView::new(&mut editor), &dispatch);
+            for action in actions.borrow_mut().drain(..) {
+                state.dispatch_action(action).expect("selection action");
+            }
+        }
+        assert_eq!(
+            editor.selected_keyframe_ids(),
+            expected_ids,
+            "actual focused curve selection"
+        );
+        assert_eq!(router.focus_manager().focused_widget(), Some(editor.id()));
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::C, modifiers: Modifiers::ctrl() },
+            &mut WidgetTreeView::new(&mut editor),
+            &dispatch,
+        );
+        let copy_actions = actions.borrow_mut().drain(..).collect::<Vec<_>>();
+        assert!(
+            !copy_actions.is_empty(),
+            "Copy must produce an actual product request"
+        );
+        for action in copy_actions {
+            state.dispatch_action(action).expect("focused Copy");
+        }
+        assert_eq!(
+            state.active_clipboard_kind(),
+            Some(crate::app::AppClipboardKind::AnimationKeyframes),
+            "the focused key selection must not fall through to copying the Clip",
+        );
+        assert!(state
+            .active_sequence()
+            .expect("unchanged")
+            .author_state_eq_ignoring_revision(&before));
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
+        let clipboard_source =
+            before.find_clip(selection.clip_id).expect("source").intrinsic_parameter_bag();
+        let property = clipboard_source.property(Transform2D::OPACITY_PATH).expect("source curve");
+        let original_keys = expected_ids
+            .iter()
+            .map(|id| property.keyframe_by_id(*id).expect("source key"))
+            .collect::<Vec<_>>();
+        router
+            .shortcut_manager_mut()
+            .register_global(ShortcutBinding::ctrl(KeyCode::V), Action::Paste);
+        router.route(
+            UiEvent::KeyDown {
+                key: KeyCode::V,
+                modifiers: Modifiers { meta: true, ..Modifiers::none() },
+            },
+            &mut WidgetTreeView::new(&mut editor),
+            &dispatch,
+        );
+        let paste_actions = actions.borrow_mut().drain(..).collect::<Vec<_>>();
+        assert_eq!(
+            paste_actions.len(),
+            1,
+            "Cmd+V is owned by the focused curve without a global binding"
+        );
+        let paste = paste_actions[0].clone();
+        let seq_id = state.active_sequence().expect("sequence").id;
+        state.active_sequence_mut_uncommitted().expect("test sequence").video_tracks[0].is_locked =
+            true;
+        assert!(
+            state.dispatch_action(paste.clone()).is_err(),
+            "late Track lock refuses the complete paste"
+        );
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
+        state.active_sequence_mut_uncommitted().expect("test sequence").video_tracks[0].is_locked =
+            false;
+        state.dispatch_action(paste).expect("focused Paste");
+        assert_eq!(state.active_sequence().expect("sequence").id, seq_id);
+        assert_eq!(state.project_author_generation(), generation + 1);
+        let pasted = state.active_sequence().expect("pasted").clone();
+        let bag = pasted.find_clip(selection.clip_id).expect("clip").intrinsic_parameter_bag();
+        let property = bag.property(Transform2D::OPACITY_PATH).expect("pasted property");
+        let new_selection = state.selected_animation_keyframes_for_clip(selection.clip_id);
+        assert_eq!(new_selection.len(), original_keys.len());
+        for original in &original_keys {
+            let id = new_selection
+                .iter()
+                .find(|entry| {
+                    property
+                        .keyframe_by_id(entry.keyframe_id)
+                        .is_some_and(|key| key.time == original.time)
+                })
+                .expect("pasted time")
+                .keyframe_id;
+            let key = property.keyframe_by_id(id).expect("pasted key");
+            assert!(!expected_ids.contains(&id), "fresh author key identities");
+            assert_eq!(key.time, original.time);
+            assert_eq!(key.value, original.value);
+            assert_eq!(key.temporal_flags, original.temporal_flags);
+            assert_eq!(key.interp_in, original.interp_in);
+            assert_eq!(key.interp_out, original.interp_out);
+        }
+        assert!(state.undo_timeline().expect("one Undo"));
+        assert!(state
+            .active_sequence()
+            .expect("undone")
+            .author_state_eq_ignoring_revision(&before));
+        assert!(
+            !state.can_undo_action(),
+            "Copy and selection created no additional history"
+        );
+        let directory = tempfile::tempdir().expect("archives");
+        let undone_path = directory.path().join("曲线剪贴板撤销🙂.mdp");
+        state.save_project_file_as(undone_path.clone()).expect("save undone");
+        assert!(state.can_redo_action(), "save retains live Redo");
+        {
+            let mut reopened = AppState::new();
+            reopened.open_project_file(undone_path).expect("fresh undone");
+            assert!(reopened
+                .active_sequence()
+                .expect("undone reopen")
+                .author_state_eq_ignoring_revision(&before));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            assert_eq!(
+                reopened.active_clipboard_kind(),
+                None,
+                "clipboard is transient"
+            );
+        }
+        assert!(state.redo_timeline().expect("Redo"));
+        assert!(state
+            .active_sequence()
+            .expect("redone")
+            .author_state_eq_ignoring_revision(&pasted));
+        let path = directory.path().join("曲线剪贴板重做🙂.mdp");
+        state.save_project_file_as(path.clone()).expect("save edited");
+        let mut reopened = AppState::new();
+        reopened.open_project_file(path).expect("fresh edited");
+        assert!(reopened
+            .active_sequence()
+            .expect("edited reopen")
+            .author_state_eq_ignoring_revision(&pasted));
+        assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        assert_eq!(reopened.active_clipboard_kind(), None);
     }
 
     #[test]

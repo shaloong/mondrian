@@ -156,6 +156,18 @@ impl AppMessage {
 
     /// Project a contextual error chain, retaining typed core failures and context.
     pub fn from_anyhow(error: &anyhow::Error) -> Self {
+        if let Some(failure) = error.chain().find_map(|source| {
+            source
+                .downcast_ref::<crate::app::curve_clipboard::CurveClipboardError>()
+                .or_else(|| match source.downcast_ref::<MondrianError>() {
+                    Some(MondrianError::Other(inner)) => {
+                        inner.downcast_ref::<crate::app::curve_clipboard::CurveClipboardError>()
+                    }
+                    _ => None,
+                })
+        }) {
+            return Self::new(failure.message_id());
+        }
         let chain = error.chain().collect::<Vec<_>>();
         let typed = chain.iter().enumerate().find_map(|(index, source)| {
             source.downcast_ref::<MondrianError>().map(|source| (index, source))

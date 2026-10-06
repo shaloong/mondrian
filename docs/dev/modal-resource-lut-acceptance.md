@@ -2,10 +2,10 @@
 
 ## Qualification scope
 
-The latest clean-source native group/resource qualification is
-[ce3edfb qualification](#clean-source-native-and-encoded-qualification-for-ce3edfb).
-The latest complete encoded Golden is
-[ce3edfb qualification](#clean-source-native-and-encoded-qualification-for-ce3edfb).
+The latest clean-source modal/resource and complete encoded Golden qualification is
+[66150cf qualification](#clean-current-modal-resource-and-encoded-lut-acceptance).
+Native visual and audio group qualification retain the separately named sources
+in their receipts below.
 Source-level tests and native results qualify their named source and binary;
 they do not automatically cover later edits.
 The complete NLE goal remains active while the listed professional matrices are
@@ -1323,3 +1323,43 @@ no newer vendor/plugin acceptance is inferred. Full App2574/0/68 ignored, strict
 workspace Clippy, fmt and diff checks passed before the production commit.
 No push was performed. The broad NLE goal remains active, including focused
 curve clipboard/group pointer/marquee/reset and the other documented matrices.
+
+## Focused visual curve clipboard and durable history
+
+The focused visual curve now owns exact Ctrl/Cmd+C/V chords with its complete
+stable key selection. A real EventRouter regression first reproduced the bug:
+Ctrl+A selected all three curve keys, but Ctrl+C fell through to global Clip Copy
+(0 passed, 1 failed). The focused typed product request now captures the complete
+current property selection and pastes through the existing atomic author session.
+No global selection mutation, second clipboard, legacy payload decoder or author
+state mirror was added.
+
+All-feature App regression: **2578 passed, 0 failed, 68 ignored**, 329.27s.
+Curve-editor regression filter: **99 passed, 0 failed, 0 ignored**, 2.38s.
+The App run includes the existing actual modal Tab/Shift+Tab, pending resource,
+atomic resource and real cube Undo/save/reopen workflows. These source tests do
+not replace the separately named clean-source native/encoded receipts above.
+
+New actual focused-control acceptance checks Ctrl+C and Cmd+V, exact key values,
+constraint flags and handles, fresh pasted IDs, late Track lock refusal, one Undo,
+saving the undone snapshot without losing live Redo, and fresh Unicode `.mdp`
+reopens of both undone and edited states. Fresh sessions have empty history and
+no transient clipboard. Copy and selection do not create history entries.
+
+The rejection matrix checks missing owner/property/key, duplicate and empty keys,
+Clip content, multi-property key content, empty clipboard, a real Playback seek
+whose complete pasted extent cannot fit, and a late Track lock. Every refusal
+retains the complete clipboard, selection, Sequence, generation and history.
+Typed actionable errors resolve through direct and wrapped error transports in
+both English and Chinese. Closed Copy/Paste payload decoding rejects extra
+operation fields, including the empty Paste object.
+
+Widget acceptance checks exact Ctrl/Cmd modifiers, complete selection, empty
+Copy consumption, empty-selection Paste, and pointer-draft/focus ownership.
+Audio clipboard, read-only selection, new pasted selection after root rebuild,
+root Edit-menu context and group pointer/marquee/reset remain open; this receipt
+qualifies focused visual keyboard/local-menu dispatch rather than the complete
+professional clipboard workflow.
+
+Strict workspace/all-target/all-feature Clippy with `-D warnings` passed (2m42s).
+Formatting and diff checks passed before this implementation was committed.

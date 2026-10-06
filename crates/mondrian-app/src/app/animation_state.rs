@@ -221,15 +221,24 @@ impl AppState {
         if selected.is_empty() {
             return Ok(false);
         }
-
         let clip = self.clip_snapshot(selection).ok_or_else(|| {
             mondrian_core::MondrianError::ClipNotFound { clip_id: selection.clip_id.to_string() }
         })?;
         let property_bag = clip.property_bag()?;
-        let stale_selection = || mondrian_core::MondrianError::ActionNotExecuted {
-            action: "copy".to_owned(),
-            reason: "Animation key selection is stale; select the keys again".to_owned(),
-        };
+        self.capture_animation_keyframes(&property_bag, selected)
+    }
+
+    /// Publish one complete selection from the caller's freshly resolved owner snapshot.
+    pub(super) fn capture_animation_keyframes(
+        &mut self,
+        property_bag: &mondrian_core::automation::PropertyBag,
+        selected: Vec<AnimationKeyframeSelection>,
+    ) -> mondrian_core::Result<bool> {
+        if selected.is_empty() {
+            return Ok(false);
+        }
+        let stale_selection =
+            || super::curve_clipboard::CurveClipboardError::InvalidSelection.into_core();
         let mut resolved = Vec::with_capacity(selected.len());
         for selection in selected {
             let (_, property) = property_bag

@@ -159,6 +159,19 @@ pub type CurveChangeAction = dyn Fn(&[CurvePoint]) -> Option<Action>;
 /// Adapter that builds commands for a complete stable selection when its menu opens.
 pub type CurveSelectionMenu = dyn Fn(&[mondrian_core::KeyframeId]) -> Vec<MenuItem>;
 
+/// Clipboard intent owned by the focused authored curve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurveClipboardCommand {
+    /// Capture the complete selected stable key set.
+    Copy,
+    /// Apply the current clipboard to this curve's owner.
+    Paste,
+}
+
+/// Adapter for clipboard commands with the current complete stable selection.
+pub type CurveClipboardAction =
+    dyn Fn(CurveClipboardCommand, &[mondrian_core::KeyframeId]) -> Option<Action>;
+
 /// One canonical tangent projected into the curve viewport.
 /// Value coordinates may exceed the visible interval; they are never clamped.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -410,6 +423,7 @@ pub struct CurveEditor {
     on_value_edit: Option<Box<CurveValueEditAction>>,
     gesture: Option<mondrian_core::AuthoringGestureId>,
     selection_menu: Option<Box<CurveSelectionMenu>>,
+    on_clipboard: Option<Box<CurveClipboardAction>>,
     context_menu: Option<ContextMenu>,
 }
 
@@ -500,6 +514,7 @@ impl CurveEditor {
             on_value_edit: None,
             gesture: None,
             selection_menu: None,
+            on_clipboard: None,
             context_menu: None,
         };
         editor.set_points(points);
@@ -579,6 +594,52 @@ impl CurveEditor {
     ) -> Self {
         self.selection_menu = Some(Box::new(menu));
         self
+    }
+
+    /// Own Ctrl/Cmd+C/V with the focused curve's stable selection.
+    /// Empty Copy and commands during a pointer draft are consumed without dispatch.
+    pub fn on_clipboard(
+        mut self,
+        callback: impl Fn(CurveClipboardCommand, &[mondrian_core::KeyframeId]) -> Option<Action>
+            + 'static,
+    ) -> Self {
+        self.on_clipboard = Some(Box::new(callback));
+        self
+    }
+
+    fn clipboard_keyboard(
+        &self,
+        key: KeyCode,
+        modifiers: Modifiers,
+        ctx: &mut EventContext,
+    ) -> bool {
+        let Some(callback) = &self.on_clipboard else {
+            return false;
+        };
+        if !self.focused
+            || ctx.focus.focused_widget() != Some(self.id)
+            || !(modifiers.ctrl ^ modifiers.meta)
+            || modifiers.alt
+            || modifiers.shift
+            || !matches!(key, KeyCode::C | KeyCode::V)
+        {
+            return false;
+        }
+        if self.has_active_pointer_interaction() || self.gesture.is_some() {
+            return true;
+        }
+        let ids = self.selected_keyframe_ids();
+        let command = if key == KeyCode::C {
+            CurveClipboardCommand::Copy
+        } else {
+            CurveClipboardCommand::Paste
+        };
+        if (command != CurveClipboardCommand::Copy || !ids.is_empty())
+            && let Some(action) = callback(command, &ids)
+        {
+            (ctx.dispatch)(action);
+        }
+        true
     }
 
     fn open_selection_menu(&mut self, position: Point, keyboard: bool, ctx: &mut EventContext) {
@@ -2345,6 +2406,11 @@ impl Widget for CurveEditor {
                 EventResult::Handled
             }
             UiEvent::KeyDown { key, modifiers }
+                if self.clipboard_keyboard(*key, *modifiers, ctx) =>
+            {
+                EventResult::Handled
+            }
+            UiEvent::KeyDown { key, modifiers }
                 if self.viewport_keyboard(*key, *modifiers, ctx) =>
             {
                 EventResult::Handled
@@ -2390,7 +2456,8 @@ impl Widget for CurveEditor {
                 if (self.selection_deletion
                     || self.selection_time_movement
                     || self.selection_value_movement
-                    || self.selection_menu.is_some())
+                    || self.selection_menu.is_some()
+                    || self.on_clipboard.is_some())
                     && *modifiers == Modifiers::shift()
                 {
                     if !self.has_active_pointer_interaction()
@@ -2537,7 +2604,8 @@ impl Widget for CurveEditor {
                 if (self.selection_deletion
                     || self.selection_time_movement
                     || self.selection_value_movement
-                    || self.selection_menu.is_some())
+                    || self.selection_menu.is_some()
+                    || self.on_clipboard.is_some())
                     && self.focused
                     && ctx.focus.focused_widget() == Some(self.id)
                     && (modifiers.ctrl ^ modifiers.meta)
@@ -6730,6 +6798,131 @@ mod tests {
 
         assert!(encoder.rects.len() >= 2 + editor.points().len() * 2);
         assert!(encoder.lines >= editor.grid_columns + editor.grid_rows + editor.points().len());
+    }
+
+    #[test]
+    fn focused_curve_clipboard_chords_preserve_selection_and_block_pointer_drafts() {
+        let ids = [
+            mondrian_core::KeyframeId::new(),
+            mondrian_core::KeyframeId::new(),
+            mondrian_core::KeyframeId::new(),
+        ];
+        let requests = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let copied_requests = requests.clone();
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.2),
+            CurvePoint::new(0.5, 0.7),
+            CurvePoint::new(1.0, 0.3),
+        ])
+        .with_keyframe_ids(ids.into_iter().map(Some).collect())
+        .on_clipboard(move |command, keys| {
+            copied_requests.borrow_mut().push((command, keys.to_vec()));
+            Some(if command == CurveClipboardCommand::Copy {
+                Action::Copy
+            } else {
+                Action::Paste
+            })
+        });
+        editor.layout(Rect::new(0.0, 0.0, 480.0, 160.0));
+        let original = editor.points().to_vec();
+        let mut focus = CurveFocus(Some(editor.id()));
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        editor.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        assert_eq!(
+            editor.event(
+                &UiEvent::KeyDown { key: KeyCode::C, modifiers: Modifiers::ctrl() },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        assert!(
+            requests.borrow().is_empty(),
+            "empty Copy cannot fall through to another owner"
+        );
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::V, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        assert_eq!(
+            requests.borrow().as_slice(),
+            &[(CurveClipboardCommand::Paste, Vec::new())]
+        );
+        requests.borrow_mut().clear();
+        actions.borrow_mut().clear();
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        assert_eq!(editor.selected_keyframe_ids(), ids);
+        for modifiers in [
+            Modifiers::ctrl(),
+            Modifiers { meta: true, ..Modifiers::none() },
+        ] {
+            for key in [KeyCode::C, KeyCode::V] {
+                assert_eq!(
+                    editor.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                    EventResult::Handled
+                );
+            }
+        }
+        assert_eq!(requests.borrow().len(), 4);
+        assert!(requests.borrow().iter().all(|(_, keys)| keys == &ids));
+        assert_eq!(editor.points(), original);
+        requests.borrow_mut().clear();
+        actions.borrow_mut().clear();
+        for modifiers in [
+            Modifiers { ctrl: true, shift: true, ..Modifiers::none() },
+            Modifiers { ctrl: true, alt: true, ..Modifiers::none() },
+            Modifiers { ctrl: true, meta: true, ..Modifiers::none() },
+            Modifiers::none(),
+        ] {
+            editor.event(&UiEvent::KeyDown { key: KeyCode::C, modifiers }, &mut ctx);
+        }
+        assert!(
+            requests.borrow().is_empty(),
+            "only exact primary clipboard chords are admitted"
+        );
+        let point = editor.to_screen(editor.points()[1]);
+        editor.event(
+            &UiEvent::MouseDown {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(editor.has_active_pointer_interaction());
+        for key in [KeyCode::C, KeyCode::V] {
+            assert_eq!(
+                editor.event(
+                    &UiEvent::KeyDown { key, modifiers: Modifiers::ctrl() },
+                    &mut ctx
+                ),
+                EventResult::Handled
+            );
+        }
+        assert!(
+            requests.borrow().is_empty(),
+            "pointer draft never dispatches a clipboard request"
+        );
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert!(!editor.has_active_pointer_interaction());
+        editor.event(&UiEvent::FocusLost, &mut ctx);
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::C, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        assert!(
+            requests.borrow().is_empty(),
+            "an unfocused editor does not own Copy"
+        );
     }
 
     #[test]

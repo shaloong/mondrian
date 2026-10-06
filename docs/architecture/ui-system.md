@@ -3874,3 +3874,13 @@ Both singleton and complete-selection authored menus use the opening-time
 factory. UI reconstruction only prepares localized labels; it does not prepare
 seven candidates for every authored key. Preset admission is bounded to the
 one addressed selection when opening the menu, avoiding quadratic rebuilding.
+
+
+CurveEditor can own focused Ctrl/Cmd+C/V with on_clipboard and a typed
+CurveClipboardCommand. The callback receives the current complete stable authored
+selection. Empty Copy, active pointer drafts and active author gestures consume
+these commands without dispatch or a global shortcut fallback. Exact primary
+modifiers are required; unfocused editors do not own clipboard chords. The visual
+adapter lowers both keyboard and lazy localized context-menu commands to the
+same typed product request; reusable widgets retain no application clipboard or
+second author interpretation. Paste may target an empty selection.

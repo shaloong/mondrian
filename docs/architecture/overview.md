@@ -827,8 +827,24 @@ invariance and constrained key-group Undo/saved Redo/fresh Unicode reopen.
 Key-group Copy chooses its type from the explicit selected-key intent. It resolves
 all stable property/key addresses against one current Clip snapshot before
 replacing the transient clipboard. A missing property or key refuses the entire
-capture through typed ActionNotExecuted and preserves the old clipboard, selection,
+capture through a typed product clipboard refusal and preserves the old clipboard, selection,
 Sequence, generation and history; empty/nonexistent key capture cannot silently
 become a Clip copy. Valid Clip Copy remains available when no keys are selected.
-The error uses the existing typed localized core-failure projection, independent
-of its developer diagnostic text.
+The clipboard refusal retains its semantic error variant through the core error
+transport; AppMessage selects a localized message ID by type. Diagnostic Display
+text is not parsed or shown as the product explanation.
+
+
+Focused visual curves submit Copy/Paste through the closed ClipProductAction
+algebra with exact Clip/parameter addresses and a complete stable selection.
+Keyboard and opening-time menus use the same request. Copy consumes one freshly
+resolved owner/property snapshot and the existing sole clipboard publication path;
+it does not mutate global selection to manufacture an action target. Focused Paste
+accepts a single-property key payload, derives current canonical owner time,
+checks the complete extent and uses the existing atomic author transaction.
+It creates fresh author IDs and publishes selection only after commit. Stale
+owners, malformed/empty/duplicate selections, incompatible payloads and late locks
+cannot silently become Clip clipboard operations. Product refusal messages retain
+locale-neutral IDs and actionable bilingual descriptions. Audio curve clipboard,
+read-only control selection and post-refresh selection integration require their
+own complete UI acceptance and remain in the professional workflow matrix.
