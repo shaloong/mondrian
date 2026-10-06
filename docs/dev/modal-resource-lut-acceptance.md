@@ -1184,3 +1184,48 @@ passed (21.26s); standalone CLAP and VST3 fixture all-target Clippy with
 `-D warnings` passed (1.47s and 2.03s). No lint suppression was added for the new
 complex-type, Range-array or nested-if findings. Clean-source rebuild and native
 matrix execution follow the implementation commit and have their own receipt.
+
+
+## Clean-source native audio group acceptance: 689aae9
+
+Clean and stable source `689aae9605b011fe74e92c32f081e234f91383ac` was rebuilt
+and qualified after the implementation commit. The native acceptance script
+requires that exact HEAD and a clean Git worktree before and after execution;
+it also verifies all 12 committed file hashes and the product/fixture hashes
+remain unchanged. Product build passed (8m39s). Every explicitly selected ignored
+test executed and passed; no zero-test filter was accepted.
+
+| Executed native gate | Result |
+| --- | --- |
+| CLAP + VST3 complete-selection interpolation / Undo / saved Redo / fresh reopen / native PCM | 2 passed, 0 failed, 0 ignored; 40.04s |
+| CLAP SDK event ranges, realtime and offline | 1 passed, 0 failed, 0 ignored; 0.79s |
+| VST3 SDK linear queues, realtime and offline | 1 passed, 0 failed, 0 ignored; 1.42s |
+| VST3 nondefault state snapshot and restored worker output | 1 passed, 0 failed, 0 ignored; 0.93s |
+| CLAP + VST3 real-WAV preview using the shared media fixture | 2 passed, 0 failed, 0 ignored; 2.33s |
+
+Qualified SHA256 identities:
+
+- Product:
+  `B2E9EE66910B513E9746C9249017B36B80157DDD7C86040A156347E6BB2E901D`
+- Owned CLAP sample-gain binary:
+  `CB2FA1B4956CEDBDA4BBAA4B24EFA2D16924820C7C7FCEB4E4881633F21FD687`
+- Owned stateful VST3 gain binary:
+  `523E714760F9BC47805B3EDE7C7FC4399AEF7D1BDEEF1DCC3832B6DA50D9907F`
+
+The named matrix includes both Auto and Continuous Bezier, locked/stale-selection
+atomic refusal, exact key identity/time/value preservation, no-op history,
+single Undo, live Redo after saving the undone state, fresh Unicode undone/edited
+archives with empty history and one consistent SQLite source asset, and native
+samplewise output under unequal realtime/offline block partitions. It requires
+absolute PCM error at most 1e-6 against canonical curve evaluation and exact
+realtime/offline PCM equality. The fixtures independently interpret SDK events;
+they contain no Mondrian curve evaluator.
+
+Implementation commit author and committer are Shalom Wang; the semantic branch
+is `feat/nle-backlog`. Strict workspace/all-target/all-feature Clippy with
+`-D warnings`, both standalone fixture all-target strict Clippy, all three fmt
+checks and Git diff checks passed before commit. This clean native audio receipt
+supersedes the candidate's audio scope, while the encoded LUT/modal/resource and
+native visual receipts retain their separately named ce3edfb/c3f5ee8 sources.
+No push was performed. The overall NLE goal remains active for the professional
+curve interaction, vendor/plugin/platform/performance and other named matrices.
