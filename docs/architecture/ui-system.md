@@ -3906,3 +3906,7 @@ Selection changes only after the single author commit; refused paste retains
 clipboard, selection, history and generation. Undo and saved Redo use normal
 author history and durable project snapshots, without serializing clipboard UI
 state or introducing a second animation interpretation.
+
+### Focused curve Cut
+
+Curve clipboard commands explicitly carry Copy, Cut or Paste plus the current complete stable selection. Exact Ctrl/Cmd+X is consumed by its focused owner, including empty selection and active drafts. Numeric intrinsic/effect curve menus dispatch the same closed owner-qualified Cut request. Capture preparation is pure: the App resolves every raw key first, then removes the group in one author transaction and publishes the sole clipboard only after success. Track locks, stale owners/keys and incomplete selections retain clipboard and history. Removed selection entries are cleared only for the addressed property; other parameter selections remain intact. Undo and saved Redo use ordinary author history; clipboard content remains transient and is cleared on fresh project reopen.

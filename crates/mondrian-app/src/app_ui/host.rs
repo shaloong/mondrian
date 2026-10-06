@@ -5714,6 +5714,108 @@ mod tests {
     }
 
     #[test]
+    fn focused_curve_cut_keeps_clip_and_removes_only_the_complete_key_group() {
+        use mondrian_core::automation::{Keyframe, PropertyMutation};
+        use mondrian_core::{PropertyHost, TimeScale};
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        use mondrian_ui_core::types::KeyCode;
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1600.0);
+        let mut state = workspace_app_state_with_timed_solid();
+        let sequence = state.active_sequence_mut_uncommitted().expect("fixture");
+        let track_id = sequence.video_tracks[0].id;
+        let clip = &mut sequence.video_tracks[0].clips[0];
+        let clip_id = clip.id;
+        let duration = clip.duration;
+        for (time, value) in [
+            (TimelineTime::ZERO, 0.25),
+            (
+                duration.checked_scale(TimeScale::new(1, 2).expect("half")).expect("middle"),
+                0.5,
+            ),
+            (duration, 0.75),
+        ] {
+            clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: mondrian_timeline::clip::Transform2D::OPACITY_PATH.into(),
+                keyframe: Keyframe::linear(time, mondrian_core::PropertyValue::Float(value)),
+            })
+            .expect("seed key");
+        }
+        state.selection.selected_clips =
+            vec![crate::app::SelectedClipRef { track_id, clip_id, is_video_track: true }];
+        let original = state.active_sequence().expect("original").clone();
+        let generation = state.project_author_generation();
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("focused-cut-owner"),
+        );
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let curve_id =
+            panel_curve_with_point_count(host.active_root(), PanelKind::Inspector, false, 3)
+                .expect("opacity curve");
+        let point = {
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let editor = tree
+                .get(curve_id)
+                .expect("curve")
+                .as_any()
+                .expect("downcast")
+                .downcast_ref::<mondrian_ui_widgets::CurveEditor>()
+                .expect("editor");
+            editor.point_position(editor.points()[1])
+        };
+        let pending = PendingUiActions::default();
+        let dispatch = |action| pending.push(action);
+        let mut router = EventRouter::new(host.active_root().id());
+        for event in [
+            UiEvent::MouseDown {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseUp {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            UiEvent::KeyDown { key: KeyCode::X, modifiers: Modifiers::ctrl() },
+        ] {
+            router.route(
+                event,
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &dispatch,
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        }
+        let sequence = host.app_state().active_sequence().expect("after Cut").clone();
+        let clip = sequence
+            .find_clip(clip_id)
+            .expect("focused curve Cut must retain its owning Clip");
+        let bag = clip.intrinsic_parameter_bag();
+        assert!(bag
+            .property(mondrian_timeline::clip::Transform2D::OPACITY_PATH)
+            .expect("opacity")
+            .channels()
+            .iter()
+            .all(|channel| channel.keyframes().is_empty()));
+        assert_eq!(
+            host.app_state().active_clipboard_kind(),
+            Some(crate::app::AppClipboardKind::AnimationKeyframes)
+        );
+        assert_eq!(host.app_state().project_author_generation(), generation + 1);
+        pending.push(Action::Undo);
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("one Undo")
+            .author_state_eq_ignoring_revision(&original));
+    }
+
+    #[test]
     fn focused_curve_paste_refresh_selects_new_group_and_preserves_keyboard_owner() {
         use mondrian_core::automation::{Keyframe, PropertyMutation};
         use mondrian_core::{PropertyHost, TimeScale};

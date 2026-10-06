@@ -2650,6 +2650,9 @@ fn focused_curve_clipboard_action(
         mondrian_ui_widgets::CurveClipboardCommand::Copy => {
             ClipCurveClipboardOperation::Copy { keyframe_ids: ids.to_vec() }
         }
+        mondrian_ui_widgets::CurveClipboardCommand::Cut => {
+            ClipCurveClipboardOperation::Cut { keyframe_ids: ids.to_vec() }
+        }
         mondrian_ui_widgets::CurveClipboardCommand::Paste => ClipCurveClipboardOperation::Paste {},
     };
     ProductAction::Clip(ClipProductAction::CurveClipboard(Box::new(
@@ -2730,6 +2733,7 @@ fn numeric_curve_editor(
         ParameterCurveGestureTarget::Audio { .. } => None,
     });
     let menu_clipboard_target = clipboard_target.clone();
+    let cut_label = localizer.text("command-edit-cut");
     let copy_label = localizer.text("command-edit-copy");
     let paste_label = localizer.text("command-edit-paste");
     let menu_model = model.clone();
@@ -2822,6 +2826,20 @@ fn numeric_curve_editor(
             if let Some((clip_id, parameter)) = &menu_clipboard_target {
                 use mondrian_ui_widgets::CurveClipboardCommand;
                 items.push(MenuItem::separator());
+                items.push(
+                    MenuItem::new(
+                        cut_label.clone(),
+                        (!ids.is_empty()).then(|| {
+                            focused_curve_clipboard_action(
+                                *clip_id,
+                                parameter,
+                                CurveClipboardCommand::Cut,
+                                ids,
+                            )
+                        }),
+                    )
+                    .with_message_id("command-edit-cut"),
+                );
                 items.push(
                     MenuItem::new(
                         copy_label.clone(),

@@ -228,14 +228,26 @@ impl AppState {
         self.capture_animation_keyframes(&property_bag, selected)
     }
 
-    /// Publish one complete selection from the caller's freshly resolved owner snapshot.
+    /// Publish one fully resolved canonical selection into the sole clipboard.
     pub(super) fn capture_animation_keyframes(
         &mut self,
         property_bag: &mondrian_core::automation::PropertyBag,
         selected: Vec<AnimationKeyframeSelection>,
     ) -> mondrian_core::Result<bool> {
-        if selected.is_empty() {
+        let Some(clipboard) = Self::prepare_animation_keyframes(property_bag, selected)? else {
             return Ok(false);
+        };
+        self.clipboard = Some(AppClipboard::AnimationKeyframes(clipboard));
+        Ok(true)
+    }
+
+    /// Resolve a complete canonical clipboard candidate without publishing UI state.
+    pub(super) fn prepare_animation_keyframes(
+        property_bag: &mondrian_core::automation::PropertyBag,
+        selected: Vec<AnimationKeyframeSelection>,
+    ) -> mondrian_core::Result<Option<AnimationClipboard>> {
+        if selected.is_empty() {
+            return Ok(None);
         }
         let stale_selection =
             || super::curve_clipboard::CurveClipboardError::InvalidSelection.into_core();
@@ -272,12 +284,9 @@ impl AppState {
             a.relative_time.cmp(&b.relative_time).then_with(|| a.property.cmp(&b.property))
         });
         if entries.is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
-        self.clipboard = Some(AppClipboard::AnimationKeyframes(AnimationClipboard {
-            entries,
-        }));
-        Ok(true)
+        Ok(Some(AnimationClipboard { entries }))
     }
 
     pub fn paste_animation_keyframes(

@@ -12,7 +12,7 @@ pub(crate) enum CurveClipboardError {
     ParameterMissing,
     #[error("Focused curve parameter does not admit animation")]
     NotAnimated,
-    #[error("Copy requires a complete unique nonempty stable key selection")]
+    #[error("Capture requires a complete unique nonempty stable key selection")]
     InvalidSelection,
     #[error("Focused curve requires compatible single-parameter keyframe clipboard content")]
     IncompatibleClipboard,
@@ -72,6 +72,12 @@ impl AppState {
             ClipCurveClipboardOperation::Copy { keyframe_ids } => {
                 property.capture_complete_keyframes(keyframe_ids).is_ok()
             }
+            ClipCurveClipboardOperation::Cut { keyframe_ids } => {
+                self.active_sequence()
+                    .and_then(|sequence| sequence.clip_track_location(payload.clip_id))
+                    .is_some_and(|location| !location.is_locked)
+                    && property.capture_complete_keyframes(keyframe_ids).is_ok()
+            }
             ClipCurveClipboardOperation::Paste {} => {
                 self.can_paste_from_app_clipboard() && self.has_animation_clipboard()
             }
@@ -93,8 +99,10 @@ impl AppState {
         if !property.descriptor.schema.is_animatable {
             return Err(CurveClipboardError::NotAnimated.into_core());
         }
+        let cut = matches!(&payload.operation, ClipCurveClipboardOperation::Cut { .. });
         match payload.operation {
-            ClipCurveClipboardOperation::Copy { keyframe_ids } => {
+            ClipCurveClipboardOperation::Copy { keyframe_ids }
+            | ClipCurveClipboardOperation::Cut { keyframe_ids } => {
                 if keyframe_ids.is_empty()
                     || keyframe_ids.iter().copied().collect::<HashSet<_>>().len()
                         != keyframe_ids.len()
@@ -102,7 +110,8 @@ impl AppState {
                     return Err(CurveClipboardError::InvalidSelection.into_core());
                 }
                 let selected = keyframe_ids
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .map(|keyframe_id| AnimationKeyframeSelection {
                         property: AnimationPropertySelection {
                             clip_id: payload.clip_id,
@@ -111,9 +120,30 @@ impl AppState {
                         keyframe_id,
                     })
                     .collect();
-                if !self.capture_animation_keyframes(&properties, selected)? {
-                    return Err(CurveClipboardError::InvalidSelection.into_core());
+                let clipboard = Self::prepare_animation_keyframes(&properties, selected)?
+                    .ok_or_else(|| CurveClipboardError::InvalidSelection.into_core())?;
+                if cut {
+                    let time = self
+                        .current_timeline_time()?
+                        .ok_or_else(|| CurveClipboardError::MissingPlayhead.into_core())?;
+                    let retain_time = clip.clamped_visual_author_time(time)?;
+                    self.mutate_clip_property(
+                        selection,
+                        PropertyMutation::RemoveKeyframes {
+                            path: path.to_owned(),
+                            keyframe_ids: keyframe_ids.clone(),
+                            retain_time,
+                        },
+                        "Cut curve keyframes",
+                    )?;
+                    let removed: HashSet<_> = keyframe_ids.into_iter().collect();
+                    self.animation_selection.selected_keyframes.retain(|key| {
+                        key.property.clip_id != payload.clip_id
+                            || key.property.property != payload.parameter
+                            || !removed.contains(&key.keyframe_id)
+                    });
                 }
+                self.clipboard = Some(AppClipboard::AnimationKeyframes(clipboard));
             }
             ClipCurveClipboardOperation::Paste {} => {
                 let Some(AppClipboard::AnimationKeyframes(clipboard)) = &self.clipboard else {
@@ -440,6 +470,189 @@ mod tests {
             .active_sequence()
             .expect("undone")
             .author_state_eq_ignoring_revision(&original));
+    }
+
+    #[test]
+    fn focused_curve_cut_refuses_without_publishing_captured_data_or_author_changes() {
+        use crate::app::product_action::{ClipProductAction, ProductAction};
+        for old_key_clipboard in [false, true] {
+            for case in 0..7 {
+                let (mut state, mut request) = clipboard_fixture();
+                if old_key_clipboard {
+                    state
+                        .dispatch_action(
+                            ProductAction::Clip(ClipProductAction::CurveClipboard(Box::new(
+                                request.clone(),
+                            )))
+                            .into_external_action(),
+                        )
+                        .expect("previous key clipboard");
+                } else {
+                    state.copy_selected_clips_to_clipboard().expect("previous Clip clipboard");
+                }
+                let ClipCurveClipboardOperation::Copy { mut keyframe_ids } = request.operation
+                else {
+                    panic!("fixture Copy")
+                };
+                match case {
+                    0 => request.clip_id = ClipId::new(),
+                    1 => {
+                        request.parameter.animation_track_id =
+                            mondrian_core::AnimationTrackId::new()
+                    }
+                    2 => keyframe_ids.push(KeyframeId::new()),
+                    3 => keyframe_ids.push(keyframe_ids[0]),
+                    4 => keyframe_ids.clear(),
+                    5 => {
+                        state.active_sequence_mut_uncommitted().expect("late lock").video_tracks
+                            [0]
+                        .is_locked = true
+                    }
+                    _ => state.selection.selected_clips.clear(),
+                }
+                request.operation = ClipCurveClipboardOperation::Cut { keyframe_ids };
+                let before = state.active_sequence().expect("before").clone();
+                let clipboard = state.clipboard.clone();
+                let selected = state.animation_selection.selected_keyframes.clone();
+                let active = state.active_animation_property_address(request.clip_id).cloned();
+                let generation = state.project_author_generation();
+                let history = state.authoring_history().expect("history").diagnostics();
+                assert!(!state.curve_clipboard_available(&request));
+                state
+                    .dispatch_action(
+                        ProductAction::Clip(ClipProductAction::CurveClipboard(Box::new(
+                            request.clone(),
+                        )))
+                        .into_external_action(),
+                    )
+                    .expect_err("complete Cut refusal");
+                assert_clipboard_unchanged(&clipboard, &state.clipboard);
+                assert_eq!(state.active_sequence().expect("after"), &before);
+                assert_eq!(state.animation_selection.selected_keyframes, selected);
+                assert_eq!(
+                    state.active_animation_property_address(request.clip_id),
+                    active.as_ref()
+                );
+                assert_eq!(state.project_author_generation(), generation);
+                assert_eq!(
+                    state.authoring_history().expect("history").diagnostics(),
+                    history
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn focused_curve_cut_preserves_other_parameters_and_durable_saved_redo() {
+        use crate::app::product_action::{ClipProductAction, ProductAction};
+        use mondrian_timeline::clip::Transform2D;
+        let (mut state, mut request) = clipboard_fixture();
+        let ClipCurveClipboardOperation::Copy { keyframe_ids } = request.operation.clone() else {
+            panic!("Copy")
+        };
+        let bag = state
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(request.clip_id)
+            .expect("clip")
+            .intrinsic_parameter_bag();
+        let rotation = bag.property(Transform2D::ROTATION_PATH).expect("rotation");
+        let other = AnimationKeyframeSelection {
+            property: AnimationPropertySelection {
+                clip_id: request.clip_id,
+                property: rotation.address(),
+            },
+            keyframe_id: rotation.channel(0).expect("channel").keyframes()[0].id,
+        };
+        let mut selected: Vec<_> = keyframe_ids
+            .iter()
+            .map(|id| AnimationKeyframeSelection {
+                property: AnimationPropertySelection {
+                    clip_id: request.clip_id,
+                    property: request.parameter.clone(),
+                },
+                keyframe_id: *id,
+            })
+            .collect();
+        selected.push(other.clone());
+        state.set_animation_keyframe_selection(selected);
+        let original = state.active_sequence().expect("original").clone();
+        let generation = state.project_author_generation();
+        request.operation = ClipCurveClipboardOperation::Cut { keyframe_ids: keyframe_ids.clone() };
+        assert!(state.curve_clipboard_available(&request));
+        state
+            .dispatch_action(
+                ProductAction::Clip(ClipProductAction::CurveClipboard(Box::new(request.clone())))
+                    .into_external_action(),
+            )
+            .expect("targeted Cut");
+        assert_eq!(state.project_author_generation(), generation + 1);
+        let cut = state.active_sequence().expect("cut").clone();
+        let after = cut
+            .find_clip(request.clip_id)
+            .expect("owning Clip retained")
+            .intrinsic_parameter_bag();
+        assert!(after
+            .property(Transform2D::OPACITY_PATH)
+            .expect("opacity")
+            .channel(0)
+            .expect("channel")
+            .keyframes()
+            .is_empty());
+        assert_eq!(
+            after.property(Transform2D::ROTATION_PATH),
+            bag.property(Transform2D::ROTATION_PATH)
+        );
+        assert_eq!(
+            state.animation_selection.selected_keyframes,
+            HashSet::from([other])
+        );
+        let Some(AppClipboard::AnimationKeyframes(clipboard)) = &state.clipboard else {
+            panic!("key clipboard")
+        };
+        assert_eq!(clipboard.entries.len(), 2);
+        for (entry, id) in clipboard.entries.iter().zip(&keyframe_ids) {
+            assert_eq!(entry.property, request.parameter);
+            assert_eq!(
+                entry.channel_keyframes,
+                bag.property(Transform2D::OPACITY_PATH)
+                    .expect("source")
+                    .capture_complete_keyframes(&[*id])
+                    .expect("raw source")
+                    .remove(0)
+            );
+        }
+        let retained_clipboard = state.clipboard.clone();
+        assert!(state.undo_timeline().expect("one Cut Undo"));
+        assert!(state
+            .active_sequence()
+            .expect("undone")
+            .author_state_eq_ignoring_revision(&original));
+        assert_clipboard_unchanged(&retained_clipboard, &state.clipboard);
+        let directory = tempfile::tempdir().expect("archives");
+        let original_path = directory.path().join("曲线剪切撤销🙂.mdp");
+        state.save_project_file_as(original_path.clone()).expect("save undone");
+        assert!(state.can_redo_action());
+        let mut reopened = AppState::new();
+        reopened.open_project_file(original_path).expect("fresh original reopen");
+        assert!(reopened
+            .active_sequence()
+            .expect("original")
+            .author_state_eq_ignoring_revision(&original));
+        assert_eq!(reopened.active_clipboard_kind(), None);
+        assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        drop(reopened);
+        assert!(state.redo_timeline().expect("Redo after saving"));
+        assert!(state.active_sequence().expect("redone").author_state_eq_ignoring_revision(&cut));
+        assert_clipboard_unchanged(&retained_clipboard, &state.clipboard);
+        let cut_path = directory.path().join("曲线剪切重做🙂.mdp");
+        state.save_project_file_as(cut_path.clone()).expect("save Cut");
+        drop(state);
+        let mut reopened = AppState::new();
+        reopened.open_project_file(cut_path).expect("fresh Cut reopen");
+        assert!(reopened.active_sequence().expect("cut").author_state_eq_ignoring_revision(&cut));
+        assert_eq!(reopened.active_clipboard_kind(), None);
+        assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
     }
 
     fn clipboard_fixture() -> (AppState, ClipCurveClipboardPayload) {

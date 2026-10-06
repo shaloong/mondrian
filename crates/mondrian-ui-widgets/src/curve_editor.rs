@@ -164,6 +164,8 @@ pub type CurveSelectionMenu = dyn Fn(&[mondrian_core::KeyframeId]) -> Vec<MenuIt
 pub enum CurveClipboardCommand {
     /// Capture the complete selected stable key set.
     Copy,
+    /// Capture and remove the complete selected set in one author transaction.
+    Cut,
     /// Apply the current clipboard to this curve's owner.
     Paste,
 }
@@ -624,7 +626,7 @@ impl CurveEditor {
             || !(modifiers.ctrl ^ modifiers.meta)
             || modifiers.alt
             || modifiers.shift
-            || !matches!(key, KeyCode::C | KeyCode::V)
+            || !matches!(key, KeyCode::C | KeyCode::X | KeyCode::V)
         {
             return false;
         }
@@ -632,12 +634,12 @@ impl CurveEditor {
             return true;
         }
         let ids = self.selected_keyframe_ids();
-        let command = if key == KeyCode::C {
-            CurveClipboardCommand::Copy
-        } else {
-            CurveClipboardCommand::Paste
+        let command = match key {
+            KeyCode::C => CurveClipboardCommand::Copy,
+            KeyCode::X => CurveClipboardCommand::Cut,
+            _ => CurveClipboardCommand::Paste,
         };
-        if (command != CurveClipboardCommand::Copy || !ids.is_empty())
+        if (command == CurveClipboardCommand::Paste || !ids.is_empty())
             && let Some(action) = callback(command, &ids)
         {
             (ctx.dispatch)(action);
@@ -6929,10 +6931,10 @@ mod tests {
         .with_keyframe_ids(ids.into_iter().map(Some).collect())
         .on_clipboard(move |command, keys| {
             copied_requests.borrow_mut().push((command, keys.to_vec()));
-            Some(if command == CurveClipboardCommand::Copy {
-                Action::Copy
-            } else {
-                Action::Paste
+            Some(match command {
+                CurveClipboardCommand::Copy => Action::Copy,
+                CurveClipboardCommand::Cut => Action::Cut,
+                CurveClipboardCommand::Paste => Action::Paste,
             })
         });
         editor.layout(Rect::new(0.0, 0.0, 480.0, 160.0));
@@ -6953,6 +6955,17 @@ mod tests {
             requests.borrow().is_empty(),
             "empty Copy cannot fall through to another owner"
         );
+        assert_eq!(
+            editor.event(
+                &UiEvent::KeyDown { key: KeyCode::X, modifiers: Modifiers::ctrl() },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        assert!(
+            requests.borrow().is_empty(),
+            "empty Cut cannot fall through to another owner"
+        );
         editor.event(
             &UiEvent::KeyDown { key: KeyCode::V, modifiers: Modifiers::ctrl() },
             &mut ctx,
@@ -6972,14 +6985,14 @@ mod tests {
             Modifiers::ctrl(),
             Modifiers { meta: true, ..Modifiers::none() },
         ] {
-            for key in [KeyCode::C, KeyCode::V] {
+            for key in [KeyCode::C, KeyCode::X, KeyCode::V] {
                 assert_eq!(
                     editor.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
                     EventResult::Handled
                 );
             }
         }
-        assert_eq!(requests.borrow().len(), 4);
+        assert_eq!(requests.borrow().len(), 6);
         assert!(requests.borrow().iter().all(|(_, keys)| keys == &ids));
         assert_eq!(editor.points(), original);
         requests.borrow_mut().clear();
@@ -7006,7 +7019,7 @@ mod tests {
             &mut ctx,
         );
         assert!(editor.has_active_pointer_interaction());
-        for key in [KeyCode::C, KeyCode::V] {
+        for key in [KeyCode::C, KeyCode::X, KeyCode::V] {
             assert_eq!(
                 editor.event(
                     &UiEvent::KeyDown { key, modifiers: Modifiers::ctrl() },

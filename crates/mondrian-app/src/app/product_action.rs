@@ -2701,6 +2701,11 @@ pub enum ClipCurveClipboardOperation {
         /// Stable authored identities in the addressed property.
         keyframe_ids: Vec<KeyframeId>,
     },
+    /// Capture and remove the complete group in one author transaction.
+    Cut {
+        /// Stable authored identities in the addressed property.
+        keyframe_ids: Vec<KeyframeId>,
+    },
     /// Paste at the current playhead into exactly the addressed property.
     Paste {},
 }
@@ -3935,6 +3940,7 @@ mod tests {
                 .expect("parameter ID"),
         };
         for operation in [
+            ClipCurveClipboardOperation::Cut { keyframe_ids: vec![KeyframeId::new()] },
             ClipCurveClipboardOperation::Copy { keyframe_ids: vec![KeyframeId::new()] },
             ClipCurveClipboardOperation::Paste {},
         ] {
@@ -3957,7 +3963,7 @@ mod tests {
             assert!(
                 ProductAction::decode_external(&Action::Custom { namespace, name, payload })
                     .is_err(),
-                "Copy and Paste both reject unknown operation fields"
+                "Copy, Cut and Paste reject unknown operation fields"
             );
         }
     }

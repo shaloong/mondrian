@@ -1,5 +1,32 @@
 # Modal, resource and LUT acceptance
 
+## Focused visual curve Cut and atomic clipboard publication
+
+The actual Host/EventRouter Ctrl+A then Ctrl+X regression retained the Clip but
+failed to remove its selected curve keys (0 passed, 1 failed, 2.84 s). The closed
+curve command now carries Cut with the exact Clip, parameter instance and stable
+key IDs. Capture prepares the complete canonical clipboard without publishing;
+one author transaction removes the group, then publishes clipboard and selection.
+Empty selection and pointer drafts consume the focused chord. The local numeric
+curve menu uses the same command. No global Clip fallback or second clipboard
+authority was added.
+
+The same Host regression passed after the fix (1 passed, 0 failed, 2.70 s),
+including owning Clip retention, complete key removal, one generation advance and
+one restoring Undo. Additional closed-command tests cover seven refusal cases
+with both old clipboard kinds, preserving project, clipboard, selection and
+history. A separate case preserves another parameter's selected key and verifies
+Undo, an undone Unicode save, live Redo after save, a redone save and fresh reopen
+of both documents with empty transient history and clipboard.
+
+Final App all-feature library suite: **2585 passed, 0 failed, 68 ignored**,
+346.89 s. Changed CurveEditor module: **87 passed, 0 failed, 0 ignored**, 2.29 s;
+this is the module filter, not the entire widgets suite. Strict workspace,
+all-target, all-feature Clippy with `-D warnings` passed in 2 min 32 s.
+Native/encoded qualification below remains bound to its named source until the
+new Cut source receives a rebuilt clean-source receipt. Root Edit menu focus,
+audio clipboard and read-only interaction remain open in the overall goal.
+
 ## Canonical visual clipboard and durable history
 
 The actual focused Copy/Paste regression reproduced narrowing of canonical
@@ -36,7 +63,7 @@ Final qualification of this implementation completed with:
   no lint allowance was added.
 
 These source tests do not replace the clean-source native/encoded receipt below.
-The wider professional goal remains active: audio and focused Cut/root-menu
+The wider professional goal remains active: audio and focused root-menu
 clipboard routing, read-only curve interaction, group pointer workflows and the
 remaining plugin/platform/performance/tracking/locale matrices still require
 their own implementation and evidence.

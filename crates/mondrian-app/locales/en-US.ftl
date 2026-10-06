@@ -1479,4 +1479,4 @@ error-curve-clipboard-empty = The keyframe clipboard is empty.
 error-curve-clipboard-missing-playhead = Select a sequence and position the playhead before pasting.
 error-curve-clipboard-out-of-bounds = The whole key group must fit inside the target clip. Move the playhead or select fewer keys.
 
-curve-editor-visual-clipboard-keyboard-help = { curve-editor-selection-keyboard-help } Ctrl/Cmd+C: copy the selected keys; Ctrl/Cmd+V: paste into this curve at the playhead in one Undo.
+curve-editor-visual-clipboard-keyboard-help = { curve-editor-selection-keyboard-help } Ctrl/Cmd+C: copy the selected keys; Ctrl/Cmd+X: cut the selected keys in one Undo; Ctrl/Cmd+V: paste into this curve at the playhead in one Undo.
