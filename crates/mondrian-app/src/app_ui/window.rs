@@ -7174,7 +7174,7 @@ fn prepare_viewer_gpu_preview(
         }
         session.program_scopes_refresh_requested = true;
     }
-    let Some(preparation) = host.viewer_gpu_preparation() else {
+    let Some(preparation) = host.viewer_gpu_preparation(Instant::now()) else {
         finish_prepare!();
     };
     let backend_plan = match viewer_program_backend_preparation(host, session) {

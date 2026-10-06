@@ -573,27 +573,43 @@ impl AppUiHost {
     }
 
     /// Select current presentation or ticketless successor preparation.
-    pub(crate) fn viewer_gpu_preparation(&self) -> Option<ViewerGpuPreparation> {
+    pub(crate) fn viewer_gpu_preparation(
+        &self,
+        observed_at: Instant,
+    ) -> Option<ViewerGpuPreparation> {
         // Consuming the current ticket must not close the existing speculative
         // successor lane: priming waits for that physical preparation.
-        let successor_only = {
+        let (current_pending, successor_only) = {
             let state = self.app_state.borrow();
-            state.pending_playback_frame_demand_identity().is_none()
-                && state.preview_successor_execution_request(Instant::now()).is_some()
+            let current_pending = state.pending_playback_frame_demand_identity().is_some();
+            (
+                current_pending,
+                !current_pending
+                    && state.preview_successor_execution_request(observed_at).is_some(),
+            )
         };
         if successor_only {
             Some(ViewerGpuPreparation::Successor)
+        } else if current_pending
+            && self
+                .prepared_current_window_preview(PreviewPresentationCarrier::ExternalGpu)
+                .is_some_and(|(_, _, artifact_was_visible)| artifact_was_visible)
+        {
+            // Preserve the ticket until the Window can validate its physical
+            // slot and continuous visibility. This only selects that owner;
+            // a new GPU execution still takes the ordinary expiry preflight.
+            Some(ViewerGpuPreparation::Current)
         } else {
-            self.preflight_pending_viewer_gpu_presentation()
+            self.preflight_pending_viewer_gpu_presentation(observed_at)
                 .then_some(ViewerGpuPreparation::Current)
         }
     }
 
     /// Consume an already-expired current demand before the Window builds a
     /// Viewer candidate.
-    pub(crate) fn preflight_pending_viewer_gpu_presentation(&self) -> bool {
+    pub(crate) fn preflight_pending_viewer_gpu_presentation(&self, observed_at: Instant) -> bool {
         let preflight =
-            self.app_state.borrow_mut().preflight_pending_frame_presentation(Instant::now());
+            self.app_state.borrow_mut().preflight_pending_frame_presentation(observed_at);
         match preflight {
             // No candidate has been built or published at this admission seam.
             // A consumed demand blocks new work without invalidating the
@@ -3502,6 +3518,105 @@ mod tests {
     }
 
     #[test]
+    fn current_visible_gpu_output_reaches_its_owner_before_expiry_preflight() {
+        for exact_visible in [true, false] {
+            let mut state = workspace_app_state_with_timed_solid();
+            state.active_sequence_mut_uncommitted().expect("Sequence").video_tracks[0].clips[0]
+                .is_disabled = false;
+            state.play().expect("prime playback");
+            let host = AppUiHost::new_with_preferences_path(
+                state,
+                AppUiPreferences::default(),
+                temp_preferences_path("current-visible-before-preflight"),
+            );
+            let PreviewGpuFrameState::Ready(frame) = host.gpu_preview_frame_for_current_state()
+            else {
+                panic!("generated solid has a real GPU plan");
+            };
+            let presentation =
+                ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
+                    .expect("valid presentation");
+            assert!(matches!(
+                host.set_external_viewer_frame(&frame, "continuous-output", presentation),
+                FramePresentationDisposition::Presented(_)
+            ));
+            let boundary_at = {
+                let mut state = host.app_state.borrow_mut();
+                assert!(state.observe_video_preroll(0, 0));
+                let boundary_at = state.playback_next_wake_deadline().expect("frame boundary");
+                assert!(state.advance_playback_clock_at(boundary_at).requires_refresh());
+                assert_eq!(state.current_frame(), 1);
+                boundary_at
+            };
+            host.last_playback_frame_advance_at.set(Some(boundary_at));
+            host.refresh_window_preview_state();
+            let pending = host
+                .app_state
+                .borrow()
+                .pending_playback_frame_demand_identity()
+                .expect("new timed demand");
+            let expired_at = boundary_at + Duration::from_secs(10);
+            assert!(host
+                .app_state
+                .borrow()
+                .playback_frame_deadline_at(expired_at)
+                .is_some_and(|deadline| deadline < expired_at));
+            if !exact_visible {
+                host.window_preview_state.replace(ViewerPreviewState::Stale(
+                    ViewerFrameContent::ExternalTexture(
+                        ViewerExternalTextureFrame::new_spatial(
+                            "different-physical-output",
+                            frame.width,
+                            frame.height,
+                            presentation,
+                        )
+                        .expect("different retained output"),
+                    ),
+                ));
+            }
+            let before = host.app_state.borrow().playback_evidence_report();
+            if exact_visible {
+                assert_eq!(
+                    host.viewer_gpu_preparation(expired_at),
+                    Some(ViewerGpuPreparation::Current),
+                    "expiry cannot consume a ticket before the Window can confirm continuous visibility",
+                );
+                assert_eq!(
+                    host.app_state.borrow().pending_playback_frame_demand_identity(),
+                    Some(pending)
+                );
+                assert_eq!(host.app_state.borrow().playback_evidence_report(), before);
+                let PreviewGpuFrameState::Current(candidate) =
+                    host.gpu_preview_frame_for_current_state()
+                else {
+                    panic!("same solid must retain its exact physical artifact");
+                };
+                assert!(candidate.was_already_visible());
+                assert!(matches!(
+                    host.present_current_viewer_output(
+                        candidate,
+                        PreviewPresentationCarrier::ExternalGpu,
+                    ),
+                    FramePresentationDisposition::Presented(_)
+                ));
+                assert!(host.app_state.borrow().pending_playback_frame_demand_identity().is_none());
+                assert_eq!(
+                    host.app_state.borrow().playback_evidence_report().deliveries.late,
+                    before.deliveries.late
+                );
+            } else {
+                assert_eq!(host.viewer_gpu_preparation(expired_at), None);
+                assert!(host.app_state.borrow().pending_playback_frame_demand_identity().is_none());
+                assert_eq!(
+                    host.app_state.borrow().playback_evidence_report().deliveries.late,
+                    before.deliveries.late + 1,
+                    "a different artifact keeps the ordinary expiry contract"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn settled_gpu_preparation_does_not_self_schedule_preview_refresh() {
         let host = workspace_host_without_preview_workers("settled-gpu-preparation");
         let ticket = {
@@ -3529,7 +3644,7 @@ mod tests {
         host.preview_dirty.set(false);
 
         for _ in 0..1_000 {
-            assert_eq!(host.viewer_gpu_preparation(), None);
+            assert_eq!(host.viewer_gpu_preparation(Instant::now()), None);
             assert!(
                 !host.has_pending_ui_refresh(),
                 "no candidate can require another redraw"
@@ -3717,7 +3832,7 @@ mod tests {
             temp_preferences_path("priming-successor"),
         );
         assert_eq!(
-            host.viewer_gpu_preparation(),
+            host.viewer_gpu_preparation(Instant::now()),
             Some(ViewerGpuPreparation::Successor)
         );
         assert!(
@@ -3744,7 +3859,7 @@ mod tests {
             Some(ticket),
             "CPU model projection must not settle the picture before the Window GPU owner submits it",
         );
-        assert!(host.preflight_pending_viewer_gpu_presentation());
+        assert!(host.preflight_pending_viewer_gpu_presentation(Instant::now()));
         assert!(!matches!(
             &*host.window_preview_state.borrow(),
             ViewerPreviewState::Ready(ViewerFrameContent::Raster(_)),
@@ -3795,7 +3910,7 @@ mod tests {
         assert_eq!(state.playback_diagnostic_snapshot(), before);
         drop(state);
         assert_eq!(
-            host.viewer_gpu_preparation(),
+            host.viewer_gpu_preparation(Instant::now()),
             Some(ViewerGpuPreparation::Current)
         );
         assert_eq!(
@@ -3838,7 +3953,7 @@ mod tests {
         assert_eq!(host.app_state.borrow().current_frame(), 4);
         assert!(!host.app_state.borrow().is_playing());
         assert_eq!(
-            host.viewer_gpu_preparation(),
+            host.viewer_gpu_preparation(Instant::now()),
             Some(ViewerGpuPreparation::Current)
         );
         assert_eq!(
@@ -4583,7 +4698,7 @@ mod tests {
             "production Preview has a ready transparent picture"
         );
         assert_eq!(
-            host.viewer_gpu_preparation(),
+            host.viewer_gpu_preparation(Instant::now()),
             Some(ViewerGpuPreparation::Current),
             "payload-free Widget Loading must not veto an exact production candidate"
         );
@@ -4617,7 +4732,7 @@ mod tests {
 
         assert!(host.app_state.borrow().is_playing());
         assert_eq!(
-            host.viewer_gpu_preparation(),
+            host.viewer_gpu_preparation(Instant::now()),
             Some(ViewerGpuPreparation::Current)
         );
 
@@ -5417,14 +5532,14 @@ mod tests {
             AppUiPreferences::default(),
             temp_preferences_path("returned-window-ticket-second"),
         );
-        assert_eq!(host.viewer_gpu_preparation(), None);
+        assert_eq!(host.viewer_gpu_preparation(Instant::now()), None);
         host.renew_still_frame_demand_after_output_retirement()
             .expect("bind the next physical Window carrier");
         let new = host.app_state().pending_playback_frame_demand_identity().expect("new ticket");
         assert_ne!(new, old.identity());
         assert_eq!(host.app_state().playback_diagnostic_snapshot(), before);
         assert_eq!(
-            host.viewer_gpu_preparation(),
+            host.viewer_gpu_preparation(Instant::now()),
             Some(ViewerGpuPreparation::Current)
         );
         assert_eq!(
