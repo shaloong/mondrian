@@ -187,7 +187,12 @@ pub(crate) fn paint_widget(widget: &dyn Widget, clip_rect: Rect) -> RecordingEnc
     let theme = theme();
     let mut encoder = RecordingEncoder::default();
     {
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         widget.paint(&mut ctx);
         widget.paint_overlay(&mut ctx);
     }

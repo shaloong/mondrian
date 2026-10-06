@@ -348,6 +348,7 @@ impl WinitUiRuntime {
         clip_rect: Rect,
         cursor: Point,
         router: &EventRouter,
+        pixels_per_point: f32,
     ) {
         let tooltip_visible = router.current_tooltip().is_some();
         if let Some(state) = router.current_tooltip().cloned() {
@@ -367,7 +368,7 @@ impl WinitUiRuntime {
                     );
                 }
                 ShellOverlayLayer::Tooltip => {
-                    let mut ctx = PaintContext { encoder, theme, clip_rect };
+                    let mut ctx = PaintContext { encoder, theme, clip_rect, pixels_per_point };
                     self.tooltip.paint_overlay(&mut ctx);
                 }
             }

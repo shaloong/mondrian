@@ -744,6 +744,7 @@ mod tests {
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
         let mut encoder = crate::test_utils::RecordingEncoder::default();
         surface.paint(&mut PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: surface.bounds,

@@ -277,6 +277,7 @@ mod tests {
     fn paint_label(label: &Label, theme: &mondrian_ui_theme::Theme) -> Vec<TextCommand> {
         let mut recorder = Recorder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut recorder,
             theme,
             clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
@@ -295,7 +296,12 @@ mod tests {
         clip_rect: Rect,
     ) -> Recorder {
         let mut recorder = Recorder::default();
-        let mut ctx = PaintContext { encoder: &mut recorder, theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut recorder,
+            theme,
+            clip_rect,
+        };
         label.paint(&mut ctx);
         recorder
     }

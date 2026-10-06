@@ -550,6 +550,7 @@ mod tests {
         let mut recorder = Recorder::default();
         let theme = ThemePreset::Dark.build();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut recorder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 1000.0, 200.0),
@@ -581,6 +582,7 @@ mod tests {
         let mut recorder = Recorder::default();
         let theme = ThemePreset::Dark.build();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut recorder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 1000.0, 200.0),

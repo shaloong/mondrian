@@ -1758,7 +1758,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 120.0, 80.0);
         let mut encoder = RecordingEncoder::default();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         d.paint(&mut ctx);
 
         assert_eq!(
@@ -1782,7 +1787,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 120.0, 80.0);
         let mut encoder = RecordingEncoder::default();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         d.paint(&mut ctx);
 
         assert_eq!(
@@ -1848,13 +1858,23 @@ mod tests {
 
         let mut encoder = RecordingEncoder::default();
         {
-            let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+            let mut ctx = PaintContext {
+                pixels_per_point: 1.0,
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect,
+            };
             d.paint(&mut ctx);
         }
         assert_eq!(encoder.rects.len(), 1);
         assert_eq!(encoder.triangles, 1);
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         d.paint_overlay(&mut ctx);
         assert!(
             encoder.rects.len() > 1,
@@ -1883,6 +1903,7 @@ mod tests {
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut paint_ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 180.0, 150.0),
@@ -1953,7 +1974,12 @@ mod tests {
             let theme = mondrian_ui_theme::ThemePreset::Dark.build();
             let mut encoder = RecordingEncoder::default();
 
-            let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+            let mut ctx = PaintContext {
+                pixels_per_point: 1.0,
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect,
+            };
             d.paint_overlay(&mut ctx);
 
             assert!(encoder.rects.is_empty());
@@ -1970,7 +1996,12 @@ mod tests {
         let mut encoder = RecordingEncoder::default();
         let popup = Rect::new(20.0, 30.0, 120.0, 64.0);
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         paint_menu_popup_chrome(&mut ctx, popup);
 
         assert_eq!(encoder.soft_shadows.len(), 3);
@@ -2010,7 +2041,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 200.0, 120.0);
         let mut encoder = RecordingEncoder::default();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         d.paint_overlay(&mut ctx);
 
         assert!(encoder.texts.iter().any(|text| text == "Disabled"));
@@ -2023,7 +2059,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 120.0, 80.0);
         let mut encoder = RecordingEncoder::default();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         paint_menu_row(
             &mut ctx,
             Rect::new(10.0, 20.0, 64.0, 24.0),
@@ -2054,7 +2095,12 @@ mod tests {
         let mut encoder = RecordingEncoder::default();
         let icon = test_icon();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         paint_menu_row(
             &mut ctx,
             Rect::new(10.0, 20.0, 128.0, 24.0),
@@ -2078,7 +2124,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 180.0, 80.0);
         let mut encoder = RecordingEncoder::default();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         paint_menu_row(
             &mut ctx,
             Rect::new(10.0, 20.0, 128.0, 28.0),
@@ -2104,7 +2155,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 220.0, 80.0);
         let mut encoder = RecordingEncoder::default();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         paint_menu_row(
             &mut ctx,
             Rect::new(10.0, 20.0, 160.0, 24.0),
@@ -2180,7 +2236,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 200.0, 140.0);
         let mut encoder = RecordingEncoder::default();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         d.paint_overlay(&mut ctx);
 
         assert_eq!(encoder.texts, vec!["Open".to_string(), "Save".to_string()]);

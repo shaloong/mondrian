@@ -1188,6 +1188,7 @@ mod tests {
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
         let mut encoder = StartupPaintRecorder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT),
@@ -1221,6 +1222,7 @@ mod tests {
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
         let mut encoder = StartupPaintRecorder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT),
@@ -1256,6 +1258,7 @@ mod tests {
         ));
         let mut rows_encoder = StartupPaintRecorder::default();
         let mut rows_ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut rows_encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT),

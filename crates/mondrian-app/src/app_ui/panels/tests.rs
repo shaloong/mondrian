@@ -6869,7 +6869,7 @@ fn viewer_anchor_gesture_emits_one_atomic_stable_address_action() {
     let expected = model.clip_transform.as_ref().expect("transform projection").clone();
     let mut viewer = viewer_panel(&model);
     viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
-    let canvas = viewer.presentation_geometry().expect("visible canvas").canvas_rect;
+    let canvas = viewer.presentation_geometry(1.0).expect("visible canvas").canvas_rect;
     let anchor = Point::new(canvas.x, canvas.y);
     let end = Point::new(anchor.x + 20.0, anchor.y + 10.0);
     let actions = RefCell::new(Vec::new());

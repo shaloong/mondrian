@@ -4279,16 +4279,19 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         let mut encoder = DrawEncoder::new();
                         let theme = mondrian_ui_theme::current_theme();
                         let b = session.current_bounds.get();
+                        let pixels_per_point =
+                            UiWindowCoordinates::from_window(&session.window).pixels_per_point();
                         if session.role == AppUiWindowRole::Workspace {
                             encoder.draw_rect(b, theme.colors.background, 0.0);
                         }
-                        TreeWalker::paint_clipped(host.active_root(), &mut encoder, &theme, b);
+                        TreeWalker::paint_clipped(host.active_root(), &mut encoder, &theme, b, pixels_per_point);
                         session.ui_runtime.paint_shell_overlays(
                             &mut encoder,
                             &theme,
                             b,
                             session.last_cursor,
                             &session.router,
+                            pixels_per_point,
                         );
                         let frame_result = frame.paint(|acquired| {
                             session.frame_renderer.render_acquired_draw_commands(
@@ -4296,10 +4299,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
                                 queue,
                                 acquired,
                                 &session.config,
-                                encoder.finish_scaled(
-                                    UiWindowCoordinates::from_window(&session.window)
-                                        .pixels_per_point(),
-                                ),
+                                encoder.finish_scaled(pixels_per_point),
                             )
                         });
                         if matches!(frame_result, crate::app_ui::rendering::AppUiFrameResult::Reconfigured { .. }) {
@@ -7140,7 +7140,8 @@ fn prepare_viewer_gpu_preview(
         host.request_viewer_cpu_fallback(fallback_reason);
         finish_prepare!();
     }
-    let Some(presentation_geometry) = host.viewer_presentation_geometry() else {
+    let pixels_per_point = UiWindowCoordinates::from_window(&session.window).pixels_per_point();
+    let Some(presentation_geometry) = host.viewer_presentation_geometry(pixels_per_point) else {
         clear_viewer_spatial_presentation(session, host);
         session.viewer_gpu_output_telemetry.record_unavailable_skip();
         finish_prepare!();

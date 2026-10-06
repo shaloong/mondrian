@@ -7723,7 +7723,7 @@ fn run_headless_playback_resize_probe(
         let bounds = Rect::new(0.0, 0.0, width, height);
         context.root.refresh_playback_frame_from_app_state(state, None);
         TreeWalker::layout(&mut context.root, bounds);
-        let geometry = crate::app_ui::shell::viewer_presentation_geometry(&context.root)
+        let geometry = crate::app_ui::shell::viewer_presentation_geometry(&context.root, 1.0)
             .context("resized production UI root omitted Viewer presentation geometry")?;
         presentation_extents.insert((
             geometry.presentation.output_width,
@@ -11139,6 +11139,6 @@ fn paint_command_count(
     bounds: Rect,
 ) -> usize {
     let mut encoder = DrawEncoder::new();
-    TreeWalker::paint_clipped(root, &mut encoder, theme, bounds);
+    TreeWalker::paint_clipped(root, &mut encoder, theme, bounds, 1.0);
     encoder.finish().len()
 }

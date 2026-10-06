@@ -1274,6 +1274,7 @@ mod tests {
         let mut encoder = RecordingEncoder::default();
         let theme = ThemePreset::Dark.build();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 300.0, 200.0),
@@ -1306,6 +1307,7 @@ mod tests {
         let mut encoder = RecordingEncoder::default();
         let theme = ThemePreset::Dark.build();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 300.0, 200.0),
@@ -1330,6 +1332,7 @@ mod tests {
         let mut encoder = RecordingEncoder::default();
         let theme = ThemePreset::Dark.build();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 320.0, 220.0),
@@ -1355,6 +1358,7 @@ mod tests {
         let mut encoder = RecordingEncoder::default();
         let theme = ThemePreset::Dark.build();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 300.0, 180.0),
@@ -1387,6 +1391,7 @@ mod tests {
         let mut encoder = RecordingEncoder::default();
         let theme = ThemePreset::Dark.build();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 300.0, 160.0),

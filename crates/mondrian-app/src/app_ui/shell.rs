@@ -2277,12 +2277,16 @@ fn update_scopes_widgets(widget: &mut dyn Widget, model: &ScopesPanelModel) -> b
 
 pub(crate) fn viewer_presentation_geometry(
     widget: &dyn Widget,
+    pixels_per_point: f32,
 ) -> Option<ViewerPresentationGeometry> {
     if let Some(viewer) = widget.as_any().and_then(|any| any.downcast_ref::<ViewerSurface>()) {
-        return viewer.presentation_geometry();
+        return viewer.presentation_geometry(pixels_per_point);
     }
     for index in 0..widget.child_count() {
-        if let Some(geometry) = widget.child(index).and_then(viewer_presentation_geometry) {
+        if let Some(geometry) = widget
+            .child(index)
+            .and_then(|child| viewer_presentation_geometry(child, pixels_per_point))
+        {
             return Some(geometry);
         }
     }
@@ -4696,6 +4700,7 @@ mod tests {
             root.refresh_playback_frame_from_app_state(&state, Some(preview));
             let mut encoder = PaintOrderRecorder::default();
             root.paint(&mut PaintContext {
+                pixels_per_point: 1.0,
                 encoder: &mut encoder,
                 theme: &theme,
                 clip_rect: bounds,
@@ -4886,6 +4891,7 @@ mod tests {
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
         let mut encoder = PaintOrderRecorder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 1280.0, 720.0),
@@ -5403,6 +5409,7 @@ mod tests {
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
         let mut encoder = PaintOrderRecorder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 1280.0, 720.0),
@@ -5436,6 +5443,7 @@ mod tests {
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         let mut encoder = PaintOrderRecorder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 1280.0, 720.0),

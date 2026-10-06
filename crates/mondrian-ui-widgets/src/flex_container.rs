@@ -361,6 +361,7 @@ mod tests {
         let mut encoder = RecordingEncoder::default();
         let theme = ThemePreset::Dark.build();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 40.0, 20.0),

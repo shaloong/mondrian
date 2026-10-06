@@ -223,9 +223,9 @@ impl ViewerExternalTexturePresentation {
 /// Current pixel-aligned Viewer presentation geometry.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViewerPresentationGeometry {
-    /// Complete sequence canvas rectangle.
+    /// Complete sequence canvas rectangle in layout points.
     pub canvas_rect: Rect,
-    /// Visible canvas intersection receiving the prefiltered texture.
+    /// Visible canvas intersection in layout points receiving the prefiltered texture.
     pub visible_rect: Rect,
     /// Stable producer/consumer spatial identity.
     pub presentation: ViewerExternalTexturePresentation,
@@ -681,7 +681,13 @@ impl ViewerSurface {
     }
 
     /// Resolve the visible, pixel-aligned spatial contract for GPU presentation.
-    pub fn presentation_geometry(&self) -> Option<ViewerPresentationGeometry> {
+    pub fn presentation_geometry(
+        &self,
+        pixels_per_point: f32,
+    ) -> Option<ViewerPresentationGeometry> {
+        if !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {
+            return None;
+        }
         let canvas_rect = self.canvas_rect();
         let visible_rect = canvas_rect.intersection(&self.canvas_viewport_rect());
         if visible_rect.width <= 0.0 || visible_rect.height <= 0.0 {
@@ -693,10 +699,20 @@ impl ViewerSurface {
             visible_rect.width / canvas_rect.width,
             visible_rect.height / canvas_rect.height,
         );
-        let output_width = visible_rect.width.round().max(1.0) as u32;
-        let output_height = visible_rect.height.round().max(1.0) as u32;
-        let presentation =
-            ViewerExternalTexturePresentation::new(output_width, output_height, source_rect)?;
+        let output_width = (visible_rect.width * pixels_per_point).round().max(1.0);
+        let output_height = (visible_rect.height * pixels_per_point).round().max(1.0);
+        if !output_width.is_finite()
+            || !output_height.is_finite()
+            || f64::from(output_width) > f64::from(u32::MAX)
+            || f64::from(output_height) > f64::from(u32::MAX)
+        {
+            return None;
+        }
+        let presentation = ViewerExternalTexturePresentation::new(
+            output_width as u32,
+            output_height as u32,
+            source_rect,
+        )?;
         Some(ViewerPresentationGeometry { canvas_rect, visible_rect, presentation })
     }
 
@@ -1199,7 +1215,7 @@ impl Widget for ViewerSurface {
                     ViewerFrameContent::ExternalTexture(frame) => match frame.presentation {
                         Some(presentation) => {
                             if let Some(geometry) = self
-                                .presentation_geometry()
+                                .presentation_geometry(ctx.pixels_per_point)
                                 .filter(|geometry| geometry.presentation == presentation)
                             {
                                 ctx.encoder.draw_external_texture(
@@ -1817,7 +1833,7 @@ mod tests {
         let mut viewer = ViewerSurface::new("Demo", 1920, 1080).with_zoom_scale(Some(1.0));
         viewer.layout(Rect::new(0.25, 0.5, 500.0, 320.0));
 
-        let geometry = viewer.presentation_geometry().expect("visible presentation");
+        let geometry = viewer.presentation_geometry(1.0).expect("visible presentation");
         let source = geometry.presentation.normalized_source_rect();
 
         assert_eq!(geometry.visible_rect.x.fract(), 0.0);
@@ -1834,6 +1850,27 @@ mod tests {
         );
         assert!(source.x > 0.0 && source.y > 0.0);
         assert!(source.width < 1.0 && source.height < 1.0);
+        for density in [1.25, 1.5, 2.0] {
+            let scaled = viewer.presentation_geometry(density).expect("physical presentation");
+            assert_eq!(scaled.canvas_rect, geometry.canvas_rect);
+            assert_eq!(scaled.visible_rect, geometry.visible_rect);
+            assert_eq!(scaled.presentation.normalized_source_rect(), source);
+            assert_eq!(
+                scaled.presentation.output_width,
+                (geometry.visible_rect.width * density).round() as u32
+            );
+            assert_eq!(
+                scaled.presentation.output_height,
+                (geometry.visible_rect.height * density).round() as u32
+            );
+            assert_ne!(
+                scaled.presentation.key_suffix(),
+                geometry.presentation.key_suffix()
+            );
+        }
+        for invalid in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::MAX] {
+            assert!(viewer.presentation_geometry(invalid).is_none());
+        }
     }
 
     #[test]
@@ -1850,6 +1887,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),
@@ -1886,6 +1924,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         viewer.paint(&mut PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: viewer.bounds,
@@ -1925,6 +1964,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),
@@ -1945,6 +1985,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),
@@ -1995,6 +2036,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),
@@ -2523,6 +2565,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 800.0, 600.0),
@@ -2550,6 +2593,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 800.0, 600.0),
@@ -2978,6 +3022,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),
@@ -3056,6 +3101,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),
@@ -3117,6 +3163,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         viewer.paint(&mut PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: bounds,
@@ -3144,6 +3191,7 @@ mod tests {
         checker.layout(bounds);
         let mut checker_encoder = RecordingEncoder::default();
         checker.paint(&mut PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut checker_encoder,
             theme: &theme,
             clip_rect: bounds,
@@ -3159,6 +3207,7 @@ mod tests {
         black.layout(bounds);
         let mut black_encoder = RecordingEncoder::default();
         black.paint(&mut PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut black_encoder,
             theme: &theme,
             clip_rect: bounds,
@@ -3179,6 +3228,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),
@@ -3209,7 +3259,7 @@ mod tests {
     fn spatial_external_texture_requires_exact_current_geometry() {
         let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080).with_zoom_scale(Some(1.0));
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
-        let geometry = viewer.presentation_geometry().expect("visible presentation");
+        let geometry = viewer.presentation_geometry(1.0).expect("visible presentation");
         let frame = ViewerExternalTextureFrame::new_spatial(
             "viewer.preview.spatial",
             1920,
@@ -3226,6 +3276,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),
@@ -3241,9 +3292,42 @@ mod tests {
             )]
         );
 
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            pixels_per_point: 2.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),
+        };
+        viewer.paint(&mut ctx);
+        assert!(
+            encoder.external_textures.is_empty(),
+            "old density must not be reused"
+        );
+        let scaled = viewer.presentation_geometry(2.0).expect("Retina presentation");
+        viewer.frame_content = Some(ViewerFrameContent::ExternalTexture(
+            ViewerExternalTextureFrame::new_spatial(
+                "viewer.preview.retina",
+                1920,
+                1080,
+                scaled.presentation,
+            )
+            .expect("Retina frame"),
+        ));
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            pixels_per_point: 2.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),
+        };
+        viewer.paint(&mut ctx);
+        assert_eq!(encoder.external_textures.len(), 1);
+
         viewer.layout(Rect::new(0.0, 0.0, 600.0, 360.0));
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 2.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 600.0, 360.0),
@@ -3268,6 +3352,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),

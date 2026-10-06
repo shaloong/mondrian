@@ -997,6 +997,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let final_clip = {
             let mut ctx = PaintContext {
+                pixels_per_point: 1.0,
                 encoder: &mut encoder,
                 theme: &theme,
                 clip_rect: Rect::new(0.0, 0.0, 100.0, 100.0),
@@ -1023,6 +1024,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let final_clip = {
             let mut ctx = PaintContext {
+                pixels_per_point: 1.0,
                 encoder: &mut encoder,
                 theme: &theme,
                 clip_rect: Rect::new(0.0, 0.0, 200.0, 200.0),
@@ -1051,6 +1053,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let visual = ScrollViewVisualTokens::from_theme(&theme);
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 400.0, 400.0),

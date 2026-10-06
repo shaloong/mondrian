@@ -224,6 +224,7 @@ mod tests {
         let visual = DialogSurfaceVisualTokens::from_theme(&theme);
         let mut recorder = Recorder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut recorder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),

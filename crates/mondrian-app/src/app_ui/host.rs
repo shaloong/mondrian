@@ -284,8 +284,9 @@ impl AppUiHost {
     /// Resolve the currently laid-out Viewer spatial presentation contract.
     pub(crate) fn viewer_presentation_geometry(
         &self,
+        pixels_per_point: f32,
     ) -> Option<mondrian_ui_widgets::ViewerPresentationGeometry> {
-        crate::app_ui::shell::viewer_presentation_geometry(self.active_root())
+        crate::app_ui::shell::viewer_presentation_geometry(self.active_root(), pixels_per_point)
     }
 
     /// Whether a demand-driven panel is the active visible workspace tab.
@@ -4278,13 +4279,27 @@ mod tests {
         TreeWalker::layout(host.active_root_mut(), bounds);
 
         let geometry = host
-            .viewer_presentation_geometry()
+            .viewer_presentation_geometry(1.0)
             .expect("laid out workspace Viewer should expose GPU presentation geometry");
 
         assert!(geometry.presentation.output_width > 0);
         assert!(geometry.presentation.output_height > 0);
         assert!(geometry.visible_rect.width > 0.0);
         assert!(geometry.visible_rect.height > 0.0);
+        let retina = host.viewer_presentation_geometry(2.0).expect("Retina Viewer geometry");
+        assert_eq!(retina.visible_rect, geometry.visible_rect);
+        assert_eq!(
+            retina.presentation.output_width,
+            geometry.presentation.output_width * 2
+        );
+        assert_eq!(
+            retina.presentation.output_height,
+            geometry.presentation.output_height * 2
+        );
+        assert_eq!(
+            retina.presentation.normalized_source_rect(),
+            geometry.presentation.normalized_source_rect()
+        );
     }
 
     #[test]
@@ -4531,10 +4546,10 @@ mod tests {
 
         assert_eq!(commands, AppUiShellCommands::default());
         assert_eq!(host.mode(), AppUiMode::Workspace);
-        assert!(host.viewer_presentation_geometry().is_none());
+        assert!(host.viewer_presentation_geometry(1.0).is_none());
         let workspace_bounds = Rect::new(0.0, 0.0, 1408.0, 736.0);
         TreeWalker::layout(host.active_root_mut(), workspace_bounds);
-        assert!(host.viewer_presentation_geometry().is_some());
+        assert!(host.viewer_presentation_geometry(1.0).is_some());
         assert!(!host.startup.has_modal());
         assert!(host.app_state().has_open_project());
         assert_eq!(
@@ -4982,7 +4997,7 @@ mod tests {
         let workspace_bounds = Rect::new(0.0, 0.0, 1408.0, 736.0);
         TreeWalker::layout(host.active_root_mut(), workspace_bounds);
         assert!(host.root().hit_test(Point::new(1400.0, 730.0)));
-        assert!(host.viewer_presentation_geometry().is_some());
+        assert!(host.viewer_presentation_geometry(1.0).is_some());
         assert_eq!(
             host.app_state().current_project_path(),
             Some(project_file.as_path())

@@ -346,6 +346,8 @@ pub struct PaintContext<'a> {
     pub theme: &'a Theme,
     /// 当前裁剪区域
     pub clip_rect: Rect,
+    /// Native Window pixels per layout point; also used by raster producers.
+    pub pixels_per_point: f32,
 }
 
 impl PaintContext<'_> {
@@ -750,6 +752,7 @@ mod tests {
         let theme: &'static Theme =
             Box::leak(Box::new(mondrian_ui_theme::ThemePreset::Dark.build()));
         PaintContext {
+            pixels_per_point: 1.0,
             encoder,
             theme,
             clip_rect: Rect::new(0.0, 0.0, 1920.0, 1080.0),

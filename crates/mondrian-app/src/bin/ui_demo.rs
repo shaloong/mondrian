@@ -1652,19 +1652,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut encoder = DrawEncoder::new();
                 let theme = mondrian_ui_theme::current_theme();
                 let b = current_bounds.get();
+                let pixels_per_point = UiWindowCoordinates::from_window(&window).pixels_per_point();
                 encoder.draw_rect(b, theme.colors.background, 0.0);
-                TreeWalker::paint_clipped(&root, &mut encoder, &theme, b);
+                TreeWalker::paint_clipped(&root, &mut encoder, &theme, b, pixels_per_point);
 
-                ui_runtime.paint_shell_overlays(&mut encoder, &theme, b, last_cursor, &router);
+                ui_runtime.paint_shell_overlays(&mut encoder, &theme, b, last_cursor, &router, pixels_per_point);
 
                 let frame_result = frame_renderer.render_draw_commands(
                     &device,
                     &queue,
                     &surface,
                     &config,
-                    encoder.finish_scaled(
-                        UiWindowCoordinates::from_window(&window).pixels_per_point(),
-                    ),
+                    encoder.finish_scaled(pixels_per_point),
                 );
                 if let Some(diagnostics) = render_diagnostic_reporter.changed_failure(frame_result)
                 {

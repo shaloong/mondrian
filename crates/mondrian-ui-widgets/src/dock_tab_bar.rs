@@ -787,6 +787,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = PaintRecorder::default();
         let mut paint_ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 320.0, 80.0),
@@ -915,6 +916,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = PaintRecorder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 200.0, 80.0),
@@ -952,6 +954,7 @@ mod tests {
         bar.hovered_tab = Some(0);
         let mut encoder = PaintRecorder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 320.0, 120.0),
