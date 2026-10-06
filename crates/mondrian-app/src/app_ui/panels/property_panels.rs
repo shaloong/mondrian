@@ -1886,12 +1886,12 @@ pub(super) fn audio_automation_curve_control(
                     preview_model.source_curve = origin.clone();
                 }
                 *preview_action.borrow_mut() = None;
-                let action = audio_automation_curve_edit_action(&preview_model, edit.clone());
-                let display_points = crate::app_ui::audio_automation::preview_audio_curve_edit(
+                let projection = crate::app_ui::audio_automation::preview_audio_curve_edit(
                     &mut preview_model,
                     edit,
                 )?;
-                *preview_action.borrow_mut() = action;
+                let display_points = projection.display_points;
+                *preview_action.borrow_mut() = Some(projection.action);
                 Some(CurvePreview {
                     virtual_boundaries: crate::app_ui::curve_tangents::virtual_boundary_points(
                         preview_model.source_curve.keyframes.iter().map(|key| key.time),

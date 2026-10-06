@@ -3791,3 +3791,20 @@ movement each validate their complete set against their own capability and point
 policies. A time-only owner therefore does not acquire group deletion merely to
 make its keys selectable. Read-only selected keys cause whole-set edit refusal,
 not silent omission or a primary-key fallback.
+
+### Audio draft admission and matching actions
+
+The audio curve model retains the definition-backed inspection contract.
+`prepare_audio_curve_edit` lowers one widget intent and admits the resulting
+exact curve through that contract. `preview_audio_curve_edit` produces an action
+and sampled display points from this one prepared candidate, installing its
+local source only after projection succeeds. The panel never separately lowers
+an action from a different curve candidate. Interpolation menus use the same
+admission before emitting an action.
+
+Illegal gain/pan controls created by constrained neighbor crossing are refused
+before preview or author dispatch. Group selection remains intact; refusal does
+not create a generation or Undo entry. Legal crossing preserves stable IDs,
+uses one author transaction, and retains normal Undo/Redo and save/reopen
+semantics. Commit resolves the current owner and definition again; a stale UI
+snapshot does not bypass current locks or author-session admission.

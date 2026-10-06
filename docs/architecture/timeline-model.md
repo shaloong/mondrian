@@ -1606,7 +1606,22 @@ Scalar audio automation and exact integer processor values consume channel zero
 of their validated canonical schema. Core enforces complete contract cardinality
 and atomic normalization for every full or sparse property write.
 
-Audio curve preview derives an immutable candidate through preview_audio_automation_curve_edit, which shares the production edit implementation and validates the input and result. This projection never publishes a transaction, generation, or history entry. The UI samples Core prepared segments once per edit and preserves owner-time and stable key identity; author admission and notifications remain in the author session.
+Audio curve inspection supplies an immutable `AudioAutomationCurveContract`
+resolved from the target definition. Its `preview_edit` admits parameter identity,
+scalar keys and absolute handle values, animation permission and interpolation
+families through the same numeric schema validator used by canonical audio
+state. Component pan curves admit both keys and controls within [-1, 1]; gain
+curves retain their declared decibel bounds. Processor curves retain the complete
+saved parameter schema, including integer and non-animatable contracts.
+
+Both UI projection and fresh author admission prepare through this contract.
+The author path publishes the prepared curve into a structurally shared Sequence
+candidate, validates the complete Audio Program, and only then commits. A preview
+never publishes a transaction, generation, or history entry. The UI samples Core
+prepared segments once per edit and returns the admitted action and geometry
+from that same candidate. Constrained handle normalization cannot leave an
+illegal preview when a key crosses a neighbor; owner time and stable key identity
+remain authoritative.
 
 ### Numeric automation ownership
 

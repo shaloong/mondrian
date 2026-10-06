@@ -82,6 +82,31 @@ pub fn gain_parameter_schema() -> ParameterSchema {
     )
 }
 
+/// Definition-backed gain admission under the owning strip/Scope/Component identity.
+pub(crate) fn gain_curve_schema(parameter_id: &'static str) -> ParameterSchema {
+    let mut schema = gain_parameter_schema();
+    schema.parameter_id = ParameterId::new_static(parameter_id);
+    schema.message_id = format!("{parameter_id}.label");
+    schema
+}
+
+/// Definition contract shared by placement pan authoring and curve preview.
+pub fn pan_parameter_schema() -> ParameterSchema {
+    ParameterSchema::v1(
+        ParameterId::new_static(CLIP_PAN_PARAMETER_ID),
+        PropertyValue::Double(0.0),
+    )
+    .with_numeric_contract(
+        ParameterUnit::Unitless,
+        ParameterNumericContract {
+            hard_range: ParameterNumericRange { min: -1.0, max: 1.0 },
+            soft_range: ParameterNumericRange { min: -1.0, max: 1.0 },
+            step: Some(0.01),
+            invalid_value_policy: ParameterInvalidValuePolicy::Reject,
+        },
+    )
+}
+
 /// Definition contract for the built-in Sample Delay's exact delay length.
 ///
 /// The value is a non-negative integer count on the active audio Evaluation
@@ -270,50 +295,7 @@ impl AudioProcessorParameter {
 
     fn validate(&self) -> Result<(), AudioAuthoringError> {
         self.ui.validate()?;
-        self.schema
-            .validate()
-            .map_err(|error| AudioAuthoringError::InvalidParameterSchema {
-                reason: error.to_string(),
-            })?;
-        if !matches!(
-            self.schema.value_type,
-            PropertyValueType::Double | PropertyValueType::Int
-        ) {
-            return Err(AudioAuthoringError::UnsupportedProcessorParameterType);
-        }
-        if self.schema.parameter_id != self.automation.parameter_id {
-            return Err(AudioAuthoringError::ParameterKeyMismatch);
-        }
-        validate_curve(&self.automation)?;
-        if !self.schema.is_animatable && !self.automation.keyframes.is_empty() {
-            return Err(AudioAuthoringError::ParameterDoesNotAdmitAutomation);
-        }
-        validate_parameter_value(&self.schema, self.automation.default_value)?;
-        for keyframe in &self.automation.keyframes {
-            validate_parameter_value(&self.schema, keyframe.value)?;
-            if let Some(handle) = keyframe.in_handle {
-                validate_parameter_value(&self.schema, keyframe.value + handle.value_offset)?;
-            }
-            if let Some(handle) = keyframe.out_handle {
-                validate_parameter_value(&self.schema, keyframe.value + handle.value_offset)?;
-            }
-        }
-        for keyframe in self
-            .automation
-            .keyframes
-            .iter()
-            .take(self.automation.keyframes.len().saturating_sub(1))
-        {
-            let interpolation = match keyframe.interpolation_to_next {
-                AutomationSegmentInterpolation::Hold => ParameterInterpolation::Hold,
-                AutomationSegmentInterpolation::Linear => ParameterInterpolation::Linear,
-                AutomationSegmentInterpolation::Bezier => ParameterInterpolation::Bezier,
-            };
-            if !self.schema.allowed_interpolations.contains(&interpolation) {
-                return Err(AudioAuthoringError::UnsupportedParameterInterpolation);
-            }
-        }
-        Ok(())
+        validate_numeric_automation(&self.schema, &self.automation)
     }
 }
 
@@ -661,7 +643,7 @@ impl AudioComponentEdit {
             ));
         }
         validate_optional_gain_curve(&self.volume_automation, CLIP_VOLUME_DB_PARAMETER_ID)?;
-        validate_optional_curve(&self.pan_automation, CLIP_PAN_PARAMETER_ID)?;
+        validate_optional_pan_curve(&self.pan_automation, self.id)?;
         for fade in [self.fades.fade_in, self.fades.fade_out].into_iter().flatten() {
             if fade.duration <= TimelineTime::ZERO || fade.duration > clip.duration {
                 return Err(AudioAuthoringError::InvalidFade(self.id));
@@ -1643,6 +1625,50 @@ fn validate_curve(curve: &ExactAutomationCurve) -> Result<(), AudioAuthoringErro
         .map_err(|error| AudioAuthoringError::InvalidAutomation { reason: error.to_string() })
 }
 
+/// Admit an exact audio curve against the same complete definition used by authoring.
+pub(crate) fn validate_numeric_automation(
+    schema: &ParameterSchema,
+    curve: &ExactAutomationCurve,
+) -> Result<(), AudioAuthoringError> {
+    schema.validate().map_err(|error| AudioAuthoringError::InvalidParameterSchema {
+        reason: error.to_string(),
+    })?;
+    if !matches!(
+        schema.value_type,
+        PropertyValueType::Double | PropertyValueType::Int
+    ) {
+        return Err(AudioAuthoringError::UnsupportedProcessorParameterType);
+    }
+    if schema.parameter_id != curve.parameter_id {
+        return Err(AudioAuthoringError::ParameterKeyMismatch);
+    }
+    validate_curve(curve)?;
+    if !schema.is_animatable && !curve.keyframes.is_empty() {
+        return Err(AudioAuthoringError::ParameterDoesNotAdmitAutomation);
+    }
+    validate_parameter_value(schema, curve.default_value)?;
+    for keyframe in &curve.keyframes {
+        validate_parameter_value(schema, keyframe.value)?;
+        if let Some(handle) = keyframe.in_handle {
+            validate_parameter_value(schema, keyframe.value + handle.value_offset)?;
+        }
+        if let Some(handle) = keyframe.out_handle {
+            validate_parameter_value(schema, keyframe.value + handle.value_offset)?;
+        }
+    }
+    for keyframe in curve.keyframes.iter().take(curve.keyframes.len().saturating_sub(1)) {
+        let interpolation = match keyframe.interpolation_to_next {
+            AutomationSegmentInterpolation::Hold => ParameterInterpolation::Hold,
+            AutomationSegmentInterpolation::Linear => ParameterInterpolation::Linear,
+            AutomationSegmentInterpolation::Bezier => ParameterInterpolation::Bezier,
+        };
+        if !schema.allowed_interpolations.contains(&interpolation) {
+            return Err(AudioAuthoringError::UnsupportedParameterInterpolation);
+        }
+    }
+    Ok(())
+}
+
 fn validate_parameter_value(
     schema: &ParameterSchema,
     value: f64,
@@ -1677,37 +1703,47 @@ fn processor_parameter_default_value(value: &PropertyValue) -> Result<f64, Audio
     }
 }
 
-fn validate_optional_curve(
+fn validate_optional_gain_curve(
     curve: &Option<ExactAutomationCurve>,
-    expected_parameter: &str,
+    expected_parameter: &'static str,
 ) -> Result<(), AudioAuthoringError> {
     if let Some(curve) = curve {
-        if curve.parameter_id.as_str() != expected_parameter {
-            return Err(AudioAuthoringError::WrongAutomationParameter {
-                expected: expected_parameter.to_owned(),
-            });
-        }
-        validate_curve(curve)?;
+        validate_numeric_automation(&gain_curve_schema(expected_parameter), curve)
+            .map_err(gain_curve_error)?;
     }
     Ok(())
 }
 
-fn validate_optional_gain_curve(
+fn validate_optional_pan_curve(
     curve: &Option<ExactAutomationCurve>,
-    expected_parameter: &str,
+    edit_id: AudioComponentEditId,
 ) -> Result<(), AudioAuthoringError> {
-    validate_optional_curve(curve, expected_parameter)?;
-    let Some(curve) = curve else {
-        return Ok(());
-    };
-    validate_gain_db(curve.default_value)?;
-    for keyframe in &curve.keyframes {
-        validate_gain_db(keyframe.value)?;
-        for handle in [keyframe.in_handle, keyframe.out_handle].into_iter().flatten() {
-            validate_gain_db(keyframe.value + handle.value_offset)?;
-        }
+    if let Some(curve) = curve {
+        validate_numeric_automation(&pan_parameter_schema(), curve)
+            .map_err(|error| pan_curve_error(error, edit_id))?;
     }
     Ok(())
+}
+
+/// Preserve the gain domain diagnostic when scalar definition admission fails.
+pub(crate) fn gain_curve_error(error: AudioAuthoringError) -> AudioAuthoringError {
+    match error {
+        AudioAuthoringError::InvalidProcessorParameterValue => AudioAuthoringError::InvalidGain,
+        other => other,
+    }
+}
+
+/// Preserve the Component identity when pan definition admission fails.
+pub(crate) fn pan_curve_error(
+    error: AudioAuthoringError,
+    edit_id: AudioComponentEditId,
+) -> AudioAuthoringError {
+    match error {
+        AudioAuthoringError::InvalidProcessorParameterValue => {
+            AudioAuthoringError::InvalidPan(edit_id)
+        }
+        other => other,
+    }
 }
 
 fn validate_gain_db(value: f64) -> Result<(), AudioAuthoringError> {
@@ -1903,9 +1939,6 @@ pub enum AudioAuthoringError {
     /// A persisted automation curve is invalid.
     #[error("invalid audio automation: {reason}")]
     InvalidAutomation { reason: String },
-    /// An automation curve used the wrong stable parameter identity.
-    #[error("audio automation must use parameter {expected}")]
-    WrongAutomationParameter { expected: String },
     /// Static, keyed, and Bezier-control gain values must fit the DSP hard range.
     #[error("audio gain must be finite and lie within the supported dB range")]
     InvalidGain,
@@ -2395,9 +2428,7 @@ mod tests {
                 &[],
                 AudioChannelLayout::Stereo
             ),
-            Err(AudioAuthoringError::WrongAutomationParameter {
-                expected: ROUTE_GAIN_DB_PARAMETER_ID.to_owned(),
-            })
+            Err(AudioAuthoringError::ParameterKeyMismatch)
         );
 
         let mut curve =

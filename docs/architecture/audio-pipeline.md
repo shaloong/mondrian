@@ -1627,3 +1627,20 @@ only one is currently bound; absent, stale or mismatched context fails explicitl
 For Inspector navigation, time clamps to the closed Clip placement extent;
 execution retains its independent half-open contribution membership. Reading
 coordinates does not mutate author state or bypass Track/Scope edit admission.
+
+### Definition admission for audio curve drafts
+
+Timeline owns one numeric automation admission implementation for gain, pan and
+Processor parameters. It validates the complete curve against its definition,
+including absolute incoming/outgoing control values, parameter identity,
+animation permission and effective interpolation families. Component pan uses
+its canonical [-1, 1] schema for persistence and author admission as well as UI
+projection. Existing typed gain/pan errors remain the target diagnostics.
+
+`AudioAutomationCurveContract` is an immutable inspection result. Preview and
+canonical author edits prepare with its `preview_edit`; only the author path
+publishes the resulting curve, after full Audio Program and lock admission.
+This closes the case where moving a Continuous Bezier endpoint across another
+key creates a newly required control outside the definition bounds. Rejection
+leaves projection, Sequence, revision and history unchanged. Execution continues
+to consume the same admitted Audio Program without a UI-specific interpretation.

@@ -37,9 +37,9 @@ pub mod visual_schedule;
 pub use audio::*;
 pub use audio_automation_edit::{
     apply_audio_automation_edit, inspect_audio_automation, AudioAutomationAddressError,
-    AudioAutomationEdit, AudioAutomationEditBlocker, AudioAutomationEditError,
-    AudioAutomationEditOutcome, AudioAutomationEditRequest, AudioAutomationInspection,
-    AudioAutomationTarget, AudioAutomationValueContract,
+    AudioAutomationCurveContract, AudioAutomationEdit, AudioAutomationEditBlocker,
+    AudioAutomationEditError, AudioAutomationEditOutcome, AudioAutomationEditRequest,
+    AudioAutomationInspection, AudioAutomationTarget, AudioAutomationValueContract,
 };
 pub use audio_automation_time::{audio_automation_author_time, AudioAutomationTimeError};
 pub use audio_channel_strip_edit::{

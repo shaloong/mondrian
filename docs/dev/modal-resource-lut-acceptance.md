@@ -1,6 +1,15 @@
 # Modal, resource and LUT acceptance
 
-## Latest qualified native-output snapshot
+## Qualification scope
+
+The latest recorded clean-source native/encoded result is
+[fda9b23 qualification](#clean-source-output-qualification-for-fda9b23).
+Subsequent sections record newer source-level tests separately. Native results
+qualify the named binary and source; they do not automatically cover later edits.
+The complete NLE goal remains active while the listed professional matrices are
+open.
+
+## Earlier qualified native-output snapshot
 
 Windows qualification on 2026-10-06 used clean, unchanged production source
 `97e82355bb92e4eb81d982c39bfad3628018cf99` and rebuilt product SHA256
@@ -565,3 +574,43 @@ This continuation does not claim that historical Golden processes exercised its
 new group operation. Dedicated native group-action/output, group value/pointer/
 interpolation, rubber-band selection and broad vendor/platform/performance
 matrices remain open. The overall NLE goal stays active.
+
+
+## Definition-backed audio preview admission (2026-10-06)
+
+A reproduced production regression showed that moving selected Continuous Bezier
+keys could turn an endpoint into an interior key and generate a new incoming
+control below the gain floor. Canonical author admission rejected the edit, but
+the UI previously installed the invalid preview. The original failure is kept
+separately from corrected results.
+
+Inspection now resolves an immutable `AudioAutomationCurveContract` from the
+actual gain, pan or Processor definition. Preview and fresh author admission use
+one numeric schema validator for parameter identity, values and absolute
+controls, animation permission and interpolation families. Author publication
+uses the prepared curve after complete Audio Program validation. UI actions and
+geometry come from the same admitted candidate. Schema-free preview APIs and a
+redundant parameter-identity diagnostic were removed; no compatibility path was
+added. Canonical pan keys and controls now admit the declared [-1, 1] range.
+
+Two Timeline contract cases cover gain, pan, Processing Scope, wrong identity,
+integer values, interpolation families and non-animatable parameters. Two App
+regressions cover the original lower-bound failure and actual Shift-click group
+selection followed by a five-frame move across a neighbor. The latter checks
+upper-bound refusal with unchanged geometry, selection, author generation and
+history, and legal crossing with stable IDs, one Undo/Redo, saved undone state
+with live Redo, and fresh Unicode project reopening with empty history.
+
+Full current-source Timeline **234/0**, audio **105/0/11 ignored**, and App
+**2566/0/63 ignored** pass. App runtime is 326.00s. This App run explicitly
+passes actual modal Tab/Shift+Tab containment and background focus restoration,
+pending resource focus after disabling confirmation, edited/cancelled/locked/
+replaced drafts, Save As directory invalidation, and real Cube LUT commit/Undo/
+saved Redo/fresh reopen/pixels. Ignored native cases are not counted as passes.
+
+Strict whole-workspace/all-targets/all-features Clippy with warnings denied
+passes (4m09s), as do final fmt and diff checks. Native/encoded qualification
+remains pinned to fda9b23;
+this source-level run does not qualify a new binary. Specific native group
+output, group value/pointer/interpolation, rubber-band selection and the broad
+vendor/platform/performance matrices remain open. The full NLE goal is active.
