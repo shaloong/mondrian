@@ -125,6 +125,8 @@ fn fs_lanczos(in: VsOut) -> @location(0) vec4<f32> {
         first = i32(floor(source_position)) - 15;
     }
 
+    var reference_coverage = 0.0;
+    var constant_coverage = true;
     var weighted = vec4<f32>(0.0);
     var weight_sum = 0.0;
     for (var tap = 0u; tap < 32u; tap = tap + 1u) {
@@ -142,11 +144,22 @@ fn fs_lanczos(in: VsOut) -> @location(0) vec4<f32> {
         if (!input_is_premultiplied) {
             sample = to_premultiplied(sample);
         }
+        if (tap == 0u) {
+            reference_coverage = sample.a;
+        } else {
+            constant_coverage = constant_coverage && sample.a == reference_coverage;
+        }
         let weight = lanczos3(f32(sample_axis) - source_position, filter_scale);
         weighted += sample * weight;
         weight_sum += weight;
     }
-    let normalized = weighted / max(abs(weight_sum), 0.0000001);
+    var normalized = weighted / max(abs(weight_sum), 0.0000001);
+    // Normalized filtering preserves a constant coverage field exactly. Even
+    // a small Float32 division error below one can lose a Float16 coverage step.
+    // Require equality of every sampled alpha; never snap varying coverage.
+    if (constant_coverage && weight_sum >= 0.0000001) {
+        normalized.a = reference_coverage;
+    }
     if (output_is_premultiplied) {
         return normalized;
     }
@@ -1107,6 +1120,38 @@ mod tests {
         }
         assert_eq!(diagnostics.prefilter_passes, 0);
         assert_eq!(diagnostics.lanczos_passes, 2);
+
+        // A normalized reconstruction must preserve constant coverage even at
+        // noninteger sample positions. A tiny error below one can become a
+        // visible coverage step when the display carrier stores Float16.
+        for alpha in [0.0, edge, 0.375, 1.0] {
+            let input = [1.25, -0.25, 0.5, alpha];
+            let Some((actual, _)) = run_spatial(
+                79,
+                63,
+                input.repeat(79 * 63),
+                ViewerSourceRect::FULL,
+                53,
+                37,
+            )
+            .await
+            else {
+                return;
+            };
+            for (pixel_index, pixel) in actual.chunks_exact(4).enumerate() {
+                assert_eq!(
+                    pixel[3], alpha,
+                    "constant coverage {alpha}, pixel {pixel_index}"
+                );
+                for channel in 0..3 {
+                    let expected = if alpha == 0.0 { 0.0 } else { input[channel] };
+                    assert!(
+                        (pixel[channel] - expected).abs() <= 2.0e-6,
+                        "constant color, pixel {pixel_index}, channel {channel}"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
