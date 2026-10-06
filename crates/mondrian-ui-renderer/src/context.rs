@@ -505,7 +505,9 @@ impl UiRenderer {
                 sample_count: UI_SAMPLE_COUNT,
                 dimension: wgpu::TextureDimension::D2,
                 format: self.presentation.ui_attachment_format(),
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                // Cleared and resolved in one pass; no sample survives that pass.
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TRANSIENT_ATTACHMENT,
                 view_formats: &[],
             });
             self.msaa_target = Some(MsaaTarget {
@@ -1254,7 +1256,27 @@ mod tests {
         encoder.pop_clip();
         encoder.draw_rect(Rect::new(12.0, 12.0, 8.0, 8.0), blue, 0.0);
 
-        let pixels = harness.render(encoder.finish());
+        let commands = encoder.finish();
+        let pixels = harness.render(commands.clone());
+        let msaa = harness.renderer.msaa_target.as_ref().expect("MSAA target");
+        assert!(msaa.view.texture().usage().contains(wgpu::TextureUsages::TRANSIENT_ATTACHMENT));
+        // Compare every resolved pixel against ordinary stored texture allocation,
+        // retaining the same 4x samples, painter order, clipping and image input.
+        let ordinary = harness.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ordinary-msaa-parity"),
+            size: wgpu::Extent3d { width: 32, height: 32, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: UI_SAMPLE_COUNT,
+            dimension: wgpu::TextureDimension::D2,
+            format: harness.renderer.presentation.ui_attachment_format(),
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        harness.renderer.msaa_target = Some(MsaaTarget {
+            size: (32, 32),
+            view: ordinary.create_view(&wgpu::TextureViewDescriptor::default()),
+        });
+        assert_eq!(pixels, harness.render(commands));
         for (x, y, expected) in [
             (4, 4, [255, 0, 0, 255]),
             (10, 10, [0, 255, 0, 255]),
@@ -2208,11 +2230,18 @@ mod tests {
         assert!(first.surface_carrier_active);
         assert!(first.surface_carrier_target_rebuilt);
 
-        let _ = harness.render(Vec::new());
+        let cleared = harness.render(Vec::new());
+        assert!(cleared.iter().all(|&channel| channel == 0));
         let second = harness.last_stats.expect("second carrier frame stats");
         assert!(second.surface_carrier_active);
         assert!(!second.surface_carrier_target_rebuilt);
         let carrier = harness.renderer.surface_carrier.as_mut().expect("P3 carrier");
+        let (msaa, composition) = carrier.attachment_views().expect("resolved carrier");
+        assert!(msaa.texture().usage().contains(wgpu::TextureUsages::TRANSIENT_ATTACHMENT));
+        assert!(!composition
+            .texture()
+            .usage()
+            .contains(wgpu::TextureUsages::TRANSIENT_ATTACHMENT));
         assert!(carrier.ensure_target(&harness.device, (17, 16), UI_SAMPLE_COUNT));
         assert!(!carrier.ensure_target(&harness.device, (17, 16), UI_SAMPLE_COUNT));
     }

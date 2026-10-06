@@ -335,7 +335,9 @@ impl UiSurfaceCarrier {
             sample_count,
             dimension: wgpu::TextureDimension::D2,
             format: COMPOSITION_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // Keep the sampled composition persistent; only MSAA is pass-local.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TRANSIENT_ATTACHMENT,
             view_formats: &[],
         });
         let msaa_view = msaa_texture.create_view(&wgpu::TextureViewDescriptor::default());
