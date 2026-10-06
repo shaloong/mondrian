@@ -3894,3 +3894,15 @@ the appropriate selection change;
 the same owner keeps widget identity, focus and viewport. A changed selection clears
 obsolete tangent selection. A different owner or author session cannot inherit the
 old view. This projection changes no author state and adds no clipboard authority.
+
+### Lossless visual curve clipboard
+
+Focused and global visual key Copy/Paste share the sole private App clipboard.
+Its transient payload stores complete canonical channel groups, preserving raw
+author values and per-channel metadata. The App renews one identity per complete
+property key and rebases exact owner time, then delegates batched admission to
+Core. Focused paste validates the entire owner extent before author publication.
+Selection changes only after the single author commit; refused paste retains
+clipboard, selection, history and generation. Undo and saved Redo use normal
+author history and durable project snapshots, without serializing clipboard UI
+state or introducing a second animation interpretation.

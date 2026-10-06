@@ -8528,7 +8528,7 @@ mod tests {
                         (
                             entry.property.clone(),
                             entry.relative_time,
-                            entry.keyframe.clone(),
+                            entry.channel_keyframes.clone(),
                         )
                     })
                     .collect::<Vec<_>>(),

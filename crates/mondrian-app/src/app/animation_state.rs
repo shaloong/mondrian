@@ -239,28 +239,32 @@ impl AppState {
         }
         let stale_selection =
             || super::curve_clipboard::CurveClipboardError::InvalidSelection.into_core();
-        let mut resolved = Vec::with_capacity(selected.len());
+        let mut owners: HashMap<_, Vec<_>> = HashMap::new();
         for selection in selected {
-            let (_, property) = property_bag
-                .property_by_address(&selection.property.property)
-                .ok_or_else(stale_selection)?;
-            let keyframe =
-                property.keyframe_by_id(selection.keyframe_id).ok_or_else(stale_selection)?;
-            resolved.push((selection, keyframe));
+            owners
+                .entry(selection.property.property)
+                .or_default()
+                .push(selection.keyframe_id);
         }
-        let anchor_time = resolved
-            .iter()
-            .map(|(_, keyframe)| keyframe.time)
-            .min()
-            .ok_or_else(stale_selection)?;
-
-        let mut entries = Vec::new();
-        for (selection, mut keyframe) in resolved {
-            keyframe.id = KeyframeId::new();
+        let mut resolved = Vec::new();
+        for (address, ids) in owners {
+            let (_, property) =
+                property_bag.property_by_address(&address).ok_or_else(stale_selection)?;
+            let groups =
+                property.capture_complete_keyframes(&ids).map_err(|_| stale_selection())?;
+            for keys in groups {
+                let time = keys.first().ok_or_else(stale_selection)?.time;
+                resolved.push((address.clone(), time, keys));
+            }
+        }
+        let anchor_time =
+            resolved.iter().map(|(_, time, _)| *time).min().ok_or_else(stale_selection)?;
+        let mut entries = Vec::with_capacity(resolved.len());
+        for (property, time, channel_keyframes) in resolved {
             entries.push(AnimationClipboardEntry {
-                property: selection.property.property,
-                relative_time: keyframe.time.checked_sub(anchor_time)?,
-                keyframe,
+                property,
+                relative_time: time.checked_sub(anchor_time)?,
+                channel_keyframes,
             });
         }
 
@@ -293,7 +297,7 @@ impl AppState {
         })?;
         let property_bag = clip.property_bag()?;
         let active_property = self.active_animation_property_address(selection.clip_id).cloned();
-        let mut mutations = Vec::with_capacity(clipboard.entries.len());
+        let mut batches: HashMap<String, Vec<_>> = HashMap::new();
         let mut selections = Vec::with_capacity(clipboard.entries.len());
 
         for entry in clipboard.entries {
@@ -327,22 +331,27 @@ impl AppState {
                         ),
                     }
                 })?;
-            let mut keyframe = entry.keyframe;
-            keyframe.id = KeyframeId::new();
-            keyframe.time = destination_clip_time.checked_add(entry.relative_time)?;
-            mutations.push(PropertyMutation::SetKeyframe {
-                path: path.to_owned(),
-                keyframe: keyframe.clone(),
-            });
+            let id = KeyframeId::new();
+            let time = destination_clip_time.checked_add(entry.relative_time)?;
+            let mut keys = entry.channel_keyframes;
+            for key in &mut keys {
+                key.id = id;
+                key.time = time;
+            }
+            batches.entry(path.to_owned()).or_default().push(keys);
             selections.push(AnimationKeyframeSelection {
                 property: AnimationPropertySelection {
                     clip_id: selection.clip_id,
                     property: destination_property,
                 },
-                keyframe_id: keyframe.id,
+                keyframe_id: id,
             });
         }
 
+        let mutations = batches
+            .into_iter()
+            .map(|(path, keyframes)| PropertyMutation::PasteCompleteKeyframes { path, keyframes })
+            .collect();
         self.mutate_clip_properties(selection, mutations, "粘贴关键帧")?;
         self.set_animation_keyframe_selection(selections);
         Ok(true)

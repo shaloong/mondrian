@@ -2329,6 +2329,45 @@ impl AnimatedProperty {
         self.keyframe_at(time)
     }
 
+    /// Capture complete stable keys without evaluating or narrowing channel values.
+    /// Missing, duplicate and channel-incomplete identities refuse the whole capture.
+    pub fn capture_complete_keyframes(
+        &self,
+        ids: &[KeyframeId],
+    ) -> Result<Vec<Vec<Keyframe<AnimationChannelValue>>>> {
+        let requested: HashSet<_> = ids.iter().copied().collect();
+        if requested.is_empty() || requested.len() != ids.len() {
+            return Err(parameter_value_error(
+                &self.descriptor.path,
+                "invalid key selection",
+            ));
+        }
+        let mut groups: HashMap<_, Vec<_>> = HashMap::with_capacity(ids.len());
+        for channel in &self.channels {
+            for key in channel.keyframes() {
+                if requested.contains(&key.id) {
+                    groups.entry(key.id).or_default().push(key.clone());
+                }
+            }
+        }
+        ids.iter()
+            .map(|id| {
+                let keys = groups.remove(id).ok_or_else(|| {
+                    parameter_value_error(&self.descriptor.path, "missing selected key")
+                })?;
+                if keys.len() != self.channel_count()
+                    || keys.iter().any(|key| key.time != keys[0].time)
+                {
+                    return Err(parameter_value_error(
+                        &self.descriptor.path,
+                        "incomplete selected key",
+                    ));
+                }
+                Ok(keys)
+            })
+            .collect()
+    }
+
     pub fn keyframe_at(&self, time: TimelineTime) -> Option<Keyframe<PropertyValue>> {
         let mut found = false;
         let mut id = None;
@@ -2577,35 +2616,7 @@ impl AnimatedProperty {
                     "author channel does not exist",
                 ));
             }
-            validate_visual_handle_coordinates(
-                &candidate.descriptor.path,
-                keyframe.interp_in,
-                keyframe.interp_out,
-            )?;
-            candidate
-                .ensure_interpolation_allowed(channel_keyframe_interpolation_type(&keyframe))?;
-            keyframe.value = match (candidate.value_type(), keyframe.value) {
-                (PropertyValueType::Int, AnimationChannelValue::Integer(value)) => {
-                    let PropertyValue::Int(value) =
-                        candidate.normalize_value(PropertyValue::Int(value))?
-                    else {
-                        return Err(parameter_value_error(
-                            &candidate.descriptor.path,
-                            "invalid integer channel value",
-                        ));
-                    };
-                    AnimationChannelValue::Integer(value)
-                }
-                (PropertyValueType::Int, _) | (_, AnimationChannelValue::Integer(_)) => {
-                    return Err(parameter_value_error(
-                        &candidate.descriptor.path,
-                        "channel scalar kind does not match its property",
-                    ));
-                }
-                (_, AnimationChannelValue::Number(value)) => AnimationChannelValue::Number(
-                    candidate.normalize_numeric_channel(channel_index, value)?,
-                ),
-            };
+            candidate.admit_channel_keyframe(channel_index, &mut keyframe)?;
             let channel = &mut candidate.channels[channel_index];
             if channel.keyframe_at(keyframe.time).is_some_and(|key| key.id != keyframe.id) {
                 return Err(parameter_value_error(
@@ -2621,6 +2632,92 @@ impl AnimatedProperty {
             candidate.animation_enabled = true;
             candidate.normalize_channels()
         })
+    }
+
+    /// Paste complete canonical keys, replacing occupied times as one atomic batch.
+    /// Channel order follows the declared schema. Values and per-channel metadata
+    /// remain canonical; constraints normalize once against the final topology.
+    /// Reusing an existing identity at another time, duplicate destinations,
+    /// incomplete groups and invalid values leave the entire property unchanged.
+    pub fn paste_complete_keyframes(
+        &mut self,
+        mut groups: Vec<Vec<Keyframe<AnimationChannelValue>>>,
+    ) -> Result<()> {
+        self.admit_channels(|candidate| {
+            let invalid =
+                || parameter_value_error(&candidate.descriptor.path, "invalid complete key batch");
+            if !candidate.descriptor.schema.is_animatable || groups.is_empty() {
+                return Err(invalid());
+            }
+            let mut ids = HashMap::with_capacity(groups.len());
+            let mut times = HashSet::with_capacity(groups.len());
+            for keys in &mut groups {
+                let first = keys.first().ok_or_else(invalid)?;
+                let (id, time) = (first.id, first.time);
+                if keys.len() != candidate.channel_count()
+                    || ids.insert(id, time).is_some()
+                    || !times.insert(time)
+                    || keys.iter().any(|key| key.id != id || key.time != time)
+                {
+                    return Err(invalid());
+                }
+                for (index, key) in keys.iter_mut().enumerate() {
+                    candidate.admit_channel_keyframe(index, key)?;
+                }
+            }
+            for (index, channel) in candidate.channels.iter_mut().enumerate() {
+                if channel
+                    .keyframes
+                    .iter()
+                    .any(|key| ids.get(&key.id).is_some_and(|time| *time != key.time))
+                {
+                    return Err(parameter_value_error(
+                        &candidate.descriptor.path,
+                        "key identity already belongs to another time",
+                    ));
+                }
+                channel.keyframes.retain(|key| !times.contains(&key.time));
+                channel.keyframes.extend(groups.iter().map(|keys| keys[index].clone()));
+                channel.keyframes.sort_by_key(|key| key.time);
+            }
+            candidate.animation_enabled = true;
+            candidate.normalize_channels()
+        })
+    }
+
+    fn admit_channel_keyframe(
+        &self,
+        channel_index: usize,
+        keyframe: &mut Keyframe<AnimationChannelValue>,
+    ) -> Result<()> {
+        validate_visual_handle_coordinates(
+            &self.descriptor.path,
+            keyframe.interp_in,
+            keyframe.interp_out,
+        )?;
+        self.ensure_interpolation_allowed(channel_keyframe_interpolation_type(keyframe))?;
+        keyframe.value = match (self.value_type(), keyframe.value) {
+            (PropertyValueType::Int, AnimationChannelValue::Integer(value)) => {
+                let PropertyValue::Int(value) = self.normalize_value(PropertyValue::Int(value))?
+                else {
+                    return Err(parameter_value_error(
+                        &self.descriptor.path,
+                        "invalid integer channel value",
+                    ));
+                };
+                AnimationChannelValue::Integer(value)
+            }
+            (PropertyValueType::Int, _) | (_, AnimationChannelValue::Integer(_)) => {
+                return Err(parameter_value_error(
+                    &self.descriptor.path,
+                    "channel scalar kind does not match its property",
+                ));
+            }
+            (_, AnimationChannelValue::Number(value)) => {
+                AnimationChannelValue::Number(self.normalize_numeric_channel(channel_index, value)?)
+            }
+        };
+        Ok(())
     }
 
     /// Atomically edit one complete property key by stable identity.
@@ -3641,6 +3738,10 @@ impl AnimatedProperty {
                 self.ensure_path(&path)?;
                 self.set_channel_keyframe(channel_index, keyframe)
             }
+            PropertyMutation::PasteCompleteKeyframes { path, keyframes } => {
+                self.ensure_path(&path)?;
+                self.paste_complete_keyframes(keyframes)
+            }
             PropertyMutation::EditKeyframe { path, keyframe_id, time, value } => {
                 self.ensure_path(&path)?;
                 ensure_value_compatible(&path, &self.descriptor.schema.default_value, &value)?;
@@ -4215,6 +4316,9 @@ impl PropertyBag {
             PropertyMutation::SetChannelKeyframe { path, channel_index, keyframe } => {
                 self.require_property_mut(&path)?.set_channel_keyframe(channel_index, keyframe)
             }
+            PropertyMutation::PasteCompleteKeyframes { path, keyframes } => {
+                self.require_property_mut(&path)?.paste_complete_keyframes(keyframes)
+            }
             PropertyMutation::EditKeyframe { path, keyframe_id, time, value } => {
                 self.edit_keyframe(&path, keyframe_id, time, value)
             }
@@ -4314,6 +4418,13 @@ pub enum PropertyMutation {
         channel_index: usize,
         /// Exact author value, identity, time and interpolation metadata.
         keyframe: Keyframe<AnimationChannelValue>,
+    },
+    /// Paste complete raw channel groups with one final-topology normalization.
+    PasteCompleteKeyframes {
+        /// Current owner-resolved property path.
+        path: String,
+        /// Each group contains every declared channel in schema order.
+        keyframes: Vec<Vec<Keyframe<AnimationChannelValue>>>,
     },
     /// Atomically change one complete key's time and value by stable identity.
     EditKeyframe {
@@ -4430,6 +4541,7 @@ impl PropertyMutation {
             Self::SetStaticValue { path, .. }
             | Self::SetKeyframe { path, .. }
             | Self::SetChannelKeyframe { path, .. }
+            | Self::PasteCompleteKeyframes { path, .. }
             | Self::EditKeyframe { path, .. }
             | Self::RemoveKeyframe { path, .. }
             | Self::RemoveKeyframes { path, .. }
@@ -4463,6 +4575,9 @@ impl PropertyMutation {
             SetKeyframe { path, keyframe } => SetKeyframe { path: f(path), keyframe },
             SetChannelKeyframe { path, channel_index, keyframe } => {
                 SetChannelKeyframe { path: f(path), channel_index, keyframe }
+            }
+            PasteCompleteKeyframes { path, keyframes } => {
+                PasteCompleteKeyframes { path: f(path), keyframes }
             }
             EditKeyframe { path, keyframe_id, time, value } => {
                 EditKeyframe { path: f(path), keyframe_id, time, value }

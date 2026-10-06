@@ -4,6 +4,9 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use std::{fs, path::Path, path::PathBuf};
 
+#[cfg(test)]
+use mondrian_core::automation::PropertyValue;
+
 use mondrian_assets::{AssetKind, AssetLibrary};
 use mondrian_audio::{
     AudioProcessorHostError, AudioProcessorPrepareRequest, AudioProcessorResolver,
@@ -14,7 +17,7 @@ use mondrian_audio::{
 use mondrian_core::{
     automation::{
         interpolation_mode_from_keyframe, AnimationParameterAddress, InterpolationType, Keyframe,
-        PropertyHost, PropertyMutation, PropertyValue,
+        PropertyHost, PropertyMutation,
     },
     events::{AppEvent, EventBus},
     types::{
@@ -384,7 +387,8 @@ pub enum AnimationBubbleHost {
 pub struct AnimationClipboardEntry {
     pub property: AnimationParameterAddress,
     pub relative_time: TimelineTime,
-    pub keyframe: Keyframe<PropertyValue>,
+    /// Complete schema-ordered canonical keys, preserving per-channel metadata.
+    pub channel_keyframes: Vec<Keyframe<mondrian_core::automation::AnimationChannelValue>>,
 }
 
 #[derive(Debug, Clone, Default)]

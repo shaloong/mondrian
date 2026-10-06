@@ -1,5 +1,46 @@
 # Modal, resource and LUT acceptance
 
+## Canonical visual clipboard and durable history
+
+The actual focused Copy/Paste regression reproduced narrowing of canonical
+`Number(0.2)` through the former `PropertyValue::Float` clipboard: expected bits
+`4596373779694328218`, observed `4596373779801702400`. This was an executed
+runtime failure (0 passed, 1 failed, 0.22 s); the earlier missing test import was
+a separate compilation failure.
+
+The sole transient clipboard now retains complete schema-ordered raw channel
+keys. Capture and Copy availability scan the selected property as one group.
+Paste renews one identity per complete key, rebases exact owner time and enters
+one author transaction. Core validates complete groups, scalar kinds, controls,
+unique destinations and identity/time ownership, merges channel lists, then
+normalizes constraints against final neighbors once. Occupied times are replaced;
+existing identities cannot move through this paste operation. Per-channel
+metadata survives without an evaluated-value reconstruction. Unadmitted channel
+indices refuse without panic or publication. The project format is unchanged.
+
+Final qualification of this implementation completed with:
+
+- Core library, integration and documentation suites: **496 passed, 0 failed,
+  1 ignored**, across 9 result summaries. Five canonical batch regressions ran,
+  including exact 0.1..0.2 Float endpoints, wide Hold integers, independent
+  channel interpolation, whole-batch refusals and 4096-key capture/publication.
+- App all-feature library suite: **2582 passed, 0 failed, 68 ignored**, 318.61 s.
+  The actual closed focused command path preserves raw `0.2` bits. Linear,
+  Auto Bezier and Continuous Bezier copy/paste cases compare values, controls,
+  flags, times and renewed IDs, one Undo, Unicode undone saves, live Redo after
+  saving, redone saves and fresh reopen with empty history/clipboard. A separate
+  actual 4096-key availability/Copy/Paste case checks every raw value, fresh IDs,
+  complete selected group, one generation advance and a single restoring Undo.
+- Strict workspace/all-targets/all-features Clippy with `-D warnings`: passed,
+  5 min 07 s. The stale production import was removed from production scope;
+  no lint allowance was added.
+
+These source tests do not replace the clean-source native/encoded receipt below.
+The wider professional goal remains active: audio and focused Cut/root-menu
+clipboard routing, read-only curve interaction, group pointer workflows and the
+remaining plugin/platform/performance/tracking/locale matrices still require
+their own implementation and evidence.
+
 ## Qualification scope
 
 The latest clean-source modal/resource and complete encoded Golden qualification is

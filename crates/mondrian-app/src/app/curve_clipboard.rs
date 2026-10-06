@@ -70,10 +70,7 @@ impl AppState {
         }
         match &payload.operation {
             ClipCurveClipboardOperation::Copy { keyframe_ids } => {
-                !keyframe_ids.is_empty()
-                    && keyframe_ids.iter().copied().collect::<HashSet<_>>().len()
-                        == keyframe_ids.len()
-                    && keyframe_ids.iter().all(|id| property.keyframe_by_id(*id).is_some())
+                property.capture_complete_keyframes(keyframe_ids).is_ok()
             }
             ClipCurveClipboardOperation::Paste {} => {
                 self.can_paste_from_app_clipboard() && self.has_animation_clipboard()
@@ -133,25 +130,32 @@ impl AppState {
                     .ok_or_else(|| CurveClipboardError::MissingPlayhead.into_core())?;
                 let destination = clip.clamped_visual_author_time(time)?;
                 let end = clip.clip_time_out()?;
-                let mut mutations = Vec::with_capacity(clipboard.entries.len());
+                let mut groups = Vec::with_capacity(clipboard.entries.len());
                 let mut selected = Vec::with_capacity(clipboard.entries.len());
                 for entry in &clipboard.entries {
-                    let mut keyframe = entry.keyframe.clone();
-                    keyframe.id = KeyframeId::new();
-                    keyframe.time = destination.checked_add(entry.relative_time)?;
-                    if keyframe.time < clip.clip_time_in || keyframe.time > end {
+                    let id = KeyframeId::new();
+                    let time = destination.checked_add(entry.relative_time)?;
+                    if time < clip.clip_time_in || time > end {
                         return Err(CurveClipboardError::OutOfBounds.into_core());
+                    }
+                    let mut keys = entry.channel_keyframes.clone();
+                    for key in &mut keys {
+                        key.id = id;
+                        key.time = time;
                     }
                     selected.push(AnimationKeyframeSelection {
                         property: AnimationPropertySelection {
                             clip_id: payload.clip_id,
                             property: payload.parameter.clone(),
                         },
-                        keyframe_id: keyframe.id,
+                        keyframe_id: id,
                     });
-                    mutations
-                        .push(PropertyMutation::SetKeyframe { path: path.to_owned(), keyframe });
+                    groups.push(keys);
                 }
+                let mutations = vec![PropertyMutation::PasteCompleteKeyframes {
+                    path: path.to_owned(),
+                    keyframes: groups,
+                }];
                 self.mutate_clip_properties(selection, mutations, "Paste curve keyframes")?;
                 self.set_animation_keyframe_selection(selected);
             }
@@ -165,6 +169,278 @@ mod tests {
     use super::*;
     use crate::app::AppMessage;
     use crate::app_ui::localization::{AppUiLocale, Localizer};
+
+    #[test]
+    fn focused_curve_clipboard_preserves_raw_channel_number_bits() {
+        use crate::app::product_action::{ClipProductAction, ProductAction};
+        use mondrian_core::automation::AnimationChannelValue;
+        use mondrian_core::PropertyHost;
+        let (mut state, mut request) = clipboard_fixture();
+        let clip = state
+            .active_sequence_mut_uncommitted()
+            .expect("fixture")
+            .find_clip_mut(request.clip_id)
+            .expect("clip");
+        let bag = clip.intrinsic_parameter_bag();
+        let mut raw = bag
+            .property(mondrian_timeline::clip::Transform2D::OPACITY_PATH)
+            .expect("opacity")
+            .channel(0)
+            .expect("canonical channel")
+            .keyframes()[0]
+            .clone();
+        raw.value = AnimationChannelValue::Number(0.2);
+        clip.apply_property_mutation(PropertyMutation::SetChannelKeyframe {
+            path: mondrian_timeline::clip::Transform2D::OPACITY_PATH.into(),
+            channel_index: 0,
+            keyframe: raw,
+        })
+        .expect("seed exact raw author value");
+        let before = state.active_sequence().expect("original").clone();
+        let source = before.find_clip(request.clip_id).expect("source").intrinsic_parameter_bag();
+        assert_eq!(
+            source
+                .property(mondrian_timeline::clip::Transform2D::OPACITY_PATH)
+                .expect("source property")
+                .channel(0)
+                .expect("source channel")
+                .keyframes()[0]
+                .value,
+            AnimationChannelValue::Number(0.2)
+        );
+        state
+            .dispatch_action(
+                ProductAction::Clip(ClipProductAction::CurveClipboard(Box::new(request.clone())))
+                    .into_external_action(),
+            )
+            .expect("focused Copy");
+        request.operation = ClipCurveClipboardOperation::Paste {};
+        state
+            .dispatch_action(
+                ProductAction::Clip(ClipProductAction::CurveClipboard(Box::new(request.clone())))
+                    .into_external_action(),
+            )
+            .expect("focused Paste");
+        let pasted = state
+            .active_sequence()
+            .expect("pasted")
+            .find_clip(request.clip_id)
+            .expect("pasted clip")
+            .intrinsic_parameter_bag();
+        let value = pasted
+            .property(mondrian_timeline::clip::Transform2D::OPACITY_PATH)
+            .expect("pasted property")
+            .channel(0)
+            .expect("pasted channel")
+            .keyframes()[0]
+            .value;
+        let AnimationChannelValue::Number(value) = value else {
+            panic!("numeric author key")
+        };
+        assert_eq!(
+            value.to_bits(),
+            0.2_f64.to_bits(),
+            "Copy/Paste must retain canonical author bits before native projection"
+        );
+    }
+
+    #[test]
+    fn focused_curve_canonical_clipboard_survives_undo_saved_redo_and_fresh_reopen() {
+        use crate::app::product_action::{ClipProductAction, ProductAction};
+        use mondrian_core::automation::{AnimationChannelValue, InterpolationType};
+        use mondrian_core::PropertyHost;
+        for mode in [
+            InterpolationType::Linear,
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let (mut state, mut request) = clipboard_fixture();
+            let clip = state
+                .active_sequence_mut_uncommitted()
+                .expect("fixture")
+                .find_clip_mut(request.clip_id)
+                .expect("clip");
+            let keys = clip
+                .intrinsic_parameter_bag()
+                .property(mondrian_timeline::clip::Transform2D::OPACITY_PATH)
+                .expect("opacity")
+                .channel(0)
+                .expect("channel")
+                .keyframes()
+                .to_vec();
+            for (key, value) in keys.iter().zip([0.1, 0.2]) {
+                let mut raw =
+                    Keyframe::from_preset(key.time, AnimationChannelValue::Number(value), mode);
+                raw.id = key.id;
+                clip.apply_property_mutation(PropertyMutation::SetChannelKeyframe {
+                    path: mondrian_timeline::clip::Transform2D::OPACITY_PATH.into(),
+                    channel_index: 0,
+                    keyframe: raw,
+                })
+                .expect("exact constrained source");
+            }
+            let original = state.active_sequence().expect("original").clone();
+            let original_keys = original
+                .find_clip(request.clip_id)
+                .expect("clip")
+                .intrinsic_parameter_bag()
+                .property(mondrian_timeline::clip::Transform2D::OPACITY_PATH)
+                .expect("opacity")
+                .channel(0)
+                .expect("channel")
+                .keyframes()
+                .to_vec();
+            let generation = state.project_author_generation();
+            state
+                .dispatch_action(
+                    ProductAction::Clip(ClipProductAction::CurveClipboard(Box::new(
+                        request.clone(),
+                    )))
+                    .into_external_action(),
+                )
+                .expect("focused Copy");
+            assert_eq!(state.project_author_generation(), generation);
+            request.operation = ClipCurveClipboardOperation::Paste {};
+            state
+                .dispatch_action(
+                    ProductAction::Clip(ClipProductAction::CurveClipboard(Box::new(
+                        request.clone(),
+                    )))
+                    .into_external_action(),
+                )
+                .expect("focused Paste");
+            assert_eq!(state.project_author_generation(), generation + 1);
+            let pasted = state.active_sequence().expect("pasted").clone();
+            let pasted_keys = pasted
+                .find_clip(request.clip_id)
+                .expect("clip")
+                .intrinsic_parameter_bag()
+                .property(mondrian_timeline::clip::Transform2D::OPACITY_PATH)
+                .expect("opacity")
+                .channel(0)
+                .expect("channel")
+                .keyframes()
+                .to_vec();
+            assert_eq!(original_keys.len(), pasted_keys.len());
+            for (old, new) in original_keys.iter().zip(&pasted_keys) {
+                assert_ne!(old.id, new.id);
+                let mut expected = old.clone();
+                expected.id = new.id;
+                assert_eq!(
+                    &expected, new,
+                    "all author metadata and raw values survive Copy/Paste"
+                );
+            }
+            assert!(state.undo_timeline().expect("single atomic Undo"));
+            assert!(state
+                .active_sequence()
+                .expect("undone")
+                .author_state_eq_ignoring_revision(&original));
+            let directory = tempfile::tempdir().expect("archives");
+            let undone_path = directory.path().join("精确曲线撤销🙂.mdp");
+            state.save_project_file_as(undone_path.clone()).expect("save undone");
+            assert!(state.can_redo_action());
+            let mut reopened = AppState::new();
+            reopened.open_project_file(undone_path).expect("fresh undone reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("original reopened")
+                .author_state_eq_ignoring_revision(&original));
+            assert_eq!(reopened.active_clipboard_kind(), None);
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            drop(reopened);
+            assert!(state.redo_timeline().expect("Redo after save"));
+            assert!(state
+                .active_sequence()
+                .expect("redone")
+                .author_state_eq_ignoring_revision(&pasted));
+            let edited_path = directory.path().join("精确曲线重做🙂.mdp");
+            state.save_project_file_as(edited_path.clone()).expect("save redone");
+            drop(state);
+            let mut reopened = AppState::new();
+            reopened.open_project_file(edited_path).expect("fresh redone reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("pasted reopened")
+                .author_state_eq_ignoring_revision(&pasted));
+            assert_eq!(reopened.active_clipboard_kind(), None);
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        }
+    }
+
+    #[test]
+    fn focused_curve_large_canonical_group_has_complete_availability_and_atomic_paste() {
+        use crate::app::product_action::{ClipProductAction, ProductAction};
+        use mondrian_core::automation::AnimationChannelValue;
+        use mondrian_core::PropertyHost;
+        let (mut state, mut request) = clipboard_fixture();
+        let groups: Vec<_> = (0..4096)
+            .map(|index| {
+                vec![Keyframe::linear(
+                    TimelineTime::new(index, 4096).expect("exact time"),
+                    AnimationChannelValue::Number(0.2),
+                )]
+            })
+            .collect();
+        let ids: Vec<_> = groups.iter().map(|keys| keys[0].id).collect();
+        let clip = state
+            .active_sequence_mut_uncommitted()
+            .expect("fixture")
+            .find_clip_mut(request.clip_id)
+            .expect("clip");
+        clip.apply_property_mutation(PropertyMutation::PasteCompleteKeyframes {
+            path: mondrian_timeline::clip::Transform2D::OPACITY_PATH.into(),
+            keyframes: groups,
+        })
+        .expect("seed canonical group as one batch");
+        request.operation = ClipCurveClipboardOperation::Copy { keyframe_ids: ids.clone() };
+        let original = state.active_sequence().expect("original").clone();
+        let generation = state.project_author_generation();
+        assert!(state.curve_clipboard_available(&request));
+        state
+            .dispatch_action(
+                ProductAction::Clip(ClipProductAction::CurveClipboard(Box::new(request.clone())))
+                    .into_external_action(),
+            )
+            .expect("complete Copy");
+        assert_eq!(state.project_author_generation(), generation);
+        request.operation = ClipCurveClipboardOperation::Paste {};
+        assert!(state.curve_clipboard_available(&request));
+        state
+            .dispatch_action(
+                ProductAction::Clip(ClipProductAction::CurveClipboard(Box::new(request.clone())))
+                    .into_external_action(),
+            )
+            .expect("complete Paste");
+        assert_eq!(state.project_author_generation(), generation + 1);
+        let bag = state
+            .active_sequence()
+            .expect("pasted")
+            .find_clip(request.clip_id)
+            .expect("clip")
+            .intrinsic_parameter_bag();
+        let keys = bag
+            .property(mondrian_timeline::clip::Transform2D::OPACITY_PATH)
+            .expect("opacity")
+            .channel(0)
+            .expect("channel")
+            .keyframes();
+        assert_eq!(keys.len(), 4096);
+        let old_ids: HashSet<_> = ids.into_iter().collect();
+        for key in keys {
+            assert!(!old_ids.contains(&key.id));
+            let AnimationChannelValue::Number(value) = key.value else {
+                panic!("numeric author value")
+            };
+            assert_eq!(value.to_bits(), 0.2_f64.to_bits());
+        }
+        assert_eq!(state.animation_selection.selected_keyframes.len(), 4096);
+        assert!(state.undo_timeline().expect("one Undo"));
+        assert!(state
+            .active_sequence()
+            .expect("undone")
+            .author_state_eq_ignoring_revision(&original));
+    }
 
     fn clipboard_fixture() -> (AppState, ClipCurveClipboardPayload) {
         use mondrian_timeline::clip::Transform2D;
@@ -223,7 +499,7 @@ mod tests {
                             (
                                 entry.property.clone(),
                                 entry.relative_time,
-                                entry.keyframe.clone(),
+                                entry.channel_keyframes.clone(),
                             )
                         })
                         .collect::<Vec<_>>()

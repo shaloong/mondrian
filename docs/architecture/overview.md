@@ -6,6 +6,16 @@ Mondrian is a native video editor organized around strict crate boundaries. The 
 
 ## Layers
 
+Canonical visual key capture returns complete schema-ordered channel groups by
+stable identity without evaluating `PropertyValue`. Clipboard capture scans each
+selected property once and retains exact `f64`/`i64` author values plus each
+channel's controls and temporal flags. `PasteCompleteKeyframes` validates the
+whole batch, replaces occupied author times, merges canonical channel lists and
+normalizes constraints once against final neighbors. Reused identities at other
+times, duplicate destinations, incomplete channels and invalid scalars refuse
+publication. The App wraps all affected properties in one author transaction;
+there is no evaluated-value clipboard alternative or persisted format migration.
+
 Core complete-key value edits address stable IDs and one declared numeric channel.
 The numeric contract derives one shared bounded displacement, retaining group
 spacing at hard limits instead of clamping each key independently. Integer source

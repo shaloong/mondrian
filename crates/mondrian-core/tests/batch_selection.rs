@@ -808,3 +808,269 @@ fn exact_selected_interpolation_refuses_invalid_sets_and_unsupported_presets_ato
         assert_eq!(curve, before, "complete refusal");
     }
 }
+
+#[test]
+fn canonical_paste_preserves_bounded_float_endpoints_and_wide_hold_integers() {
+    use mondrian_core::automation::{
+        ParameterInvalidValuePolicy, ParameterNumericContract, ParameterUnit,
+    };
+    let mut bag = PropertyBag::default();
+    bag.define(
+        PropertyDescriptor::new("gain", "Gain", PropertyValue::Float(0.125)).with_numeric_contract(
+            ParameterUnit::Normalized,
+            ParameterNumericContract::closed(0.1, 0.2, None, ParameterInvalidValuePolicy::Reject)
+                .expect("bounds"),
+        ),
+    );
+    bag.define(PropertyDescriptor::new(
+        "counter",
+        "Counter",
+        PropertyValue::Int(0),
+    ));
+    for (path, values, mode) in [
+        (
+            "gain",
+            vec![
+                AnimationChannelValue::Number(0.1),
+                AnimationChannelValue::Number(0.2),
+            ],
+            InterpolationType::Linear,
+        ),
+        (
+            "counter",
+            vec![
+                AnimationChannelValue::Integer(i64::MIN + 17),
+                AnimationChannelValue::Integer(i64::MAX - 31),
+            ],
+            InterpolationType::Hold,
+        ),
+    ] {
+        let groups: Vec<_> = values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                vec![Keyframe::from_preset(
+                    TimelineTime::new(index as i64, 7).expect("time"),
+                    *value,
+                    mode,
+                )]
+            })
+            .collect();
+        let ids: Vec<_> = groups.iter().map(|keys| keys[0].id).collect();
+        bag.apply_mutation(PropertyMutation::PasteCompleteKeyframes {
+            path: path.into(),
+            keyframes: groups.clone(),
+        })
+        .expect("canonical paste");
+        let captured = bag
+            .property(path)
+            .expect("property")
+            .capture_complete_keyframes(&ids)
+            .expect("canonical capture");
+        assert_eq!(
+            captured, groups,
+            "raw author values and metadata are not native projections"
+        );
+    }
+    let reopened: PropertyBag =
+        serde_json::from_slice(&serde_json::to_vec(&bag).expect("serialize"))
+            .expect("fresh reopen");
+    assert_eq!(reopened, bag);
+}
+
+#[test]
+fn canonical_paste_retains_independent_metadata_and_replaces_occupied_times() {
+    let mut bag = PropertyBag::default();
+    bag.define(PropertyDescriptor::new(
+        "position",
+        "Position",
+        PropertyValue::Vec2(Vec2::ZERO),
+    ));
+    let old = Keyframe::linear(TimelineTime::ZERO, PropertyValue::Vec2(Vec2::ONE));
+    bag.apply_mutation(PropertyMutation::SetKeyframe {
+        path: "position".into(),
+        keyframe: old.clone(),
+    })
+    .expect("occupied time");
+    let x = Keyframe::linear(TimelineTime::ZERO, AnimationChannelValue::Number(0.2));
+    let mut y = Keyframe::from_preset(
+        TimelineTime::ZERO,
+        AnimationChannelValue::Number(0.7),
+        InterpolationType::Hold,
+    );
+    y.id = x.id;
+    let expected = vec![x.clone(), y.clone()];
+    bag.apply_mutation(
+        PropertyMutation::PasteCompleteKeyframes {
+            path: "nested.position".into(),
+            keyframes: vec![expected.clone()],
+        }
+        .map_path(|path| path.trim_start_matches("nested.").into()),
+    )
+    .expect("mapped canonical paste");
+    let property = bag.property("position").expect("position");
+    assert!(property.capture_complete_keyframes(&[old.id]).is_err());
+    assert_eq!(
+        property.capture_complete_keyframes(&[x.id]).expect("new identity"),
+        vec![expected]
+    );
+    assert_ne!(x.interp_out, y.interp_out);
+    assert!(property.channels().iter().all(|channel| channel.keyframes().len() == 1));
+}
+
+#[test]
+fn canonical_paste_refuses_whole_invalid_batches_and_reused_identity_moves() {
+    let mut bag = PropertyBag::default();
+    bag.define(PropertyDescriptor::new(
+        "position",
+        "Position",
+        PropertyValue::Vec2(Vec2::ZERO),
+    ));
+    let mut groups = Vec::new();
+    for index in 0..2 {
+        let key = Keyframe::linear(
+            TimelineTime::new(index, 1).expect("time"),
+            PropertyValue::Vec2(Vec2::ONE),
+        );
+        let id = key.id;
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "position".into(),
+            keyframe: key,
+        })
+        .expect("seed");
+        groups.push(
+            bag.property("position")
+                .expect("position")
+                .capture_complete_keyframes(&[id])
+                .expect("capture")
+                .remove(0),
+        );
+    }
+    let before = bag.clone();
+    let mut moved = groups.clone();
+    // Swapping existing IDs across two already-occupied destinations is also a move.
+    let first_id = moved[0][0].id;
+    let second_id = moved[1][0].id;
+    for key in &mut moved[0] {
+        key.id = second_id;
+    }
+    for key in &mut moved[1] {
+        key.id = first_id;
+    }
+    let mut incomplete = groups.clone();
+    incomplete[1].pop();
+    let mut mismatched = groups.clone();
+    mismatched[1][1].id = KeyframeId::new();
+    let mut nonfinite = groups.clone();
+    nonfinite[1][1].value = AnimationChannelValue::Number(f64::NAN);
+    let mut wrong_kind = groups.clone();
+    wrong_kind[1][1].value = AnimationChannelValue::Integer(7);
+    let duplicate = vec![groups[0].clone(), groups[0].clone()];
+    let mut different_times = groups.clone();
+    different_times[1][1].time = TimelineTime::new(9, 1).expect("time");
+    for invalid in [
+        vec![],
+        incomplete,
+        mismatched,
+        nonfinite,
+        wrong_kind,
+        duplicate,
+        different_times,
+        moved,
+    ] {
+        assert!(bag
+            .apply_mutation(PropertyMutation::PasteCompleteKeyframes {
+                path: "position".into(),
+                keyframes: invalid
+            })
+            .is_err());
+        assert_eq!(
+            bag, before,
+            "valid first groups must not leak into a refused batch"
+        );
+    }
+    let property = bag.property("position").expect("position");
+    for invalid in [
+        vec![],
+        vec![first_id, first_id],
+        vec![first_id, KeyframeId::new()],
+    ] {
+        assert!(property.capture_complete_keyframes(&invalid).is_err());
+    }
+    let partial = Keyframe::linear(
+        TimelineTime::new(3, 1).expect("time"),
+        AnimationChannelValue::Number(0.2),
+    );
+    let partial_id = partial.id;
+    bag.apply_mutation(PropertyMutation::SetChannelKeyframe {
+        path: "position".into(),
+        channel_index: 1,
+        keyframe: partial,
+    })
+    .expect("independent channel key");
+    assert!(bag
+        .property("position")
+        .expect("position")
+        .capture_complete_keyframes(&[first_id, partial_id])
+        .is_err());
+}
+
+#[test]
+fn canonical_paste_large_complete_group_keeps_values_and_order_without_per_key_normalization() {
+    let mut bag = PropertyBag::default();
+    bag.define(PropertyDescriptor::new(
+        "gain",
+        "Gain",
+        PropertyValue::Float(0.0),
+    ));
+    let groups: Vec<_> = (0..4096)
+        .rev()
+        .map(|index| {
+            vec![Keyframe::linear(
+                TimelineTime::new(index, 48000).expect("sample time"),
+                AnimationChannelValue::Number(index as f64 / 4097.0),
+            )]
+        })
+        .collect();
+    let ids: Vec<_> = groups.iter().map(|keys| keys[0].id).collect();
+    bag.apply_mutation(PropertyMutation::PasteCompleteKeyframes {
+        path: "gain".into(),
+        keyframes: groups.clone(),
+    })
+    .expect("large complete paste");
+    let property = bag.property("gain").expect("gain");
+    assert!(property
+        .channel(0)
+        .expect("channel")
+        .keyframes()
+        .windows(2)
+        .all(|pair| pair[0].time < pair[1].time));
+    assert_eq!(
+        property.capture_complete_keyframes(&ids).expect("one-pass capture"),
+        groups
+    );
+}
+
+#[test]
+fn canonical_paste_refuses_malformed_channel_indices_without_panicking_or_publication() {
+    let mut bag = PropertyBag::default();
+    bag.define(PropertyDescriptor::new(
+        "gain",
+        "Gain",
+        PropertyValue::Float(0.0),
+    ));
+    let mut serialized =
+        serde_json::to_value(bag.property("gain").expect("gain")).expect("serialize");
+    serialized["channels"][0]["index"] = serde_json::json!(usize::MAX);
+    let mut malformed: mondrian_core::automation::AnimatedProperty =
+        serde_json::from_value(serialized).expect("unadmitted source");
+    assert!(malformed.validate().is_err());
+    let before = malformed.clone();
+    assert!(malformed
+        .paste_complete_keyframes(vec![vec![Keyframe::linear(
+            TimelineTime::ZERO,
+            AnimationChannelValue::Number(0.2)
+        )]])
+        .is_err());
+    assert_eq!(malformed, before);
+}
