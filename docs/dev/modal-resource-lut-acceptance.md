@@ -2,10 +2,12 @@
 
 ## Qualification scope
 
-The latest recorded clean-source native/encoded result is
+The latest clean-source native group/resource qualification is
+[18b3a82 qualification](#clean-source-native-qualification-for-18b3a82).
+The latest complete encoded Golden remains
 [fda9b23 qualification](#clean-source-output-qualification-for-fda9b23).
-Subsequent sections record newer source-level tests separately. Native results
-qualify the named binary and source; they do not automatically cover later edits.
+Source-level tests and native results qualify their named source and binary;
+they do not automatically cover later edits.
 The complete NLE goal remains active while the listed professional matrices are
 open.
 
@@ -648,3 +650,38 @@ product and fixture hashes remained stable. The source was uncommitted during
 this run, so it is not represented as a clean-source encoded qualification.
 Final strict workspace/all-target/all-feature Clippy passes (1m59s), as do fmt and diff checks. Clean committed-source native attestation follows separately.
 Complete Golden remains pinned to fda9b23, and the full NLE goal remains active.
+
+
+### Clean-source native qualification for 18b3a82
+
+Production and native-test source is committed as
+`18b3a82907f3c02080d5431d8e7106195191f381`, with Shalom Wang as both author and
+committer. The clean-source product rebuild passes (7m54s). The qualification
+starts and ends on this exact commit with a clean tree and stable binary/fixture
+hashes. The new group test explicitly executes both Auto and Continuous curves;
+its off-key pixels match canonical author evaluation and differ from a linear
+downgrade after movement.
+
+| Current-source scope | Executed result |
+| --- | --- |
+| Group native curve, collision, Undo, both saved states and output | 1/0, 4.33s; both tangent constraints |
+| Original single-key native curve and output | 1/0, 2.20s |
+| Native retained Window/Surface/device role cycle | 1/0, 10.31s |
+| Native resource helper, cancellation/timeout/retry and Unicode persistence/output | 5/0, 8.51s |
+| Modal Tab containment and pending-resource focus | 16/0, 22.48s |
+| Resource workflows including real Cube LUT commit/Undo/save/reopen/pixels | 103/0, 28.45s; five ignored native cases executed separately |
+| Exact integer, dense temporal and untouched Float history | 1/0 each, 1.78s / 4.10s / 0.60s |
+
+Product SHA256:
+`c59f8667af36e884cc745c5d7e67e73d5529fca550cf801c8f79f2f0ac878c8f`.
+SessionProbe SHA256:
+`841520a969b43ba1859a22394f62ccf6aeea62069f41a5c0fbb556ce2be8d456`.
+The source/binary/fixture receipt records `CleanStable = true`. Filter counts
+may overlap and are not added as unique coverage. Candidate-source compiler
+setup failure and precommit runtime results remain separate historical records.
+
+This qualifies the listed Windows native contract paths. It does not qualify a
+new complete encoded Golden, physical keyboard/file-picker/high-DPI interaction,
+macOS or broad vendor/plugin/performance matrices. Complete encoded Golden
+remains pinned to fda9b23. Group value/pointer/interpolation/rubber-band work and
+the original full professional NLE scope remain open; the goal stays active.
