@@ -307,3 +307,43 @@ This is verified author-command groundwork. CurveEditor multi-selection and
 group pointer/time/value/interpolation UI remain pending. No fresh native golden
 was built on this source; the prior native report remains source-pinned historical
 evidence. Overall NLE goal remains active.
+
+
+## Visual key-selection UI continuation (2026-10-06)
+
+Visual numeric curves now admit Shift-click selection and Ctrl/Cmd+A, keeping
+stable authored IDs rather than display slots. Virtual evaluated boundaries are
+excluded, including when zoom hides real keys. Replacement views preserve the
+surviving set and recover a primary from survivors when its former ID is absent.
+Painting/accessibility expose the full set; Escape clears it without authoring.
+
+Delete sends one complete DeleteMany through canonical preview and the existing
+Clip/Effect RemoveMany author transaction. Inspector models supply current exact
+Clip author time, so removing all keys retains the original evaluated current
+value. A rejected preview restores full local geometry and selection together;
+an accepted all-key delete rebuilds canonical evaluated boundary points.
+
+The actual numeric CurveEditor/EventRouter test exercises Shift, Ctrl and Meta
+selection, no selection history or capture, all-key retained value, boundary
+reconciliation and exactly one complete Sequence Undo/Redo. A real failing
+replacement test exposed stale stable-ID selection in set_points; replacement
+now clears both that set and its former primary instead of transferring author
+selection to unrelated snapshot geometry. Surviving-ID refresh and whole-set
+rejection tests also pass.
+
+Final curve-widget tests: **92 passed / 0 failed** (3.96s). Full all-feature App
+library: **2557 passed / 0 failed / 62 ignored** (557.71s), including current-source
+modal routing and resource_lut_draft_commit_undo_save_reopen_executes_real_cube.
+Strict workspace/all-targets/all-features Clippy passed (2m17s); final fmt and
+diff checks passed. No warning suppression or source change followed these gates.
+
+Audio UI selection deletion remains disabled until current occurrence time is
+explicit for component/shared-Scope bindings. Group movement/value/interpolation
+and rubber-band selection remain open; group keyboard edits do not silently edit
+only the primary. The corresponding help is localized in English and Chinese.
+CurveEdit and CurveGestureEvent carry owned selection IDs and require Clone;
+there is no compatibility shim for their former Copy API.
+
+No fresh native golden executable or encoded-output qualification was built for
+this UI source. Historical97e evidence stays source-pinned. The 62 ignored tests
+are not counted as completed qualification. The full NLE goal remains active.

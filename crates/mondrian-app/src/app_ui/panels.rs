@@ -2106,6 +2106,8 @@ pub struct InspectorCurveKeyModel {
 /// Stable author target plus editable keys and read-only evaluated samples.
 #[derive(Debug, Clone)]
 pub struct InspectorCurveModel {
+    /// Current exact Clip author time, retained when a selection removes every key.
+    pub(crate) author_time: TimelineTime,
     /// Exact duration of one sequence frame in this owner time domain.
     pub(crate) frame_time_step: TimelineTime,
     /// Immutable canonical property used solely to derive current display samples.
@@ -2485,12 +2487,10 @@ fn inspector_effect_property_model(
     time_base: mondrian_core::Rational,
 ) -> InspectorEffectPropertyModel {
     let mut model = inspector_property_model(path, property, author_time, localizer);
-    model.numeric_curve =
-        numeric_curve_model_for_property(property, clip, time_base).map(|curve| {
-            InspectorPropertyCurveModel {
-                curve,
-                current_keyframe_id: property.keyframe_at(author_time).map(|key| key.id),
-            }
+    model.numeric_curve = numeric_curve_model_for_property(property, clip, time_base, author_time)
+        .map(|curve| InspectorPropertyCurveModel {
+            curve,
+            current_keyframe_id: property.keyframe_at(author_time).map(|key| key.id),
         });
     model
 }
@@ -2696,7 +2696,11 @@ impl InspectorPanelModel {
                 time,
             ),
             tint_area_mode: ColorPickerAreaMode::Wheel,
-            opacity_curve: opacity_curve_model_for_clip(clip, sequence.time_base()),
+            opacity_curve: opacity_curve_model_for_clip(
+                clip,
+                sequence.time_base(),
+                clip_author_time,
+            ),
             audio_components: inspector_audio_components(
                 state,
                 sequence,
@@ -4070,16 +4074,18 @@ fn clip_rotation_degrees(clip: &Clip, time: TimelineTime) -> f32 {
 fn opacity_curve_model_for_clip(
     clip: &Clip,
     time_base: mondrian_core::Rational,
+    author_time: TimelineTime,
 ) -> Option<InspectorCurveModel> {
     let bag = clip.transform.to_property_bag();
     let opacity = bag.property(Transform2D::OPACITY_PATH)?;
-    numeric_curve_model_for_property(opacity, clip, time_base)
+    numeric_curve_model_for_property(opacity, clip, time_base, author_time)
 }
 
 fn numeric_curve_model_for_property(
     property: &mondrian_core::automation::AnimatedProperty,
     clip: &Clip,
     time_base: mondrian_core::Rational,
+    author_time: TimelineTime,
 ) -> Option<InspectorCurveModel> {
     if !property.descriptor.schema.is_animatable
         || property.channel_count() != 1
@@ -4167,6 +4173,7 @@ fn numeric_curve_model_for_property(
         .collect::<Option<Vec<_>>>()?;
 
     Some(InspectorCurveModel {
+        author_time,
         frame_time_step: TimelineTime::from_frame_position(mondrian_core::FramePosition::new(
             1, time_base,
         ))

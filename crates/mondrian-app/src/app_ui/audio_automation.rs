@@ -459,6 +459,8 @@ fn audio_curve_edit_intent(
             };
             AudioAutomationEdit::UpsertKeyframe { keyframe }
         }
+        // Shared Scope selection needs an explicit occurrence time before bulk deletion.
+        CurveEdit::DeleteMany { .. } => return None,
         CurveEdit::Delete { target } => {
             let CurvePointTarget::Keyframe(keyframe_id) = target else {
                 return None;
@@ -756,13 +758,13 @@ mod tests {
                 },
                 CurveEdit::Delete { target: audio_target(&model, 0) },
             ] {
-                let display = preview_audio_curve_edit(&mut model.clone(), edit).unwrap();
+                let display = preview_audio_curve_edit(&mut model.clone(), edit.clone()).unwrap();
                 let mut authored = sequence.clone();
                 mondrian_timeline::apply_audio_automation_edit(
                     &mut authored,
                     &AudioAutomationEditRequest {
                         target: target.clone(),
-                        edit: audio_curve_edit_intent(&model, edit).unwrap(),
+                        edit: audio_curve_edit_intent(&model, edit.clone()).unwrap(),
                     },
                 )
                 .unwrap();

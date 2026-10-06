@@ -1851,7 +1851,7 @@ pub(super) fn audio_automation_curve_control(
                     preview_model.source_curve = origin.clone();
                 }
                 *preview_action.borrow_mut() = None;
-                let action = audio_automation_curve_edit_action(&preview_model, edit);
+                let action = audio_automation_curve_edit_action(&preview_model, edit.clone());
                 let display_points = crate::app_ui::audio_automation::preview_audio_curve_edit(
                     &mut preview_model,
                     edit,
@@ -2647,10 +2647,11 @@ fn numeric_curve_editor(
         .with_frame_time_step(model.frame_time_step)
         .with_keyboard_help(
             localizer.text("curve-editor-name"),
-            localizer.text("curve-editor-keyboard-help"),
+            localizer.text("curve-editor-selection-keyboard-help"),
         )
         .with_view_key(target.as_ref().and_then(|target| serde_json::to_string(target).ok()))
         .with_keyframe_ids(ids)
+        .with_selection_deletion()
         .with_tangents(tangents)
         .with_preview_projection(move |event| match event {
             CurveGestureEvent::Begin(_) => {
@@ -2668,7 +2669,7 @@ fn numeric_curve_editor(
                 *preview_action.borrow_mut() = None;
                 let mut live_model = preview_model.clone();
                 live_model.curve_source = preview_source.clone();
-                let action = on_edit(&live_model, edit);
+                let action = on_edit(&live_model, edit.clone());
                 let display_points =
                     preview_numeric_curve_points(&live_model, &mut preview_source, edit)?;
                 *preview_action.borrow_mut() = action;
@@ -2873,6 +2874,9 @@ fn numeric_curve_edit_payload(
                     point: inspector_curve_point_payload(model, point)?,
                 }
             }
+        }
+        CurveEdit::DeleteMany { keyframe_ids } => {
+            ClipCurveEditPayload::RemoveMany { keyframe_ids, retain_time: model.author_time }
         }
         CurveEdit::Delete { target } => {
             let CurvePointTarget::Keyframe(keyframe_id) = target else {
@@ -3841,6 +3845,7 @@ mod temporal_handle_tests {
         let model = opacity_curve_model_for_clip(
             before.find_clip(clip_id).expect("clip"),
             state.active_sequence().expect("sequence").time_base(),
+            before.find_clip(clip_id).expect("clip").clip_time_in,
         )
         .expect("model");
         (state, selection, model, key_id)
@@ -4105,6 +4110,109 @@ mod temporal_handle_tests {
     }
 
     #[test]
+    fn temporal_multiselection_deletes_atomically_retains_current_sample_and_undoes_once() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        for selection_mode in 0..3 {
+            let (mut state, selection, _, _) = temporal_curve_fixture(true);
+            let original = state.active_sequence().expect("before").clone();
+            let time = TimelineTime::new(3, 8).expect("current exact owner time");
+            let model = opacity_curve_model_for_clip(
+                original.find_clip(selection.clip_id).expect("clip"),
+                original.time_base(),
+                time,
+            )
+            .expect("current model");
+            assert_eq!(model.author_time, time);
+            let retained = model.curve_source.evaluate(time);
+            let ids = model.keys.iter().filter_map(|key| key.keyframe_id).collect::<Vec<_>>();
+            let mut editor = fixture_curve_editor(selection, &model);
+            let mut router = EventRouter::new(editor.id());
+            route_temporal(
+                &mut editor,
+                &mut router,
+                &mut state,
+                UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+            );
+            if selection_mode != 0 {
+                route_temporal(
+                    &mut editor,
+                    &mut router,
+                    &mut state,
+                    UiEvent::KeyDown {
+                        key: KeyCode::A,
+                        modifiers: if selection_mode == 1 {
+                            Modifiers::ctrl()
+                        } else {
+                            Modifiers { meta: true, ..Modifiers::none() }
+                        },
+                    },
+                );
+            } else {
+                for point in model.keys.iter().map(|key| key.point) {
+                    let position = editor.point_position(point);
+                    route_temporal(
+                        &mut editor,
+                        &mut router,
+                        &mut state,
+                        UiEvent::MouseDown {
+                            position,
+                            button: MouseButton::Left,
+                            modifiers: Modifiers::shift(),
+                        },
+                    );
+                    route_temporal(
+                        &mut editor,
+                        &mut router,
+                        &mut state,
+                        UiEvent::MouseUp {
+                            position,
+                            button: MouseButton::Left,
+                            modifiers: Modifiers::shift(),
+                        },
+                    );
+                }
+            }
+            assert_eq!(editor.selected_keyframe_ids(), ids);
+            assert!(router.captured().is_none());
+            assert!(!state.can_undo_action(), "selection is not an author edit");
+            route_temporal(
+                &mut editor,
+                &mut router,
+                &mut state,
+                UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
+            );
+            let accepted = state.active_sequence().expect("deleted").clone();
+            let bag =
+                accepted.find_clip(selection.clip_id).expect("clip").intrinsic_parameter_bag();
+            let property = bag.property(Transform2D::OPACITY_PATH).expect("opacity");
+            assert!(!property.is_enabled());
+            assert_eq!(property.evaluate(time), retained);
+            assert_eq!(property.evaluate(TimelineTime::ZERO), retained);
+            assert_eq!(
+                editor.points().len(),
+                2,
+                "canonical virtual boundaries restored"
+            );
+            assert!(editor.points().iter().all(|point| Some(point.y) == retained.as_numeric_f64()));
+            assert!(editor.selected_keyframe_ids().is_empty());
+            assert!(state.undo_timeline().expect("one Undo"));
+            assert!(state
+                .active_sequence()
+                .expect("undone")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(
+                !state.can_undo_action(),
+                "the set must create exactly one history entry"
+            );
+            assert!(state.redo_timeline().expect("one Redo"));
+            assert!(state
+                .active_sequence()
+                .expect("redone")
+                .author_state_eq_ignoring_revision(&accepted));
+        }
+    }
+
+    #[test]
     fn temporal_keyboard_time_nudge_uses_the_exact_sequence_frame_grid() {
         let _guard = crate::app_ui::test_utils::theme_test_guard();
         for rate in [
@@ -4121,6 +4229,12 @@ mod temporal_handle_tests {
                     .find_clip(selection.clip_id)
                     .expect("clip"),
                 state.active_sequence().expect("sequence").time_base(),
+                state
+                    .active_sequence()
+                    .expect("sequence")
+                    .find_clip(selection.clip_id)
+                    .expect("clip")
+                    .clip_time_in,
             )
             .expect("rate-bound model");
             let frame = TimelineTime::from_frame_position(mondrian_core::FramePosition::new(
@@ -4832,8 +4946,12 @@ mod temporal_handle_tests {
                 })
                 .expect("real author key");
         }
-        let model = opacity_curve_model_for_clip(&clip, mondrian_core::Rational::new(1, 30))
-            .expect("model");
+        let model = opacity_curve_model_for_clip(
+            &clip,
+            mondrian_core::Rational::new(1, 30),
+            clip.clip_time_in,
+        )
+        .expect("model");
         assert_eq!(
             model.keys.iter().map(|key| key.keyframe_id).collect::<Vec<_>>(),
             identities[1..4].iter().copied().map(Some).collect::<Vec<_>>()
@@ -4858,8 +4976,12 @@ mod temporal_handle_tests {
         let before = clip.clone();
         clip.clip_time_in = TimelineTime::new(3, 10).expect("inner in");
         clip.duration = TimelineTime::new(2, 5).expect("inner span");
-        let model = opacity_curve_model_for_clip(&clip, mondrian_core::Rational::new(1, 30))
-            .expect("inner model");
+        let model = opacity_curve_model_for_clip(
+            &clip,
+            mondrian_core::Rational::new(1, 30),
+            clip.clip_time_in,
+        )
+        .expect("inner model");
         assert_eq!(
             model.keys.iter().map(|key| key.keyframe_id).collect::<Vec<_>>(),
             vec![None, Some(identities[2]), None]
@@ -4900,9 +5022,13 @@ mod temporal_handle_tests {
             TimelineTime::ONE,
         )
         .expect("owner");
-        let model =
-            numeric_curve_model_for_property(&property, &clip, mondrian_core::Rational::new(1, 30))
-                .expect("real model");
+        let model = numeric_curve_model_for_property(
+            &property,
+            &clip,
+            mondrian_core::Rational::new(1, 30),
+            clip.clip_time_in,
+        )
+        .expect("real model");
         assert_eq!(
             model.keys[0].point.y, 1.5,
             "legal author value must not be clamped to the soft display boundary"
@@ -4956,6 +5082,7 @@ mod temporal_handle_tests {
                 &property,
                 &clip,
                 mondrian_core::Rational::new(1, 30),
+                clip.clip_time_in,
             )
             .expect("actual visual model");
             println!(

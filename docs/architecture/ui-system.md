@@ -3688,9 +3688,25 @@ after a successful commit, removing every deleted ID from the addressed
 property while preserving surviving keys and other property selections. Empty,
 duplicate, stale or incomplete sets do not publish author state or history.
 
-This is the author command groundwork for professional curve multi-selection.
-The CurveEditor still has a single-point selection; Shift/rubber-band selection,
-group pointer/value/time edits and group interpolation remain to be connected.
-The command is already exposed through real typed Clip/Effect product actions
-and the audio automation action, including scripting callers. No widget-owned
-curve replacement or loop of independent author commands is introduced.
+Visual numeric CurveEditor owners enable selection deletion explicitly. Shift
+click toggles authored keys; Ctrl/Cmd+A selects all admitted authored keys,
+including offscreen keys in the current owner interval. Virtual evaluated
+boundaries never enter the deletion set. Selection snapshots carry stable IDs
+and restore surviving keys after canonical reordering or replacement. Painting
+and accessibility expose the entire set. Escape clears the set without an author
+edit. Plain navigation/click explicitly replaces selection with one point.
+
+CurveEdit::DeleteMany carries the complete set through one canonical preview
+and the existing Clip/Effect transaction. The Inspector projection carries the
+current exact Clip author time; removing every key retains its original value
+at that time. Local geometry and selection roll back together when the canonical
+preview rejects the set. Accepted previews reconcile virtual boundaries.
+
+Group pointer/value/time edits, rubber-band selection and group interpolation
+remain to be connected. Arrow edits and keyboard interpolation do not modify
+only the primary point while multiple keys are selected. Audio owners do not
+enable UI selection deletion until the current occurrence time is explicit;
+shared Scope time cannot be inferred from Sequence playhead alone. The canonical
+batch audio author action remains available with an explicit retain time.
+No widget-owned curve replacement or loop of independent author commands is
+introduced.

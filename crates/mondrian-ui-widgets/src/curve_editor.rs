@@ -202,8 +202,8 @@ pub enum CurvePointTarget {
     VirtualBoundary(CurveBoundary),
 }
 
-/// One point or tangent author intent, carrying its stable source identity.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Point, selection or tangent author intent, carrying stable source identities.
+#[derive(Debug, Clone, PartialEq)]
 pub enum CurveEdit {
     /// Offset an authored scalar key using its canonical typed value.
     NudgeValue {
@@ -248,6 +248,11 @@ pub enum CurveEdit {
         /// Finite viewport coordinates, with unconstrained value excursions.
         point: CurvePoint,
     },
+    /// Delete an admitted set of authored keys as one transaction.
+    DeleteMany {
+        /// Stable identities in current author order; virtual boundaries are excluded.
+        keyframe_ids: Vec<mondrian_core::KeyframeId>,
+    },
     /// Delete one existing point.
     Delete {
         /// Stable author or owner-snapshot target.
@@ -259,7 +264,7 @@ pub enum CurveEdit {
 pub type CurveEditAction = dyn Fn(CurveEdit) -> Option<Action>;
 
 /// Lifecycle of a pointer curve gesture with live author updates and one history entry.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CurveGestureEvent {
     /// Open a pointer draft without committing author state.
     Begin(mondrian_core::AuthoringGestureId),
@@ -326,6 +331,7 @@ pub struct CurveEditorViewState {
     id: WidgetId,
     points: Option<Vec<CurvePoint>>,
     selected: Option<CurvePointTarget>,
+    selected_keys: std::collections::HashSet<mondrian_core::KeyframeId>,
     selected_tangent: Option<(mondrian_core::KeyframeId, mondrian_core::BezierHandleSide)>,
     focused: bool,
     focus_visible: bool,
@@ -360,6 +366,8 @@ pub struct CurveEditor {
     preview_projection: Option<Box<CurvePreviewProjection>>,
     drag_display_origin: Option<Option<Vec<CurvePoint>>>,
     selected: Option<usize>,
+    selected_keys: std::collections::HashSet<mondrian_core::KeyframeId>,
+    selection_deletion: bool,
     tangents: Vec<CurveTangent>,
     selected_tangent: Option<(mondrian_core::KeyframeId, mondrian_core::BezierHandleSide)>,
     tangent_drag: Option<TangentDrag>,
@@ -445,6 +453,8 @@ impl CurveEditor {
             preview_projection: None,
             drag_display_origin: None,
             selected: None,
+            selected_keys: std::collections::HashSet::new(),
+            selection_deletion: false,
             tangents: Vec::new(),
             selected_tangent: None,
             tangent_drag: None,
@@ -691,6 +701,16 @@ impl CurveEditor {
 
     /// Replace curve points. Times are bounded and sorted; temporal values stay absolute.
     pub fn set_points(&mut self, points: Vec<CurvePoint>) {
+        // Replacement supplies snapshot geometry, so no old authored ID owns a slot.
+        if !self.selected_keys.is_empty()
+            || self
+                .selected
+                .and_then(|index| self.point_target(index))
+                .is_some_and(|target| matches!(target, CurvePointTarget::Keyframe(_)))
+        {
+            self.selected = None;
+        }
+        self.selected_keys.clear();
         if self.has_active_pointer_interaction() {
             self.pending_capture_release = true;
         }
@@ -966,6 +986,7 @@ impl CurveEditor {
                 .filter(|target| !matches!(target, CurvePointTarget::Keyframe(_)))
                 .map(|_| self.points.clone()),
             selected,
+            selected_keys: self.selected_keys.clone(),
             selected_tangent: self.selected_tangent,
             focused: self.focused,
             focus_visible: self.focus_visible,
@@ -992,6 +1013,18 @@ impl CurveEditor {
             }
             _ => None,
         });
+        self.selected_keys = state
+            .selected_keys
+            .iter()
+            .copied()
+            .filter(|id| self.keyframe_indices.contains_key(id))
+            .collect();
+        if self.selected.is_none() {
+            self.selected = self.point_metadata.iter().position(|metadata| {
+                matches!(metadata.target,
+                CurvePointTarget::Keyframe(id) if self.selected_keys.contains(&id))
+            });
+        }
         self.selected_tangent = state.selected_tangent.filter(|(id, side)| {
             Some(*id) == self.selected_keyframe()
                 && self
@@ -1009,9 +1042,49 @@ impl CurveEditor {
         self.selected
     }
 
+    /// Enable stable authored-key selection and atomic selection deletion.
+    /// The owner adapter must admit `DeleteMany` through its canonical transaction.
+    pub fn with_selection_deletion(mut self) -> Self {
+        self.selection_deletion = true;
+        self
+    }
+
+    /// Selected authored keys in current canonical display order.
+    pub fn selected_keyframe_ids(&self) -> Vec<mondrian_core::KeyframeId> {
+        self.point_metadata
+            .iter()
+            .filter_map(|metadata| match metadata.target {
+                CurvePointTarget::Keyframe(id) if self.selected_keys.contains(&id) => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn toggle_key_selection(&mut self, index: usize) {
+        let Some(CurvePointTarget::Keyframe(id)) = self.point_target(index) else {
+            return;
+        };
+        if !self.point_metadata[index].policy.deletable {
+            return;
+        }
+        if !self.selected_keys.remove(&id) {
+            self.selected_keys.insert(id);
+            self.selected = Some(index);
+        } else if self.selected == Some(index) {
+            self.selected = self.point_metadata.iter().position(|metadata| matches!(
+                metadata.target, CurvePointTarget::Keyframe(id) if self.selected_keys.contains(&id)
+            ));
+        }
+        self.selected_tangent = None;
+    }
+
     /// Select a point by index.
     pub fn select(&mut self, index: Option<usize>) {
         self.selected = index.filter(|index| *index < self.points.len());
+        self.selected_keys.clear();
+        if let Some(id) = self.selected_keyframe() {
+            self.selected_keys.insert(id);
+        }
         self.selected_tangent = None;
     }
 
@@ -1098,7 +1171,7 @@ impl CurveEditor {
         };
         let accepted = if self.tangent_drag.is_some() {
             self.dispatch_gesture(
-                CurveGestureEvent::Edit { gesture_id: self.gesture, edit },
+                CurveGestureEvent::Edit { gesture_id: self.gesture, edit: edit.clone() },
                 ctx,
             )
         } else {
@@ -1229,7 +1302,7 @@ impl CurveEditor {
     }
 
     fn dispatch_gesture(&mut self, event: CurveGestureEvent, ctx: &mut EventContext) -> bool {
-        let points = self.preview_projection.as_mut().and_then(|project| project(event));
+        let points = self.preview_projection.as_mut().and_then(|project| project(event.clone()));
         if matches!(event, CurveGestureEvent::Edit { .. })
             && self.preview_projection.is_some()
             && points.is_none()
@@ -1303,7 +1376,7 @@ impl CurveEditor {
 
     fn dispatch_edit(&mut self, edit: CurveEdit, ctx: &mut EventContext) -> bool {
         if !self.dispatch_gesture(
-            CurveGestureEvent::Edit { gesture_id: self.gesture, edit },
+            CurveGestureEvent::Edit { gesture_id: self.gesture, edit: edit.clone() },
             ctx,
         ) {
             return false;
@@ -1646,6 +1719,9 @@ impl CurveEditor {
         if self.has_active_pointer_interaction() || self.gesture.is_some() {
             return true;
         }
+        if menu && self.selected_keys.len() > 1 {
+            return true;
+        }
         if menu {
             if let Some(index) = self.selected
                 && let Some(items) = self.point_metadata[index].context_menu.as_ref()
@@ -1673,6 +1749,9 @@ impl CurveEditor {
             self.viewport,
         );
         self.focus_visible = true;
+        if alt && self.selected_keys.len() > 1 {
+            return true;
+        }
         if alt {
             if key == KeyCode::Up {
                 self.selected_tangent = None;
@@ -1701,6 +1780,12 @@ impl CurveEditor {
             });
             self.selected_tangent = None;
         }
+        if !alt {
+            self.selected_keys.clear();
+            if let Some(id) = self.selected_keyframe() {
+                self.selected_keys.insert(id);
+            }
+        }
         self.reveal_selection();
         if before
             != (
@@ -1721,6 +1806,12 @@ impl CurveEditor {
         modifiers: Modifiers,
         ctx: &mut EventContext,
     ) -> bool {
+        if self.selected_keys.len() > 1 {
+            return matches!(
+                key,
+                KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
+            );
+        }
         if let Some(step) = self.frame_time_step
             && matches!(key, KeyCode::Left | KeyCode::Right)
             && !modifiers.ctrl
@@ -1864,6 +1955,47 @@ impl CurveEditor {
     }
 
     fn delete_selected_from_input(&mut self, ctx: &mut EventContext) -> bool {
+        if self.selection_deletion && self.selected_keys.len() > 1 {
+            if self.has_active_pointer_interaction() || self.gesture.is_some() {
+                return true;
+            }
+            let keyframe_ids = self.selected_keyframe_ids();
+            if keyframe_ids.iter().any(|id| {
+                self.keyframe_indices
+                    .get(id)
+                    .is_none_or(|index| !self.point_metadata[*index].policy.deletable)
+            }) {
+                return true;
+            }
+            let original_points = self.points.clone();
+            let original_metadata = self.point_metadata.clone();
+            let original_selection = self.selected;
+            let mut index = 0;
+            self.points.retain(|_| {
+                let keep = !matches!(self.point_metadata[index].target,
+                    CurvePointTarget::Keyframe(id) if self.selected_keys.contains(&id));
+                index += 1;
+                keep
+            });
+            self.point_metadata.retain(|metadata| {
+                !matches!(metadata.target,
+                CurvePointTarget::Keyframe(id) if self.selected_keys.contains(&id))
+            });
+            self.selected = None;
+            self.rebuild_keyframe_indices();
+            if !self.dispatch_edit(CurveEdit::DeleteMany { keyframe_ids }, ctx) {
+                self.points = original_points;
+                self.point_metadata = original_metadata;
+                self.selected = original_selection;
+                self.rebuild_keyframe_indices();
+                return true;
+            }
+            self.selected_keys.clear();
+            self.selected_tangent = None;
+            self.dispatch_change(ctx);
+            ctx.request_repaint();
+            return true;
+        }
         let Some(index) = self.selected else {
             return false;
         };
@@ -1896,6 +2028,10 @@ impl CurveEditor {
             self.dragging = drag;
             self.rebuild_keyframe_indices();
             return true;
+        }
+        self.selected_keys.clear();
+        if let Some(id) = self.selected_keyframe() {
+            self.selected_keys.insert(id);
         }
         self.dispatch_change(ctx);
         if drag.is_some() {
@@ -2073,9 +2209,9 @@ impl Widget for CurveEditor {
                         .and_then(|metadata| metadata.context_menu.as_ref())
                     && items.iter().any(MenuItem::is_activatable)
                 {
-                    self.selected = Some(index);
-                    self.selected_tangent = None;
-                    let mut menu = ContextMenu::new(*position, items.clone());
+                    let items = items.clone();
+                    self.select(Some(index));
+                    let mut menu = ContextMenu::new(*position, items);
                     menu.layout(self.bounds);
                     self.context_menu = Some(menu);
                     ctx.request_repaint();
@@ -2083,13 +2219,24 @@ impl Widget for CurveEditor {
                 }
                 EventResult::Ignored
             }
-            UiEvent::MouseDown { position, button: MouseButton::Left, .. }
+            UiEvent::MouseDown { position, button: MouseButton::Left, modifiers }
                 if self.bounds.contains(*position) =>
             {
                 self.focus_visible = false;
                 ctx.tooltip.hide();
+                if self.selection_deletion && *modifiers == Modifiers::shift() {
+                    if !self.has_active_pointer_interaction()
+                        && self.gesture.is_none()
+                        && let Some(index) = self.hit_point(*position)
+                    {
+                        self.toggle_key_selection(index);
+                        ctx.request_repaint();
+                    }
+                    return EventResult::Handled;
+                }
                 if let Some(tangent) = self.hit_tangent(*position) {
                     let index = self.keyframe_indices[&tangent.keyframe_id];
+                    self.select(Some(index));
                     self.begin_drag(index, false, *position, ctx);
                     self.dragging = None;
                     self.tangent_origin = Some(self.tangents.clone());
@@ -2101,7 +2248,7 @@ impl Widget for CurveEditor {
                 }
                 self.selected_tangent = None;
                 if let Some(index) = self.hit_point(*position) {
-                    self.selected = Some(index);
+                    self.select(Some(index));
                     self.begin_drag(index, false, *position, ctx);
                     ctx.request_pointer_capture(self.id);
                     return EventResult::Handled;
@@ -2109,6 +2256,7 @@ impl Widget for CurveEditor {
                 if self.point_insertion_limit.is_some_and(|maximum| self.points.len() >= maximum) {
                     return EventResult::Handled;
                 }
+                self.selected_keys.clear();
                 let previous_selection = self.selected;
                 if let Some(index) = self.insert_point_from_input(*position, ctx) {
                     self.begin_drag(index, true, *position, ctx);
@@ -2210,9 +2358,36 @@ impl Widget for CurveEditor {
                 self.focus_visible = false;
                 ctx.tooltip.hide();
                 self.selected = None;
+                self.selected_keys.clear();
                 self.selected_tangent = None;
                 if was_dragging {
                     ctx.release_pointer_capture(self.id);
+                }
+                EventResult::Handled
+            }
+            UiEvent::KeyDown { key: KeyCode::A, modifiers }
+                if self.selection_deletion
+                    && self.focused
+                    && ctx.focus.focused_widget() == Some(self.id)
+                    && (modifiers.ctrl ^ modifiers.meta)
+                    && !modifiers.alt
+                    && !modifiers.shift =>
+            {
+                if !self.has_active_pointer_interaction() && self.gesture.is_none() {
+                    self.selected_keys = self
+                        .point_metadata
+                        .iter()
+                        .filter_map(|metadata| match metadata.target {
+                            CurvePointTarget::Keyframe(id) if metadata.policy.deletable => Some(id),
+                            _ => None,
+                        })
+                        .collect();
+                    self.selected = self.point_metadata.iter().position(|metadata| {
+                        matches!(metadata.target,
+                        CurvePointTarget::Keyframe(id) if self.selected_keys.contains(&id))
+                    });
+                    self.selected_tangent = None;
+                    ctx.request_repaint();
                 }
                 EventResult::Handled
             }
@@ -2226,6 +2401,7 @@ impl Widget for CurveEditor {
                 let changed = self.cancel_drag_state();
                 self.end_gesture(true, ctx);
                 if !was_dragging {
+                    self.selected_keys.clear();
                     self.selected = None;
                     self.selected_tangent = None;
                 }
@@ -2359,7 +2535,9 @@ impl Widget for CurveEditor {
         }
 
         for (index, point) in self.points.iter().enumerate() {
-            let selected = self.selected == Some(index);
+            let selected = self.selected == Some(index)
+                || matches!(self.point_metadata[index].target,
+                CurvePointTarget::Keyframe(id) if self.selected_keys.contains(&id));
             let radius = if selected {
                 SELECTED_POINT_RADIUS
             } else {
@@ -2421,7 +2599,7 @@ impl Widget for CurveEditor {
                     .iter()
                     .filter(|point| self.plot_rect().contains(self.to_screen(**point)))
                     .count(),
-                selected_count: usize::from(self.selected.is_some()),
+                selected_count: self.selected_keys.len().max(usize::from(self.selected.is_some())),
             });
         node.name = self.accessible_name.clone();
         Some(node)
@@ -2483,6 +2661,149 @@ mod tests {
             name,
             payload: Default::default(),
         }
+    }
+
+    #[test]
+    fn authored_multiselection_is_stable_excludes_boundaries_and_deletes_once() {
+        let ids = [
+            mondrian_core::KeyframeId::new(),
+            mondrian_core::KeyframeId::new(),
+        ];
+        let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.25, 0.2),
+            CurvePoint::new(0.75, 0.8),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .with_keyframe_ids(vec![None, Some(ids[0]), Some(ids[1]), None])
+        .with_selection_deletion()
+        .with_view_key(Some("selection-owner".into()));
+        editor.layout(Rect::new(0.0, 0.0, 400.0, 200.0));
+        let emitted = events.clone();
+        editor = editor.on_edit(move |edit| {
+            emitted.borrow_mut().push(edit);
+            None
+        });
+        let mut ctx = event_ctx();
+        for index in [1, 2, 0, 3] {
+            editor.event(
+                &UiEvent::MouseDown {
+                    position: editor.point_position(editor.points()[index]),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::shift(),
+                },
+                &mut ctx,
+            );
+        }
+        assert_eq!(editor.selected_keyframe_ids(), ids);
+        assert!(events.borrow().is_empty());
+        assert!(!editor.has_active_pointer_interaction());
+        let snapshot = editor.view_state().expect("inactive selected view");
+        let mut replacement = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.1, 0.8),
+            CurvePoint::new(0.9, 0.2),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .with_keyframe_ids(vec![None, Some(ids[1]), Some(ids[0]), None])
+        .with_selection_deletion()
+        .with_view_key(Some("selection-owner".into()));
+        assert!(replacement.restore_view_state(&snapshot));
+        assert_eq!(replacement.selected_keyframe_ids(), [ids[1], ids[0]]);
+        let mut shrunk = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.2),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .with_keyframe_ids(vec![None, Some(ids[0]), None])
+        .with_selection_deletion()
+        .with_view_key(Some("selection-owner".into()));
+        assert!(shrunk.restore_view_state(&snapshot));
+        assert_eq!(shrunk.selected_keyframe_ids(), [ids[0]]);
+        assert_eq!(
+            shrunk.selected_index(),
+            Some(1),
+            "surviving key replaces removed primary"
+        );
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(
+            *events.borrow(),
+            [CurveEdit::DeleteMany { keyframe_ids: ids.to_vec() }]
+        );
+        assert_eq!(editor.points().len(), 2);
+        assert!(editor.selected_keyframe_ids().is_empty());
+    }
+
+    #[test]
+    fn replacing_authored_geometry_clears_the_entire_stable_selection() {
+        let ids = [
+            mondrian_core::KeyframeId::new(),
+            mondrian_core::KeyframeId::new(),
+        ];
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.25, 0.2),
+            CurvePoint::new(0.75, 0.8),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .with_keyframe_ids(vec![None, Some(ids[0]), Some(ids[1]), None])
+        .with_selection_deletion();
+        editor.toggle_key_selection(1);
+        editor.toggle_key_selection(2);
+        assert_eq!(editor.selected_keyframe_ids(), ids);
+        editor.set_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ]);
+        assert!(
+            editor.selected_keys.is_empty(),
+            "replacement has no author identities"
+        );
+        assert_eq!(
+            editor.selected_index(),
+            None,
+            "old author selection cannot become a snapshot point"
+        );
+        let mut ctx = event_ctx();
+        assert!(!editor.delete_selected_from_input(&mut ctx));
+        assert_eq!(editor.points().len(), 3);
+    }
+
+    #[test]
+    fn rejected_selection_delete_restores_geometry_and_entire_selection() {
+        let ids = [
+            mondrian_core::KeyframeId::new(),
+            mondrian_core::KeyframeId::new(),
+        ];
+        let original = vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.25, 0.2),
+            CurvePoint::new(0.75, 0.8),
+            CurvePoint::new(1.0, 1.0),
+        ];
+        let mut editor = CurveEditor::with_points(original.clone())
+            .with_keyframe_ids(vec![None, Some(ids[0]), Some(ids[1]), None])
+            .with_selection_deletion()
+            .with_preview_projection(|_| None);
+        editor.toggle_key_selection(1);
+        editor.toggle_key_selection(2);
+        let selected = editor.selected_index();
+        let mut ctx = event_ctx();
+        assert!(editor.delete_selected_from_input(&mut ctx));
+        assert_eq!(editor.points(), original);
+        assert_eq!(editor.selected_keyframe_ids(), ids);
+        assert_eq!(editor.selected_index(), selected);
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert!(editor.selected_keyframe_ids().is_empty());
+        assert_eq!(editor.points(), original);
     }
 
     #[test]
@@ -2768,6 +3089,7 @@ mod tests {
             }
             CurveEdit::Handle { keyframe_id, side, .. } => format!("handle:{keyframe_id}:{side:?}"),
             CurveEdit::Delete { target } => format!("delete:{target:?}"),
+            CurveEdit::DeleteMany { keyframe_ids } => format!("delete-many:{keyframe_ids:?}"),
         };
         Action::Custom {
             namespace: "test.curve-edit".into(),
@@ -4118,7 +4440,7 @@ mod tests {
             if cancel || mode == 0 {
                 assert_eq!(editor.points(), original);
                 assert_eq!(
-                    events.borrow().last().copied(),
+                    events.borrow().last().cloned(),
                     Some(if cancel {
                         CurveGestureEvent::Cancel(id)
                     } else {
@@ -4128,7 +4450,7 @@ mod tests {
             } else {
                 assert_eq!(events.borrow().len(), if mode == 3 { 5 } else { 4 });
                 assert_eq!(
-                    events.borrow().last().copied(),
+                    events.borrow().last().cloned(),
                     Some(CurveGestureEvent::Finish(id))
                 );
                 assert!(
@@ -4780,7 +5102,7 @@ mod tests {
             CurvePoint::new(1.0, 1.0),
         ])
         .with_preview_projection(move |event| {
-            projected.borrow_mut().push(event);
+            projected.borrow_mut().push(event.clone());
             match event {
                 CurveGestureEvent::Edit { edit: CurveEdit::Move { point, .. }, .. } => {
                     Some(CurvePreview {
@@ -4830,7 +5152,7 @@ mod tests {
                 &mut ctx,
             );
             assert_eq!(
-                events.borrow().last().copied(),
+                events.borrow().last().cloned(),
                 Some(CurveGestureEvent::Edit {
                     gesture_id: Some(id),
                     edit: CurveEdit::Move {
@@ -4857,7 +5179,7 @@ mod tests {
         );
         assert_eq!(editor.points()[1], CurvePoint::new(0.5, 0.5));
         assert_eq!(
-            events.borrow().last().copied(),
+            events.borrow().last().cloned(),
             Some(CurveGestureEvent::Cancel(id))
         );
         assert_eq!(
@@ -5153,7 +5475,7 @@ mod tests {
             }
             let events = events.borrow();
             if finish == 2 || finish == 4 {
-                assert_eq!(events.last().copied(), Some(CurveGestureEvent::Cancel(id)));
+                assert_eq!(events.last().cloned(), Some(CurveGestureEvent::Cancel(id)));
                 assert_eq!(editor.points()[1], CurvePoint::new(0.5, 0.5));
             } else if finish == 0 {
                 assert_eq!(
