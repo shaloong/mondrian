@@ -1282,3 +1282,44 @@ matrix remain separate open work; this is not a claim of complete curve UI or
 new native/encoded output qualification.
 
 Strict workspace/all-target/all-feature Clippy with `-D warnings` passed (2m06s).
+
+
+## Clean current modal, resource and encoded LUT acceptance
+
+Clean and stable source `66150cf84ca5613c4b77591eff1fc50762937c2f` was rebuilt
+and qualified after the atomic Copy commit. Build passed (504452ms). Complete
+Golden passed **3/3** with all seven execution stages, distinct project identities,
+exit code 0, natural termination and no forced exit for every pass. Starting and
+ending source were clean and identical; the contract timeouts were unchanged.
+
+| Gate | Executed result |
+| --- | --- |
+| EventRouter modal scope: Tab/Shift+Tab, suspended background shortcut, replaced/empty/removed owner | 1 passed, 0 failed, 0 ignored |
+| Real resource helper/Host/native OpenFX and bounded child cancellation/timeout/retry | 5 passed, 0 failed, 0 ignored; 8.87s |
+| App modal routing, disabled Apply traversal and background focus restoration | 16 passed, 0 failed, 0 ignored; 24.42s |
+| Ordinary resource workflows/transactions | 103 passed, 0 failed, 5 ignored; 23.95s |
+
+The five ignored resource cases in the ordinary filter were explicitly executed
+by the real-resource gate above; the skipped count itself is not a passing result.
+The wrapper rejects zero or changed executed counts and checks clean source and
+stable product/fixture hashes after all gates.
+
+Each Golden pass retained a maximum final H.264 channel error of **4/255** and
+**0** GPU output CPU fallbacks. Pass process elapsed times were 120780, 119100 and
+118981ms. Encoder handoff was `cpu_rawvideo_pipe`; these receipts do not assert a
+zero-copy encoder or platform/vendor/performance coverage outside the named matrix.
+
+Qualified SHA256 identities:
+
+- Product: `448E82EE2789764009141B484A509CC85DE48964E07362A75EB32E5AED59C787`
+- Golden executable: `3726BC51F73BD4FEA99FD47A90EB6FE452F5233BDE1D5673A3DD826D741B3A60`
+- Native OpenFX fixture: `BA8734FE2FC3CEF93D0973415B8C4FEE64B1A1C0CEA9ECDBD409B2401781978A`
+
+Consecutive report:
+`E:/dev/mondrian/target/validation/nle-backlog-complete/20261006T154246Z-complete-golden-0f6053cd/complete-golden-consecutive-report.json`.
+This supersedes the older ce3 encoded/modal/resource scope. Native visual and
+native audio group receipts retain their separately qualified c3/689 sources;
+no newer vendor/plugin acceptance is inferred. Full App2574/0/68 ignored, strict
+workspace Clippy, fmt and diff checks passed before the production commit.
+No push was performed. The broad NLE goal remains active, including focused
+curve clipboard/group pointer/marquee/reset and the other documented matrices.
