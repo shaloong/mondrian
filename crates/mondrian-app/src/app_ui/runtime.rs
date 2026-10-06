@@ -57,6 +57,15 @@ impl WinitUiRuntime {
         Self::default()
     }
 
+    /// End transient native input sessions when replacing the visible widget root.
+    pub(crate) fn reset_for_root_change(&mut self, window: &winit::window::Window) {
+        self.eyedropper.cancel();
+        self.tooltip = TooltipWidget::new();
+        self.widget_cursor = None;
+        window.set_ime_allowed(false);
+        window.set_cursor(winit::window::CursorIcon::Default);
+    }
+
     /// Whether a platform eyedropper session is active.
     pub fn is_eyedropper_active(&self) -> bool {
         self.eyedropper.is_active()

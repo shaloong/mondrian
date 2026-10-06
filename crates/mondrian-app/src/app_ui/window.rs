@@ -735,6 +735,7 @@ enum WindowCornerPreference {
 enum SurfaceLifecycleReason {
     Resize,
     ScaleFactorChanged,
+    RoleChanged,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -998,6 +999,7 @@ struct AppUiViewerGpuOutputDisplayView {
 enum AppUiDisplayContractRefreshReasonDiagnostic {
     Resize,
     ScaleFactorChanged,
+    RoleChanged,
     WindowMoved,
     DisplayPolicyChanged,
 }
@@ -1681,6 +1683,9 @@ impl AppUiDisplayContractRefreshReasonDiagnostic {
             DisplayOutputContractRefreshReason::SurfaceLifecycle(
                 SurfaceLifecycleReason::ScaleFactorChanged,
             ) => Self::ScaleFactorChanged,
+            DisplayOutputContractRefreshReason::SurfaceLifecycle(
+                SurfaceLifecycleReason::RoleChanged,
+            ) => Self::RoleChanged,
             DisplayOutputContractRefreshReason::WindowMoved => Self::WindowMoved,
             DisplayOutputContractRefreshReason::DisplayPolicyChanged => Self::DisplayPolicyChanged,
         }
@@ -1785,6 +1790,7 @@ struct AppUiWindowSession {
     viewer_gpu_device_progress: ViewerGpuDeviceGenerationMember<ViewerGpuDeviceProgressOwner>,
     surface_generation_id: AppUiSurfaceGenerationId,
     role: AppUiWindowRole,
+    workspace_placement: WorkspaceWindowPlacement,
     window: Arc<winit::window::Window>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
@@ -2177,6 +2183,7 @@ struct AppUiInitialWindowCandidate {
     preview_work_event_proxy: winit::event_loop::EventLoopProxy<AppUiUserEvent>,
     preview_work_watch: PreviewWorkWatch,
     preview_work_event_pending: Arc<AtomicBool>,
+    #[cfg(feature = "validation")]
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
     device: wgpu::Device,
@@ -2306,6 +2313,7 @@ fn prepare_initial_window_candidate(
             preview_work_event_proxy,
             preview_work_watch,
             preview_work_event_pending,
+            #[cfg(feature = "validation")]
             instance,
             adapter,
             device,
@@ -3561,6 +3569,7 @@ fn merge_window_cleanup_failures(first: Option<String>, second: Option<String>) 
     }
 }
 
+#[cfg(any(test, feature = "validation"))]
 fn with_window_candidate_installed<T, R>(
     active: &mut T,
     candidate: &mut T,
@@ -3802,6 +3811,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
         preview_work_event_proxy,
         preview_work_watch,
         preview_work_event_pending,
+        #[cfg(feature = "validation")]
         instance,
         adapter,
         device: initial_device,
@@ -3913,7 +3923,6 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     sync_window_session_role(
                         &mut host,
                         elwt,
-                        &instance,
                         &adapter,
                         &device,
                         &mut session,
@@ -3931,7 +3940,6 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     sync_window_session_role(
                         &mut host,
                         elwt,
-                        &instance,
                         &adapter,
                         &device,
                         &mut session,
@@ -3948,7 +3956,6 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &pending_actions,
                             &platform,
                             elwt,
-                            &instance,
                             &adapter,
                             &device,
                             &mut session,
@@ -3985,7 +3992,6 @@ fn run_app_ui_with_initial_state_on_event_loop(
                                 &pending_actions,
                                 &platform,
                                 elwt,
-                                &instance,
                                 &adapter,
                                 &device,
                                 &mut session,
@@ -4011,7 +4017,6 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &pending_actions,
                             &platform,
                             elwt,
-                            &instance,
                             &adapter,
                             &device,
                             &mut session,
@@ -4041,7 +4046,6 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &pending_actions,
                             &platform,
                             elwt,
-                            &instance,
                             &adapter,
                             &device,
                             &mut session,
@@ -4054,7 +4058,6 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         sync_window_session_role(
                             &mut host,
                             elwt,
-                            &instance,
                             &adapter,
                             &device,
                             &mut session,
@@ -4190,6 +4193,9 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     }
 
                     WindowEvent::Resized(new_size) => {
+                        if session.role == AppUiWindowRole::Workspace {
+                            session.workspace_placement.observe(&session.window);
+                        }
                         apply_surface_lifecycle_update(
                             SurfaceLifecycleReason::Resize,
                             (new_size.width, new_size.height),
@@ -4288,7 +4294,6 @@ fn run_app_ui_with_initial_state_on_event_loop(
                                 &pending_actions,
                                 &platform,
                                 elwt,
-                                &instance,
                                 &adapter,
                                 &device,
                                 &mut session,
@@ -4321,7 +4326,6 @@ fn run_app_ui_with_initial_state_on_event_loop(
                                 &pending_actions,
                                 &platform,
                                 elwt,
-                                &instance,
                                 &adapter,
                                 &device,
                                 &mut session,
@@ -4380,7 +4384,6 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &pending_actions,
                             &platform,
                             elwt,
-                            &instance,
                             &adapter,
                             &device,
                             &mut session,
@@ -4409,7 +4412,6 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &pending_actions,
                             &platform,
                             elwt,
-                            &instance,
                             &adapter,
                             &device,
                             &mut session,
@@ -4502,7 +4504,6 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     sync_window_session_role(
                         &mut host,
                         elwt,
-                        &instance,
                         &adapter,
                         &device,
                         &mut session,
@@ -4522,7 +4523,6 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     sync_window_session_role(
                         &mut host,
                         elwt,
-                        &instance,
                         &adapter,
                         &device,
                         &mut session,
@@ -4562,7 +4562,6 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         &pending_actions,
                         &platform,
                         elwt,
-                        &instance,
                         &adapter,
                         &device,
                         &mut session,
@@ -7925,7 +7924,7 @@ fn surface_lifecycle_update(
     }
 
     let size_changed = current_size != next_size;
-    let relayout_root = size_changed || reason == SurfaceLifecycleReason::ScaleFactorChanged;
+    let relayout_root = size_changed || reason != SurfaceLifecycleReason::Resize;
     let bounds = relayout_root.then(|| Rect::new(0.0, 0.0, next_size.0 as f32, next_size.1 as f32));
 
     SurfaceLifecycleUpdate {
@@ -8298,6 +8297,7 @@ impl AppUiPreparedWindowSession {
             viewer_gpu_device_progress: ViewerGpuDeviceGenerationMember::empty(),
             surface_generation_id,
             role,
+            workspace_placement: WorkspaceWindowPlacement::default(),
             window,
             surface,
             config: config.clone(),
@@ -8477,7 +8477,6 @@ fn drain_actions_and_sync_window_session(
     pending_actions: &PendingUiActions,
     platform: &dyn mondrian_platform::PlatformService,
     elwt: &winit::event_loop::ActiveEventLoop,
-    instance: &wgpu::Instance,
     adapter: &wgpu::Adapter,
     device: &wgpu::Device,
     session: &mut AppUiWindowSession,
@@ -8492,7 +8491,7 @@ fn drain_actions_and_sync_window_session(
     let should_sync_window = shell_commands_should_sync_window_session(commands);
     apply_shell_commands(commands, &session.window, elwt);
     if should_sync_window {
-        sync_window_session_role(host, elwt, instance, adapter, device, session);
+        sync_window_session_role(host, elwt, adapter, device, session);
         if session.role == AppUiWindowRole::Workspace {
             let (next_color_engine, next_display_policy) = host.resolved_display_color_management();
             if display_color_management_changed(
@@ -8542,7 +8541,6 @@ fn rebuild_global_shortcuts(
 fn sync_window_session_role(
     host: &mut AppUiHost,
     elwt: &winit::event_loop::ActiveEventLoop,
-    instance: &wgpu::Instance,
     adapter: &wgpu::Adapter,
     device: &wgpu::Device,
     session: &mut AppUiWindowSession,
@@ -8551,97 +8549,113 @@ fn sync_window_session_role(
     if session.role == target_role {
         return;
     }
-    if let Err(err) =
-        replace_window_session(target_role, elwt, instance, adapter, device, host, session)
-    {
-        let failure = format!("failed to replace app UI native window: {err}");
+    let old_role = session.role;
+    if old_role == AppUiWindowRole::Workspace {
+        session.workspace_placement.observe(&session.window);
+    }
+    // Publication is revoked, but in-flight device owners and callback receivers
+    // remain in this session until their existing completion gates release them.
+    clear_viewer_spatial_presentation(session, host);
+    // Ticketless CPU candidates belong to the retired project, not the retained
+    // device generation. Their owners have never crossed GPU submission.
+    session.staged_viewer_gpu_successors.retain_only(&[]);
+    session.ui_runtime.reset_for_root_change(&session.window);
+    session.router = build_event_router(
+        host.active_root().id(),
+        &host.preferences().shortcut_overrides,
+    );
+    session.last_window_cursor_icon = None;
+    session.role = target_role;
+    apply_window_role_chrome(&session.window, target_role, session.workspace_placement);
+    let size = session.window.inner_size();
+    apply_surface_lifecycle_update(
+        SurfaceLifecycleReason::RoleChanged,
+        (size.width, size.height),
+        adapter,
+        device,
+        session,
+        host,
+    );
+    // The active root changes even when the native size has not changed yet.
+    publish_active_window_session(host, session, session.current_bounds.get());
+    if let Err(err) = host.renew_still_frame_demand_after_output_retirement() {
+        let failure = format!("failed to renew app UI window role demand: {err}");
         tracing::error!("{failure}");
         if session.event_loop_failure.is_none() {
             session.event_loop_failure = Some(failure);
         }
         elwt.exit();
+        return;
+    }
+    tracing::info!(
+        ?old_role,
+        ?target_role,
+        surface_generation = session.surface_generation_id.get(),
+        "app UI role changed on retained native window"
+    );
+    session.window.request_redraw();
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WorkspaceWindowPlacement {
+    normal_size: winit::dpi::LogicalSize<f64>,
+    maximized: bool,
+}
+
+impl Default for WorkspaceWindowPlacement {
+    fn default() -> Self {
+        Self {
+            normal_size: logical_size(WORKSPACE_WINDOW_WIDTH, WORKSPACE_WINDOW_HEIGHT),
+            maximized: false,
+        }
     }
 }
 
-fn replace_window_session(
-    role: AppUiWindowRole,
-    elwt: &winit::event_loop::ActiveEventLoop,
-    instance: &wgpu::Instance,
-    adapter: &wgpu::Adapter,
-    device: &wgpu::Device,
-    host: &mut AppUiHost,
-    session: &mut AppUiWindowSession,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let old_role = session.role;
-    let old_surface_generation = session.surface_generation_id;
-    let window = Arc::new(elwt.create_window(window_attributes_for_role(role))?);
-    let surface = instance.create_surface(window.clone())?;
-    let queue = session.renderer_queue.clone();
-    let prepared = AppUiPreparedWindowSession::prepare(
-        role, window, surface, adapter, device, &queue, host, None,
-    )?;
-    let activated = prepared.activate(None)?;
-    let (mut next_session, bounds) = activated.into_parts();
-    // Native-window replacement does not replace the wgpu device generation.
-    // The complete candidate is prepared before the active Window is hidden or
-    // its publication authority is revoked.
-    clear_viewer_spatial_presentation(session, host);
-    session.window.set_visible(false);
-    handoff_window_viewer_gpu_device_generation(
-        &mut session.viewer_gpu_device_progress,
-        &mut next_session.viewer_gpu_device_progress,
-        &mut session.viewer_gpu_execution,
-        &mut next_session.viewer_gpu_execution,
-        &mut session.viewer_gpu_submissions,
-        &mut next_session.viewer_gpu_submissions,
-        &mut session.viewer_gpu_deferred_cleanup,
-        &mut next_session.viewer_gpu_deferred_cleanup,
-    );
-    with_window_candidate_installed(
-        session,
-        &mut next_session,
-        |active_session, _retired_session| {
-            host.renew_still_frame_demand_after_output_retirement()?;
-            publish_active_window_session(host, active_session, bounds);
-            Ok::<_, mondrian_playback::PlaybackError>(())
-        },
-    )?;
-    tracing::info!(
-        ?old_role,
-        ?role,
-        surface_generation_before = old_surface_generation.get(),
-        surface_generation_after = session.surface_generation_id.get(),
-        device_generation = session
-            .viewer_gpu_device_progress
-            .generation_id()
-            .map(ViewerGpuDeviceGenerationId::get),
-        "app UI native window replaced"
-    );
-    session.window.set_visible(true);
-    session.window.request_redraw();
-    drop(next_session);
-    Ok(())
+impl WorkspaceWindowPlacement {
+    fn observe(&mut self, window: &winit::window::Window) {
+        self.record(
+            window.inner_size().to_logical(window.scale_factor()),
+            window.is_maximized(),
+            window.is_minimized().unwrap_or(false),
+        );
+    }
+
+    fn record(&mut self, size: winit::dpi::LogicalSize<f64>, maximized: bool, minimized: bool) {
+        if minimized {
+            return;
+        }
+        self.maximized = maximized;
+        if !maximized && size.width > 0.0 && size.height > 0.0 {
+            self.normal_size = size;
+        }
+    }
 }
 
-fn handoff_window_viewer_gpu_device_generation<P, E, O, C>(
-    retiring_progress: &mut P,
-    replacement_progress: &mut P,
-    retiring_execution: &mut E,
-    replacement_execution: &mut E,
-    retiring_submissions: &mut ViewerGpuSubmissionLifecycle<O, C>,
-    replacement_submissions: &mut ViewerGpuSubmissionLifecycle<O, C>,
-    retiring_cleanup: &mut WindowViewerGpuDeferredCleanup,
-    replacement_cleanup: &mut WindowViewerGpuDeferredCleanup,
+fn apply_window_role_chrome(
+    window: &winit::window::Window,
+    role: AppUiWindowRole,
+    workspace: WorkspaceWindowPlacement,
 ) {
-    // The surface/window generation is replaceable; the device-progress
-    // worker, execution runtime, callback receiver, retained owners, and their
-    // pending cleanup form one indivisible device-generation authority. In
-    // particular, an in-flight owner may still protect native decoder
-    // resources allocated by the retiring execution runtime.
-    std::mem::swap(retiring_progress, replacement_progress);
-    std::mem::swap(retiring_execution, replacement_execution);
-    std::mem::swap(retiring_submissions, replacement_submissions);
-    std::mem::swap(retiring_cleanup, replacement_cleanup);
+    let chrome = window_chrome_for_role(role);
+    window.set_maximized(false);
+    window.set_minimized(false);
+    // Remove Startup's fixed maximum before raising Workspace's minimum.
+    window.set_max_inner_size(None::<winit::dpi::LogicalSize<f64>>);
+    window.set_min_inner_size(chrome.min_size.map(|(w, h)| logical_size(w, h)));
+    window.set_title(chrome.title);
+    window.set_transparent(chrome.transparent);
+    window.set_decorations(chrome.decorations);
+    window.set_resizable(chrome.resizable);
+    apply_window_corner_preference(window, window_corner_preference_for_role(role));
+    let size = match role {
+        AppUiWindowRole::Startup => logical_size(chrome.width, chrome.height),
+        AppUiWindowRole::Workspace => workspace.normal_size,
+    };
+    let _ = window.request_inner_size(size);
+    window.set_max_inner_size(chrome.max_size.map(|(w, h)| logical_size(w, h)));
+    if role == AppUiWindowRole::Workspace && workspace.maximized {
+        window.set_maximized(true);
+    }
 }
 
 fn window_role_for_mode(mode: AppUiMode) -> AppUiWindowRole {
@@ -9282,7 +9296,6 @@ mod tests {
     };
     use mondrian_ui_core::widget::{EventContext, PaintContext};
     use mondrian_ui_core::Widget;
-    use std::sync::Mutex;
 
     #[test]
     fn qualification_diagnostics_bind_full_contract_and_runtime_image() {
@@ -9296,59 +9309,196 @@ mod tests {
         assert!(runtime_image.chars().all(|value| value.is_ascii_hexdigit()));
     }
 
+    #[cfg(all(target_os = "windows", feature = "validation"))]
     #[test]
-    fn delayed_viewer_callback_survives_native_window_replacement() {
-        type CompletionCallback = Box<dyn FnOnce(u64) + Send + 'static>;
+    #[ignore = "requires a native Windows desktop and GPU; run alone"]
+    fn native_window_role_cycle_retains_surface_and_device_authority() {
+        use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
+        use winit::platform::windows::EventLoopBuilderExtWindows;
 
-        let now = Instant::now();
-        let callback = Arc::new(Mutex::new(None::<CompletionCallback>));
-        let mut retiring_progress = "active-device-generation".to_owned();
-        let mut replacement_progress = "unused-replacement-worker".to_owned();
-        let mut retiring_execution = "retained-frame-resource-runtime".to_owned();
-        let mut replacement_execution = "unused-replacement-runtime".to_owned();
-        let mut retiring_submissions = ViewerGpuSubmissionLifecycle::<String, u64>::new();
-        let mut replacement_submissions = ViewerGpuSubmissionLifecycle::<String, u64>::new();
-        let mut retiring_cleanup = WindowViewerGpuDeferredCleanup::Reset;
-        let mut replacement_cleanup = WindowViewerGpuDeferredCleanup::None;
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let background = AppUiBackgroundRuntimeOwner::start(deadline)
+            .unwrap_or_else(|_| panic!("native test background startup failed"));
+        let runtime_guard = background.enter();
+        let mut host = AppUiHost::new(AppState::new());
+        let project_dir = tempfile::tempdir().expect("native role project directory");
+        let project_file = project_dir.path().join("窗口角色.mdp");
+        let mut builder = winit::event_loop::EventLoop::<AppUiUserEvent>::with_user_event();
+        builder.with_any_thread(true);
+        let mut event_loop = builder.build().expect("native role event loop");
+        let mut candidate = prepare_initial_window_candidate(&event_loop, &host, deadline)
+            .unwrap_or_else(|failure| panic!("native candidate: {}", failure.primary));
+        let id = candidate.session.window.id();
+        let surface_generation = candidate.session.surface_generation_id;
+        let device_generation = candidate.session.viewer_gpu_device_progress.generation_id();
+        assert!(device_generation.is_some());
+        let mut exercised = false;
+        let result = catch_app_ui_event_loop(|| {
+            #[allow(deprecated)]
+            event_loop.run_on_demand(|event, elwt| {
+                if !matches!(event, winit::event::Event::Resumed) || exercised {
+                    return;
+                }
+                exercised = true;
+                assert!(!candidate.session.window.is_resizable());
+                host.with_validation_app_state_mut(|app| {
+                    app.create_new_project_at(
+                        project_file.clone(),
+                        "Native role cycle",
+                        1280,
+                        720,
+                        mondrian_core::Rational::new(24, 1),
+                    )
+                    .expect("create native role project");
+                });
+                host.mark_dirty();
+                host.refresh_if_dirty(candidate.session.current_bounds.get());
+                assert_eq!(host.mode(), AppUiMode::Workspace);
+                sync_window_session_role(
+                    &mut host,
+                    elwt,
+                    &candidate.adapter,
+                    &candidate.device,
+                    &mut candidate.session,
+                );
+                assert!(candidate.session.window.is_resizable());
+                mondrian_core::ensure_mondrian_default_ocio_loaded()
+                    .expect("native staging color context");
+                host.with_validation_app_state_mut(|app| {
+                    let mut sequence = mondrian_timeline::Sequence::new("Native staging");
+                    sequence.video_tracks[0]
+                        .add_clip(
+                            mondrian_timeline::Clip::new_solid_color(
+                                mondrian_core::AssetId::new(),
+                                mondrian_core::Color::from_rgba8(24, 80, 160, 255),
+                                mondrian_core::TimelineTime::ZERO,
+                                mondrian_core::TimelineTime::new(1, 1).expect("one second"),
+                            )
+                            .expect("solid source"),
+                        )
+                        .expect("staging source placement");
+                    app.test_set_sequence(Some(sequence));
+                    app.seek(4).expect("staging seek");
+                    app.play().expect("staging playback");
+                });
+                host.mark_dirty();
+                host.refresh_if_dirty(candidate.session.current_bounds.get());
+                stage_window_viewer_gpu_lookahead(&mut candidate.session, &host);
+                assert_eq!(candidate.session.staged_viewer_gpu_successors.len(), 1);
+                let normal = logical_size(1300.0, 800.0);
+                let _ = candidate.session.window.request_inner_size(normal);
+                candidate.session.workspace_placement.observe(&candidate.session.window);
+                assert_eq!(candidate.session.workspace_placement.normal_size, normal);
+                candidate.session.window.set_maximized(true);
+                assert!(candidate.session.window.is_maximized());
+                host.with_validation_app_state_mut(|app| app.close_project())
+                    .expect("close native role project");
+                host.mark_dirty();
+                host.refresh_if_dirty(candidate.session.current_bounds.get());
+                sync_window_session_role(
+                    &mut host,
+                    elwt,
+                    &candidate.adapter,
+                    &candidate.device,
+                    &mut candidate.session,
+                );
+                assert_eq!(host.mode(), AppUiMode::Startup);
+                assert_eq!(candidate.session.staged_viewer_gpu_successors.len(), 0);
+                assert!(!candidate.session.window.is_resizable());
+                assert!(!candidate.session.window.is_maximized());
+                assert_eq!(candidate.session.workspace_placement.normal_size, normal);
+                assert!(candidate.session.workspace_placement.maximized);
+                let startup_size = candidate
+                    .session
+                    .window
+                    .inner_size()
+                    .to_logical::<f64>(candidate.session.window.scale_factor());
+                assert!((startup_size.width - f64::from(STARTUP_WINDOW_WIDTH)).abs() < 1.0);
+                assert!((startup_size.height - f64::from(STARTUP_WINDOW_HEIGHT)).abs() < 1.0);
+                host.with_validation_app_state_mut(|app| {
+                    app.open_project_file(project_file.clone())
+                })
+                .expect("reopen native role project");
+                host.mark_dirty();
+                host.refresh_if_dirty(candidate.session.current_bounds.get());
+                sync_window_session_role(
+                    &mut host,
+                    elwt,
+                    &candidate.adapter,
+                    &candidate.device,
+                    &mut candidate.session,
+                );
+                assert!(candidate.session.window.is_resizable());
+                assert!(candidate.session.window.is_maximized());
+                assert_eq!(candidate.session.workspace_placement.normal_size, normal);
+                assert_eq!(candidate.session.window.id(), id);
+                assert_eq!(candidate.session.surface_generation_id, surface_generation);
+                assert_eq!(
+                    candidate.session.viewer_gpu_device_progress.generation_id(),
+                    device_generation
+                );
+                assert!(candidate.session.event_loop_failure.is_none());
+                candidate.session.window.set_visible(true);
+                match candidate.session.surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(frame)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                        candidate.queue.present(frame)
+                    }
+                    failure => panic!("retained surface acquisition failed: {failure:?}"),
+                }
+                elwt.exit();
+            })
+        });
+        let gpu = candidate.session.shutdown_viewer_gpu_until(&host, deadline);
+        assert!(gpu.qualification_failure().is_none(), "{gpu:?}");
+        drop(candidate);
+        let (state, ui) = host.into_app_state_until(deadline);
+        assert!(ui.all_resources_released(), "{ui:?}");
+        let app = state.shutdown_for_endurance(deadline);
+        assert!(app.all_resources_released(), "{app:?}");
+        drop(runtime_guard);
+        assert!(background.shutdown_until(deadline).all_created_resources_released());
+        assert!(exercised);
+        result.expect("native role cycle");
+    }
 
-        let reservation = retiring_submissions.reserve().expect("reserve old Window submission");
-        let submission_id = reservation.submission_id();
-        let callback_slot = Arc::clone(&callback);
-        reservation.commit(
-            "retained-media-owner".to_owned(),
-            now + Duration::from_secs(1),
-            move |registered| {
-                *callback_slot.lock().expect("callback slot") = Some(registered);
-            },
-            || {},
+    #[test]
+    fn role_change_relayouts_same_sized_surface_with_distinct_diagnostics() {
+        let update = surface_lifecycle_update(
+            SurfaceLifecycleReason::RoleChanged,
+            (1280, 720),
+            (1280, 720),
         );
-
-        handoff_window_viewer_gpu_device_generation(
-            &mut retiring_progress,
-            &mut replacement_progress,
-            &mut retiring_execution,
-            &mut replacement_execution,
-            &mut retiring_submissions,
-            &mut replacement_submissions,
-            &mut retiring_cleanup,
-            &mut replacement_cleanup,
+        assert!(!update.reconfigure_surface);
+        assert!(update.relayout_root);
+        assert!(update.request_redraw);
+        assert_eq!(update.bounds, Some(Rect::new(0.0, 0.0, 1280.0, 720.0)));
+        assert_eq!(
+            AppUiDisplayContractRefreshReasonDiagnostic::from_reason(
+                DisplayOutputContractRefreshReason::SurfaceLifecycle(
+                    SurfaceLifecycleReason::RoleChanged
+                ),
+            ),
+            AppUiDisplayContractRefreshReasonDiagnostic::RoleChanged,
         );
+    }
 
-        assert_eq!(replacement_progress, "active-device-generation");
-        assert_eq!(replacement_execution, "retained-frame-resource-runtime");
-        assert_eq!(replacement_cleanup, WindowViewerGpuDeferredCleanup::Reset);
-        assert!(matches!(
-            retiring_submissions.poll(now),
-            ViewerGpuSubmissionPoll::Idle
-        ));
-        callback.lock().expect("callback slot").take().expect("registered callback")(73);
-        let completed = match replacement_submissions.poll(now) {
-            ViewerGpuSubmissionPoll::Completed(completed) => completed,
-            _ => panic!("replacement must retain the exact in-flight lifecycle"),
-        };
-        assert_eq!(completed.submission_id, submission_id);
-        assert_eq!(completed.owner, "retained-media-owner");
-        assert_eq!(completed.completion, 73);
+    #[test]
+    fn workspace_placement_retains_normal_size_through_maximize_and_minimize() {
+        let mut placement = WorkspaceWindowPlacement::default();
+        let normal = winit::dpi::LogicalSize::new(1300.0, 800.0);
+        placement.record(normal, false, false);
+        placement.record(winit::dpi::LogicalSize::new(1920.0, 1080.0), true, false);
+        assert_eq!(placement.normal_size, normal);
+        assert!(placement.maximized);
+        placement.record(winit::dpi::LogicalSize::new(0.0, 0.0), false, true);
+        assert_eq!(placement.normal_size, normal);
+        assert!(placement.maximized);
+        placement.record(normal, false, false);
+        assert!(!placement.maximized);
+        placement.record(winit::dpi::LogicalSize::new(0.0, 0.0), false, false);
+        assert_eq!(placement.normal_size, normal);
     }
 
     #[test]
@@ -11698,6 +11848,7 @@ mod tests {
         for reason in [
             SurfaceLifecycleReason::Resize,
             SurfaceLifecycleReason::ScaleFactorChanged,
+            SurfaceLifecycleReason::RoleChanged,
         ] {
             assert_eq!(
                 surface_lifecycle_update(reason, (1280, 720), (0, 720)),

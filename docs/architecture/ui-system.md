@@ -96,7 +96,24 @@ it does not allocate a Startup carrier only to replace it on the first event
 loop turn. A Host without a Project still starts with the Startup carrier.
 Both paths keep the original pre-active construction owner, deadline, wake
 registration, activation, and partial-start cleanup. Opening or closing a
-Project later still uses the production role-replacement lifecycle.
+Project later changes the role on that same native Window and Surface. The
+Viewer device progress owner, execution runtime, submission callback receiver,
+and deferred cleanup stay in the retained session. Publication retirement and
+display-contract invalidation still use their existing completion gates; a role
+change is not a device or surface generation change. Ticketless CPU staging
+frames from the retiring project are released immediately; submitted GPU owners
+still wait for exact completion. Only explicit validation
+surface/device recovery constructs another native carrier.
+
+Startup is transparent and fixed-size; Workspace uses the self-hosted chrome
+and permits native edge/corner resizing. Role changes clear native IME, tooltip,
+eyedropper and router focus/capture state, then publish and lay out the new root
+even if the OS has not changed its size yet. Display diagnostics distinguish
+RoleChanged from Resize and ScaleFactorChanged. Workspace retains its normal
+logical size and maximized flag across project close/open; maximized and
+minimized extents cannot overwrite the normal restore size. Startup always
+leaves minimized/maximized state and applies equal minimum/maximum dimensions.
+The fixed Startup maximum is removed before increasing the Workspace minimum.
 
 Empty and model-only UI construction must not create an `AppState`. A disabled
 empty Timeline has explicit unavailable edit flags, and a model-only shell has

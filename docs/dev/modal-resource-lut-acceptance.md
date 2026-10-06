@@ -448,3 +448,38 @@ alpha Rust API changes. The fresh native/encoded report above remains pinned to
 99db114, not to this subsequent selector source. Group movement/interpolation, rubber-band
 selection and the broader vendor/platform qualification remain open; overall
 NLE goal active.
+
+
+## Retained native window role and resource retirement (2026-10-06)
+
+Opening and closing a Project now changes Startup/Workspace role on the same
+native Window and Surface. Ordinary transitions no longer create another Window,
+renderer candidate or GPU device-session handoff. Explicit device/surface recovery
+keeps its separate replacement and closure protocol. New root layout and display
+refresh carry a distinct RoleChanged reason; same-size transitions still layout.
+Native IME, eyedropper, tooltip and router focus/capture state are cleared.
+
+Workspace remains resizable with the existing eight-edge hit routing; Startup
+has equal minimum/maximum dimensions and leaves minimized/maximized state. The
+normal logical Workspace size and maximized flag survive Project close/reopen;
+maximized and minimized extents cannot replace the normal restore size.
+
+A real Windows desktop/GPU test creates a Unicode-path Project, opens Workspace,
+closes it and reopens from disk. It verifies the identical Window ID, Surface
+generation and GPU device generation; resize/maximized contracts, normal-size
+retention, continued surface acquisition and complete GPU/UI/App/background
+closure. Its nonempty CPU staging fixture uses a solid-color Sequence in the
+canonical Project document and the real playback lookahead path. An actual RED
+left one CPU-complete ticketless frame after close reached Startup. Role changes
+now release that independent CPU staging queue immediately; submitted GPU owners
+still stay behind exact completion callbacks. The corrected native test passes
+1/0 (9.71s); the failure and correction logs are retained separately.
+
+Final current-source gates pass: App **2562/0/63 ignored** (294.76s), strict
+whole-workspace/all-targets/all-features Clippy with warnings denied (2m04s),
+default-feature App build (29.46s), fmt and diff checks. The ignored Windows role
+case was separately executed and passed. Fresh native resource/Undo/save-reopen/
+LUT-output qualification will use the clean committed source; the earlier encoded
+Golden proof remains pinned to 99db114 until that report completes. Physical
+interaction, macOS and the broad vendor/plugin matrix remain separately
+unqualified. Overall NLE goal remains active.
