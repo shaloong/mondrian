@@ -479,7 +479,41 @@ Final current-source gates pass: App **2562/0/63 ignored** (294.76s), strict
 whole-workspace/all-targets/all-features Clippy with warnings denied (2m04s),
 default-feature App build (29.46s), fmt and diff checks. The ignored Windows role
 case was separately executed and passed. Fresh native resource/Undo/save-reopen/
-LUT-output qualification will use the clean committed source; the earlier encoded
-Golden proof remains pinned to 99db114 until that report completes. Physical
+LUT-output qualification for the clean committed source is recorded below;
+the earlier 99db114 encoded Golden proof remains historical. Physical
 interaction, macOS and the broad vendor/plugin matrix remain separately
 unqualified. Overall NLE goal remains active.
+
+
+### Clean-source output qualification for fda9b23
+
+The corrected production source is committed as
+`fda9b23b2b47c8bcd4ceeceba6ba76f5bb0a70d7` (Shalom Wang as both author and
+committer). Fresh complete Golden passes **3/3**, seven stages per round, with
+baseline eligibility true. Starting/ending source match that commit, both trees
+are clean, timeouts match the unchanged contract, and every process exits
+naturally. Three distinct Project IDs and fresh persisted-session identities
+are recorded. Native build took 515292ms; rounds took 121890/120957/120283ms.
+
+Report:
+`E:/dev/mondrian/target/validation/nle-backlog-complete/20261006T033630Z-complete-golden-1c145a8f/complete-golden-consecutive-report.json`.
+Product worker SHA256:
+`f79a8c0b1038a44f3ed6de008eede8e9694c5a8d34d51a5dbfa3d623655a75d3`.
+Golden SHA256:
+`d42c1ea429b590b56e7f964adef230a11863fc294e0fda3ee0d484e45f86208f`.
+Color-stage encoded reimport maximum channel error is **4/255** in each round;
+GPU-output CPU fallbacks are **0**. Encoder frame transport remains
+`cpu_rawvideo_pipe`; this is not zero-copy or a performance qualification.
+
+Independent same-product native follow-up passes: retained Window/nonempty CPU
+staging **1/0**; supervised resource worker **5/0**; native effect curve author
+edit/Undo/saved Redo/fresh reopen/output **1/0**; modal Tab/resource focus
+**16/0**; resource workflows including real Cube LUT commit/Undo/save/reopen/
+output **103/0**; integer, dense curve and untouched raw-float history **1/0
+each**. The resource filter's five ignored native cases were executed separately.
+The final identity receipt confirms the same source, same product SHA and a
+clean/stable tree. Earlier failure evidence remains separate from this passing
+qualification. Windows contract paths are accepted within this scope; physical
+keyboard/file picker, high-DPI layouts, macOS and the broader vendor/plugin
+matrix remain unqualified. Key-group move/value/interpolation and rubber-band
+selection remain open. Overall goal stays active.
