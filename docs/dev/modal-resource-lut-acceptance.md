@@ -23,9 +23,62 @@ Final App all-feature library suite: **2585 passed, 0 failed, 68 ignored**,
 346.89 s. Changed CurveEditor module: **87 passed, 0 failed, 0 ignored**, 2.29 s;
 this is the module filter, not the entire widgets suite. Strict workspace,
 all-target, all-feature Clippy with `-D warnings` passed in 2 min 32 s.
-Native/encoded qualification below remains bound to its named source until the
-new Cut source receives a rebuilt clean-source receipt. Root Edit menu focus,
+The clean-source qualification below now includes this Cut implementation.
+Root Edit menu focus,
 audio clipboard and read-only interaction remain open in the overall goal.
+
+## Clean 26696ef modal resource LUT and native plugin acceptance
+
+Clean source `26696ef19c281ee602cac5a94877b83594d55257` was rebuilt and
+qualified on 2026-10-07. Build passed in 549962 ms without timeout. Complete
+Golden passed **3/3**, all seven stages each, distinct project IDs, natural
+exit 0 and no forced exits. Elapsed times were 120404, 120340 and 119887 ms.
+Starting and ending source were identical and clean; baseline eligibility was
+true. Build/process timeouts remained 3600/1800 s.
+
+Every final H.264 result had maximum channel error **4/255** and **0** GPU
+output CPU fallbacks. Encoder handoff was `cpu_rawvideo_pipe`; this qualifies
+the executed output contract, with no zero-copy or wider performance claim.
+
+| Explicit current-source gate | Executed result |
+| --- | --- |
+| EventRouter modal scope, shortcut containment and replacement/empty/removed owners | 1 passed, 0 failed, 0 ignored |
+| Native resource helper/Host/OpenFX paths and child cancellation/timeout/retry | 5 passed, 0 failed, 0 ignored; 8.35 s |
+| App modal Tab/Shift+Tab, disabled Apply traversal and focus restoration | 16 passed, 0 failed, 0 ignored; 23.65 s |
+| Resource drafts, atomic transactions, real cube Undo/save/reopen | 103 passed, 0 failed, 5 ignored; 24.26 s |
+| Native OpenFX group interpolation/history/queries/pixels | 1 passed, 0 failed, 0 ignored; 5.42 s |
+| Native OpenFX group time/history/queries/pixels | 1 passed, 0 failed, 0 ignored; 5.41 s |
+| Native OpenFX group value/history/queries/pixels | 1 passed, 0 failed, 0 ignored; 5.58 s |
+| Native CLAP/VST3 group Undo/saved Redo/Unicode reopen/audio | 2 passed, 0 failed, 0 ignored; 37.12 s |
+| CLAP sample-accurate event ranges | 1 passed, 0 failed, 0 ignored; 0.85 s |
+| VST3 SDK linear parameter queues | 1 passed, 0 failed, 0 ignored; 1.40 s |
+| VST3 state restoration and isolated-worker signal | 1 passed, 0 failed, 0 ignored; 0.94 s |
+| Real CLAP/VST3 shared preview WAV execution | 2 passed, 0 failed, 0 ignored; 2.25 s |
+
+The five default-ignored resource cases were explicitly executed by the native
+resource gate. Filters overlap; the table is not a count of unique tests.
+The wrapper required positive exact counts, clean stable source and unchanged
+hashes for all six product/plugin binaries. Owned CLAP/VST3 fixtures use the
+documented SDK event/queue interpretation; external examples remain limited
+static references. Unexecuted vendor, bus, MIDI, editor and platform combinations
+remain outside this qualification.
+
+Qualified SHA256 identities:
+
+- Product: `87D8EB8842823A542C4EDD0849DE7E5E22B8439F6F6E4D9E5F6C90CD8F191431`
+- Golden: `5D05B2458839D607D8131FB46C6F2FF2D17E2BDA4906342AE7224D6A489077D9`
+- OpenFX SessionProbe: `BA8734FE2FC3CEF93D0973415B8C4FEE64B1A1C0CEA9ECDBD409B2401781978A`
+- Owned CLAP sample gain: `CB2FA1B4956CEDBDA4BBAA4B24EFA2D16924820C7C7FCEB4E4881633F21FD687`
+- Owned VST3 stateful gain: `523E714760F9BC47805B3EDE7C7FC4399AEF7D1BDEEF1DCC3832B6DA50D9907F`
+- External Clack static gain: `171222FFE85360DBD5BDC8791073FFE7603D178E93118DFB7E15B42B1891039C`
+- External VST3 static gain: `CBCA9C3E9ED68554A5877889A81264D5C4910DEE38FCF02706272B0BB99F1AF5`
+
+Consecutive report:
+`E:/dev/mondrian/target/validation/nle-backlog-complete/20261006T211014Z-complete-golden-f3f9d3e3/complete-golden-consecutive-report.json`.
+This supersedes b846010 for the executed modal/resource/native/encoded cases.
+The App 2585/0/68 ignored, CurveEditor module 87/0/0 ignored, strict workspace
+Clippy, fmt and diff gates passed before the production commit. No push occurred.
+The complete professional NLE goal remains active.
 
 ## Canonical visual clipboard and durable history
 
@@ -71,7 +124,7 @@ their own implementation and evidence.
 ## Qualification scope
 
 The latest clean-source modal/resource and complete encoded Golden qualification is
-[b846010 qualification](#clean-b846010-modal-resource-lut-and-native-plugin-acceptance).
+[26696ef qualification](#clean-26696ef-modal-resource-lut-and-native-plugin-acceptance).
 The same clean source also passed the explicitly executed native visual/audio
 group, SDK queue, state-restoration and preview cases listed there.
 Source-level tests and native results qualify their named source and binary;
