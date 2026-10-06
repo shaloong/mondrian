@@ -3710,3 +3710,30 @@ shared Scope time cannot be inferred from Sequence playhead alone. The canonical
 batch audio author action remains available with an explicit retain time.
 No widget-owned curve replacement or loop of independent author commands is
 introduced.
+
+
+### Audio curve selection current-time context
+
+Audio automation projections require AudioAutomationTimeContext containing the
+current domain-qualified Sequence time. Mixer faders, routes and processor racks
+use AppState's current timeline coordinate. Inspector Component curves use the
+same live coordinate. A selected Clip Scope rack supplies its Component address
+only when that Clip has exactly one binding of the Scope. Multiple bindings in
+the same Clip remain ambiguous until a product occurrence selector is supplied.
+No global first-binding or viewport-origin fallback chooses retention time.
+
+The model retains Timeline's Result<DomainTime, AudioAutomationTimeError>.
+CurveEditor selection deletion is enabled only for an admitted current owner
+time. DeleteMany uses the canonical AudioAutomationEdit::RemoveKeyframes and one
+author transaction, including original-value retention when every key disappears.
+Preview uses the existing Timeline edit preparation and evaluator. Current-time
+projection does not create history; underlying shared Scope lock checks remain
+whole-definition admission. Group movement/interpolation and ambiguous-occurrence
+selection are still open and not presented as completed professional qualification.
+
+Audio view identity includes the explicit Scope occurrence, excluding transient
+playhead time. Playback refresh preserves selection in the same owner; changing
+occurrence cannot inherit another occurrence's view state. If a refreshed widget
+retains multiple selected IDs but loses batch admission, Delete consumes the
+input without emitting a singleton edit, changing geometry or losing selection.
+Production time-context construction is shared by Mixer and Inspector callers.

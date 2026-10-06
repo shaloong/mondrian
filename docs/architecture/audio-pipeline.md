@@ -1609,3 +1609,21 @@ curves become unkeyed when deleting every key; the original evaluated value is
 retained. Processor-owned curves keep their explicit Core curve object. Preview
 and author mutation consume the same edit contract. Batch deletion creates one
 author transaction and Undo entry through the existing App action path.
+
+
+### Current audio automation author time
+
+Timeline exposes audio_automation_author_time with a domain-qualified Sequence
+coordinate and an optional, explicit AudioComponentAddress for Processing Scope
+occurrences. Component targets carry their own stable address. Sequence-owned
+fader/route/Rack curves retain Sequence coordinates. Component and Scope curves
+use local_time_in and processing.scope_in respectively plus exact placement
+elapsed time. Visual clip_time_in and source sampling rate/origin do not interpret
+these audio author coordinates. Checked rational arithmetic rejects overflow.
+
+The query resolves addresses through the existing automation and Component
+inspection interfaces. Shared Scope queries require an occurrence even when
+only one is currently bound; absent, stale or mismatched context fails explicitly.
+For Inspector navigation, time clamps to the closed Clip placement extent;
+execution retains its independent half-open contribution membership. Reading
+coordinates does not mutate author state or bypass Track/Scope edit admission.

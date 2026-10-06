@@ -11,6 +11,7 @@
 
 pub mod audio;
 pub mod audio_automation_edit;
+pub mod audio_automation_time;
 pub mod audio_channel_strip_edit;
 pub mod audio_component_edit;
 pub mod audio_processor_edit;
@@ -40,6 +41,7 @@ pub use audio_automation_edit::{
     AudioAutomationEditOutcome, AudioAutomationEditRequest, AudioAutomationInspection,
     AudioAutomationTarget, AudioAutomationValueContract,
 };
+pub use audio_automation_time::{audio_automation_author_time, AudioAutomationTimeError};
 pub use audio_channel_strip_edit::{
     apply_audio_channel_strip_edit, audio_channel_strip, inspect_audio_channel_strip,
     AudioChannelStripAddressError, AudioChannelStripEdit, AudioChannelStripEditBlocker,

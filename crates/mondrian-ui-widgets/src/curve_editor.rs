@@ -1955,8 +1955,11 @@ impl CurveEditor {
     }
 
     fn delete_selected_from_input(&mut self, ctx: &mut EventContext) -> bool {
-        if self.selection_deletion && self.selected_keys.len() > 1 {
-            if self.has_active_pointer_interaction() || self.gesture.is_some() {
+        if self.selected_keys.len() > 1 {
+            if !self.selection_deletion
+                || self.has_active_pointer_interaction()
+                || self.gesture.is_some()
+            {
                 return true;
             }
             let keyframe_ids = self.selected_keyframe_ids();
@@ -2772,6 +2775,49 @@ mod tests {
         let mut ctx = event_ctx();
         assert!(!editor.delete_selected_from_input(&mut ctx));
         assert_eq!(editor.points().len(), 3);
+    }
+
+    #[test]
+    fn refreshed_multiselection_without_batch_admission_never_deletes_only_primary() {
+        let ids = [
+            mondrian_core::KeyframeId::new(),
+            mondrian_core::KeyframeId::new(),
+        ];
+        let points = vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.25, 0.2),
+            CurvePoint::new(0.75, 0.8),
+            CurvePoint::new(1.0, 1.0),
+        ];
+        let mut original = CurveEditor::with_points(points.clone())
+            .with_keyframe_ids(vec![None, Some(ids[0]), Some(ids[1]), None])
+            .with_selection_deletion()
+            .with_view_key(Some("same-author-owner".into()));
+        original.toggle_key_selection(1);
+        original.toggle_key_selection(2);
+        let state = original.view_state().expect("inactive selected view");
+        let actions = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let emitted = actions.clone();
+        let mut replacement = CurveEditor::with_points(points.clone())
+            .with_keyframe_ids(vec![None, Some(ids[0]), Some(ids[1]), None])
+            .with_view_key(Some("same-author-owner".into()))
+            .on_edit(move |edit| {
+                emitted.borrow_mut().push(edit);
+                None
+            });
+        assert!(replacement.restore_view_state(&state));
+        assert_eq!(replacement.selected_keyframe_ids(), ids);
+        let mut ctx = event_ctx();
+        replacement.event(
+            &UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert!(
+            actions.borrow().is_empty(),
+            "unadmitted set must not emit a singleton edit"
+        );
+        assert_eq!(replacement.points(), points);
+        assert_eq!(replacement.selected_keyframe_ids(), ids);
     }
 
     #[test]

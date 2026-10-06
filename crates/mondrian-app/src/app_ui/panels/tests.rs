@@ -10303,6 +10303,10 @@ fn audio_rack_numeric_widget_preserves_double_and_rejects_fractional_integer_inp
             sequence,
             sequence.find_clip(clip_id).expect("clip"),
             &chinese_localizer(),
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                sequence,
+                sequence.playhead,
+            ),
         );
         let rack = &racks[0];
         let processor = &rack.processors[index];
@@ -10379,6 +10383,10 @@ fn audio_rack_numeric_widget_preserves_double_and_rejects_fractional_integer_inp
                 sequence,
                 sequence.find_clip(clip_id).expect("clip"),
                 &chinese_localizer(),
+                crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                    sequence,
+                    sequence.playhead,
+                ),
             )[0]
             .processors[index]
                 .parameters[0]

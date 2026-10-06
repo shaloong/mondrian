@@ -2709,7 +2709,14 @@ impl InspectorPanelModel {
                 localizer,
             ),
             audio_processor_racks: {
-                let mut racks = clip_processing_scope_racks(sequence, clip, localizer);
+                let mut racks = clip_processing_scope_racks(
+                    sequence,
+                    clip,
+                    localizer,
+                    crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                        sequence, time,
+                    ),
+                );
                 if let Ok(descriptors) = state.installed_clap_processors() {
                     append_clap_insert_options(&mut racks, &descriptors);
                 }
@@ -4619,6 +4626,11 @@ fn inspector_audio_components(
         state.sequences().iter().find(|sequence| sequence.id == sequence_id)
     });
 
+    let time_context =
+        crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+            sequence,
+            state.current_timeline_time().ok().flatten().unwrap_or(sequence.playhead),
+        );
     clip.audio_components
         .iter()
         .map(|edit| match edit.source {
@@ -4639,6 +4651,7 @@ fn inspector_audio_components(
                         selection.track_id,
                         clip.id,
                         localizer,
+                        time_context,
                     );
                 };
                 let source_options = asset
@@ -4713,6 +4726,7 @@ fn inspector_audio_components(
                     selection.track_id,
                     clip.id,
                     localizer,
+                    time_context,
                 )
             }
             AudioComponentSource::NestedOutput { output_id } => {
@@ -4760,6 +4774,7 @@ fn inspector_audio_components(
                     selection.track_id,
                     clip.id,
                     localizer,
+                    time_context,
                 )
             }
         })
@@ -4777,6 +4792,7 @@ fn inspector_audio_component_model(
     track_id: TrackId,
     clip_id: ClipId,
     localizer: &Localizer,
+    time_context: crate::app_ui::audio_automation::AudioAutomationTimeContext,
 ) -> InspectorAudioComponentModel {
     let viewport = component_automation_viewport(edit.id, edit.local_time_in, clip_duration);
     InspectorAudioComponentModel {
@@ -4801,6 +4817,7 @@ fn inspector_audio_component_model(
                     edit_id: edit.id,
                 },
                 viewport,
+                time_context,
             )
         }),
         pan: edit.pan,
@@ -4813,6 +4830,7 @@ fn inspector_audio_component_model(
                     edit_id: edit.id,
                 },
                 viewport,
+                time_context,
             )
         }),
         fade_in: edit.fades.fade_in,

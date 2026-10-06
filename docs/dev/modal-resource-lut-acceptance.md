@@ -347,3 +347,35 @@ there is no compatibility shim for their former Copy API.
 No fresh native golden executable or encoded-output qualification was built for
 this UI source. Historical97e evidence stays source-pinned. The 62 ignored tests
 are not counted as completed qualification. The full NLE goal remains active.
+
+
+## Explicit audio occurrence and admission continuation (2026-10-06)
+
+Timeline now resolves domain-qualified Sequence time into Component or Scope
+curve time using the addressed occurrence and exact placement arithmetic.
+Shared Scopes require an explicit occurrence; absent, stale, mismatched or
+unrepresentable contexts fail without author mutation. Mixer and Inspector use
+the live AppState coordinate. Selected Clip Scope racks resolve a unique binding;
+multiple bindings in one Clip await an explicit product occurrence selector.
+
+Admitted audio curves support whole-selection Delete through one canonical
+RemoveKeyframes transaction, retaining the original evaluated current owner
+value when every key disappears. The real CurveEditor/EventRouter acceptance
+covers Component and Scope owners, one full Sequence Undo/Redo and Unicode
+save/fresh reopen. View identity includes the Scope occurrence, never the transient
+playhead. An actual failing widget test exposed fallback to singleton deletion
+after refresh removed batch admission; refusal now preserves the complete set
+and emits no edit.
+
+Curve widgets: **93 passed / 0 failed** (2.26s). Timeline: **231 passed / 0 failed**.
+Full App library: **2558 passed / 0 failed / 62 ignored** (315.08s), including modal
+Tab scope, pending Apply focus, stale-resource refusal and real cube pixels through
+Undo/save/reopen. Strict Clippy initially caught a test-only time constructor;
+production callers now share it instead of repeating its fields. Corrected
+whole-workspace/all-targets/all-features Clippy passed (3m17s), followed by affected
+audio App tests **134 passed / 0 failed / 7 ignored** and final fmt/diff checks.
+
+Fresh native/encoded qualification is pending on the committed source. Historical
+native results remain pinned to their original commit. Group movement/interpolation,
+rubber-band selection, ambiguous same-Clip occurrences and broader plugin/platform
+qualification remain open; the overall NLE goal is active.

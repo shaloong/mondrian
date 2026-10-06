@@ -132,6 +132,11 @@ impl AudioMixerPanelModel {
                 empty_message: Some(localizer.text("audio-mixer-empty")),
             };
         };
+        let time_context =
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                sequence,
+                state.current_timeline_time().ok().flatten().unwrap_or(sequence.playhead),
+            );
         let meter = state.latest_audio_meter_frame();
         let mut channels = Vec::with_capacity(
             sequence
@@ -140,7 +145,7 @@ impl AudioMixerPanelModel {
                 .saturating_add(sequence.audio_program.buses.len())
                 .saturating_add(sequence.audio_program.outputs.len()),
         );
-        let routing = AudioMixerRoutingIndex::build(sequence, localizer);
+        let routing = AudioMixerRoutingIndex::build(sequence, localizer, time_context);
         channels.extend(sequence.audio_tracks.iter().map(|track| {
             project_channel(
                 sequence,
@@ -152,6 +157,7 @@ impl AudioMixerPanelModel {
                 Some(state.is_audio_track_soloed(track.id)),
                 meter.as_ref(),
                 localizer,
+                time_context,
             )
         }));
         channels.extend(sequence.audio_program.buses.iter().map(|bus| {
@@ -165,6 +171,7 @@ impl AudioMixerPanelModel {
                 None,
                 meter.as_ref(),
                 localizer,
+                time_context,
             )
         }));
         channels.extend(sequence.audio_program.outputs.iter().map(|output| {
@@ -178,6 +185,7 @@ impl AudioMixerPanelModel {
                 None,
                 meter.as_ref(),
                 localizer,
+                time_context,
             )
         }));
         if let Ok(descriptors) = state.installed_clap_processors() {
@@ -214,6 +222,7 @@ fn project_channel(
     track_soloed: Option<bool>,
     meter: Option<&AudioMeterFrame>,
     localizer: &Localizer,
+    time_context: crate::app_ui::audio_automation::AudioAutomationTimeContext,
 ) -> AudioMixerChannelModel {
     let automation_viewport = sequence_automation_viewport(sequence);
     let inspection = inspect_audio_channel_strip(sequence, owner);
@@ -250,6 +259,7 @@ fn project_channel(
             sequence,
             AudioProcessorRackAddress::ChannelStrip { owner, rack },
             localizer,
+            time_context,
         )
     })
     .collect();
@@ -276,6 +286,7 @@ fn project_channel(
                 sequence,
                 AudioAutomationTarget::ChannelFader { owner },
                 viewport,
+                time_context,
             )
         }),
         track_muted,
@@ -309,7 +320,11 @@ struct AudioMixerRoutingIndex {
 }
 
 impl AudioMixerRoutingIndex {
-    fn build(sequence: &mondrian_timeline::sequence::Sequence, localizer: &Localizer) -> Self {
+    fn build(
+        sequence: &mondrian_timeline::sequence::Sequence,
+        localizer: &Localizer,
+        time_context: crate::app_ui::audio_automation::AudioAutomationTimeContext,
+    ) -> Self {
         let mut index = Self {
             route_candidates: inspect_audio_route_candidates(sequence).ok(),
             ..Self::default()
@@ -326,7 +341,7 @@ impl AudioMixerRoutingIndex {
             )
         }));
         for route in &sequence.audio_program.routes {
-            let projected = project_route(sequence, route, localizer);
+            let projected = project_route(sequence, route, localizer, time_context);
             let connected_bus_disabled_reason = (!projected.is_editable)
                 .then(|| projected.edit_disabled_reason.clone())
                 .flatten();
@@ -377,6 +392,7 @@ fn project_route(
     sequence: &mondrian_timeline::sequence::Sequence,
     route: &mondrian_timeline::audio::AudioRoute,
     localizer: &Localizer,
+    time_context: crate::app_ui::audio_automation::AudioAutomationTimeContext,
 ) -> AudioMixerRouteModel {
     let (is_editable, edit_disabled_reason) = match inspect_audio_route(sequence, route.id) {
         Ok(inspection) => {
@@ -407,6 +423,7 @@ fn project_route(
                 sequence,
                 AudioAutomationTarget::RouteGain { route_id: route.id },
                 viewport,
+                time_context,
             )
         }),
         is_editable,

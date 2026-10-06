@@ -118,6 +118,7 @@ pub(crate) fn clip_processing_scope_racks(
     sequence: &Sequence,
     clip: &Clip,
     localizer: &Localizer,
+    time_context: crate::app_ui::audio_automation::AudioAutomationTimeContext,
 ) -> Vec<AudioProcessorRackModel> {
     let mut scope_ids = clip
         .audio_components
@@ -129,10 +130,32 @@ pub(crate) fn clip_processing_scope_racks(
     scope_ids
         .into_iter()
         .map(|scope_id| {
+            let mut bindings =
+                clip.audio_components.iter().filter(|edit| edit.processing.scope_id == scope_id);
+            let first = bindings.next();
+            let occurrence = if bindings.next().is_none() {
+                first.and_then(|edit| {
+                    sequence
+                        .clip_track_location(clip.id)
+                        .filter(|location| !location.is_video_track)
+                        .map(|location| mondrian_timeline::AudioComponentAddress {
+                            track_id: location.track_id,
+                            clip_id: clip.id,
+                            edit_id: edit.id,
+                        })
+                })
+            } else {
+                None
+            };
+            let time_context = crate::app_ui::audio_automation::AudioAutomationTimeContext {
+                scope_occurrence: occurrence,
+                ..time_context
+            };
             project_audio_processor_rack(
                 sequence,
                 AudioProcessorRackAddress::ProcessingScope { scope_id },
                 localizer,
+                time_context,
             )
         })
         .collect()
@@ -144,6 +167,7 @@ pub(crate) fn project_audio_processor_rack(
     sequence: &Sequence,
     address: AudioProcessorRackAddress,
     localizer: &Localizer,
+    time_context: crate::app_ui::audio_automation::AudioAutomationTimeContext,
 ) -> AudioProcessorRackModel {
     let automation_viewport = rack_automation_viewport(sequence, address);
     let inspection = inspect_audio_processor_rack(sequence, &address);
@@ -158,7 +182,14 @@ pub(crate) fn project_audio_processor_rack(
                 .processors
                 .iter()
                 .map(|processor| {
-                    project_processor(sequence, address, automation_viewport, processor, localizer)
+                    project_processor(
+                        sequence,
+                        address,
+                        automation_viewport,
+                        processor,
+                        localizer,
+                        time_context,
+                    )
                 })
                 .collect(),
         ),
@@ -184,6 +215,7 @@ pub(crate) fn project_audio_processor_rack(
                             scope_id,
                         },
                         viewport,
+                        time_context,
                     )
                 }),
             AudioProcessorRackAddress::ChannelStrip { .. } => None,
@@ -373,6 +405,7 @@ fn project_processor(
     viewport: Option<AudioAutomationViewport>,
     processor: &AudioProcessorInstance,
     localizer: &Localizer,
+    time_context: crate::app_ui::audio_automation::AudioAutomationTimeContext,
 ) -> AudioProcessorInstanceModel {
     let definition_id = match &processor.definition {
         AudioProcessorDefinitionRef::BuiltIn { definition_id, .. } => Some(definition_id.as_str()),
@@ -402,6 +435,7 @@ fn project_processor(
                             parameter_id: parameter_id.clone(),
                         },
                         viewport,
+                        time_context,
                     )
                 });
                 AudioProcessorParameterModel {
@@ -637,7 +671,15 @@ mod tests {
             .find(|clip| clip.id == clip_id)
             .expect("Clip");
 
-        let racks = clip_processing_scope_racks(&sequence, clip, &chinese());
+        let racks = clip_processing_scope_racks(
+            &sequence,
+            clip,
+            &chinese(),
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
+        );
 
         assert_eq!(racks.len(), 1);
         assert_eq!(
@@ -650,7 +692,15 @@ mod tests {
 
         sequence.audio_tracks[0].is_locked = true;
         let clip = &sequence.audio_tracks[0].clips[0];
-        let locked = clip_processing_scope_racks(&sequence, clip, &chinese());
+        let locked = clip_processing_scope_racks(
+            &sequence,
+            clip,
+            &chinese(),
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
+        );
         assert!(!locked[0].is_editable);
         assert!(locked[0].edit_disabled_reason.is_some());
     }
@@ -660,8 +710,24 @@ mod tests {
         let (sequence, _) = sequence_with_gain_scope();
         let clip = &sequence.audio_tracks[0].clips[0];
         let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
-        let english_rack = &clip_processing_scope_racks(&sequence, clip, &english)[0];
-        let chinese_rack = &clip_processing_scope_racks(&sequence, clip, &chinese())[0];
+        let english_rack = &clip_processing_scope_racks(
+            &sequence,
+            clip,
+            &english,
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
+        )[0];
+        let chinese_rack = &clip_processing_scope_racks(
+            &sequence,
+            clip,
+            &chinese(),
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
+        )[0];
         assert_eq!(english_rack.title, "Audio Processor Rack");
         assert_eq!(english_rack.processors[0].label, "Gain");
         assert_eq!(english_rack.processors[0].parameters[0].label, "Gain");
@@ -698,15 +764,32 @@ mod tests {
             },
         ];
 
-        let projected =
-            addresses.map(|address| project_audio_processor_rack(&sequence, address, &chinese()));
+        let projected = addresses.map(|address| {
+            project_audio_processor_rack(
+                &sequence,
+                address,
+                &chinese(),
+                crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                    &sequence,
+                    sequence.playhead,
+                ),
+            )
+        });
         assert_eq!(projected[0].ownership_label, sequence.audio_tracks[0].name);
         assert_eq!(projected[1].ownership_label, "Bus · Dialog");
         assert!(projected[2].ownership_label.starts_with("节目输出 · "));
         assert!(projected.iter().all(|rack| rack.is_editable));
 
         sequence.audio_tracks[0].is_locked = true;
-        let locked = project_audio_processor_rack(&sequence, addresses[0], &chinese());
+        let locked = project_audio_processor_rack(
+            &sequence,
+            addresses[0],
+            &chinese(),
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
+        );
         assert!(!locked.is_editable);
         assert!(locked
             .edit_disabled_reason
@@ -717,8 +800,15 @@ mod tests {
     #[test]
     fn static_parameter_action_preserves_canonical_double_precision() {
         let (sequence, _) = sequence_with_gain_scope();
-        let racks =
-            clip_processing_scope_racks(&sequence, &sequence.audio_tracks[0].clips[0], &chinese());
+        let racks = clip_processing_scope_racks(
+            &sequence,
+            &sequence.audio_tracks[0].clips[0],
+            &chinese(),
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
+        );
         let rack = &racks[0];
         let processor = &rack.processors[0];
         let parameter = &processor.parameters[0];
@@ -737,8 +827,16 @@ mod tests {
         state.test_set_sequence(Some(sequence));
         let snapshot = |state: &crate::app::AppState| {
             let sequence = state.active_sequence().expect("sequence");
-            clip_processing_scope_racks(sequence, &sequence.audio_tracks[0].clips[0], &chinese())[0]
-                .processors[0]
+            clip_processing_scope_racks(
+                sequence,
+                &sequence.audio_tracks[0].clips[0],
+                &chinese(),
+                crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                    sequence,
+                    sequence.playhead,
+                ),
+            )[0]
+            .processors[0]
                 .parameters[0]
                 .static_value
         };
@@ -755,7 +853,15 @@ mod tests {
     fn actions_preserve_typed_addresses_and_do_not_fake_automated_static_edits() {
         let (mut sequence, _) = sequence_with_gain_scope();
         let clip = &sequence.audio_tracks[0].clips[0];
-        let racks = clip_processing_scope_racks(&sequence, clip, &chinese());
+        let racks = clip_processing_scope_racks(
+            &sequence,
+            clip,
+            &chinese(),
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
+        );
         let rack = &racks[0];
         let processor = &rack.processors[0];
         let parameter = &processor.parameters[0];
@@ -791,7 +897,15 @@ mod tests {
             .set_keyframe(ExactAutomationKeyframe::linear(TimelineTime::ZERO, -3.0))
             .expect("keyframe");
         let clip = &sequence.audio_tracks[0].clips[0];
-        let racks = clip_processing_scope_racks(&sequence, clip, &chinese());
+        let racks = clip_processing_scope_racks(
+            &sequence,
+            clip,
+            &chinese(),
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
+        );
         let processor = &racks[0].processors[0];
         let parameter = &processor.parameters[0];
         assert_eq!(parameter.keyframe_count, 1);
@@ -802,7 +916,15 @@ mod tests {
     fn insertion_action_carries_a_preset_without_allocating_author_identity_in_projection() {
         let (sequence, _) = sequence_with_gain_scope();
         let clip = &sequence.audio_tracks[0].clips[0];
-        let racks = clip_processing_scope_racks(&sequence, clip, &chinese());
+        let racks = clip_processing_scope_racks(
+            &sequence,
+            clip,
+            &chinese(),
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
+        );
         let action = insert_action(&racks[0], AudioProcessorBuiltInPreset::LookaheadLimiter);
 
         assert!(matches!(
@@ -820,7 +942,15 @@ mod tests {
     fn installed_clap_option_preserves_plugin_identity_and_rack_address() {
         let (sequence, _) = sequence_with_gain_scope();
         let clip = &sequence.audio_tracks[0].clips[0];
-        let mut racks = clip_processing_scope_racks(&sequence, clip, &chinese());
+        let mut racks = clip_processing_scope_racks(
+            &sequence,
+            clip,
+            &chinese(),
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
+        );
         append_clap_insert_options(
             &mut racks,
             &[ClapPluginDescriptor {
@@ -849,7 +979,15 @@ mod tests {
     fn installed_vst3_option_preserves_class_identity_and_rack_address() {
         let (sequence, _) = sequence_with_gain_scope();
         let clip = &sequence.audio_tracks[0].clips[0];
-        let mut racks = clip_processing_scope_racks(&sequence, clip, &chinese());
+        let mut racks = clip_processing_scope_racks(
+            &sequence,
+            clip,
+            &chinese(),
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
+        );
         let class_id = "0123456789ABCDEF0123456789ABCDEF".to_owned();
         append_vst3_insert_options(
             &mut racks,
@@ -892,6 +1030,10 @@ mod tests {
             &sequence,
             AudioProcessorRackAddress::ProcessingScope { scope_id },
             &chinese(),
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
         );
         let instance = &rack.processors[0];
         assert_eq!(instance.native_format, Some(NativeAudioFormat::Clap));
@@ -906,6 +1048,10 @@ mod tests {
             &sequence,
             AudioProcessorRackAddress::ProcessingScope { scope_id },
             &chinese(),
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
         );
         assert!(rebind_native_action(&locked, &locked.processors[0]).is_none());
     }
@@ -950,6 +1096,10 @@ mod tests {
             &sequence,
             AudioProcessorRackAddress::ProcessingScope { scope_id },
             &chinese(),
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
         );
         assert_eq!(rack.processors[0].parameters.len(), 1);
         assert_eq!(rack.processors[0].parameters[0].label, "Output Gain");

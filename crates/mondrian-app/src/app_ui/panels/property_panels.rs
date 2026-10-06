@@ -1826,17 +1826,22 @@ pub(super) fn audio_automation_curve_control(
     let pending_action = std::rc::Rc::new(std::cell::RefCell::new(None));
     let preview_action = pending_action.clone();
     let ids = model.keys.iter().map(|key| key.keyframe.as_ref().map(|key| key.id)).collect();
-    let editor = CurveEditor::with_author_points(model.points(), model.value_axis)
+    let mut editor = CurveEditor::with_author_points(model.points(), model.value_axis)
         .with_time_axis(model.viewport.range)
         .with_frame_time_step(model.frame_time_step)
         .with_keyboard_help(
             localizer.text("curve-editor-name"),
-            localizer.text("curve-editor-keyboard-help"),
+            localizer.text(if model.current_author_time.is_ok() {
+                "curve-editor-selection-keyboard-help"
+            } else {
+                "curve-editor-keyboard-help"
+            }),
         )
         .with_view_key(
-            serde_json::to_string(&ParameterCurveGestureTarget::Audio {
-                target: model.target.clone(),
-            })
+            serde_json::to_string(&(
+                ParameterCurveGestureTarget::Audio { target: model.target.clone() },
+                model.time_context.scope_occurrence,
+            ))
             .ok(),
         )
         .with_keyframe_ids(ids)
@@ -1883,6 +1888,9 @@ pub(super) fn audio_automation_curve_control(
         .with_display_points(model.display_points.clone())
         .with_point_context_menus(interpolation_menus)
         .enabled(model.is_editable);
+    if model.current_author_time.is_ok() {
+        editor = editor.with_selection_deletion();
+    }
     Box::new(editor.on_gesture(move |event| {
         match event {
             CurveGestureEvent::Begin(gesture_id) => Some(
@@ -4636,6 +4644,160 @@ mod temporal_handle_tests {
     }
 
     #[test]
+    fn temporal_audio_selection_uses_owner_context_is_one_undo_and_survives_reopen() {
+        use crate::app_ui::audio_automation::{
+            component_automation_viewport, processing_scope_automation_viewport,
+            project_audio_automation, AudioAutomationTimeContext,
+        };
+        use mondrian_core::{
+            AssetId, AudioSourceComponentId, AuthoringTimeDomain, DomainTime,
+            ExactAutomationKeyframe,
+        };
+        use mondrian_timeline::{
+            apply_audio_automation_edit, inspect_audio_automation, AudioAutomationEdit,
+            AudioAutomationEditRequest, AudioAutomationTarget, AudioComponentAddress,
+        };
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        for scope in [false, true] {
+            let mut sequence = mondrian_timeline::Sequence::new("Audio selection acceptance");
+            let track_id = sequence.audio_tracks[0].id;
+            let clip = Clip::new(
+                AssetId::new(),
+                TimelineTime::new(10, 1).expect("placement"),
+                TimelineTime::ONE,
+            )
+            .expect("clip");
+            sequence
+                .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+                .expect("audio clip");
+            let clip = &mut sequence.audio_tracks[0].clips[0];
+            let edit = &mut clip.audio_components[0];
+            edit.local_time_in = TimelineTime::new(2, 1).expect("component origin");
+            edit.processing.scope_in = TimelineTime::new(7, 1).expect("Scope origin");
+            let address = AudioComponentAddress { track_id, clip_id: clip.id, edit_id: edit.id };
+            let scope_id = edit.processing.scope_id;
+            let target = if scope {
+                AudioAutomationTarget::ProcessingScopeInputGain { scope_id }
+            } else {
+                AudioAutomationTarget::ComponentVolume {
+                    track_id,
+                    clip_id: clip.id,
+                    edit_id: edit.id,
+                }
+            };
+            let origin = if scope {
+                edit.processing.scope_in
+            } else {
+                edit.local_time_in
+            };
+            let mut ids = Vec::new();
+            for (offset, value) in [
+                (TimelineTime::ZERO, -24.0),
+                (TimelineTime::new(1, 2).expect("middle"), -6.0),
+                (TimelineTime::ONE, -18.0),
+            ] {
+                let keyframe = ExactAutomationKeyframe::linear(
+                    origin.checked_add(offset).expect("author time"),
+                    value,
+                );
+                ids.push(keyframe.id);
+                apply_audio_automation_edit(
+                    &mut sequence,
+                    &AudioAutomationEditRequest {
+                        target: target.clone(),
+                        edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                    },
+                )
+                .expect("canonical seed");
+            }
+            let context = AudioAutomationTimeContext {
+                sequence_time: DomainTime::new(
+                    AuthoringTimeDomain::Sequence(sequence.id),
+                    TimelineTime::new(41, 4).expect("live time"),
+                ),
+                scope_occurrence: scope.then_some(address),
+            };
+            let viewport = if scope {
+                processing_scope_automation_viewport(&sequence, scope_id).expect("Scope viewport")
+            } else {
+                component_automation_viewport(address.edit_id, origin, TimelineTime::ONE)
+                    .expect("component viewport")
+            };
+            let model = project_audio_automation(&sequence, target.clone(), viewport, context)
+                .expect("model");
+            let author_time = origin
+                .checked_add(TimelineTime::new(1, 4).expect("offset"))
+                .expect("exact current time");
+            assert_eq!(
+                model.current_author_time.as_ref().expect("current owner").time,
+                author_time
+            );
+            let retained = model.source_curve.evaluate(author_time).expect("original sample");
+            let original = sequence.clone();
+            let mut state = AppState::new();
+            state.test_set_sequence(Some(sequence));
+            let localizer =
+                Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs).expect("locale");
+            let mut widget = audio_automation_curve_control(&model, &localizer);
+            widget.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+            let mut router = EventRouter::new(widget.id());
+            for event in [
+                UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+                UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            ] {
+                route_temporal(widget.as_mut(), &mut router, &mut state, event);
+            }
+            assert_eq!(
+                widget
+                    .as_any()
+                    .and_then(|any| any.downcast_ref::<CurveEditor>())
+                    .expect("curve")
+                    .selected_keyframe_ids(),
+                ids
+            );
+            assert!(!state.can_undo_action());
+            route_temporal(
+                widget.as_mut(),
+                &mut router,
+                &mut state,
+                UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
+            );
+            let accepted = state.active_sequence().expect("accepted").clone();
+            let inspection = inspect_audio_automation(&accepted, &target).expect("inspection");
+            assert!(inspection.curve().is_none());
+            assert_eq!(inspection.default_value(), retained);
+            let editor = widget
+                .as_any()
+                .and_then(|any| any.downcast_ref::<CurveEditor>())
+                .expect("curve");
+            assert_eq!(editor.points().len(), 2);
+            assert!(editor.selected_keyframe_ids().is_empty());
+            assert!(state.undo_timeline().expect("one Undo"));
+            assert!(state
+                .active_sequence()
+                .expect("undone")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(!state.can_undo_action());
+            assert!(state.redo_timeline().expect("one Redo"));
+            assert!(state
+                .active_sequence()
+                .expect("redone")
+                .author_state_eq_ignoring_revision(&accepted));
+            let directory = tempfile::tempdir().expect("archives");
+            let path = directory.path().join("音频整组删除🙂.mdp");
+            state.save_project_file_as(path.clone()).expect("save audio selection");
+            let mut reopened = AppState::new();
+            reopened.open_project_file(path).expect("fresh reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("reopened")
+                .author_state_eq_ignoring_revision(&accepted));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            drop(reopened);
+        }
+    }
+
+    #[test]
     fn temporal_audio_boundary_preview_matches_owner_and_retains_history() {
         use crate::app_ui::audio_automation::{project_audio_automation, AudioAutomationViewport};
         use mondrian_core::{
@@ -4660,10 +4822,18 @@ mod temporal_handle_tests {
                     range: TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE)
                         .expect("range"),
                 };
-                let soft = project_audio_automation(&sequence, target.clone(), viewport)
-                    .expect("default axis")
-                    .value_axis
-                    .soft_range();
+                let soft = project_audio_automation(
+                    &sequence,
+                    target.clone(),
+                    viewport,
+                    crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                        &sequence,
+                        sequence.playhead,
+                    ),
+                )
+                .expect("default axis")
+                .value_axis
+                .soft_range();
                 let middle_value = soft.min * 0.5 + soft.max * 0.5;
                 let mut middle_id = None;
                 for (index, time) in [
@@ -4701,8 +4871,16 @@ mod temporal_handle_tests {
                 }
                 let id = middle_id.expect("middle identity");
                 let original = sequence.clone();
-                let model =
-                    project_audio_automation(&sequence, target.clone(), viewport).expect("model");
+                let model = project_audio_automation(
+                    &sequence,
+                    target.clone(),
+                    viewport,
+                    crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                        &sequence,
+                        sequence.playhead,
+                    ),
+                )
+                .expect("model");
                 let mut state = AppState::new();
                 state.test_set_sequence(Some(sequence));
                 let localizer =
@@ -4740,8 +4918,7 @@ mod temporal_handle_tests {
                     let projected = project_audio_automation(
                         state.active_sequence().expect("draft"),
                         target.clone(),
-                        viewport,
-                    )
+                        viewport, crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(state.active_sequence().expect("draft"), state.active_sequence().expect("draft").playhead))
                     .expect("canonical projection");
                     let curve = widget
                         .as_any()
@@ -4827,7 +5004,16 @@ mod temporal_handle_tests {
             domain: AuthoringTimeDomain::Sequence(sequence.id),
             range: TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE).expect("range"),
         };
-        let model = project_audio_automation(&sequence, target.clone(), viewport).expect("model");
+        let model = project_audio_automation(
+            &sequence,
+            target.clone(),
+            viewport,
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
+        )
+        .expect("model");
         let before = inspect_audio_automation(&sequence, &target)
             .expect("before")
             .curve()
@@ -5104,6 +5290,10 @@ mod temporal_handle_tests {
                     )
                     .expect("range"),
                 },
+                crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                    &sequence,
+                    sequence.playhead,
+                ),
             )
             .expect("actual audio model");
             let audio_keys = keys
@@ -5193,8 +5383,16 @@ mod temporal_handle_tests {
                 range: TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE)
                     .expect("range"),
             };
-            let model = project_audio_automation(&sequence, target.clone(), viewport)
-                .expect("actual audio projection");
+            let model = project_audio_automation(
+                &sequence,
+                target.clone(),
+                viewport,
+                crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                    &sequence,
+                    sequence.playhead,
+                ),
+            )
+            .expect("actual audio projection");
             let index = model
                 .keys
                 .iter()
