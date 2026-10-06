@@ -1,0 +1,18 @@
+[package]
+name = "mondrian-clap-sample-gain-fixture"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+clack-plugin = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d" }
+clack-extensions = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d", features = ["audio-ports", "params", "state", "clack-plugin"] }
+
+[patch.crates-io]
+clap-sys = { git = "https://github.com/micahrj/clap-sys.git", rev = "25d7f53fdb6363ad63fbd80049cb7a42a97ac156" }
+
+[workspace]

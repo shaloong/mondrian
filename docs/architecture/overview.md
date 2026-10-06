@@ -798,3 +798,15 @@ split-integral oracles qualify calculus; Continuous may legally retain geometry
 while changing constraint intent. Explicit ignored candidate tests passed for Interpolation, Time and Value with
 stable source/product/fixture hashes. Named clean-source receipts remain separate
 from an uncommitted candidate run.
+
+
+Native audio complete-selection interpolation qualification uses the actual
+ProductAction author-session path and a real probed stereo WAV. Owned CLAP/VST3
+SDK fixtures provide independent sample-position signal semantics. The matrix
+checks exact key identity/time/value preservation, current owner locks, missing
+key refusal, same-mode no-op history, single Undo, saved live Redo and fresh Unicode
+project reopening with an empty author history and a consistent SQLite asset
+snapshot. Rendering consumes the same AudioProgramRuntime under realtime and
+offline contracts with unequal block partitions; it does not add an App curve
+interpreter. Actual test results and binary identities are recorded separately
+in docs/dev/modal-resource-lut-acceptance.md.

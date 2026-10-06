@@ -162,21 +162,53 @@ fn isolated_worker_transports_state_sidechain_parameters_and_pcm() {
 #[test]
 #[ignore = "requires a built Mondrian executable and the Clack gain reference DLL"]
 fn installed_clap_reference_processes_through_isolated_worker() {
+    assert_installed_clap_gain(
+        "MONDRIAN_CLAP_TEST_PLUGIN",
+        "org.rust-audio.clack.gain",
+        false,
+        AudioProcessingMode::Realtime,
+    );
+}
+
+#[test]
+#[ignore = "requires a built Mondrian executable and the owned sample-accurate CLAP gain DLL"]
+fn installed_clap_sample_gain_preserves_event_ranges() {
+    for mode in [AudioProcessingMode::Realtime, AudioProcessingMode::Offline] {
+        assert_installed_clap_gain(
+            "MONDRIAN_CLAP_SAMPLE_TEST_PLUGIN",
+            "org.mondrian.fixture.sample-gain",
+            true,
+            mode,
+        );
+    }
+}
+
+fn assert_installed_clap_gain(
+    plugin_env: &str,
+    plugin_id: &str,
+    sample_accurate: bool,
+    mode: AudioProcessingMode,
+) {
+    let render_contract = AudioRenderContract { processing_mode: mode, ..test_render_contract() };
+    let context = |start_sample| {
+        AudioProcessorProcessContext::new(
+            AudioRenderRequest { start_sample, frames: 4 },
+            AudioSampleRate::new(48_000).expect("sample rate"),
+            AudioChannelLayout::Stereo,
+            mode,
+            AudioKernelBackend::ScalarReference,
+        )
+    };
     let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
         .map(PathBuf::from)
         .expect("set MONDRIAN_CLAP_TEST_HELPER to mondrian executable");
-    let plugin = std::env::var_os("MONDRIAN_CLAP_TEST_PLUGIN")
+    let plugin = std::env::var_os(plugin_env)
         .map(PathBuf::from)
-        .expect("set MONDRIAN_CLAP_TEST_PLUGIN to Clack gain DLL");
+        .expect("set the CLAP test plugin environment variable to its native binary");
     let state = 0.5_f32.to_le_bytes();
-    let registration = probe_clap_plugin_registration(
-        &helper,
-        &plugin,
-        "org.rust-audio.clack.gain",
-        test_render_contract(),
-        Some(&state),
-    )
-    .expect("probe installed gain contract");
+    let registration =
+        probe_clap_plugin_registration(&helper, &plugin, plugin_id, render_contract, Some(&state))
+            .expect("probe installed gain contract");
     let payload = serde_json::to_vec(&serde_json::json!({
         "library_path": registration.library_path,
         "plugin_id": registration.plugin_id,
@@ -193,7 +225,7 @@ fn installed_clap_reference_processes_through_isolated_worker() {
         registration.execution_contract,
         AudioProcessorAuxiliaryInputContract::default(),
         vec![parameter_id.clone()],
-        test_render_contract(),
+        render_contract,
     )
     .expect("CLAP worker specification");
     let factory = IsolatedAudioProcessorFactory::prepare(spec)
@@ -205,7 +237,7 @@ fn installed_clap_reference_processes_through_isolated_worker() {
     let empty_ranges = [Range { start: 0, end: 0 }];
     processor
         .process(
-            test_context(100),
+            context(100),
             &mut audio,
             AudioParameterEventBatch::new(
                 100,
@@ -223,7 +255,7 @@ fn installed_clap_reference_processes_through_isolated_worker() {
     let event_ranges = [Range { start: 0, end: 1 }];
     processor
         .process(
-            test_context(104),
+            context(104),
             &mut audio,
             AudioParameterEventBatch::new(
                 104,
@@ -235,17 +267,51 @@ fn installed_clap_reference_processes_through_isolated_worker() {
         )
         .expect("send automated volume through isolated worker");
     assert!(audio.main.iter().all(|sample| (*sample - 0.25).abs() < 1.0e-6));
+
+    if !sample_accurate {
+        return;
+    }
+    // Independent SDK signal oracle: event values are held from their timestamp.
+    // Include an initial unchanged range, a last-sample event, and no-event carry.
+    assert_native_parameter_signal(
+        processor.as_mut(),
+        &parameter_id,
+        mode,
+        &[
+            NativeParameterSignalBlock {
+                start_sample: 108,
+                points: &[(0, 0.25), (2, 0.5)],
+                gains: &[0.25, 0.25, 0.5, 0.5],
+            },
+            NativeParameterSignalBlock {
+                start_sample: 112,
+                points: &[(1, 0.75), (3, 0.125)],
+                gains: &[0.5, 0.75, 0.75, 0.125],
+            },
+            NativeParameterSignalBlock { start_sample: 116, points: &[], gains: &[0.125; 4] },
+        ],
+    );
 }
 
 #[test]
 #[ignore = "requires a built Mondrian executable and the VST3 SDK gain reference DLL"]
 fn installed_vst3_reference_processes_through_isolated_worker() {
+    assert_installed_vst3_gain("MONDRIAN_VST3_TEST_PLUGIN", false);
+}
+
+#[test]
+#[ignore = "requires a built Mondrian executable and the owned stateful VST3 gain DLL"]
+fn installed_vst3_stateful_gain_preserves_linear_parameter_queues() {
+    assert_installed_vst3_gain("MONDRIAN_VST3_STATEFUL_TEST_PLUGIN", true);
+}
+
+fn assert_installed_vst3_gain(plugin_env: &str, sample_accurate: bool) {
     let helper = std::env::var_os("MONDRIAN_VST3_TEST_HELPER")
         .map(PathBuf::from)
         .expect("set MONDRIAN_VST3_TEST_HELPER to the app executable");
-    let binary = std::env::var_os("MONDRIAN_VST3_TEST_PLUGIN")
+    let binary = std::env::var_os(plugin_env)
         .map(PathBuf::from)
-        .expect("set MONDRIAN_VST3_TEST_PLUGIN to the VST3 gain DLL");
+        .expect("set the VST3 test plugin environment variable to its native binary");
     let descriptors =
         scan_vst3_binary_descriptors(&helper, &binary).expect("scan VST3 reference classes");
     assert_eq!(descriptors.len(), 1);
@@ -319,6 +385,9 @@ fn installed_vst3_reference_processes_through_isolated_worker() {
         )
         .expect("process after VST3 state re-entry");
     assert!(audio.main.iter().all(|sample| (*sample - 0.25).abs() < 1.0e-6));
+    if sample_accurate {
+        assert_vst3_parameter_queue_signal(processor.as_mut(), &id, AudioProcessingMode::Realtime);
+    }
     processor.enter_state(100).expect("reset before invalid VST3 event");
     let mut audio = TestAudioIo { main: vec![0.75; 8], auxiliary: Vec::new() };
     assert!(processor
@@ -387,6 +456,91 @@ fn installed_vst3_reference_processes_through_isolated_worker() {
         .expect("process offline VST3 gain");
     for (actual, source) in audio.main.iter().zip(original) {
         assert!((actual - source * 0.5).abs() < 1.0e-6);
+    }
+    if sample_accurate {
+        assert_vst3_parameter_queue_signal(offline.as_mut(), &id, AudioProcessingMode::Offline);
+    }
+}
+
+fn assert_vst3_parameter_queue_signal(
+    processor: &mut dyn AudioProcessor,
+    parameter_id: &ParameterId,
+    mode: AudioProcessingMode,
+) {
+    // VST3 queue points describe linear segments. An omitted sample-zero point
+    // interpolates from the previous block's final value at implicit offset -1.
+    assert_native_parameter_signal(
+        processor,
+        parameter_id,
+        mode,
+        &[
+            NativeParameterSignalBlock {
+                start_sample: 104,
+                points: &[(0, 0.25), (2, 0.75)],
+                gains: &[0.25, 0.5, 0.75, 0.75],
+            },
+            NativeParameterSignalBlock {
+                start_sample: 108,
+                points: &[(3, 0.25)],
+                gains: &[0.625, 0.5, 0.375, 0.25],
+            },
+            NativeParameterSignalBlock { start_sample: 112, points: &[], gains: &[0.25; 4] },
+            NativeParameterSignalBlock {
+                start_sample: 116,
+                points: &[(0, 0.25), (1, 0.75)],
+                gains: &[0.25, 0.75, 0.75, 0.75],
+            },
+        ],
+    );
+}
+
+struct NativeParameterSignalBlock<'a> {
+    start_sample: i64,
+    points: &'a [(u32, f64)],
+    gains: &'a [f32],
+}
+
+fn assert_native_parameter_signal(
+    processor: &mut dyn AudioProcessor,
+    parameter_id: &ParameterId,
+    mode: AudioProcessingMode,
+    blocks: &[NativeParameterSignalBlock<'_>],
+) {
+    for NativeParameterSignalBlock { start_sample, points, gains } in blocks {
+        let mut audio = TestAudioIo { main: vec![1.0; 8], auxiliary: Vec::new() };
+        let ranges = [Range { start: 0, end: points.len() }];
+        let events: Vec<_> = points
+            .iter()
+            .map(|(sample_offset, value)| AudioParameterEvent {
+                sample_offset: *sample_offset,
+                value: *value,
+            })
+            .collect();
+        let context = AudioProcessorProcessContext::new(
+            AudioRenderRequest { start_sample: *start_sample, frames: 4 },
+            AudioSampleRate::new(48_000).expect("sample rate"),
+            AudioChannelLayout::Stereo,
+            mode,
+            AudioKernelBackend::ScalarReference,
+        );
+        processor
+            .process(
+                context,
+                &mut audio,
+                AudioParameterEventBatch::new(
+                    *start_sample,
+                    4,
+                    std::slice::from_ref(parameter_id),
+                    &ranges,
+                    &events,
+                ),
+            )
+            .expect("deliver native parameter events");
+        let expected: Vec<_> = gains.iter().flat_map(|gain| [*gain; 2]).collect();
+        assert_eq!(
+            audio.main, expected,
+            "native {mode:?} signal at block {start_sample}"
+        );
     }
 }
 

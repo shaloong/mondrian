@@ -1115,3 +1115,72 @@ The earlier ce3edfb encoded Golden remains a separately named receipt; no new
 encoded or native audio group output is claimed by this run. Native audio,
 professional group pointer/rubber-band/copy/reset, vendor/platform/performance,
 tracking and broader i18n acceptance remain open under the complete NLE goal.
+
+
+## Native audio group interpolation and independent SDK signal oracles
+
+The current candidate adds two end-to-end native audio group tests in
+`app::audio_rendering::tests`: CLAP and VST3 each qualify Auto Bezier and Continuous
+Bezier through `ProductAction::Audio(EditAutomation)` and the author session.
+The test source starts from clean `e20b14130e4e4c557ee810772df50748581f916b`.
+Both tests passed (2/0/0 ignored, 38.39s; compile 2m20s). This is candidate-source
+execution, using the unchanged clean c3f5ee8 product's native worker helper:
+`B3E285576773D238279D5EF9BCCFDADEEC9F986687D1A7EB7AF940DA4A57E489`.
+It is not a new clean-product or encoded-output receipt.
+
+The independent native DSP fixtures are:
+
+- Owned CLAP sample gain, plugin ID `org.mondrian.fixture.sample-gain`, adapted
+  and attributed from pinned Clack under MIT OR Apache-2.0. It applies gain only
+  within each SDK event batch's sample range; upstream source remains unchanged.
+  Tested binary SHA256:
+  `1CD37EEF0D1CAEE44915654B715911914E6896B9F81D1B098046E4FF6ECC9B26`.
+- Owned stateful VST3 gain, now consuming every parameter queue point with linear
+  segment interpolation and the implicit previous-block value at sample -1.
+  Tested binary SHA256:
+  `523E714760F9BC47805B3EDE7C7FC4399AEF7D1BDEEF1DCC3832B6DA50D9907F`.
+
+Actual runtime diagnostics first reproduced whole-block gain defects in the
+reference examples: CLAP multiplied both batch gains across all samples; VST3
+used only the final queue value. Those examples' static and single-point tests
+remain useful, but do not prove multi-point sample accuracy. The owned fixtures
+provide SDK signal semantics without implementing a second Mondrian curve model.
+VST3 interpolation follows the official
+[IParamValueQueue contract](https://steinbergmedia.github.io/vst3_doc/vstinterfaces/classSteinberg_1_1Vst_1_1IParamValueQueue.html).
+No production host workaround or relaxed signal tolerance was added.
+
+Isolated-worker qualification passed five explicitly executed ignored filters:
+CLAP sample ranges (Realtime and Offline, 0.88s), VST3 linear queues (Realtime and
+Offline, 1.70s), VST3 nondefault state restoration (0.99s), external CLAP static
+state (0.40s) and SDK VST3 static gain (1.42s), each 1/0/0 ignored. The ordinary
+Audio library suite passed 105/0/13 ignored (0.63s); the explicitly run filters are
+not added to that suite as unique tests. Reused real-WAV preview fixture tests
+also passed 2/0/0 ignored (2.26s).
+
+The group matrix uses a real IEEE Float stereo WAV with opposite-sign channels,
+probes it into the asset library, and edits three exact stable keys with one
+complete-selection transaction. It checks missing-key and locked-Track atomic
+refusal, preserved key identities/times/values, constraint intent, repeated-mode
+no-op generation/history, single Undo, live Redo after an undone save, and fresh
+Unicode undone/edited archives with empty history and exactly one SQLite asset.
+Both runtime modes render every sample of the edited and restored curves with
+unequal block partitions and compare native PCM to the canonical admitted curve
+at tolerance 1e-6; realtime/offline PCM must also match exactly.
+
+This qualification covers the named stereo Float32 gain instances and native
+parameter automation/history chain. Broader vendor plugins, multibus layouts,
+MIDI, native editors, platform/performance matrices and professional group
+pointer/rubberband/copy/reset remain open in the overall goal. Encoded LUT/modal/
+resource acceptance above retains its separately named clean ce3edfb source.
+
+
+After simplifying the signal test table into named fields and a shared event
+runner, both isolated native signal gates were rerun successfully: CLAP1/0/0
+ignored (1.20s), VST3 1/0/0 ignored (1.39s). The rebuilt CLAP fixture for this rerun
+is `CB2FA1B4956CEDBDA4BBAA4B24EFA2D16924820C7C7FCEB4E4881633F21FD687`;
+the earlier end-to-end candidate run above retains its actually tested 1CD37E
+fixture identity. Strict workspace/all-target/all-feature Clippy with `-D warnings`
+passed (21.26s); standalone CLAP and VST3 fixture all-target Clippy with
+`-D warnings` passed (1.47s and 2.03s). No lint suppression was added for the new
+complex-type, Range-array or nested-if findings. Clean-source rebuild and native
+matrix execution follow the implementation commit and have their own receipt.

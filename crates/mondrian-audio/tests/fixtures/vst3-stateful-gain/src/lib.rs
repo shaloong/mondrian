@@ -294,31 +294,6 @@ impl IAudioProcessorTrait for GainProcessor {
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
         let process_data = &*data;
 
-        if let Some(param_changes) = ComRef::from_raw(process_data.inputParameterChanges) {
-            let param_count = param_changes.getParameterCount();
-            for param_index in 0..param_count {
-                if let Some(param_queue) =
-                    ComRef::from_raw(param_changes.getParameterData(param_index))
-                {
-                    let param_id = param_queue.getParameterId();
-                    let point_count = param_queue.getPointCount();
-
-                    if param_id == 0 && point_count > 0 {
-                        let mut sample_offset = 0;
-                        let mut value = 0.0;
-                        let result =
-                            param_queue.getPoint(point_count - 1, &mut sample_offset, &mut value);
-
-                        if result == kResultTrue {
-                            self.gain.store(value.to_bits(), Ordering::Relaxed);
-                        }
-                    }
-                }
-            }
-        }
-
-        let gain = f64::from_bits(self.gain.load(Ordering::Relaxed)) as f32;
-
         let num_samples = process_data.numSamples as usize;
 
         if process_data.numInputs != 1 || process_data.numOutputs != 1 {
@@ -348,10 +323,51 @@ impl IAudioProcessorTrait for GainProcessor {
         let output_l = slice::from_raw_parts_mut(output_channels[0], num_samples);
         let output_r = slice::from_raw_parts_mut(output_channels[1], num_samples);
 
-        for i in 0..num_samples {
-            output_l[i] = gain * input_l[i];
-            output_r[i] = gain * input_r[i];
+        // SDK queue values define linear segments, with the previous block's
+        // final value at implicit sample -1. Process every point in one pass;
+        // no curve implementation or per-process allocation belongs here.
+        let mut gain = f64::from_bits(self.gain.load(Ordering::Relaxed));
+        let mut previous_offset = -1_i32;
+        let mut write_frame = |index: usize, value: f64| {
+            output_l[index] = value as f32 * input_l[index];
+            output_r[index] = value as f32 * input_r[index];
+        };
+        if let Some(param_changes) = ComRef::from_raw(process_data.inputParameterChanges) {
+            for param_index in 0..param_changes.getParameterCount() {
+                let Some(queue) = ComRef::from_raw(param_changes.getParameterData(param_index))
+                else {
+                    continue;
+                };
+                if queue.getParameterId() != 0 {
+                    continue;
+                }
+                for point_index in 0..queue.getPointCount() {
+                    let mut offset = 0;
+                    let mut value = 0.0;
+                    if queue.getPoint(point_index, &mut offset, &mut value) != kResultOk
+                        || offset <= previous_offset
+                        || offset < 0
+                        || offset >= process_data.numSamples
+                        || !value.is_finite()
+                        || !(0.0..=1.0).contains(&value)
+                    {
+                        return kInvalidArgument;
+                    }
+                    for sample in (previous_offset + 1)..=offset {
+                        let ratio = f64::from(sample - previous_offset)
+                            / f64::from(offset - previous_offset);
+                        write_frame(sample as usize, gain + (value - gain) * ratio);
+                    }
+                    previous_offset = offset;
+                    gain = value;
+                }
+                break;
+            }
         }
+        for sample in (previous_offset + 1) as usize..num_samples {
+            write_frame(sample, gain);
+        }
+        self.gain.store(gain.to_bits(), Ordering::Relaxed);
 
         kResultOk
     }

@@ -596,65 +596,7 @@ mod tests {
         instance: mondrian_timeline::audio::AudioProcessorInstance,
         resolver: &dyn AudioProcessorResolver,
     ) {
-        use std::io::Write;
-
-        let root = std::env::temp_dir().join(format!(
-            "mondrian-preview-plugin-{}",
-            mondrian_core::ProjectId::new()
-        ));
-        std::fs::create_dir_all(&root).expect("preview test directory");
-        let source_path = root.join("constant-stereo.wav");
-        let sample_rate = 48_000_u32;
-        let frames = sample_rate as usize;
-        let data_bytes = u32::try_from(frames * 2 * 4).expect("short WAV payload");
-        let mut wave = std::io::BufWriter::new(
-            std::fs::File::create(&source_path).expect("create nonzero WAV source"),
-        );
-        wave.write_all(b"RIFF").expect("RIFF");
-        wave.write_all(&(36_u32 + data_bytes).to_le_bytes()).expect("RIFF extent");
-        wave.write_all(b"WAVEfmt ").expect("format");
-        wave.write_all(&16_u32.to_le_bytes()).expect("format extent");
-        wave.write_all(&3_u16.to_le_bytes()).expect("IEEE Float");
-        wave.write_all(&2_u16.to_le_bytes()).expect("stereo");
-        wave.write_all(&sample_rate.to_le_bytes()).expect("sample rate");
-        wave.write_all(&(sample_rate * 8).to_le_bytes()).expect("byte rate");
-        wave.write_all(&8_u16.to_le_bytes()).expect("block alignment");
-        wave.write_all(&32_u16.to_le_bytes()).expect("sample bits");
-        wave.write_all(b"data").expect("data");
-        wave.write_all(&data_bytes.to_le_bytes()).expect("data extent");
-        for _ in 0..frames {
-            wave.write_all(&0.25_f32.to_le_bytes()).expect("left sample");
-            wave.write_all(&(-0.25_f32).to_le_bytes()).expect("right sample");
-        }
-        wave.flush().expect("complete WAV source");
-        drop(wave);
-        let source_path = std::fs::canonicalize(source_path).expect("canonical WAV path");
-        let library = AssetLibrary::open(root.join("library")).expect("asset library");
-        let asset_id = library
-            .commit_media_probe(
-                mondrian_assets::AssetMediaProbeCandidate::new(
-                    source_path.clone(),
-                    mondrian_core::MediaFileFingerprint::capture(&source_path),
-                    mondrian_media::probe_media_info(&source_path).expect("probe WAV"),
-                )
-                .expect("audio source candidate"),
-                None,
-            )
-            .expect("register WAV source");
-        let mut sequence = Sequence::new("native plugin preview");
-        let track_id = sequence.audio_tracks[0].id;
-        sequence
-            .add_media_audio_clip(
-                track_id,
-                mondrian_timeline::Clip::new(
-                    asset_id,
-                    mondrian_core::TimelineTime::ZERO,
-                    mondrian_core::TimelineTime::ONE,
-                )
-                .expect("audio Clip"),
-                mondrian_core::AudioSourceComponentId::primary(),
-            )
-            .expect("add WAV Clip");
+        let (root, library, mut sequence) = native_gain_media_fixture();
         sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
         let renderer = TimelineAudioPcmRenderer::new_with_processor_resolver(
             sequence,
@@ -695,6 +637,361 @@ mod tests {
             );
         }
         drop(renderer);
-        let _ = std::fs::remove_dir_all(root);
+        drop(root);
+    }
+    fn native_gain_media_fixture() -> (tempfile::TempDir, Arc<AssetLibrary>, Sequence) {
+        use std::io::Write;
+
+        let root = tempfile::Builder::new()
+            .prefix("mondrian-native-audio-音频🙂-")
+            .tempdir()
+            .expect("native audio fixture directory");
+        let source_path = root.path().join("constant-stereo.wav");
+        let sample_rate = 48_000_u32;
+        let frames = sample_rate as usize;
+        let data_bytes = u32::try_from(frames * 2 * 4).expect("short WAV payload");
+        let mut wave = std::io::BufWriter::new(
+            std::fs::File::create(&source_path).expect("create nonzero WAV source"),
+        );
+        wave.write_all(b"RIFF").expect("RIFF");
+        wave.write_all(&(36_u32 + data_bytes).to_le_bytes()).expect("RIFF extent");
+        wave.write_all(b"WAVEfmt ").expect("format");
+        wave.write_all(&16_u32.to_le_bytes()).expect("format extent");
+        wave.write_all(&3_u16.to_le_bytes()).expect("IEEE Float");
+        wave.write_all(&2_u16.to_le_bytes()).expect("stereo");
+        wave.write_all(&sample_rate.to_le_bytes()).expect("sample rate");
+        wave.write_all(&(sample_rate * 8).to_le_bytes()).expect("byte rate");
+        wave.write_all(&8_u16.to_le_bytes()).expect("block alignment");
+        wave.write_all(&32_u16.to_le_bytes()).expect("sample bits");
+        wave.write_all(b"data").expect("data");
+        wave.write_all(&data_bytes.to_le_bytes()).expect("data extent");
+        for _ in 0..frames {
+            wave.write_all(&0.25_f32.to_le_bytes()).expect("left sample");
+            wave.write_all(&(-0.25_f32).to_le_bytes()).expect("right sample");
+        }
+        wave.flush().expect("complete WAV source");
+        drop(wave);
+        let source_path = std::fs::canonicalize(source_path).expect("canonical WAV path");
+        let library = AssetLibrary::open(root.path().join("library")).expect("asset library");
+        let asset_id = library
+            .commit_media_probe(
+                mondrian_assets::AssetMediaProbeCandidate::new(
+                    source_path.clone(),
+                    mondrian_core::MediaFileFingerprint::capture(&source_path),
+                    mondrian_media::probe_media_info(&source_path).expect("probe WAV"),
+                )
+                .expect("audio source candidate"),
+                None,
+            )
+            .expect("register WAV source");
+        let mut sequence = Sequence::new("native plugin preview");
+        let track_id = sequence.audio_tracks[0].id;
+        sequence
+            .add_media_audio_clip(
+                track_id,
+                mondrian_timeline::Clip::new(
+                    asset_id,
+                    mondrian_core::TimelineTime::ZERO,
+                    mondrian_core::TimelineTime::ONE,
+                )
+                .expect("audio Clip"),
+                mondrian_core::AudioSourceComponentId::primary(),
+            )
+            .expect("add WAV Clip");
+        (root, library, sequence)
+    }
+
+    #[test]
+    #[ignore = "requires current product and owned sample-accurate CLAP gain binary"]
+    fn native_clap_group_interpolation_undo_save_reopen_preserves_output() {
+        use mondrian_audio::{
+            DiscoveredClapAudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
+        };
+        let helper = std::path::PathBuf::from(
+            std::env::var_os("MONDRIAN_CLAP_TEST_HELPER").expect("built product"),
+        );
+        let plugin = std::path::PathBuf::from(
+            std::env::var_os("MONDRIAN_CLAP_SAMPLE_TEST_PLUGIN").expect("sample-accurate fixture"),
+        );
+        let installed = DiscoveredClapAudioProcessorSpecResolver::discover(helper, [plugin])
+            .expect("discover native CLAP");
+        let instance = installed
+            .create_instance(
+                "org.mondrian.fixture.sample-gain",
+                reference_render_contract(),
+                None,
+            )
+            .expect("capture pinned native instance");
+        let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
+        qualify_native_audio_group_history(instance, &resolver);
+    }
+
+    #[test]
+    #[ignore = "requires current product and owned sample-accurate stateful VST3 gain binary"]
+    fn native_vst3_group_interpolation_undo_save_reopen_preserves_output() {
+        use mondrian_audio::{
+            DiscoveredVst3AudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
+        };
+        let helper = std::path::PathBuf::from(
+            std::env::var_os("MONDRIAN_VST3_TEST_HELPER").expect("built product"),
+        );
+        let plugin = std::path::PathBuf::from(
+            std::env::var_os("MONDRIAN_VST3_STATEFUL_TEST_PLUGIN").expect("stateful fixture"),
+        );
+        let installed = DiscoveredVst3AudioProcessorSpecResolver::discover(helper, [plugin])
+            .expect("discover native VST3");
+        let class_id = installed.descriptors()[0].class_id.clone();
+        let instance = installed
+            .create_instance(&class_id, reference_render_contract(), None)
+            .expect("capture pinned native instance");
+        let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
+        qualify_native_audio_group_history(instance, &resolver);
+    }
+
+    fn qualify_native_audio_group_history(
+        instance: mondrian_timeline::audio::AudioProcessorInstance,
+        resolver: &dyn AudioProcessorResolver,
+    ) {
+        use super::super::product_action::{AudioProductAction, ProductAction};
+        use mondrian_core::{
+            ExactAutomationCurve, ExactAutomationKeyframe, InterpolationType, KeyframeId,
+            TimelineTime,
+        };
+        use mondrian_timeline::audio::AudioChannelStripOwner;
+        use mondrian_timeline::{
+            inspect_audio_automation, AudioAutomationEdit, AudioAutomationEditRequest,
+            AudioAutomationTarget, AudioChannelStripRack, AudioProcessorRackAddress,
+        };
+        for mode in [
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let (root, library, mut sequence) = native_gain_media_fixture();
+            let mut instance = instance.clone();
+            let parameter_id = instance.parameters.keys().next().cloned().expect("gain parameter");
+            let mut source = ExactAutomationCurve::new(parameter_id.clone(), 0.2).expect("curve");
+            for (sample, value) in [(0, 0.2), (128, 0.7), (256, 0.3)] {
+                source
+                    .set_keyframe(ExactAutomationKeyframe::linear(
+                        TimelineTime::new(sample, 48_000).expect("exact sample time"),
+                        value,
+                    ))
+                    .expect("seed curve");
+            }
+            let ids: Vec<_> = source.keyframes.iter().map(|key| key.id).collect();
+            instance
+                .parameters
+                .get_mut(&parameter_id)
+                .expect("gain")
+                .set_automation(source)
+                .expect("admitted source curve");
+            let track_id = sequence.audio_tracks[0].id;
+            let target = AudioAutomationTarget::ProcessorParameter {
+                rack: AudioProcessorRackAddress::ChannelStrip {
+                    owner: AudioChannelStripOwner::Track { track_id },
+                    rack: AudioChannelStripRack::PreFader,
+                },
+                processor_id: instance.id,
+                parameter_id,
+            };
+            sequence
+                .audio_program
+                .track_channels
+                .get_mut(&track_id)
+                .expect("track strip")
+                .strip
+                .pre_fader
+                .processors
+                .push(instance);
+            let mut state = AppState::new();
+            state.test_set_sequence(Some(sequence));
+            state.test_set_asset_library(Some(library.clone()));
+            let snapshot = |state: &AppState| {
+                inspect_audio_automation(state.active_sequence().expect("sequence"), &target)
+                    .expect("native parameter address")
+                    .curve()
+                    .expect("curve")
+                    .clone()
+            };
+            let execute =
+                |state: &AppState| assert_native_audio_group_signal(state, &target, resolver);
+            let action = |keyframe_ids| {
+                ProductAction::Audio(AudioProductAction::EditAutomation(
+                    AudioAutomationEditRequest {
+                        target: target.clone(),
+                        edit: AudioAutomationEdit::SetInterpolations {
+                            keyframe_ids,
+                            interpolation: mode,
+                        },
+                    },
+                ))
+                .into_external_action()
+            };
+            let original_sequence = state.active_sequence().expect("original").clone();
+            let original = snapshot(&state);
+            let before = execute(&state);
+            let generation = state.project_author_generation();
+            state
+                .dispatch_action(action(vec![ids[0], KeyframeId::new()]))
+                .expect_err("missing key refuses complete selection");
+            assert_eq!(snapshot(&state), original);
+            assert_eq!(state.project_author_generation(), generation);
+            assert!(!state.can_undo_action() && !state.can_redo_action());
+            let mut locked = original_sequence.clone();
+            locked.audio_tracks[0].is_locked = true;
+            let mut refused = AppState::new();
+            refused.test_set_sequence(Some(locked.clone()));
+            let refused_generation = refused.project_author_generation();
+            refused.dispatch_action(action(ids.clone())).expect_err("locked native owner");
+            assert!(refused
+                .active_sequence()
+                .expect("locked")
+                .author_state_eq_ignoring_revision(&locked));
+            assert_eq!(refused.project_author_generation(), refused_generation);
+            assert!(!refused.can_undo_action() && !refused.can_redo_action());
+            drop(refused);
+            state
+                .dispatch_action(action(ids.clone()))
+                .expect("one native group transaction");
+            assert_eq!(state.project_author_generation(), generation + 1);
+            let edited = snapshot(&state);
+            for (old, new) in original.keyframes.iter().zip(edited.keyframes.iter()) {
+                assert_eq!((new.id, new.time, new.value), (old.id, old.time, old.value));
+                assert_eq!(
+                    new.tangent_mode,
+                    if mode == InterpolationType::AutoBezier {
+                        mondrian_core::ExactAutomationTangentMode::Auto
+                    } else {
+                        mondrian_core::ExactAutomationTangentMode::Continuous
+                    }
+                );
+            }
+            let after = execute(&state);
+            if mode == InterpolationType::AutoBezier {
+                assert_ne!(after, before);
+            }
+            let history = state.authoring_history().expect("history").diagnostics();
+            state.dispatch_action(action(ids.clone())).expect("same mode is a no-op");
+            assert_eq!(state.project_author_generation(), generation + 1);
+            assert_eq!(
+                state.authoring_history().expect("history").diagnostics(),
+                history
+            );
+            assert!(state.undo_timeline().expect("one Undo"));
+            assert!(state
+                .active_sequence()
+                .expect("undone")
+                .author_state_eq_ignoring_revision(&original_sequence));
+            assert!(!state.can_undo_action() && state.can_redo_action());
+            assert_eq!(execute(&state), before);
+            let undone_path = root.path().join("原生音频分组撤销🙂.mdp");
+            state.save_project_file_as(undone_path.clone()).expect("save undone");
+            assert!(state.can_redo_action(), "saving retains live Redo");
+            let mut reopened = AppState::new();
+            reopened.open_project_file(undone_path).expect("fresh undone reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("saved undone")
+                .author_state_eq_ignoring_revision(&original_sequence));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            assert_eq!(execute(&reopened), before);
+            drop(reopened);
+            assert!(state.redo_timeline().expect("Redo after save"));
+            assert_eq!(snapshot(&state), edited);
+            assert_eq!(execute(&state), after);
+            let edited_sequence = state.active_sequence().expect("edited").clone();
+            let edited_path = root.path().join("原生音频分组重做🙂.mdp");
+            state.save_project_file_as(edited_path.clone()).expect("save edited");
+            drop(state);
+            let mut reopened = AppState::new();
+            reopened.open_project_file(edited_path).expect("fresh edited reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("saved edited")
+                .author_state_eq_ignoring_revision(&edited_sequence));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            assert_eq!(execute(&reopened), after);
+            assert_eq!(
+                reopened.asset_library().expect("SQLite").list_assets().expect("assets").len(),
+                1
+            );
+            drop(reopened);
+            drop(library);
+            drop(root);
+        }
+    }
+
+    fn assert_native_audio_group_signal(
+        state: &AppState,
+        target: &mondrian_timeline::AudioAutomationTarget,
+        processor_resolver: &dyn AudioProcessorResolver,
+    ) -> Vec<f32> {
+        use mondrian_core::TimelineTime;
+        let sequence = state.active_sequence().expect("author sequence");
+        let curve = mondrian_timeline::inspect_audio_automation(sequence, target)
+            .expect("native parameter")
+            .curve()
+            .expect("curve");
+        let library = state.asset_library_handle().expect("source library");
+        let mut reference_output = None;
+        for (mode, partitions) in [
+            (AudioProcessingMode::Realtime, [64, 64, 129]),
+            (AudioProcessingMode::Offline, [37, 59, 161]),
+        ] {
+            let media_resolver = PlaybackMediaResolver {
+                library: library.clone(),
+                source_cache: Arc::new(AudioSourceCache::new(48_000)),
+            };
+            let mut runtime = AudioProgramRuntime::build_with_compile_request_processor_resolver_and_resource_grant(
+                sequence, &[], &media_resolver, processor_resolver,
+                AudioRenderContract { processing_mode: mode, ..reference_render_contract() },
+                AudioCompileRequest {
+                    output_id: sequence.audio_program.outputs[0].id,
+                    audition: AudioAuditionOverlay::default(),
+                }, test_runtime_grant(),
+            ).expect("shared production audio program");
+            runtime
+                .enter_state(mondrian_audio::AudioStateEntry {
+                    epoch: AudioContinuityEpoch::new(1),
+                    start_sample: 0,
+                })
+                .expect("native state entry");
+            let mut output = Vec::new();
+            let mut start_sample = 0_i64;
+            for frames in partitions {
+                let mut samples = vec![0.0; frames * 2];
+                runtime
+                    .render_into(AudioRenderRequest { start_sample, frames }, &mut samples)
+                    .expect("native signal block");
+                output.extend(samples);
+                start_sample += i64::try_from(frames).expect("short block");
+            }
+            assert_eq!(output.len(), 257 * 2);
+            for (sample, pair) in output.chunks_exact(2).enumerate() {
+                let time = TimelineTime::new(sample as i64, 48_000).expect("sample time");
+                let expected =
+                    0.25 * curve.evaluate(time).expect("canonical author trajectory") as f32;
+                assert!(
+                    (pair[0] - expected).abs() <= 1e-6,
+                    "{mode:?} left sample {sample}: {} vs {expected}",
+                    pair[0]
+                );
+                assert!(
+                    (pair[1] + expected).abs() <= 1e-6,
+                    "{mode:?} right sample {sample}: {} vs {}",
+                    pair[1],
+                    -expected
+                );
+            }
+            if let Some(reference) = &reference_output {
+                assert_eq!(
+                    &output, reference,
+                    "native realtime/offline partitions preserve PCM"
+                );
+            } else {
+                reference_output = Some(output);
+            }
+        }
+        reference_output.expect("rendered native signal")
     }
 }

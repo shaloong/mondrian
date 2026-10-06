@@ -1655,3 +1655,26 @@ it does not clamp individual keys or replace the curve from display samples.
 
 
 AudioAutomationEdit::SetInterpolations lowers complete-key interpolation through ExactAutomationCurve. AudioAutomationCurveContract admits its interpolation family against the current definition before preparing the candidate and checks all new absolute controls before preview or author publication. Owner locks and no-op outcomes retain the shared authoring semantics.
+
+
+### Native automation signal qualification
+
+Native event transport and native DSP output are qualified separately. The owned
+CLAP sample-gain fixture consumes each SDK event batch's sample range, retaining
+the last gain in blocks without events. The owned stateful VST3 fixture consumes
+all queue points as piecewise linear segments, using the previous block's final
+value at implicit offset -1 when sample zero is omitted. Neither fixture embeds
+a Mondrian curve evaluator or allocates a per-process signal buffer.
+
+The isolated-worker signal tests cover intermediate and final-sample changes,
+unchanged blocks, VST3 adjacent-point jumps and realtime/offline modes. Upstream
+simple gain examples retain their static-state tests; their whole-block gain
+behavior is not an oracle for sample-accurate automation. The production host
+continues to lower admitted exact curves through its preallocated event scratch
+and the native SDK boundary.
+
+The App native group-history matrix is a separate end-to-end gate. It uses a real
+probed stereo WAV, definition-pinned instances, author-session interpolation
+edits, durable project/library reopening and shared AudioProgramRuntime rendering
+with different realtime/offline block partitions. Its receipt must name the
+actually tested product and fixture hashes; compile-only output is not acceptance.
