@@ -1555,6 +1555,8 @@ impl AppState {
                 let edit = super::clip_authoring::numeric_curve_edit_from_payload(&payload.edit)?;
                 let clip_id = payload.clip_id;
                 let property = payload.parameter.clone();
+                let retained_keys =
+                    payload.edit.retained_group_keyframe_ids().map(|ids| ids.to_vec());
                 let removed_keys = payload
                     .edit
                     .removed_keyframe_ids()
@@ -1586,6 +1588,15 @@ impl AppState {
                             || !removed_keys.contains(&selected.keyframe_id)
                     });
                     self.set_active_animation_property(clip_id, property);
+                } else if let Some(ids) = retained_keys {
+                    self.set_animation_keyframe_selection(
+                        ids.into_iter()
+                            .map(|keyframe_id| crate::app::AnimationKeyframeSelection {
+                                property: key_selection.property.clone(),
+                                keyframe_id,
+                            })
+                            .collect(),
+                    );
                 } else {
                     self.select_animation_keyframe_only(key_selection);
                 }
@@ -1723,6 +1734,8 @@ impl AppState {
             ClipProductAction::EditNumericCurve(payload) => {
                 let clip_id = payload.clip_id;
                 let property = payload.parameter.clone();
+                let retained_keys =
+                    payload.edit.retained_group_keyframe_ids().map(|ids| ids.to_vec());
                 let removed_keys = payload
                     .edit
                     .removed_keyframe_ids()
@@ -1749,6 +1762,15 @@ impl AppState {
                             || !removed_keys.contains(&selected.keyframe_id)
                     });
                     self.set_active_animation_property(clip_id, property);
+                } else if let Some(ids) = retained_keys {
+                    self.set_animation_keyframe_selection(
+                        ids.into_iter()
+                            .map(|keyframe_id| crate::app::AnimationKeyframeSelection {
+                                property: key_selection.property.clone(),
+                                keyframe_id,
+                            })
+                            .collect(),
+                    );
                 } else {
                     self.select_animation_keyframe_only(key_selection);
                 }

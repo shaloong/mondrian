@@ -5714,6 +5714,194 @@ mod tests {
     }
 
     #[test]
+    fn focused_curve_paste_refresh_selects_new_group_and_preserves_keyboard_owner() {
+        use mondrian_core::automation::{Keyframe, PropertyMutation};
+        use mondrian_core::{PropertyHost, TimeScale};
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        use mondrian_ui_core::types::KeyCode;
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1600.0);
+        let mut state = workspace_app_state_with_timed_solid();
+        let sequence = state.active_sequence_mut_uncommitted().expect("fixture");
+        let track_id = sequence.video_tracks[0].id;
+        let clip = &mut sequence.video_tracks[0].clips[0];
+        let clip_id = clip.id;
+        let duration = clip.duration;
+        for (time, value) in [
+            (TimelineTime::ZERO, 0.25),
+            (
+                duration.checked_scale(TimeScale::new(1, 2).expect("half")).expect("middle"),
+                0.5,
+            ),
+            (duration, 0.75),
+        ] {
+            clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: mondrian_timeline::clip::Transform2D::OPACITY_PATH.into(),
+                keyframe: Keyframe::linear(time, mondrian_core::PropertyValue::Float(value)),
+            })
+            .expect("seed key");
+        }
+        state.selection.selected_clips =
+            vec![crate::app::SelectedClipRef { track_id, clip_id, is_video_track: true }];
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("focused-paste-selection"),
+        );
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let curve_id =
+            panel_curve_with_point_count(host.active_root(), PanelKind::Inspector, false, 3)
+                .expect("opacity curve");
+        let point = {
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let editor = tree
+                .get(curve_id)
+                .expect("curve")
+                .as_any()
+                .expect("downcast")
+                .downcast_ref::<mondrian_ui_widgets::CurveEditor>()
+                .expect("editor");
+            editor.point_position(editor.points()[1])
+        };
+        let pending = PendingUiActions::default();
+        let dispatch = |action| pending.push(action);
+        let mut router = EventRouter::new(host.active_root().id());
+        for event in [
+            UiEvent::MouseDown {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseUp {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            UiEvent::KeyDown { key: KeyCode::C, modifiers: Modifiers::ctrl() },
+            UiEvent::KeyDown { key: KeyCode::V, modifiers: Modifiers::ctrl() },
+        ] {
+            router.route(
+                event,
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &dispatch,
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        }
+        let selected = host
+            .app_state()
+            .selected_animation_keyframes_for_clip(clip_id)
+            .into_iter()
+            .map(|selection| selection.keyframe_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            selected.len(),
+            3,
+            "Paste publishes the complete fresh group"
+        );
+        let refreshed_id =
+            panel_curve_with_point_count(host.active_root(), PanelKind::Inspector, false, 3)
+                .expect("refreshed curve");
+        {
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let editor = tree
+                .get(refreshed_id)
+                .expect("curve")
+                .as_any()
+                .expect("downcast")
+                .downcast_ref::<mondrian_ui_widgets::CurveEditor>()
+                .expect("editor");
+            let mut actual = editor.selected_keyframe_ids();
+            actual.sort();
+            let mut expected = selected.clone();
+            expected.sort();
+            assert_eq!(
+                actual, expected,
+                "root rebuild must select the newly pasted keys"
+            );
+        }
+        assert_eq!(router.focused(), Some(refreshed_id));
+        let before = host.app_state().active_sequence().expect("pasted").clone();
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &dispatch,
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        let after = host.app_state().active_sequence().expect("edited").clone();
+        assert_eq!(
+            host.app_state().selected_animation_keyframes_for_clip(clip_id).len(),
+            3,
+            "batch value edit must retain complete App selection after commit"
+        );
+        let before_bag = before.find_clip(clip_id).expect("pasted clip").intrinsic_parameter_bag();
+        let after_bag = after.find_clip(clip_id).expect("edited clip").intrinsic_parameter_bag();
+        let before_curve = before_bag
+            .property(mondrian_timeline::clip::Transform2D::OPACITY_PATH)
+            .expect("pasted keys");
+        let after_curve = after_bag
+            .property(mondrian_timeline::clip::Transform2D::OPACITY_PATH)
+            .expect("edited keys");
+        for id in selected {
+            assert_ne!(
+                before_curve.keyframe_by_id(id).expect("before key").value,
+                after_curve.keyframe_by_id(id).expect("after key").value,
+                "keyboard value movement edits every newly pasted key"
+            );
+        }
+        assert!(
+            !after.author_state_eq_ignoring_revision(&before),
+            "keyboard edit reaches pasted group"
+        );
+        assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo keyboard"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("undone")
+            .author_state_eq_ignoring_revision(&before));
+        assert!(host.app_state.borrow_mut().redo_timeline().expect("Redo keyboard"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("redone")
+            .author_state_eq_ignoring_revision(&after));
+        for action in [Action::Undo, Action::Undo] {
+            pending.push(action);
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        }
+        assert_eq!(
+            host.app_state().selected_animation_keyframes_for_clip(clip_id).len(),
+            3,
+            "App retains explicit owner selection while its keys are absent"
+        );
+        pending.push(Action::Redo);
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("Paste Redo")
+            .author_state_eq_ignoring_revision(&before));
+        let redone_id =
+            panel_curve_with_point_count(host.active_root(), PanelKind::Inspector, false, 3)
+                .expect("redone curve");
+        let tree = WidgetTreeView::new(host.active_root_mut());
+        let editor = tree
+            .get(redone_id)
+            .expect("curve")
+            .as_any()
+            .expect("downcast")
+            .downcast_ref::<mondrian_ui_widgets::CurveEditor>()
+            .expect("editor");
+        assert_eq!(
+            editor.selected_keyframe_ids().len(),
+            3,
+            "Paste Redo must reproject the restored complete group"
+        );
+        assert_eq!(router.focused(), Some(redone_id));
+    }
+
+    #[test]
     fn inspector_curve_release_refresh_preserves_selection_and_keyboard_editing() {
         curve_release_refresh_keyboard_matrix(false);
     }

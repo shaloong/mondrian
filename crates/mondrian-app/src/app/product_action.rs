@@ -2672,6 +2672,16 @@ pub enum ClipCurveEditPayload {
 }
 
 impl ClipCurveEditPayload {
+    /// Complete group retained after a successful non-deleting batch edit.
+    pub(crate) fn retained_group_keyframe_ids(&self) -> Option<&[KeyframeId]> {
+        match self {
+            Self::OffsetValuesMany { keyframe_ids, .. }
+            | Self::ShiftMany { keyframe_ids, .. }
+            | Self::SetInterpolations { keyframe_ids, .. } => Some(keyframe_ids),
+            _ => None,
+        }
+    }
+
     /// Stable deletion targets used to update selection after a successful commit.
     pub(crate) fn removed_keyframe_ids(&self) -> Option<&[KeyframeId]> {
         match self {

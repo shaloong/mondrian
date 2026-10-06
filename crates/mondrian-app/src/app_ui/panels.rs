@@ -2105,6 +2105,8 @@ pub struct InspectorCurveKeyModel {
 /// Stable author target plus editable keys and read-only evaluated samples.
 #[derive(Debug, Clone)]
 pub struct InspectorCurveModel {
+    /// Explicit owner selection projected after author commands such as Paste.
+    pub selected_keyframe_ids: Vec<KeyframeId>,
     /// Current exact Clip author time, retained when a selection removes every key.
     pub(crate) author_time: TimelineTime,
     /// Exact duration of one sequence frame in this owner time domain.
@@ -2634,7 +2636,7 @@ impl InspectorPanelModel {
                     .collect()
             })
             .unwrap_or_default();
-        Self {
+        let mut model = Self {
             selected_clip: Some(resolved_selection),
             empty_message: None,
             selected_effect_id: state.primary_selected_effect().and_then(|selection| {
@@ -2802,7 +2804,24 @@ impl InspectorPanelModel {
                     }
                 })
                 .collect(),
+        };
+        let selected = state.selected_animation_keyframes_for_clip(clip.id);
+        for curve in model.opacity_curve.iter_mut().chain(
+            model
+                .effects
+                .iter_mut()
+                .flat_map(|effect| effect.properties.iter_mut())
+                .filter_map(|property| {
+                    property.numeric_curve.as_mut().map(|model| &mut model.curve)
+                }),
+        ) {
+            curve.selected_keyframe_ids = selected
+                .iter()
+                .filter(|selection| selection.property.property == curve.property)
+                .map(|selection| selection.keyframe_id)
+                .collect();
         }
+        model
     }
 
     pub fn empty() -> Self {
@@ -4186,6 +4205,7 @@ fn numeric_curve_model_for_property(
         .collect::<Option<Vec<_>>>()?;
 
     Some(InspectorCurveModel {
+        selected_keyframe_ids: Vec::new(),
         author_time,
         frame_time_step: TimelineTime::from_frame_position(mondrian_core::FramePosition::new(
             1, time_base,

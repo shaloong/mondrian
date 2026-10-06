@@ -846,5 +846,19 @@ It creates fresh author IDs and publishes selection only after commit. Stale
 owners, malformed/empty/duplicate selections, incompatible payloads and late locks
 cannot silently become Clip clipboard operations. Product refusal messages retain
 locale-neutral IDs and actionable bilingual descriptions. Audio curve clipboard,
-read-only control selection and post-refresh selection integration require their
-own complete UI acceptance and remain in the professional workflow matrix.
+read-only control selection and root Edit-menu context require their own complete
+UI acceptance and remain in the professional workflow matrix.
+
+Inspector visual curve models project the current App animation selection by
+exact parameter instance. After Paste publishes fresh stable IDs, reconstruction
+applies that changed selection while restoring the same owner focus and viewport.
+Unchanged selection projection retains the user's local curve selection. The
+model does not guess key identities from time/value coordinates, mutate author
+state or introduce a second author interpretation.
+
+Visual group value/time/interpolation actions publish their complete admitted
+stable selection after the author transaction succeeds. The single representative
+key in an edit outcome is not the selection authority for a batch. The same
+post-commit rule applies to intrinsic Clip and Effect curves; rejection changes
+neither selection nor history. Selection projections compare currently present
+keys, so real Undo/Redo can remove and restore the complete selected group.

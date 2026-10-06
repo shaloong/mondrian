@@ -1363,3 +1363,43 @@ professional clipboard workflow.
 
 Strict workspace/all-target/all-feature Clippy with `-D warnings` passed (2m42s).
 Formatting and diff checks passed before this implementation was committed.
+
+## Pasted group selection across root reconstruction
+
+A real Host/EventRouter regression reproduced successful Paste publishing three
+fresh selected author IDs while the rebuilt curve selected none (0 passed,
+1 failed, 3.45s). The visual Inspector now projects selection by exact parameter
+instance. A changed projected set replaces the old selection; an unchanged set
+preserves current local selection. Set order does not signal a change. Missing
+keys are excluded, and another owner or author session cannot inherit focus.
+
+The corrected real Host case passes: Ctrl+A/C/V selects every newly pasted key
+after root rebuild, focus stays on that curve, the next keyboard increment changes
+all three keys, and Undo/Redo restores complete author state. Generic widget
+acceptance additionally covers unchanged local selection, explicit clearing,
+missing IDs, projection reordering and different-owner isolation. This adds no
+author-state mirror, coordinate-based ID matching or second clipboard.
+
+Final all-feature App after the complete history fixes: **2579 passed, 0 failed,
+68 ignored**, 403.10s. The initial projection also passed full Widgets
+**1099/0/0 ignored** (323.40s); the revised projection requires its final curve
+widget gate below.
+The App run includes actual modal/resource and real cube Undo/save/reopen cases.
+The older clean native/encoded receipts retain their named source until the
+current committed source receives its own rebuilt qualification.
+
+
+Additional real history regression exposed complete batch edits publishing only
+one representative key (0/1 failed, 3.46s). Clip and Effect handlers now retain the
+complete admitted value/time/interpolation selection after successful commit.
+After that fix, a separate actual Paste Redo regression reproduced three restored
+author keys but zero selected UI keys (0/1 failed, 2.99s). Projection comparison
+now excludes currently absent IDs, so disappearance and reappearance reproject the
+complete group. The final Host test checks these real Undo/Redo routes and the
+complete group after keyboard editing. Generic acceptance checks the same stable
+identity absence/reappearance without retaining dormant IDs or guessed coordinates.
+
+Final changed-curve widget regression: **100 passed, 0 failed, 0 ignored**, 3.13s.
+Strict workspace/all-target/all-feature Clippy with `-D warnings` passed (2m59s).
+Final formatting and diff checks passed before commit. The full original goal
+remains active; native receipts and remaining professional matrices are separate.

@@ -3884,3 +3884,13 @@ modifiers are required; unfocused editors do not own clipboard chords. The visua
 adapter lowers both keyboard and lazy localized context-menu commands to the
 same typed product request; reusable widgets retain no application clipboard or
 second author interpretation. Paste may target an empty selection.
+
+Owner-provided stable key selection is a view projection. CurveEditor retains its
+previous projected set alongside the inactive view snapshot: a changed set selects
+the newly published keys, while an unchanged set preserves current local selection.
+Projection order does not create a selection change. Missing keys are excluded
+before comparing projections, so Undo/Redo disappearance and restoration trigger
+the appropriate selection change;
+the same owner keeps widget identity, focus and viewport. A changed selection clears
+obsolete tangent selection. A different owner or author session cannot inherit the
+old view. This projection changes no author state and adds no clipboard authority.

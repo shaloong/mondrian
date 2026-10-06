@@ -366,6 +366,7 @@ pub struct CurveEditorViewState {
     points: Option<Vec<CurvePoint>>,
     selected: Option<CurvePointTarget>,
     selected_keys: std::collections::HashSet<mondrian_core::KeyframeId>,
+    selection_projection: Option<std::collections::HashSet<mondrian_core::KeyframeId>>,
     selected_tangent: Option<(mondrian_core::KeyframeId, mondrian_core::BezierHandleSide)>,
     focused: bool,
     focus_visible: bool,
@@ -401,6 +402,7 @@ pub struct CurveEditor {
     drag_display_origin: Option<Option<Vec<CurvePoint>>>,
     selected: Option<usize>,
     selected_keys: std::collections::HashSet<mondrian_core::KeyframeId>,
+    selection_projection: Option<std::collections::HashSet<mondrian_core::KeyframeId>>,
     selection_deletion: bool,
     selection_time_movement: bool,
     selection_value_movement: bool,
@@ -492,6 +494,7 @@ impl CurveEditor {
             drag_display_origin: None,
             selected: None,
             selected_keys: std::collections::HashSet::new(),
+            selection_projection: None,
             selection_deletion: false,
             selection_time_movement: false,
             selection_value_movement: false,
@@ -1109,6 +1112,7 @@ impl CurveEditor {
                 .map(|_| self.points.clone()),
             selected,
             selected_keys: self.selected_keys.clone(),
+            selection_projection: self.selection_projection.clone(),
             selected_tangent: self.selected_tangent,
             focused: self.focused,
             focus_visible: self.focus_visible,
@@ -1128,19 +1132,26 @@ impl CurveEditor {
         }
         self.viewport = state.viewport;
         self.id = state.id;
-        self.selected = state.selected.and_then(|target| match target {
-            CurvePointTarget::Keyframe(id) => self.keyframe_indices.get(&id).copied(),
-            _ if state.points.as_deref() == Some(self.points.as_slice()) => {
-                self.point_metadata.iter().position(|point| point.target == target)
-            }
-            _ => None,
-        });
-        self.selected_keys = state
-            .selected_keys
-            .iter()
-            .copied()
-            .filter(|id| self.keyframe_indices.contains_key(id))
-            .collect();
+        let projection_changed = self.selection_projection != state.selection_projection;
+        self.selected = if projection_changed {
+            None
+        } else {
+            state.selected.and_then(|target| match target {
+                CurvePointTarget::Keyframe(id) => self.keyframe_indices.get(&id).copied(),
+                _ if state.points.as_deref() == Some(self.points.as_slice()) => {
+                    self.point_metadata.iter().position(|point| point.target == target)
+                }
+                _ => None,
+            })
+        };
+        if !projection_changed {
+            self.selected_keys = state
+                .selected_keys
+                .iter()
+                .copied()
+                .filter(|id| self.keyframe_indices.contains_key(id))
+                .collect();
+        }
         if self.selected.is_none() {
             self.selected = self.point_metadata.iter().position(|metadata| {
                 matches!(metadata.target,
@@ -1148,7 +1159,8 @@ impl CurveEditor {
             });
         }
         self.selected_tangent = state.selected_tangent.filter(|(id, side)| {
-            Some(*id) == self.selected_keyframe()
+            !projection_changed
+                && Some(*id) == self.selected_keyframe()
                 && self
                     .tangents
                     .iter()
@@ -1162,6 +1174,28 @@ impl CurveEditor {
     /// Selected point index, if any.
     pub fn selected_index(&self) -> Option<usize> {
         self.selected
+    }
+
+    /// Project an explicit owner selection after assigning stable key identities.
+    /// A changed projection replaces local selection during view restoration;
+    /// an unchanged projection preserves the user's current local selection.
+    /// Only current keys participate in projection changes, including Undo/Redo.
+    /// Projection does not author an edit.
+    pub fn with_selection_projection(
+        mut self,
+        ids: impl IntoIterator<Item = mondrian_core::KeyframeId>,
+    ) -> Self {
+        let ids = ids
+            .into_iter()
+            .filter(|id| self.keyframe_indices.contains_key(id))
+            .collect::<std::collections::HashSet<_>>();
+        self.selected_keys = ids.clone();
+        self.selected = self.point_metadata.iter().position(|metadata| {
+            matches!(metadata.target, CurvePointTarget::Keyframe(id) if self.selected_keys.contains(&id))
+        });
+        self.selected_tangent = None;
+        self.selection_projection = Some(ids);
+        self
     }
 
     /// Enable stable authored-key selection and atomic selection deletion.
@@ -2900,6 +2934,82 @@ mod tests {
             name,
             payload: Default::default(),
         }
+    }
+
+    #[test]
+    fn selection_projection_replaces_new_groups_preserves_local_selection_and_clears_explicitly() {
+        let old = [
+            mondrian_core::KeyframeId::new(),
+            mondrian_core::KeyframeId::new(),
+        ];
+        let fresh = [
+            mondrian_core::KeyframeId::new(),
+            mondrian_core::KeyframeId::new(),
+        ];
+        let make = |ids: [mondrian_core::KeyframeId; 2],
+                    selection: Vec<mondrian_core::KeyframeId>| {
+            CurveEditor::with_points(vec![CurvePoint::new(0.2, 0.3), CurvePoint::new(0.8, 0.7)])
+                .with_keyframe_ids(ids.into_iter().map(Some).collect())
+                .with_selection_projection(selection)
+                .with_view_key(Some("projected-owner".into()))
+        };
+        let mut original = make(old, Vec::new());
+        original.select(Some(1));
+        original.focused = true;
+        original.focus_visible = true;
+        let initial = original.view_state().expect("local selection");
+        let mut unchanged = make(old, Vec::new());
+        assert!(unchanged.restore_view_state(&initial));
+        assert_eq!(
+            unchanged.selected_keyframe_ids(),
+            [old[1]],
+            "unchanged empty projection preserves local selection"
+        );
+        assert!(unchanged.focused && unchanged.focus_visible);
+        assert_eq!(unchanged.id(), original.id());
+
+        let missing = mondrian_core::KeyframeId::new();
+        let mut pasted = make(fresh, vec![fresh[1], missing, fresh[0]]);
+        assert!(pasted.restore_view_state(&initial));
+        assert_eq!(
+            pasted.selected_keyframe_ids(),
+            fresh,
+            "fresh group replaces removed author IDs and excludes missing keys"
+        );
+        assert_eq!(pasted.selected_index(), Some(0));
+        assert!(pasted.focused && pasted.focus_visible);
+        pasted.select(Some(1));
+        let local = pasted.view_state().expect("local pasted selection");
+        let mut reordered_projection = make(fresh, vec![fresh[0], fresh[1], missing]);
+        assert!(reordered_projection.restore_view_state(&local));
+        assert_eq!(
+            reordered_projection.selected_keyframe_ids(),
+            [fresh[1]],
+            "projection order is not a selection change"
+        );
+
+        let mut cleared = make(fresh, Vec::new());
+        assert!(cleared.restore_view_state(&local));
+        assert!(cleared.selected_keyframe_ids().is_empty());
+        assert_eq!(cleared.selected_index(), None);
+        assert!(cleared.focused);
+        let mut absent = make(old, fresh.to_vec());
+        assert!(absent.restore_view_state(&local));
+        assert!(absent.selected_keyframe_ids().is_empty());
+        let absent_state = absent.view_state().expect("absent author keys");
+        let mut restored = make(fresh, fresh.to_vec());
+        assert!(restored.restore_view_state(&absent_state));
+        assert_eq!(
+            restored.selected_keyframe_ids(),
+            fresh,
+            "reappearing author keys reproject the complete owner selection"
+        );
+        assert!(restored.focused);
+        let mut another_owner =
+            make(fresh, fresh.to_vec()).with_view_key(Some("other-owner".into()));
+        assert!(!another_owner.restore_view_state(&local));
+        assert_ne!(another_owner.id(), original.id());
+        assert!(!another_owner.focused);
     }
 
     #[test]

@@ -2749,6 +2749,7 @@ fn numeric_curve_editor(
         )
         .with_view_key(target.as_ref().and_then(|target| serde_json::to_string(target).ok()))
         .with_keyframe_ids(ids)
+        .with_selection_projection(model.selected_keyframe_ids.iter().copied())
         .with_selection_deletion()
         .with_selection_time_movement()
         .with_selection_value_movement()

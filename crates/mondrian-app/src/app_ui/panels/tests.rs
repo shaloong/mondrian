@@ -8577,6 +8577,7 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
         })
         .expect("canonical source key");
     let model = InspectorCurveModel {
+        selected_keyframe_ids: Vec::new(),
         author_time: TimelineTime::ZERO,
         frame_time_step: TimelineTime::new(1, 30).expect("fixture grid"),
         curve_source: std::sync::Arc::new(
@@ -8647,6 +8648,7 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
 
     let boundary_keyframe_id = KeyframeId::new();
     let boundary_model = InspectorCurveModel {
+        selected_keyframe_ids: Vec::new(),
         author_time: TimelineTime::ZERO,
         frame_time_step: TimelineTime::new(1, 30).expect("fixture grid"),
         curve_source: std::sync::Arc::new(
@@ -10678,6 +10680,7 @@ fn inspector_actions_without_selection_produce_no_command() {
         None
     );
     let curve_model = InspectorCurveModel {
+        selected_keyframe_ids: Vec::new(),
         author_time: TimelineTime::ZERO,
         frame_time_step: TimelineTime::new(1, 30).expect("fixture grid"),
         curve_source: std::sync::Arc::new(
@@ -12946,6 +12949,17 @@ fn group_value_keyboard_commits_once_and_roundtrips_both_history_states() {
             assert_eq!(actions.borrow().len(), 1, "one group intent");
             state.dispatch_action(actions.borrow_mut().remove(0)).expect("author group");
             assert_eq!(state.project_author_generation(), generation + 1);
+            if let Some(clip_id) = clip_id {
+                assert_eq!(
+                    state
+                        .selected_animation_keyframes_for_clip(clip_id)
+                        .iter()
+                        .map(|selection| selection.keyframe_id)
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    ids.iter().copied().collect(),
+                    "committed value batch retains the complete visual selection"
+                );
+            }
             let moved = state.active_sequence().expect("moved").clone();
             let moved_values = values(&moved, clip_id, target.as_ref());
             let upper = if audio {
@@ -13233,6 +13247,17 @@ fn group_interpolation_menu_commits_once_and_roundtrips_both_history_states() {
             }
             state.dispatch_action(action).expect("publish preset");
             assert_eq!(state.project_author_generation(), generation + 1);
+            if let Some(clip_id) = clip_id {
+                assert_eq!(
+                    state
+                        .selected_animation_keyframes_for_clip(clip_id)
+                        .iter()
+                        .map(|selection| selection.keyframe_id)
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    ids.iter().copied().collect(),
+                    "committed interpolation batch retains the complete visual selection"
+                );
+            }
             assert_eq!(
                 curve
                     .as_any()
