@@ -784,3 +784,6 @@ constrained Auto/Continuous modes retain precedence.
 
 
 ExactAutomationCurve also admits complete stable selections with one preset and one normalization. Singleton preset edits delegate to this primitive. Empty/duplicate/stale selections and unsupported asymmetric presets publish nothing; scalar author bits and exact times remain intact.
+
+
+Visual App curve preparation lowers complete selection interpolation into one Core mutation; singleton requests reuse the same candidate preparation. No-op admission compares complete normalized author state, rather than reconstructing mode-specific equality in the application.

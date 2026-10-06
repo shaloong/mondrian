@@ -3861,3 +3861,16 @@ an ignored test or earlier time-mode receipt is not value-mode evidence.
 The App animation selection resolves manual asymmetric Linear/Bezier sides as
 EaseIn or EaseOut through the Core resolver. Current-mode and available-preset
 menus therefore retain the authored side intent for complete selections.
+
+
+CurveEditor accepts a stable-selection menu factory invoked only on menu opening. Right-clicking a selected key retains the complete group; Shift+F10 shares the same command factory. Active pointer drafts refuse menu opening. Visual and audio adapters use definition-admitted batch requests, disable equal candidates, keep localized labels and resolve mixed selections without a checked preset.
+
+Group menu selection permission is independent of deletion and coordinate movement;
+Ctrl/Cmd+A and Shift-click remain available when only interpolation is admitted.
+Active drafts refuse right-click and keyboard menus, and cancellation restores
+normal menu access. Author dispatch revalidates stale keys and late owner locks.
+
+Both singleton and complete-selection authored menus use the opening-time
+factory. UI reconstruction only prepares localized labels; it does not prepare
+seven candidates for every authored key. Preset admission is bounded to the
+one addressed selection when opening the menu, avoiding quadratic rebuilding.

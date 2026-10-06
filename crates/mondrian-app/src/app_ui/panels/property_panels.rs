@@ -433,12 +433,15 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
             can_edit,
             None,
             move |curve, edit| inspector_curve_edit_action(selected_clip, curve, edit),
-            move |curve, keyframe_id, interpolation| {
+            move |curve, keyframe_ids, interpolation| {
                 selected_clip.map(|selection| {
                     clip_edit_numeric_curve_action(ClipEditNumericCurvePayload {
                         clip_id: selection.clip_id,
                         parameter: curve.property.clone(),
-                        edit: ClipCurveEditPayload::SetInterpolation { keyframe_id, interpolation },
+                        edit: ClipCurveEditPayload::SetInterpolations {
+                            keyframe_ids: keyframe_ids.to_vec(),
+                            interpolation,
+                        },
                     })
                 })
             },
@@ -1495,15 +1498,15 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                                 move |curve, edit| {
                                     effect_curve_edit_action(selected_clip, effect_id, curve, edit)
                                 },
-                                move |curve, keyframe_id, interpolation| {
+                                move |curve, keyframe_ids, interpolation| {
                                     selected_clip.map(|selection| {
                                         visual_effect_edit_numeric_curve_action(
                                             VisualEffectEditNumericCurvePayload {
                                                 clip_id: selection.clip_id,
                                                 effect_id,
                                                 parameter: curve.property.clone(),
-                                                edit: ClipCurveEditPayload::SetInterpolation {
-                                                    keyframe_id,
+                                                edit: ClipCurveEditPayload::SetInterpolations {
+                                                    keyframe_ids: keyframe_ids.to_vec(),
                                                     interpolation,
                                                 },
                                             },
@@ -1819,35 +1822,20 @@ pub(super) fn audio_automation_curve_control(
     localizer: &Localizer,
 ) -> Box<dyn Widget> {
     let action_model = model.clone();
-    let interpolation_menus = model
-        .keys
-        .iter()
-        .enumerate()
-        .map(|(index, key)| {
-            let keyframe = key.keyframe.as_ref()?;
-            Some(
-                [
-                    InterpolationType::Hold,
-                    InterpolationType::Linear,
-                    InterpolationType::Bezier,
-                    InterpolationType::AutoBezier,
-                    InterpolationType::ContinuousBezier,
-                ]
-                .into_iter()
-                .filter_map(|interpolation| {
-                    let message_id = keyframe_interpolation_message_id(interpolation);
-                    audio_automation_interpolation_action(model, index, interpolation).map(
-                        |action| {
-                            MenuItem::new(localizer.text(message_id), action)
-                                .with_message_id(message_id)
-                                .checked(audio_keyframe_interpolation(keyframe) == interpolation)
-                        },
-                    )
-                })
-                .collect(),
-            )
-        })
-        .collect();
+    let menu_model = model.clone();
+    let menu_choices = [
+        InterpolationType::Hold,
+        InterpolationType::Linear,
+        InterpolationType::Bezier,
+        InterpolationType::AutoBezier,
+        InterpolationType::ContinuousBezier,
+    ]
+    .into_iter()
+    .map(|mode| {
+        let message = keyframe_interpolation_message_id(mode);
+        (mode, localizer.text(message), message)
+    })
+    .collect::<Vec<_>>();
     let mut preview_model = model.clone();
     let mut preview_origin = None;
     let pending_action = std::rc::Rc::new(std::cell::RefCell::new(None));
@@ -1920,7 +1908,37 @@ pub(super) fn audio_automation_curve_control(
         })
         .with_point_policies(model.point_policies())
         .with_display_points(model.display_points.clone())
-        .with_point_context_menus(interpolation_menus)
+        .with_selection_context_menu(move |ids| {
+            menu_choices
+                .iter()
+                .filter(|(mode, _, _)| {
+                    let family = match mode {
+                        InterpolationType::Hold => ParameterInterpolation::Hold,
+                        InterpolationType::Linear => ParameterInterpolation::Linear,
+                        _ => ParameterInterpolation::Bezier,
+                    };
+                    menu_model.allowed_interpolations.contains(&family)
+                })
+                .map(|(mode, label, message)| {
+                    let action =
+                        crate::app_ui::audio_automation::audio_automation_interpolations_action(
+                            &menu_model,
+                            ids,
+                            *mode,
+                        );
+                    let checked = !ids.is_empty()
+                        && ids.iter().all(|id| {
+                            menu_model
+                                .source_curve
+                                .keyframes
+                                .iter()
+                                .find(|key| key.id == *id)
+                                .is_some_and(|key| audio_keyframe_interpolation(key) == *mode)
+                        });
+                    MenuItem::new(label.clone(), action).with_message_id(*message).checked(checked)
+                })
+                .collect()
+        })
         .enabled(model.is_editable);
     if model.current_author_time.is_ok() {
         editor = editor
@@ -2626,7 +2644,8 @@ fn numeric_curve_editor(
     can_edit: bool,
     allowed_interpolations: Option<Vec<ParameterInterpolation>>,
     on_edit: impl Fn(&InspectorCurveModel, CurveEdit) -> Option<Action> + 'static,
-    on_interpolation: impl Fn(&InspectorCurveModel, KeyframeId, InterpolationType) -> Option<Action>,
+    on_interpolation: impl Fn(&InspectorCurveModel, &[KeyframeId], InterpolationType) -> Option<Action>
+        + 'static,
 ) -> CurveEditor {
     let tangents = numeric_tangents(&model, &model.curve_source);
     let points = model.keys.iter().map(|key| key.point).collect();
@@ -2641,45 +2660,48 @@ fn numeric_curve_editor(
             }
         })
         .collect();
-    let interpolation_menus = model
-        .keys
-        .iter()
-        .map(|key| {
-            let id = key.keyframe_id?;
-            Some(
-                [
-                    InterpolationType::Hold,
-                    InterpolationType::Linear,
-                    InterpolationType::Bezier,
-                    InterpolationType::AutoBezier,
-                    InterpolationType::ContinuousBezier,
-                    InterpolationType::EaseIn,
-                    InterpolationType::EaseOut,
-                ]
-                .into_iter()
-                .filter(|interpolation| {
-                    allowed_interpolations.as_ref().is_none_or(|allowed| {
-                        let schema_interpolation = match interpolation {
-                            InterpolationType::Hold => ParameterInterpolation::Hold,
-                            InterpolationType::Linear => ParameterInterpolation::Linear,
-                            _ => ParameterInterpolation::Bezier,
-                        };
-                        allowed.contains(&schema_interpolation)
-                    })
-                })
-                .map(|interpolation| {
-                    let message_id = keyframe_interpolation_message_id(interpolation);
-                    MenuItem::new(
-                        localizer.text(message_id),
-                        on_interpolation(&model, id, interpolation),
-                    )
-                    .with_message_id(message_id)
-                    .checked(key.interpolation == Some(interpolation))
-                })
-                .collect(),
+    let on_interpolation = std::rc::Rc::new(
+        move |model: &InspectorCurveModel, ids: &[KeyframeId], interpolation| {
+            let edit = ClipCurveEditPayload::SetInterpolations {
+                keyframe_ids: ids.to_vec(),
+                interpolation,
+            };
+            let candidate = crate::app::preview_numeric_curve_edit(
+                &model.curve_source,
+                model.owner_range,
+                &edit,
             )
-        })
-        .collect();
+            .ok()?;
+            if candidate == *model.curve_source {
+                return None;
+            }
+            on_interpolation(model, ids, interpolation)
+        },
+    );
+    let interpolation_choices = [
+        InterpolationType::Hold,
+        InterpolationType::Linear,
+        InterpolationType::Bezier,
+        InterpolationType::AutoBezier,
+        InterpolationType::ContinuousBezier,
+        InterpolationType::EaseIn,
+        InterpolationType::EaseOut,
+    ]
+    .into_iter()
+    .filter(|mode| {
+        let family = match mode {
+            InterpolationType::Hold => ParameterInterpolation::Hold,
+            InterpolationType::Linear => ParameterInterpolation::Linear,
+            _ => ParameterInterpolation::Bezier,
+        };
+        allowed_interpolations.as_ref().is_none_or(|allowed| allowed.contains(&family))
+    })
+    .map(|mode| {
+        let id = keyframe_interpolation_message_id(mode);
+        (mode, localizer.text(id), id)
+    })
+    .collect::<Vec<_>>();
+    let menu_model = model.clone();
     let display_points = model.display_points.clone();
     let preview_model = model.clone();
     let mut preview_source = preview_model.curve_source.clone();
@@ -2748,7 +2770,24 @@ fn numeric_curve_editor(
         })
         .with_point_policies(point_policies)
         .with_display_points(display_points)
-        .with_point_context_menus(interpolation_menus)
+        .with_selection_context_menu(move |ids| {
+            interpolation_choices
+                .iter()
+                .map(|(mode, label, message)| {
+                    let checked = !ids.is_empty()
+                        && ids.iter().all(|id| {
+                            menu_model
+                                .keys
+                                .iter()
+                                .find(|key| key.keyframe_id == Some(*id))
+                                .is_some_and(|key| key.interpolation == Some(*mode))
+                        });
+                    MenuItem::new(label.clone(), on_interpolation(&menu_model, ids, *mode))
+                        .with_message_id(*message)
+                        .checked(checked)
+                })
+                .collect()
+        })
         .enabled(can_edit);
     editor.on_gesture(move |event| match event {
         CurveGestureEvent::Begin(gesture_id) => target

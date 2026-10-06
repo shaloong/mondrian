@@ -79,6 +79,13 @@ pub enum ClipNumericCurveEdit {
     },
     /// Remove one existing key by stable identity.
     Remove { keyframe_id: KeyframeId },
+    /// Set one preset on a complete stable key selection in one transaction.
+    SetInterpolations {
+        /// Nonempty unique complete key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Current-schema interpolation preset.
+        interpolation: InterpolationType,
+    },
     /// Change one complete key's interpolation using its stable identity.
     SetInterpolation {
         keyframe_id: KeyframeId,
@@ -660,6 +667,22 @@ fn prepare_property_curve_edit(
             Ok(PreparedCurveEdit { mutations, keyframe_id })
         }
         ClipNumericCurveEdit::SetInterpolation { keyframe_id, interpolation } => {
+            prepare_property_curve_edit(
+                path,
+                property,
+                range,
+                address,
+                ClipNumericCurveEdit::SetInterpolations {
+                    keyframe_ids: vec![keyframe_id],
+                    interpolation,
+                },
+            )
+        }
+        ClipNumericCurveEdit::SetInterpolations { keyframe_ids, interpolation } => {
+            let keyframe_id = keyframe_ids
+                .first()
+                .copied()
+                .ok_or_else(|| curve_error("interpolation selection is empty"))?;
             if !property
                 .descriptor
                 .schema
@@ -671,67 +694,15 @@ fn prepare_property_curve_edit(
                     address.parameter_id
                 )));
             }
-            let keyframe = property.keyframe_by_id(keyframe_id).ok_or_else(|| {
-                curve_error(format!(
-                    "keyframe {keyframe_id} is stale or is not a complete key of parameter {}",
-                    address.parameter_id
-                ))
-            })?;
-            let unchanged = match interpolation {
-                InterpolationType::Hold => {
-                    matches!(
-                        keyframe.interp_in,
-                        mondrian_core::automation::KeyframeInterpolation::Hold
-                    ) && matches!(
-                        keyframe.interp_out,
-                        mondrian_core::automation::KeyframeInterpolation::Hold
-                    )
-                }
-                InterpolationType::Linear => {
-                    matches!(
-                        keyframe.interp_in,
-                        mondrian_core::automation::KeyframeInterpolation::Linear
-                    ) && matches!(
-                        keyframe.interp_out,
-                        mondrian_core::automation::KeyframeInterpolation::Linear
-                    )
-                }
-                InterpolationType::AutoBezier => keyframe.temporal_flags.auto_bezier,
-                InterpolationType::ContinuousBezier => {
-                    keyframe.temporal_flags.continuous
-                        && !keyframe.temporal_flags.auto_bezier
-                        && !keyframe.temporal_flags.broken_handles
-                }
-                InterpolationType::Bezier => {
-                    !keyframe.temporal_flags.auto_bezier
-                        && !keyframe.temporal_flags.continuous
-                        && keyframe.interp_in.is_bezier()
-                        && keyframe.interp_out.is_bezier()
-                }
-                InterpolationType::EaseIn => matches!(
-                    (keyframe.interp_in, keyframe.interp_out),
-                    (
-                        mondrian_core::automation::KeyframeInterpolation::Linear,
-                        mondrian_core::automation::KeyframeInterpolation::Bezier(_)
-                            | mondrian_core::automation::KeyframeInterpolation::DefaultBezier
-                    )
-                ),
-                InterpolationType::EaseOut => matches!(
-                    (keyframe.interp_in, keyframe.interp_out),
-                    (
-                        mondrian_core::automation::KeyframeInterpolation::Bezier(_)
-                            | mondrian_core::automation::KeyframeInterpolation::DefaultBezier,
-                        mondrian_core::automation::KeyframeInterpolation::Linear
-                    )
-                ),
-            };
+            let mut candidate = property.clone();
+            candidate.update_keyframes_interpolation(&keyframe_ids, interpolation)?;
             Ok(PreparedCurveEdit {
-                mutations: if unchanged {
+                mutations: if candidate == *property {
                     Vec::new()
                 } else {
-                    vec![PropertyMutation::UpdateKeyframeInterpolation {
+                    vec![PropertyMutation::UpdateKeyframesInterpolation {
                         path: path.to_owned(),
-                        time: keyframe.time,
+                        keyframe_ids,
                         interpolation,
                     }]
                 },

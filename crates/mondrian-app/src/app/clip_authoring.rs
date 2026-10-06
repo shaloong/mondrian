@@ -285,6 +285,12 @@ pub(super) fn numeric_curve_edit_from_payload(
         ClipCurveEditPayload::Remove { keyframe_id } => {
             Ok(ClipNumericCurveEdit::Remove { keyframe_id: *keyframe_id })
         }
+        ClipCurveEditPayload::SetInterpolations { keyframe_ids, interpolation } => {
+            Ok(ClipNumericCurveEdit::SetInterpolations {
+                keyframe_ids: keyframe_ids.clone(),
+                interpolation: *interpolation,
+            })
+        }
         ClipCurveEditPayload::SetInterpolation { keyframe_id, interpolation } => {
             Ok(ClipNumericCurveEdit::SetInterpolation {
                 keyframe_id: *keyframe_id,

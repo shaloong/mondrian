@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 
 use mondrian_core::{
     AuthoringTimeDomain, AutomationSegmentInterpolation, ExactAutomationKeyframe,
-    ExactAutomationTangentMode, InterpolationType, ParameterInterpolation, PropertyValue,
-    PropertyValueType, TimeScale, TimelineTime, TimelineTimeRange,
+    ExactAutomationTangentMode, InterpolationType, KeyframeId, ParameterInterpolation,
+    PropertyValue, PropertyValueType, TimeScale, TimelineTime, TimelineTimeRange,
 };
 use mondrian_editor_state::Action;
 use mondrian_timeline::{
@@ -323,10 +323,10 @@ pub(crate) fn project_audio_automation(
     })
 }
 
-/// Lower a keyframe context-menu choice through the same stable target address.
-pub(crate) fn audio_automation_interpolation_action(
+/// Admit one complete-selection preset through the current audio definition.
+pub(crate) fn audio_automation_interpolations_action(
     model: &AudioAutomationCurveModel,
-    index: usize,
+    keyframe_ids: &[KeyframeId],
     interpolation: InterpolationType,
 ) -> Option<Action> {
     if !model.is_editable {
@@ -340,9 +340,14 @@ pub(crate) fn audio_automation_interpolation_action(
     if !model.allowed_interpolations.contains(&family) {
         return None;
     }
-    let keyframe_id = model.keys.get(index)?.keyframe.as_ref()?.id;
-    let edit = AudioAutomationEdit::SetInterpolation { keyframe_id, interpolation };
-    model.curve_contract.preview_edit(&model.source_curve, &edit).ok()?;
+    let edit = AudioAutomationEdit::SetInterpolations {
+        keyframe_ids: keyframe_ids.to_vec(),
+        interpolation,
+    };
+    let candidate = model.curve_contract.preview_edit(&model.source_curve, &edit).ok()?;
+    if candidate == model.source_curve {
+        return None;
+    }
     Some(audio_automation_edit_action(AudioAutomationEditRequest {
         target: model.target.clone(),
         edit,
@@ -1192,10 +1197,10 @@ mod tests {
             ),
         )
         .unwrap();
-        let index = model.keys.iter().position(|key| key.keyframe.is_some()).unwrap();
-        let action = audio_automation_interpolation_action(
+
+        let action = audio_automation_interpolations_action(
             &model,
-            index,
+            &[keyframe_id],
             InterpolationType::ContinuousBezier,
         )
         .unwrap();
@@ -1203,25 +1208,26 @@ mod tests {
             ProductAction::decode_external(&action).unwrap(),
             Some(ProductAction::Audio(AudioProductAction::EditAutomation(
                 AudioAutomationEditRequest {
-                    edit: AudioAutomationEdit::SetInterpolation {
-                        keyframe_id: id,
+                    edit: AudioAutomationEdit::SetInterpolations {
+                        keyframe_ids: ids,
                         interpolation: InterpolationType::ContinuousBezier,
                     },
                     ..
                 }
-            ))) if id == keyframe_id
+            ))) if ids == vec![keyframe_id]
         ));
         model
             .allowed_interpolations
             .retain(|mode| *mode != ParameterInterpolation::Bezier);
-        assert!(audio_automation_interpolation_action(
+        assert!(audio_automation_interpolations_action(
             &model,
-            index,
+            &[keyframe_id],
             InterpolationType::AutoBezier,
         )
         .is_none());
         assert!(
-            audio_automation_interpolation_action(&model, 0, InterpolationType::Linear,).is_none()
+            audio_automation_interpolations_action(&model, &[], InterpolationType::Linear)
+                .is_none()
         );
     }
 

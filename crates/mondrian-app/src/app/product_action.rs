@@ -2643,6 +2643,13 @@ pub enum ClipCurveEditPayload {
         /// Stable key identity captured by the current projection.
         keyframe_id: KeyframeId,
     },
+    /// Set one interpolation preset on a complete stable selection atomically.
+    SetInterpolations {
+        /// Nonempty unique complete key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Current-schema interpolation preset.
+        interpolation: mondrian_core::automation::InterpolationType,
+    },
     /// Change the interpolation preset of one existing complete key.
     SetInterpolation {
         /// Stable key identity captured by the current projection.

@@ -156,6 +156,9 @@ impl CurvePointPolicy {
 /// Adapter that maps the current curve points to an editor [`Action`].
 pub type CurveChangeAction = dyn Fn(&[CurvePoint]) -> Option<Action>;
 
+/// Adapter that builds commands for a complete stable selection when its menu opens.
+pub type CurveSelectionMenu = dyn Fn(&[mondrian_core::KeyframeId]) -> Vec<MenuItem>;
+
 /// One canonical tangent projected into the curve viewport.
 /// Value coordinates may exceed the visible interval; they are never clamped.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -406,6 +409,7 @@ pub struct CurveEditor {
     on_gesture: Option<Box<CurveGestureAction>>,
     on_value_edit: Option<Box<CurveValueEditAction>>,
     gesture: Option<mondrian_core::AuthoringGestureId>,
+    selection_menu: Option<Box<CurveSelectionMenu>>,
     context_menu: Option<ContextMenu>,
 }
 
@@ -495,6 +499,7 @@ impl CurveEditor {
             on_gesture: None,
             on_value_edit: None,
             gesture: None,
+            selection_menu: None,
             context_menu: None,
         };
         editor.set_points(points);
@@ -564,6 +569,40 @@ impl CurveEditor {
     pub fn with_point_policies(mut self, policies: Vec<CurvePointPolicy>) -> Self {
         self.set_point_policies(policies);
         self
+    }
+
+    /// Build single-key or group commands only when an authored selection menu opens.
+    /// Right-clicking a selected key retains the group; Shift+F10 uses the same menu.
+    pub fn with_selection_context_menu(
+        mut self,
+        menu: impl Fn(&[mondrian_core::KeyframeId]) -> Vec<MenuItem> + 'static,
+    ) -> Self {
+        self.selection_menu = Some(Box::new(menu));
+        self
+    }
+
+    fn open_selection_menu(&mut self, position: Point, keyboard: bool, ctx: &mut EventContext) {
+        if self.has_active_pointer_interaction() || self.gesture.is_some() {
+            return;
+        }
+        let Some(factory) = &self.selection_menu else {
+            return;
+        };
+        let items = factory(&self.selected_keyframe_ids());
+        if !items.iter().any(MenuItem::is_activatable) {
+            return;
+        }
+        let mut menu = ContextMenu::new(position, items);
+        menu.layout(self.bounds);
+        if keyboard {
+            menu.event(
+                &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                ctx,
+            );
+        }
+        self.context_menu = Some(menu);
+        ctx.tooltip.hide();
+        ctx.request_repaint();
     }
 
     /// Set optional context menu commands for each editable point.
@@ -1761,6 +1800,12 @@ impl CurveEditor {
         if self.has_active_pointer_interaction() || self.gesture.is_some() {
             return true;
         }
+        if menu && self.selection_menu.is_some() {
+            if let Some(index) = self.selected {
+                self.open_selection_menu(self.to_screen(self.points[index]), true, ctx);
+            }
+            return true;
+        }
         if menu && self.selected_keys.len() > 1 {
             return true;
         }
@@ -2307,6 +2352,19 @@ impl Widget for CurveEditor {
             UiEvent::MouseDown { position, button: MouseButton::Right, .. }
                 if self.bounds.contains(*position) =>
             {
+                if self.has_active_pointer_interaction() || self.gesture.is_some() {
+                    return EventResult::Handled;
+                }
+                if let Some(index) = self.hit_point(*position)
+                    && let CurvePointTarget::Keyframe(id) = self.point_metadata[index].target
+                    && self.selection_menu.is_some()
+                {
+                    if !self.selected_keys.contains(&id) {
+                        self.select(Some(index));
+                    }
+                    self.open_selection_menu(*position, false, ctx);
+                    return EventResult::Handled;
+                }
                 if let Some(index) = self.hit_point(*position)
                     && let Some(items) = self
                         .point_metadata
@@ -2331,7 +2389,8 @@ impl Widget for CurveEditor {
                 ctx.tooltip.hide();
                 if (self.selection_deletion
                     || self.selection_time_movement
-                    || self.selection_value_movement)
+                    || self.selection_value_movement
+                    || self.selection_menu.is_some())
                     && *modifiers == Modifiers::shift()
                 {
                     if !self.has_active_pointer_interaction()
@@ -2477,7 +2536,8 @@ impl Widget for CurveEditor {
             UiEvent::KeyDown { key: KeyCode::A, modifiers }
                 if (self.selection_deletion
                     || self.selection_time_movement
-                    || self.selection_value_movement)
+                    || self.selection_value_movement
+                    || self.selection_menu.is_some())
                     && self.focused
                     && ctx.focus.focused_widget() == Some(self.id)
                     && (modifiers.ctrl ^ modifiers.meta)
@@ -6670,5 +6730,191 @@ mod tests {
 
         assert!(encoder.rects.len() >= 2 + editor.points().len() * 2);
         assert!(encoder.lines >= editor.grid_columns + editor.grid_rows + editor.points().len());
+    }
+
+    #[test]
+    fn group_context_menu_preserves_selection_keyboard_pointer_and_escape() {
+        for keyboard in [true, false] {
+            let ids = [
+                mondrian_core::KeyframeId::new(),
+                mondrian_core::KeyframeId::new(),
+                mondrian_core::KeyframeId::new(),
+            ];
+            let requests = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let menu_requests = requests.clone();
+            let actions = RefCell::new(Vec::new());
+            let dispatch = |action| actions.borrow_mut().push(action);
+            let mut editor = CurveEditor::with_points(vec![
+                CurvePoint::new(0.0, 0.2),
+                CurvePoint::new(0.5, 0.7),
+                CurvePoint::new(1.0, 0.3),
+            ])
+            .with_keyframe_ids(ids.map(Some).to_vec())
+            .with_selection_context_menu(move |keys| {
+                menu_requests.borrow_mut().push(keys.to_vec());
+                vec![MenuItem::new("Auto", Action::Paste)]
+            });
+            editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+            let before = editor.points().to_vec();
+            let mut focus = CurveFocus(Some(editor.id()));
+            let mut shortcuts = DummyShortcut;
+            let mut tooltip = DummyTooltip;
+            let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+            editor.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+            editor.event(
+                &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+                &mut ctx,
+            );
+            assert_eq!(editor.selected_keyframe_ids(), ids);
+            assert!(
+                requests.borrow().is_empty(),
+                "construction and selection do not prepare menu commands"
+            );
+            let open = if keyboard {
+                UiEvent::KeyDown { key: KeyCode::F10, modifiers: Modifiers::shift() }
+            } else {
+                UiEvent::MouseDown {
+                    position: editor.to_screen(editor.points()[1]),
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                }
+            };
+            assert_eq!(editor.event(&open, &mut ctx), EventResult::Handled);
+            assert_eq!(*requests.borrow(), vec![ids.to_vec()]);
+            assert_eq!(editor.selected_keyframe_ids(), ids);
+            assert!(editor.context_menu.is_some());
+            editor.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+            assert!(editor.context_menu.is_none());
+            assert!(actions.borrow().is_empty());
+            assert_eq!(editor.selected_keyframe_ids(), ids);
+            assert_eq!(editor.points(), before);
+            editor.event(&open, &mut ctx);
+            if !keyboard {
+                editor.event(
+                    &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                    &mut ctx,
+                );
+            }
+            editor.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+            assert_eq!(actions.borrow().as_slice(), &[Action::Paste]);
+            assert_eq!(editor.selected_keyframe_ids(), ids);
+            assert_eq!(editor.points(), before);
+            editor.event(
+                &UiEvent::KeyDown { key: KeyCode::Home, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+            assert_eq!(editor.selected_keyframe_ids(), [ids[0]]);
+            editor.event(
+                &UiEvent::KeyDown { key: KeyCode::F10, modifiers: Modifiers::shift() },
+                &mut ctx,
+            );
+            assert_eq!(
+                requests.borrow().last(),
+                Some(&vec![ids[0]]),
+                "singleton shares the lazy factory"
+            );
+            editor.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+            editor.event(
+                &UiEvent::MouseDown {
+                    position: editor.to_screen(editor.points()[1]),
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            assert_eq!(editor.selected_keyframe_ids(), [ids[1]]);
+            assert_eq!(
+                requests.borrow().last(),
+                Some(&vec![ids[1]]),
+                "unselected right-click addresses that key"
+            );
+            assert_eq!(actions.borrow().as_slice(), &[Action::Paste]);
+            assert_eq!(editor.points(), before);
+        }
+    }
+
+    #[test]
+    fn pointer_draft_refuses_context_menu_until_cancelled() {
+        let ids = [
+            mondrian_core::KeyframeId::new(),
+            mondrian_core::KeyframeId::new(),
+            mondrian_core::KeyframeId::new(),
+        ];
+        let requests = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let menu_requests = requests.clone();
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.2),
+            CurvePoint::new(0.5, 0.7),
+            CurvePoint::new(1.0, 0.3),
+        ])
+        .with_keyframe_ids(ids.map(Some).to_vec())
+        .with_point_context_menus(vec![
+            None,
+            Some(vec![MenuItem::new("Auto", Action::Paste)]),
+            None,
+        ])
+        .with_selection_context_menu(move |keys| {
+            menu_requests.borrow_mut().push(keys.to_vec());
+            vec![MenuItem::new("Auto", Action::Paste)]
+        });
+        editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let origin = editor.points().to_vec();
+        let point = editor.to_screen(editor.points()[1]);
+        let mut focus = CurveFocus(Some(editor.id()));
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        editor.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        editor.event(
+            &UiEvent::MouseDown {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(editor.has_active_pointer_interaction());
+        editor.event(
+            &UiEvent::MouseDown {
+                position: point,
+                button: MouseButton::Right,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::F10, modifiers: Modifiers::shift() },
+            &mut ctx,
+        );
+        assert!(editor.context_menu.is_none());
+        assert!(requests.borrow().is_empty());
+        assert!(actions.borrow().is_empty());
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert!(!editor.has_active_pointer_interaction());
+        assert_eq!(editor.points(), origin);
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::F10, modifiers: Modifiers::shift() },
+            &mut ctx,
+        );
+        assert_eq!(*requests.borrow(), vec![ids.to_vec()]);
+        assert!(editor.context_menu.is_some());
     }
 }

@@ -933,3 +933,46 @@ batch suite is included in that count. Timeline build was 3m40s.
 Final exact-audio domain gate: whole-workspace all-target/all-feature Clippy
 with warnings as errors passed in **5m23s**; format and diff checks passed before
 commit. This qualifies the current domain source, not end-to-end UI/native audio.
+
+
+## Actual complete-selection interpolation menus and durable history
+
+Visual and audio curves now build group menus from stable selected keys on
+opening. Right-clicking a selected key and Shift+F10 retain the group; Escape
+closes the menu without editing. Interpolation selection is independent of
+coordinate movement/deletion permissions, so Ctrl/Cmd+A and Shift-click still
+work when only menu commands are admitted. Active pointer drafts refuse menu
+opening; cancellation restores normal access. Labels and help use existing
+localized presets. Checked current presets remain visible and disabled, and
+mixed selections have no checked preset.
+
+Visual singleton and group author preparation share one canonical normalized
+candidate, replacing application-specific mode equality branches. Both visual
+and audio menu adapters preflight current-definition candidates and suppress
+no-op actions. Formal dispatch rechecks the current author state.
+
+Verified candidate gates so far: Curve Editor **85/85**, zero failures/ignored,
+runtime 2.24s, including independent menu selection and pointer-draft refusal.
+The actual App menu-history filter passed **1/1** (3.70s), covering four cases:
+visual opacity/audio fader times Auto/Continuous, starting with a mixed Hold/
+Linear selection. Real EventRouter Tab/Ctrl+A/Shift+F10/Down/Enter publishes one
+intent and author generation, preserves exact key identity/time/value, and keeps
+the selection. One Undo and Redo restore complete author snapshots; both Unicode
+archives reopen in fresh sessions with empty histories. Saving undone retains
+live Redo. A refreshed audio model emits no action for the current group preset.
+
+The current complete App regression passed **2569 tests**, zero failures and
+65 ignored, in 321.86s. This includes captured menu intents refused after a late
+owner lock or removal of a selected key, with the complete author snapshot,
+generation and history unchanged. Ignored native tests are not counted as passes.
+Strict whole-workspace, all-target, all-feature Clippy with warnings as errors
+passed in **2m24s**.
+
+Both single-key and group menus use the opening-time factory. The production
+adapters no longer preflight seven candidates per key during UI reconstruction.
+A callback-count test verifies no factory invocation on construction or selection,
+then checks keyboard single selection and right-click replacement of the addressed
+selection. This removes the introduced quadratic preflight work; no latency or
+allocation benchmark is claimed. Current native/plugin/encoded output has not yet been
+qualified for this menu source. Group pointer/rubber-band and the broader full
+NLE vendor/platform/performance/i18n/tracking matrices remain open.
