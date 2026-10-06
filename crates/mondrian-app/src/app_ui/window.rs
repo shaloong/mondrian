@@ -6825,9 +6825,20 @@ fn complete_window_viewer_gpu_submission(
         submission_id,
         mut owner,
         completion,
+        completion_observed_at,
         mut quarantine_reason,
-        ..
     } = completed;
+    tracing::debug!(
+        target: "mondrian_app::viewer_submission",
+        submission_id = submission_id.get(),
+        frame = owner.frame.frame,
+        candidate_id = owner.frame.candidate_id(),
+        generation = owner.frame.generation(),
+        playback_intent = ?owner.frame.playback_intent(),
+        callback_consumption_delay_us = completion_observed_at.elapsed().as_micros(),
+        ?quarantine_reason,
+        "Window Viewer consumed exact GPU completion"
+    );
     if let Some(terminal) = session.viewer_gpu_device_progress.generation_terminal() {
         quarantine_reason.get_or_insert_with(|| {
             ViewerGpuSubmissionQuarantineReason::DevicePollFailed(format!(
@@ -7304,10 +7315,19 @@ fn prepare_viewer_gpu_preview(
             if physical_is_exact
                 && session.viewer_gpu_device_progress.generation_terminal().is_none()
             {
+                let ticket = candidate.presentation_ticket();
                 let disposition = host.present_current_viewer_output(
                     candidate,
                     crate::app::preview_runtime::PreviewPresentationCarrier::ExternalGpu,
                 );
+                if !matches!(disposition, FramePresentationDisposition::NoDemand) {
+                    tracing::debug!(
+                        target: "mondrian_app::viewer_submission",
+                        ?ticket,
+                        ?disposition,
+                        "Window Viewer consumed exact current physical output"
+                    );
+                }
                 if matches!(
                     disposition,
                     FramePresentationDisposition::Presented(_)
@@ -7887,6 +7907,18 @@ fn prepare_viewer_gpu_preview(
     }
     progress_permit.arm_native_completion_wake(queue);
     let submission_index = queue.submit(std::iter::once(encoder.finish()));
+    tracing::debug!(
+        target: "mondrian_app::viewer_submission",
+        submission_id = submission_id.get(),
+        frame = frame.frame,
+        candidate_id = frame.candidate_id(),
+        generation = frame.generation(),
+        playback_intent = ?frame.playback_intent(),
+        ticket = ?frame.presentation_ticket(),
+        successor = frame.is_successor_preparation(),
+        prepare_duration_us = prepare_started.elapsed().as_micros(),
+        "Window Viewer submitted exact GPU candidate"
+    );
     let heterogeneous_submission = record.assert_adapter_submission(submission_index.clone());
     let output_lease = match session.viewer_gpu_execution.take_presentation_output(&mut record) {
         Ok(lease) => lease,
@@ -8216,6 +8248,12 @@ fn publish_ordinary_window_viewer_gpu_submission(
                 .record_registered_frame(owner.stage_diagnostics);
         }
         let _ = host.observe_prepared_viewer_gpu_preroll();
+        tracing::debug!(
+            target: "mondrian_app::viewer_submission",
+            submission_id = submission_id.get(),
+            capacity_full = session.viewer_gpu_submissions.is_at_capacity(),
+            "Window Viewer published queue-ordered prepared physical output"
+        );
         return;
     }
     let disposition = {
@@ -8230,6 +8268,13 @@ fn publish_ordinary_window_viewer_gpu_submission(
         };
         host.set_external_viewer_frame(&owner.frame, texture_key.as_str().to_owned(), presentation)
     };
+    tracing::debug!(
+        target: "mondrian_app::viewer_submission",
+        submission_id = submission_id.get(),
+        capacity_full = session.viewer_gpu_submissions.is_at_capacity(),
+        ?disposition,
+        "Window Viewer arbitrated queue-ordered current physical output"
+    );
     if let Some(terminal) = session.viewer_gpu_device_progress.generation_terminal() {
         let _ = host.clear_external_viewer_frame_for_artifact(&output_key, texture_key.as_str());
         if let Some(owner) = session.viewer_gpu_submissions.owner_mut(submission_id)

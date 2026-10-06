@@ -1681,6 +1681,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         if transport.is_speculative_preparation() {
             tracing::debug!(
                 frame,
+                candidate_id,
+                generation,
+                ?playback_intent,
                 preamble_us,
                 evaluation_us,
                 layer_preparation_us,
