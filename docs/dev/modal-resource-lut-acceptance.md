@@ -3,9 +3,9 @@
 ## Qualification scope
 
 The latest clean-source native group/resource qualification is
-[18b3a82 qualification](#clean-source-native-qualification-for-18b3a82).
+[d5ed1ae qualification](#clean-source-native-and-encoded-qualification-for-d5ed1ae).
 The latest complete encoded Golden is
-[d2b22be qualification](#current-complete-encoded-golden-for-d2b22be).
+[d5ed1ae qualification](#clean-source-native-and-encoded-qualification-for-d5ed1ae).
 Source-level tests and native results qualify their named source and binary;
 they do not automatically cover later edits.
 The complete NLE goal remains active while the listed professional matrices are
@@ -840,3 +840,35 @@ reference; it does not qualify arbitrary vendor plugins or other platforms.
 
 Whole-workspace all-target/all-feature Clippy with warnings as errors passed
 in 2m05s; formatting and diff whitespace checks passed before this commit.
+
+
+## Clean-source native and encoded qualification for d5ed1ae
+
+Current source `d5ed1ae6865c19cf9ac89af10ef76005f93ec0d8` remained clean and
+unchanged throughout native and complete encoded qualification. The product and
+SessionProbe hashes match the candidate hashes recorded above. Explicit native
+execution passed group value/time, single-key history, actual-widget group
+history, window role transitions and integer/dense/Float history (one per
+filter), modal focus (16), resources (103), and five additional ignored native
+resource cases. The five ignored cases in the ordinary resource filter were
+executed separately, and are not counted twice. The resource scope includes
+real Cube commit/Undo/save/reopen/pixels, stale and locked drafts, cancellation,
+timeout and retry. Modal scope checks Tab/Shift+Tab containment, blocked
+background input, disabled pending confirmation and restored focus.
+
+The complete Golden contract `windows-alpha-golden-v14` passed **3/3** rounds,
+all seven stages each round, three distinct projects, fresh session reopen and
+natural process exit 0 with no forced termination. Round durations were
+123097, 118640 and 119020 ms. Every round had H.264 decoded maximum channel
+error **4/255** and **zero GPU output CPU fallbacks**. The DX12/NVENC path still
+uses `cpu_rawvideo_pipe`; this receipt makes no zero-copy or performance claim.
+Source attestation is clean/stable and `baseline_eligible` is true.
+
+Aggregate report:
+`E:/dev/mondrian/target/validation/nle-backlog-complete/20261006T095123Z-complete-golden-4b744355/complete-golden-consecutive-report.json`.
+Golden harness SHA256:
+`fb944d4b5b86d4f574cca6d50cb548101a641be3aba4bd16488b5abd101fe134`.
+The packaged product worker SHA256 matches the native qualification product.
+These are current Windows contract results; group pointer/bulk interpolation,
+audio group native output, arbitrary vendor plugins, macOS and remaining
+professional/performance matrices are still open. The full NLE goal is active.
