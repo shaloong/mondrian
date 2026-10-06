@@ -814,4 +814,29 @@ remain open. The full NLE goal stays active.
 Final integration gate: whole-workspace, all-target, all-feature Clippy with
 warnings as errors passed in **5m12s** (`group-value-integration-clippy.log`).
 The tested integration scopes comprise **2895 distinct passing cases**; the
-application's 64 ignored cases require separate native/environment qualification.
+application’s 64 ignored cases require separate native/environment qualification.
+
+
+## Native group value candidate and shared fixture regression
+
+The rebuilt production worker and SDK SessionProbe pass all three explicitly
+executed native tests: group value (5.48s), group time (5.52s), and single-key
+history (2.74s), one test per filter, zero failures and zero ignored tests.
+These runs used candidate source based on `3e814c7`; clean-source qualification
+is a separate gate. Product SHA256 is
+`fa43de9bb770faf2725fa71f6e8d21ffbed3a88a1e3962d84bfac18549b3f3d5`;
+fixture SHA256 is
+`fabf11ea8d81c2bf8f698d854b8bf4568597a4e11b26f5bd45d30bd124cebb5c`.
+
+The shared history runner covers Auto and Continuous curves, complete-selection
+atomic rejection, one-command Undo/Redo, saving with live Redo retained, and
+fresh Unicode archives for both history states. The new value case preserves
+all key times and the unselected first key, and moves the remaining values by
+one common offset. Native key count/time/index/value queries, derivative and
+integral queries run at lifecycle and render actions. Off-key native HDR and
+negative float pixels match the canonical compiled graph exactly after edit,
+Undo, Redo and reopen. This fixture remains separate from the official SDK
+reference; it does not qualify arbitrary vendor plugins or other platforms.
+
+Whole-workspace all-target/all-feature Clippy with warnings as errors passed
+in 2m05s; formatting and diff whitespace checks passed before this commit.

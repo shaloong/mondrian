@@ -1384,6 +1384,16 @@ mod tests {
     #[test]
     #[ignore = "requires current product and SessionProbe mode curve_group_authoring"]
     fn native_effect_group_time_undo_save_reopen_preserves_queries_and_output() {
+        qualify_native_effect_group_history(false);
+    }
+
+    #[test]
+    #[ignore = "requires current product and SessionProbe mode curve_group_value_authoring"]
+    fn native_effect_group_value_undo_save_reopen_preserves_queries_and_output() {
+        qualify_native_effect_group_history(true);
+    }
+
+    fn qualify_native_effect_group_history(value_edit: bool) {
         use super::super::ui_actions::{
             visual_effect_edit_numeric_curve_action, ClipCurveEditPayload,
             VisualEffectEditNumericCurvePayload,
@@ -1394,7 +1404,11 @@ mod tests {
         let _guard = crate::app_ui::test_utils::theme_test_guard();
         assert_eq!(
             std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
-            "curve_group_authoring"
+            if value_edit {
+                "curve_group_value_authoring"
+            } else {
+                "curve_group_authoring"
+            }
         );
         let helper =
             PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").expect("product"));
@@ -1489,7 +1503,15 @@ mod tests {
                     gain
                 );
                 let sample = numeric(TimelineTime::new(1, 8).expect("off-key frame three"));
-                if curve.keyframe_at(TimelineTime::new(1, 4).expect("original middle")).is_none() {
+                if value_edit && gain == 3.5 {
+                    assert!(
+                        sample > 1.5,
+                        "selected value edit must affect off-key native output"
+                    );
+                } else if curve
+                    .keyframe_at(TimelineTime::new(1, 4).expect("original middle"))
+                    .is_none()
+                {
                     assert!(
                         (sample - 1.25).abs() > 1e-6,
                         "moved constrained curve must differ from linear interpolation"
@@ -1537,41 +1559,60 @@ mod tests {
             let original = snapshot(&state);
             let before = execute(&state, 3.0);
             let generation = state.project_author_generation();
-            let action = |delta| {
+            let action = |valid| {
+                let edit = if value_edit {
+                    ClipCurveEditPayload::OffsetValuesMany {
+                        keyframe_ids: if valid {
+                            ids[1..].to_vec()
+                        } else {
+                            vec![ids[1], KeyframeId::new()]
+                        },
+                        delta: 0.5,
+                        steps: 1,
+                    }
+                } else {
+                    ClipCurveEditPayload::ShiftMany {
+                        keyframe_ids: ids[1..].to_vec(),
+                        delta: TimelineTime::new(if valid { 1 } else { -1 }, 4)
+                            .expect("group delta"),
+                    }
+                };
                 visual_effect_edit_numeric_curve_action(VisualEffectEditNumericCurvePayload {
                     clip_id,
                     effect_id,
                     parameter: parameter.clone(),
-                    edit: ClipCurveEditPayload::ShiftMany {
-                        keyframe_ids: ids[1..].to_vec(),
-                        delta,
-                    },
+                    edit,
                 })
             };
             state
-                .dispatch_action(action(TimelineTime::new(-1, 4).expect("collision delta")))
-                .expect_err("whole group collides with unselected key");
+                .dispatch_action(action(false))
+                .expect_err("invalid complete group must refuse atomically");
             assert_eq!(snapshot(&state), original);
             assert_eq!(state.project_author_generation(), generation);
             assert!(!state.can_undo_action() && !state.can_redo_action());
             assert_eq!(execute(&state, 3.0), before);
-            state
-                .dispatch_action(action(TimelineTime::new(1, 4).expect("exact group delta")))
-                .expect("one group author transaction");
+            state.dispatch_action(action(true)).expect("one group author transaction");
             assert_eq!(state.project_author_generation(), generation + 1);
             let edited = snapshot(&state);
-            for (index, time) in [
-                TimelineTime::ZERO,
-                TimelineTime::new(1, 2).expect("middle"),
-                TimelineTime::new(3, 4).expect("end"),
-            ]
-            .iter()
-            .copied()
-            .enumerate()
-            {
-                assert_eq!(edited.keyframe_at(time).expect("moved key").id, ids[index]);
+            let edited_times = if value_edit {
+                times
+            } else {
+                [
+                    TimelineTime::ZERO,
+                    TimelineTime::new(1, 2).expect("middle"),
+                    TimelineTime::new(3, 4).expect("end"),
+                ]
+            };
+            for (index, time) in edited_times.iter().copied().enumerate() {
+                let key = edited.keyframe_at(time).expect("moved key");
+                assert_eq!(key.id, ids[index]);
+                assert_eq!(
+                    key.value.as_numeric_f64().expect("numeric"),
+                    index as f64 + 1.0 + if value_edit && index > 0 { 0.5 } else { 0.0 }
+                );
             }
-            let after = execute(&state, 2.0);
+            let edited_gain = if value_edit { 3.5 } else { 2.0 };
+            let after = execute(&state, edited_gain);
             assert_ne!(before, after);
             assert!(state.undo_timeline().expect("single Undo"));
             assert_eq!(snapshot(&state), original);
@@ -1589,7 +1630,7 @@ mod tests {
             drop(reopened);
             assert!(state.redo_timeline().expect("Redo after save"));
             assert_eq!(snapshot(&state), edited);
-            assert_eq!(execute(&state, 2.0), after);
+            assert_eq!(execute(&state, edited_gain), after);
             let edited_path = directory.path().join("分组重做🙂.mdp");
             state.save_project_file_as(edited_path.clone()).expect("save edited");
             drop(state);
@@ -1597,7 +1638,7 @@ mod tests {
             reopened.open_project_file(edited_path).expect("fresh edited reopen");
             assert_eq!(snapshot(&reopened), edited);
             assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
-            assert_eq!(execute(&reopened, 2.0), after);
+            assert_eq!(execute(&reopened, edited_gain), after);
             assert!(reopened
                 .asset_library()
                 .expect("SQLite library")

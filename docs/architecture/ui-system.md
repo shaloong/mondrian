@@ -3846,3 +3846,14 @@ previous live display source. The comparison snapshot is taken before resetting
 an active pointer gesture to its origin, so returning a changed gesture to that
 origin still publishes a real update. Boundary keyboard no-ops therefore do not
 surface an unexecuted-action error or alter history.
+
+
+Native group curve qualification shares one fixture runner for exact-time and
+common-value edits. Value editing retains all author times and the unselected
+first key, changes the selected values together, and checks native off-keyframe
+pixels against canonical evaluation through the shared compiled graph. The owned
+OpenFX fixture verifies key count/time/index/value and independent derivative
+and integral queries across instance, edit, render and destruction actions.
+Both Undo/Redo states and fresh Unicode project reopens use real native execution.
+Each mode needs its current explicitly rebuilt product and fixture qualification;
+an ignored test or earlier time-mode receipt is not value-mode evidence.
