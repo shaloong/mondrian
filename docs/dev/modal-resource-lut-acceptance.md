@@ -760,3 +760,58 @@ Final domain gate: whole-workspace, all-target, all-feature Clippy with warnings
 as errors passed in **5m14s** (`group-value-workspace-clippy.log`); formatting and
 diff whitespace checks passed. These are local candidate-source gates, not a
 remote CI or native production requalification.
+
+
+## Complete-key common value keyboard authoring and durable history
+
+The actual visual and audio curve controls now admit selected-key Up/Down
+increments as one common displacement; Shift requests five increments. Group
+value permission is independent of deletion and time movement, and selection
+uses stable authored IDs. Whole-set value locks reject before intent dispatch.
+Core exact automation uses the same numeric displacement contract as visual
+properties; audio supplies the current parameter definition and checks absolute
+control bounds before either preview installation or author publication.
+
+A real application RED exposed an unexecuted-action error at the common hard
+boundary. The shared visual/audio preview callbacks now compare the complete
+candidate with the previous live display source and emit no intent for an equal
+candidate. The snapshot precedes pointer-origin reset, so a changed pointer
+candidate returning to its original author state still emits a necessary update.
+The original failure log `group-value-app-history.log` remains as evidence; the
+boundary assertion now requires zero emitted actions.
+
+Candidate-source gates:
+
+- Core public complete-key tests: **9/9**, including exact audio Auto/Continuous
+  constraints, identities, rational times, common limits, no-op and codec.
+- Timeline full suite: **236/236**, including shared preview/author admission,
+  current **+24 dB** gain hard limit, owner locks, complete-set refusal, illegal
+  new control bounds and subsequent legal recovery.
+- Curve Editor regression suite: **83/83**, including independent group
+  capability, selection retention, complete-set value locks, pointer-coordinate
+  value locks, singleton value increments, cancellation and exact time behavior.
+- Application full all-feature library suite: **2567 passed**, **64 ignored**,
+  zero failures, runtime **320.45 seconds**. The ignored native/environment
+  gates have not been executed by this run.
+
+The new actual-widget history test covers visual opacity and audio channel fader,
+with both Auto and Continuous interpolation: Select All then Shift+Up publishes
+one author command and one generation, preserves key IDs and exact times, moves
+values to one shared limit without changing group spacing, and refuses to emit
+another command at that limit. One Undo restores the complete original sequence;
+one Redo restores the complete edit. Separate Unicode `.mdp` archives for both
+states are opened in fresh AppStates, with exact sequence/value equality and empty
+session histories. Saving the undone state preserves the live session's Redo.
+
+The full application run also passes the actual resource LUT draft, commit,
+Undo, save/reopen and real Cube execution test, plus existing pointer-origin,
+Escape, late-lock and intervening-author-edit regressions. This is local editor
+and persistence evidence, not native plugin pixel or encoded production output
+qualification for group value edits. Group pointer/bulk interpolation/rubber-band,
+new native group value output and broader vendor/platform/performance matrices
+remain open. The full NLE goal stays active.
+
+Final integration gate: whole-workspace, all-target, all-feature Clippy with
+warnings as errors passed in **5m12s** (`group-value-integration-clippy.log`).
+The tested integration scopes comprise **2895 distinct passing cases**; the
+application's 64 ignored cases require separate native/environment qualification.

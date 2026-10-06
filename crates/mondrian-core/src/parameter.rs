@@ -441,6 +441,53 @@ impl ExactAutomationCurve {
         Ok(())
     }
 
+    /// Offset stable keys with one common definition-bounded displacement.
+    /// Times, identities and manual offsets remain intact; constraints normalize once.
+    /// Definition-specific control admission belongs to the owning adapter.
+    pub fn offset_keyframe_values(
+        &mut self,
+        ids: &[KeyframeId],
+        contract: crate::ParameterNumericContract,
+        delta: f64,
+        steps: i8,
+    ) -> Result<(), AutomationError> {
+        self.validate()?;
+        if ids.is_empty() {
+            return Err(AutomationError::EmptyKeySelection);
+        }
+        let identities = ids.iter().copied().collect::<HashSet<_>>();
+        if identities.len() != ids.len() {
+            return Err(AutomationError::DuplicateKeyframeIdentity);
+        }
+        let (indices, values): (Vec<_>, Vec<_>) = self
+            .keyframes
+            .iter()
+            .enumerate()
+            .filter(|(_, key)| identities.contains(&key.id))
+            .map(|(index, key)| (index, crate::PropertyValue::Double(key.value)))
+            .unzip();
+        if indices.len() != ids.len() {
+            return Err(AutomationError::UnknownKeyframe);
+        }
+        let shifted = contract
+            .offset_scalars(&values, delta, steps)
+            .ok_or(AutomationError::InvalidValueIncrement)?;
+        if shifted == values {
+            return Ok(());
+        }
+        let mut candidate = self.clone();
+        for (index, value) in indices.into_iter().zip(shifted) {
+            let crate::PropertyValue::Double(value) = value else {
+                return Err(AutomationError::InvalidValueIncrement);
+            };
+            candidate.keyframes[index].value = value;
+        }
+        candidate.normalize_constrained_tangents()?;
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Remove a key and refresh the constraints of its surviving neighbors.
     pub fn remove_keyframe(&mut self, keyframe_id: KeyframeId) -> Result<(), AutomationError> {
         let mut candidate = self.clone();
@@ -969,6 +1016,9 @@ pub enum AutomationError {
     /// A batch key edit must address at least one key.
     #[error("automation key selection is empty")]
     EmptyKeySelection,
+    /// A common increment or selected values violate the supplied numeric contract.
+    #[error("automation value increment is invalid for its numeric contract")]
+    InvalidValueIncrement,
     /// Numeric author values and handle values must be finite.
     #[error("automation values must be finite")]
     NonFiniteValue,

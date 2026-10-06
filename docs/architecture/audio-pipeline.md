@@ -1644,3 +1644,11 @@ This closes the case where moving a Continuous Bezier endpoint across another
 key creates a newly required control outside the definition bounds. Rejection
 leaves projection, Sequence, revision and history unchanged. Execution continues
 to consume the same admitted Audio Program without a UI-specific interpretation.
+
+
+Audio group value increments enter through `AudioAutomationEdit::OffsetKeyframeValues`.
+`AudioAutomationCurveContract` supplies the current definition's numeric channel
+contract to exact curve editing and validates the complete candidate afterward.
+Preview and fresh author admission therefore share key bounds, control bounds,
+interpolation and lock semantics. The UI submits one increment and stable ID set;
+it does not clamp individual keys or replace the curve from display samples.

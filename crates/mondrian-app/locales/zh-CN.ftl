@@ -1398,7 +1398,7 @@ curve-editor-name = 曲线编辑器
 curve-editor-keyboard-help = Home/End：首尾点；Ctrl/Cmd＋左右：上一个／下一个点；Alt＋左右：入／出手柄；Alt＋上：返回点；左右：一帧；Shift＋左右：五帧；上下：数值微调；Shift＋F10：插值菜单。 Ctrl/Cmd＋滚轮：时间缩放，加 Shift：数值缩放；中键拖动：平移；Ctrl/Cmd＋PageUp/PageDown：缩放，加 Shift：数值缩放；Ctrl/Cmd＋Shift＋方向键：平移；Ctrl/Cmd＋0：复位视图。
 curve-editor-shape-keyboard-help = Home/End：首尾点；Ctrl/Cmd＋左右：上一个／下一个点；方向键：微调；Shift＋方向键：较大幅度微调。 Ctrl/Cmd＋滚轮：时间缩放，加 Shift：数值缩放；中键拖动：平移；Ctrl/Cmd＋PageUp/PageDown：缩放，加 Shift：数值缩放；Ctrl/Cmd＋Shift＋方向键：平移；Ctrl/Cmd＋0：复位视图。
 
-curve-editor-selection-keyboard-help = { curve-editor-keyboard-help } Shift＋点选：切换关键帧选择；Ctrl/Cmd＋A：全选作者关键帧；Delete/Backspace：整组删除，一次撤销；Escape：清空选择。←/→：整组移动一帧（Shift：五帧）。暂不支持整组数值、鼠标移动或插值修改。
+curve-editor-selection-keyboard-help = { curve-editor-keyboard-help } Shift＋点选：切换关键帧选择；Ctrl/Cmd＋A：全选作者关键帧；Delete/Backspace：整组删除，一次撤销；Escape：清空选择。←/→：整组移动一帧（Shift：五帧）。↑/↓：整组数值移动一步（Shift：五步），到边界时一起停止。暂不支持整组鼠标移动或插值修改。
 
 audio-rack-occurrence-row = 时间参照
 audio-rack-occurrence-choose = 选择音频组件

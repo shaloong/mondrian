@@ -545,3 +545,57 @@ fn float_group_uses_representable_inward_bounds_and_rejects_invalid_contracts() 
     .expect("valid Double-only range");
     assert!(unrepresentable.offset_scalars(&[PropertyValue::Float(0.125)], 0.0, 0).is_none());
 }
+
+#[test]
+fn exact_selected_value_offset_normalizes_constraints_atomically() {
+    use mondrian_core::automation::{ParameterInvalidValuePolicy, ParameterNumericContract};
+    use mondrian_core::{ExactAutomationCurve, ExactAutomationKeyframe, ParameterId};
+    let contract =
+        ParameterNumericContract::closed(0.0, 4.0, None, ParameterInvalidValuePolicy::Reject)
+            .expect("range");
+    for mode in [
+        InterpolationType::AutoBezier,
+        InterpolationType::ContinuousBezier,
+    ] {
+        let mut curve =
+            ExactAutomationCurve::new(ParameterId::new_static("test.group.values"), 0.0)
+                .expect("curve");
+        for (time, value) in [(1, 1.0), (2, 2.0), (3, 3.0)] {
+            curve
+                .set_keyframe(ExactAutomationKeyframe::linear(
+                    TimelineTime::new(time, 7).expect("exact time"),
+                    value,
+                ))
+                .expect("seed");
+        }
+        let ids = curve.keyframes.iter().map(|key| key.id).collect::<Vec<_>>();
+        for id in &ids {
+            curve.set_keyframe_interpolation(*id, mode).expect("constraint");
+        }
+        let before = curve.clone();
+        for selection in [
+            vec![],
+            vec![ids[0], ids[0]],
+            vec![ids[0], KeyframeId::new()],
+        ] {
+            assert!(curve.offset_keyframe_values(&selection, contract, 0.0, 0).is_err());
+            assert_eq!(curve, before);
+        }
+        assert!(curve.offset_keyframe_values(&ids, contract, f64::NAN, 0).is_err());
+        assert_eq!(curve, before);
+        curve.offset_keyframe_values(&ids, contract, 1.0, 5).expect("common boundary");
+        curve.validate().expect("constraints");
+        for (index, key) in curve.keyframes.iter().enumerate() {
+            assert_eq!(key.id, before.keyframes[index].id);
+            assert_eq!(key.time, before.keyframes[index].time);
+            assert_eq!(key.tangent_mode, before.keyframes[index].tangent_mode);
+            assert_eq!(key.value, before.keyframes[index].value + 1.0);
+        }
+        let edited = curve.clone();
+        curve.offset_keyframe_values(&ids, contract, 1.0, 1).expect("bound no-op");
+        assert_eq!(curve, edited);
+        let reopened: ExactAutomationCurve =
+            serde_json::from_slice(&serde_json::to_vec(&curve).expect("encode")).expect("decode");
+        assert_eq!(reopened, curve);
+    }
+}

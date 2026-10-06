@@ -1463,7 +1463,7 @@ curve-editor-name = Curve editor
 curve-editor-keyboard-help = Home/End: first/last point; Ctrl/Cmd + Left/Right: previous/next point; Alt + Left/Right: incoming/outgoing handle; Alt + Up: return to point; Left/Right: one frame; Shift + Left/Right: five frames; Up/Down: value; Shift + F10: interpolation menu. Ctrl/Cmd + wheel: time zoom; add Shift: value zoom; middle drag: pan; Ctrl/Cmd + PageUp/PageDown: zoom; add Shift: value zoom; Ctrl/Cmd + Shift + arrows: pan; Ctrl/Cmd + 0: reset view.
 curve-editor-shape-keyboard-help = Home/End: first/last point; Ctrl/Cmd + Left/Right: previous/next point; arrows: adjust; Shift + arrows: larger adjustment. Ctrl/Cmd + wheel: time zoom; add Shift: value zoom; middle drag: pan; Ctrl/Cmd + PageUp/PageDown: zoom; add Shift: value zoom; Ctrl/Cmd + Shift + arrows: pan; Ctrl/Cmd + 0: reset view.
 
-curve-editor-selection-keyboard-help = { curve-editor-keyboard-help } Shift + click: toggle key selection; Ctrl/Cmd + A: select authored keys; Delete/Backspace: delete selection in one Undo; Escape: clear selection. Left/Right: move selected keys by one frame (Shift: five frames). Group value edits, pointer movement and interpolation are unavailable.
+curve-editor-selection-keyboard-help = { curve-editor-keyboard-help } Shift + click: toggle key selection; Ctrl/Cmd + A: select authored keys; Delete/Backspace: delete selection in one Undo; Escape: clear selection. Left/Right: move selected keys by one frame (Shift: five frames). Up/Down: move selected values together by one increment (Shift: five), stopping together at limits. Group pointer movement and interpolation are unavailable.
 
 audio-rack-occurrence-row = Time reference
 audio-rack-occurrence-choose = Choose an audio component

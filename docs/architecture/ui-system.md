@@ -3823,3 +3823,26 @@ rendered pixels without losing its shape. Collision refusal, one Undo/Redo and
 fresh undone/redone Unicode project archives use the same plugin execution.
 This test requires an explicitly rebuilt product and fixture; an ignored result
 or an earlier single-key native test does not qualify the group operation.
+
+
+Curve group value keyboard editing has an independent selection-value capability.
+Shift-click and Select All establish stable authored-key selection when any group
+operation is admitted; each operation still gates its own capability. Up/Down
+submits one `NudgeValueMany` intent after checking the complete selected set's
+value locks, with Shift requesting five increments. Canonical preview owns values
+and geometry. Visual payloads prepare a common Core property mutation; audio
+payloads use the shared definition-admitted exact curve contract. Refusal cannot
+publish a partial key update. Bundled keyboard help describes shared boundary
+stopping in both locales.
+
+Point policy explicitly distinguishes time and value locks. Virtual viewport
+anchors retain their existing editable values while locking time; normal author
+keys default to both axes editable. A value lock constrains pointer projection,
+suppresses singleton value increments and rejects complete group increments
+containing that key. Selection and deletion permissions remain separate.
+
+Curve previews suppress author intent when the complete candidate equals the
+previous live display source. The comparison snapshot is taken before resetting
+an active pointer gesture to its origin, so returning a changed gesture to that
+origin still publishes a real update. Boundary keyboard no-ops therefore do not
+surface an unexecuted-action error or alter history.

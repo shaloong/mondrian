@@ -1640,3 +1640,10 @@ uses the same lock, numeric-contract and author generation rules as other audio
 edits. A Processing Scope curve remains Scope-owned even when the Inspector
 projects a chosen Clip occurrence; its canonical author bounds are not replaced
 by that Clip's visible viewport.
+
+
+Selected audio key values use one definition-bounded common increment in the
+stable-address automation editor. The candidate shares preview and canonical
+admission, retaining exact times, IDs, and unaffected curves. Audio-specific
+control-value limits and shared owner locks are checked before sequence
+publication; no sequential per-key transaction is used.

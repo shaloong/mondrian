@@ -28,6 +28,15 @@ pub struct ClipCurveAuthorPoint {
 /// One stable-identity curve edit requested by a product Adapter.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClipNumericCurveEdit {
+    /// Offset complete stable keys with one common numeric displacement.
+    OffsetValuesMany {
+        /// Nonempty unique complete key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Finite increment in author value units.
+        delta: f64,
+        /// Signed increment count.
+        steps: i8,
+    },
     /// Translate complete stable keys together in their exact owner-time domain.
     ShiftMany {
         /// Nonempty unique complete canonical key identities.
@@ -546,6 +555,24 @@ fn prepare_property_curve_edit(
 ) -> Result<PreparedCurveEdit> {
     validate_numeric_curve_property(property, address)?;
     match edit {
+        ClipNumericCurveEdit::OffsetValuesMany { keyframe_ids, delta, steps } => {
+            let keyframe_id = keyframe_ids
+                .first()
+                .copied()
+                .ok_or_else(|| curve_error("key selection is empty"))?;
+            let mut candidate = property.clone();
+            candidate.offset_keyframe_values(&keyframe_ids, 0, delta, steps)?;
+            Ok(PreparedCurveEdit {
+                mutations: vec![PropertyMutation::OffsetKeyframeValues {
+                    path: path.to_owned(),
+                    channel_index: 0,
+                    keyframe_ids,
+                    delta,
+                    steps,
+                }],
+                keyframe_id,
+            })
+        }
         ClipNumericCurveEdit::ShiftMany { keyframe_ids, delta } => {
             let keyframe_id = keyframe_ids
                 .first()

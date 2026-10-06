@@ -1882,6 +1882,7 @@ pub(super) fn audio_automation_curve_control(
                 None
             }
             CurveGestureEvent::Edit { edit, .. } => {
+                let previous_source = preview_model.source_curve.clone();
                 if let Some(origin) = &preview_origin {
                     preview_model.source_curve = origin.clone();
                 }
@@ -1890,6 +1891,9 @@ pub(super) fn audio_automation_curve_control(
                     &mut preview_model,
                     edit,
                 )?;
+                if preview_model.source_curve == previous_source {
+                    return None;
+                }
                 let display_points = projection.display_points;
                 *preview_action.borrow_mut() = Some(projection.action);
                 Some(CurvePreview {
@@ -1919,7 +1923,10 @@ pub(super) fn audio_automation_curve_control(
         .with_point_context_menus(interpolation_menus)
         .enabled(model.is_editable);
     if model.current_author_time.is_ok() {
-        editor = editor.with_selection_deletion().with_selection_time_movement();
+        editor = editor
+            .with_selection_deletion()
+            .with_selection_time_movement()
+            .with_selection_value_movement();
     }
     Box::new(editor.on_gesture(move |event| {
         match event {
@@ -2691,6 +2698,7 @@ fn numeric_curve_editor(
         .with_keyframe_ids(ids)
         .with_selection_deletion()
         .with_selection_time_movement()
+        .with_selection_value_movement()
         .with_tangents(tangents)
         .with_preview_projection(move |event| match event {
             CurveGestureEvent::Begin(_) => {
@@ -2698,6 +2706,7 @@ fn numeric_curve_editor(
                 None
             }
             CurveGestureEvent::Edit { edit, .. } => {
+                let previous_source = preview_source.clone();
                 if matches!(
                     edit,
                     CurveEdit::Move { .. } | CurveEdit::Insert { .. } | CurveEdit::Handle { .. }
@@ -2711,6 +2720,9 @@ fn numeric_curve_editor(
                 let action = on_edit(&live_model, edit.clone());
                 let display_points =
                     preview_numeric_curve_points(&live_model, &mut preview_source, edit)?;
+                if preview_source == previous_source {
+                    return None;
+                }
                 *preview_action.borrow_mut() = action;
                 Some(CurvePreview {
                     virtual_boundaries: crate::app_ui::curve_tangents::virtual_boundary_points(
@@ -2812,6 +2824,9 @@ fn numeric_curve_edit_payload(
                 _ => return None,
             };
             ClipCurveEditPayload::Move { keyframe_id, time: None, value: Some(value) }
+        }
+        CurveEdit::NudgeValueMany { keyframe_ids, delta, steps } => {
+            ClipCurveEditPayload::OffsetValuesMany { keyframe_ids, delta, steps }
         }
         CurveEdit::NudgeTimeMany { keyframe_ids, delta } => {
             ClipCurveEditPayload::ShiftMany { keyframe_ids, delta }

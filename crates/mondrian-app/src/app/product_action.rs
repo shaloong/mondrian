@@ -2580,6 +2580,15 @@ pub use super::animation_authoring::ClipCurveAuthorPoint;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClipCurveEditPayload {
+    /// Offset complete stable keys with one common numeric displacement.
+    OffsetValuesMany {
+        /// Nonempty unique complete key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Finite increment in author value units.
+        delta: f64,
+        /// Signed increment count.
+        steps: i8,
+    },
     /// Translate complete stable keys together in their exact owner-time domain.
     ShiftMany {
         /// Nonempty unique complete canonical key identities.

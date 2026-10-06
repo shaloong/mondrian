@@ -423,6 +423,9 @@ fn lower_audio_curve_edit(
                 .as_f64()?;
             AudioAutomationEdit::UpsertKeyframe { keyframe: key }
         }
+        CurveEdit::NudgeValueMany { keyframe_ids, delta, steps } => {
+            AudioAutomationEdit::OffsetKeyframeValues { keyframe_ids, delta, steps }
+        }
         CurveEdit::NudgeTimeMany { keyframe_ids, delta } => {
             AudioAutomationEdit::ShiftKeyframes { keyframe_ids, delta }
         }

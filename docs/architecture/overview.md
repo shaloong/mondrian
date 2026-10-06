@@ -757,3 +757,10 @@ channels retain typed values and complete-key identity; incomplete channel sets
 and a later-channel failure cannot publish earlier changes. Owner domains impose
 bounds at their authoring adapter; the generic time primitive does not invent a
 Clip interval for Sequence or shareable Scope author time.
+
+
+Exact automation group value offsets reuse Core's numeric common-displacement
+contract. The complete stable ID set is admitted before candidate cloning;
+constraints normalize once and manual offsets remain unchanged. The owning
+adapter supplies the numeric contract and retains definition-specific validation
+of absolute control values. A no-op does not rewrite constrained handles.

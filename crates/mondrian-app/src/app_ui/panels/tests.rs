@@ -12753,3 +12753,280 @@ fn audio_group_crossing_widget_refuses_invalid_controls_and_keeps_legal_crossing
         }
     }
 }
+
+#[test]
+fn group_value_keyboard_commits_once_and_roundtrips_both_history_states() {
+    use crate::app_ui::audio_automation::{
+        project_audio_automation, sequence_automation_viewport, AudioAutomationTimeContext,
+    };
+    use mondrian_core::ExactAutomationKeyframe;
+    use mondrian_timeline::{
+        apply_audio_automation_edit, inspect_audio_automation, AudioAutomationEdit,
+        AudioAutomationEditRequest, AudioAutomationTarget, AudioChannelStripOwner,
+    };
+    use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+    fn find_curve(widget: &dyn Widget, ids: &[KeyframeId]) -> Option<WidgetId> {
+        if widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .is_some_and(|curve| {
+                let actual = (0..curve.points().len())
+                    .filter_map(|index| match curve.point_target(index) {
+                        Some(CurvePointTarget::Keyframe(id)) => Some(id),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                actual == ids
+            })
+        {
+            return Some(widget.id());
+        }
+        (0..widget.child_count())
+            .find_map(|index| widget.child(index).and_then(|child| find_curve(child, ids)))
+    }
+    fn values(
+        sequence: &Sequence,
+        clip_id: Option<ClipId>,
+        audio: Option<&AudioAutomationTarget>,
+    ) -> Vec<(KeyframeId, TimelineTime, f64)> {
+        if let Some(target) = audio {
+            inspect_audio_automation(sequence, target)
+                .expect("audio owner")
+                .curve()
+                .expect("audio curve")
+                .keyframes
+                .iter()
+                .map(|key| (key.id, key.time, key.value))
+                .collect()
+        } else {
+            let bag = sequence
+                .find_clip(clip_id.expect("visual owner"))
+                .expect("Clip")
+                .intrinsic_parameter_bag();
+            bag.property(Transform2D::OPACITY_PATH)
+                .expect("opacity")
+                .channel(0)
+                .expect("channel")
+                .keyframes()
+                .iter()
+                .map(|key| (key.id, key.time, key.value.projection()))
+                .collect()
+        }
+    }
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    for audio in [false, true] {
+        for mode in [
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let mut sequence = Sequence::new("Group value keyboard");
+            let mut ids = Vec::new();
+            let (clip_id, target) = if audio {
+                let target = AudioAutomationTarget::ChannelFader {
+                    owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+                };
+                for (time, value) in [
+                    (1, -6.0),
+                    (3, mondrian_timeline::audio::AUDIO_GAIN_DB_MAX - 0.1),
+                ] {
+                    let keyframe = ExactAutomationKeyframe::linear(
+                        TimelineTime::new(time, 4).expect("exact time"),
+                        value,
+                    );
+                    ids.push(keyframe.id);
+                    apply_audio_automation_edit(
+                        &mut sequence,
+                        &AudioAutomationEditRequest {
+                            target: target.clone(),
+                            edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                        },
+                    )
+                    .expect("seed audio");
+                }
+                for id in &ids {
+                    apply_audio_automation_edit(
+                        &mut sequence,
+                        &AudioAutomationEditRequest {
+                            target: target.clone(),
+                            edit: AudioAutomationEdit::SetInterpolation {
+                                keyframe_id: *id,
+                                interpolation: mode,
+                            },
+                        },
+                    )
+                    .expect("audio mode");
+                }
+                (None, Some(target))
+            } else {
+                let mut clip = Clip::new_basic_title(
+                    "Group values",
+                    "Arial",
+                    TimelineTime::ZERO,
+                    TimelineTime::ONE,
+                )
+                .expect("title");
+                let clip_id = clip.id;
+                for (time, value) in [(1, 0.2), (3, 0.98)] {
+                    let keyframe = Keyframe::linear(
+                        TimelineTime::new(time, 4).expect("exact time"),
+                        PropertyValue::Float(value),
+                    );
+                    ids.push(keyframe.id);
+                    clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+                        path: Transform2D::OPACITY_PATH.into(),
+                        keyframe,
+                    })
+                    .expect("seed visual");
+                }
+                for time in [1, 3] {
+                    clip.apply_property_mutation(PropertyMutation::UpdateKeyframeInterpolation {
+                        path: Transform2D::OPACITY_PATH.into(),
+                        time: TimelineTime::new(time, 4).expect("time"),
+                        interpolation: mode,
+                    })
+                    .expect("visual mode");
+                }
+                sequence.video_tracks[0].add_clip(clip).expect("place title");
+                (Some(clip_id), None)
+            };
+            let mut state = AppState::new();
+            state.test_set_sequence(Some(sequence));
+            if let Some(id) = clip_id {
+                state.select_clip_by_id(id).expect("select Clip");
+            }
+            let original = state.active_sequence().expect("origin").clone();
+            let original_values = values(&original, clip_id, target.as_ref());
+            let mut widget: Box<dyn Widget> = if let Some(target) = &target {
+                let model = project_audio_automation(
+                    &original,
+                    target.clone(),
+                    sequence_automation_viewport(&original).expect("viewport"),
+                    AudioAutomationTimeContext::at_sequence_time(&original, TimelineTime::ZERO),
+                )
+                .expect("audio model");
+                audio_automation_curve_control(&model, &chinese_localizer())
+            } else {
+                let models = AppUiPanelModels::from_app_state(&state);
+                Box::new(inspector_panel(&models.inspector, &chinese_localizer()))
+            };
+            let curve_id = find_curve(widget.as_ref(), &ids).expect("actual product curve");
+            let mut panel_tree = WidgetTreeView::new(widget.as_mut());
+            let curve = panel_tree.get_mut(curve_id).expect("curve");
+            curve.layout(Rect::new(0.0, 0.0, 480.0, 160.0));
+            let mut router = EventRouter::new(curve_id);
+            let actions = RefCell::new(Vec::new());
+            let dispatch = |action| actions.borrow_mut().push(action);
+            {
+                let mut tree = WidgetTreeView::new(curve);
+                router.route(
+                    UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+                    &mut tree,
+                    &dispatch,
+                );
+                router.route(
+                    UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+                    &mut tree,
+                    &dispatch,
+                );
+            }
+            let editor = curve
+                .as_any()
+                .and_then(|any| any.downcast_ref::<CurveEditor>())
+                .expect("curve editor");
+            assert_eq!(editor.selected_keyframe_ids(), ids);
+            let generation = state.project_author_generation();
+            {
+                let mut tree = WidgetTreeView::new(curve);
+                router.route(
+                    UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::shift() },
+                    &mut tree,
+                    &dispatch,
+                );
+            }
+            assert_eq!(actions.borrow().len(), 1, "one group intent");
+            state.dispatch_action(actions.borrow_mut().remove(0)).expect("author group");
+            assert_eq!(state.project_author_generation(), generation + 1);
+            let moved = state.active_sequence().expect("moved").clone();
+            let moved_values = values(&moved, clip_id, target.as_ref());
+            let upper = if audio {
+                mondrian_timeline::audio::AUDIO_GAIN_DB_MAX
+            } else {
+                1.0
+            };
+            assert_eq!(moved_values[1].2, upper, "group stops at shared boundary");
+            let displacement = upper - original_values[1].2;
+            assert!((moved_values[0].2 - original_values[0].2 - displacement).abs() < 1e-12);
+            for (old, new) in original_values.iter().zip(&moved_values) {
+                assert_eq!(old.0, new.0);
+                assert_eq!(old.1, new.1);
+            }
+            assert_eq!(
+                curve
+                    .as_any()
+                    .and_then(|any| any.downcast_ref::<CurveEditor>())
+                    .expect("editor")
+                    .selected_keyframe_ids(),
+                ids
+            );
+            let unchanged_generation = state.project_author_generation();
+            {
+                let mut tree = WidgetTreeView::new(curve);
+                router.route(
+                    UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::shift() },
+                    &mut tree,
+                    &dispatch,
+                );
+            }
+            assert!(
+                actions.borrow().is_empty(),
+                "boundary no-op cannot emit an unexecuted action"
+            );
+            assert_eq!(state.project_author_generation(), unchanged_generation);
+            assert!(state
+                .active_sequence()
+                .expect("no-op")
+                .author_state_eq_ignoring_revision(&moved));
+            assert!(state.undo_timeline().expect("single group Undo"));
+            assert!(!state.can_undo_action() && state.can_redo_action());
+            assert!(state
+                .active_sequence()
+                .expect("undone")
+                .author_state_eq_ignoring_revision(&original));
+            let directory = tempfile::tempdir().expect("archives");
+            let undone_path = directory.path().join("共同数值撤销🙂.mdp");
+            state.save_project_file_as(undone_path.clone()).expect("save origin");
+            assert!(state.can_redo_action());
+            {
+                let mut reopened = AppState::new();
+                reopened.open_project_file(undone_path).expect("fresh origin reopen");
+                assert!(reopened
+                    .active_sequence()
+                    .expect("origin")
+                    .author_state_eq_ignoring_revision(&original));
+                assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            }
+            assert!(state.redo_timeline().expect("single group Redo"));
+            assert!(state
+                .active_sequence()
+                .expect("redone")
+                .author_state_eq_ignoring_revision(&moved));
+            let edited_path = directory.path().join("共同数值重做🙂.mdp");
+            state.save_project_file_as(edited_path.clone()).expect("save group");
+            let mut reopened = AppState::new();
+            reopened.open_project_file(edited_path).expect("fresh group reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("group")
+                .author_state_eq_ignoring_revision(&moved));
+            assert_eq!(
+                values(
+                    reopened.active_sequence().expect("reopened"),
+                    clip_id,
+                    target.as_ref()
+                ),
+                moved_values
+            );
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        }
+    }
+}

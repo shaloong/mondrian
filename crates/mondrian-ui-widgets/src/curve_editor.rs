@@ -135,6 +135,8 @@ pub struct CurvePointPolicy {
     /// Keep the point's horizontal position fixed during pointer and keyboard
     /// edits.
     pub lock_x: bool,
+    /// Keep the author value fixed during pointer and keyboard edits.
+    pub lock_y: bool,
     /// Allow Delete or Backspace to remove this point.
     pub deletable: bool,
 }
@@ -142,12 +144,12 @@ pub struct CurvePointPolicy {
 impl CurvePointPolicy {
     /// Policy for a virtual viewport anchor.
     pub const fn anchor() -> Self {
-        Self { lock_x: true, deletable: false }
+        Self { lock_x: true, lock_y: false, deletable: false }
     }
 
     /// Policy for a domain-owned editable point.
     pub const fn editable() -> Self {
-        Self { lock_x: false, deletable: true }
+        Self { lock_x: false, lock_y: false, deletable: true }
     }
 }
 
@@ -212,6 +214,15 @@ pub enum CurveEdit {
         /// Author-unit step, independent of projected key geometry.
         delta: f64,
         /// Signed number of steps, retaining coarse increments without overflow.
+        steps: i8,
+    },
+    /// Offset a complete selected key set with one common bounded increment.
+    NudgeValueMany {
+        /// Stable identities in current author order.
+        keyframe_ids: Vec<mondrian_core::KeyframeId>,
+        /// Author-unit increment, independent of projected geometry.
+        delta: f64,
+        /// Signed increment count.
         steps: i8,
     },
     /// Adjust an authored key or control by an exact owner-time increment.
@@ -376,6 +387,7 @@ pub struct CurveEditor {
     selected_keys: std::collections::HashSet<mondrian_core::KeyframeId>,
     selection_deletion: bool,
     selection_time_movement: bool,
+    selection_value_movement: bool,
     tangents: Vec<CurveTangent>,
     selected_tangent: Option<(mondrian_core::KeyframeId, mondrian_core::BezierHandleSide)>,
     tangent_drag: Option<TangentDrag>,
@@ -464,6 +476,7 @@ impl CurveEditor {
             selected_keys: std::collections::HashSet::new(),
             selection_deletion: false,
             selection_time_movement: false,
+            selection_value_movement: false,
             tangents: Vec::new(),
             selected_tangent: None,
             tangent_drag: None,
@@ -1065,6 +1078,13 @@ impl CurveEditor {
         self
     }
 
+    /// Enable selected-key value increments admitted as one owner transaction.
+    /// The adapter must implement `NudgeValueMany` using canonical values and bounds.
+    pub fn with_selection_value_movement(mut self) -> Self {
+        self.selection_value_movement = true;
+        self
+    }
+
     /// Selected authored keys in current canonical display order.
     pub fn selected_keyframe_ids(&self) -> Vec<mondrian_core::KeyframeId> {
         self.point_metadata
@@ -1238,7 +1258,16 @@ impl CurveEditor {
     }
 
     fn constrained_point(&self, index: usize, point: CurvePoint) -> CurvePoint {
-        let lock_x = self.point_metadata.get(index).is_none_or(|metadata| metadata.policy.lock_x);
+        let policy = self.point_metadata.get(index).map(|metadata| metadata.policy);
+        let lock_x = policy.is_none_or(|policy| policy.lock_x);
+        let point = if policy.is_none_or(|policy| policy.lock_y) {
+            CurvePoint {
+                y: self.points.get(index).map_or(point.y, |current| current.y),
+                ..point
+            }
+        } else {
+            point
+        };
         constrained_point(
             &self.points,
             index,
@@ -1826,6 +1855,32 @@ impl CurveEditor {
             ) {
                 return false;
             }
+            if self.selection_value_movement
+                && self.value_axis.is_some()
+                && self.fixed_value.is_none()
+                && !self.has_active_pointer_interaction()
+                && matches!(key, KeyCode::Up | KeyCode::Down)
+                && !modifiers.ctrl
+                && !modifiers.alt
+                && !modifiers.meta
+            {
+                let keyframe_ids = self.selected_keyframe_ids();
+                let movable = keyframe_ids.len() == self.selected_keys.len()
+                    && keyframe_ids.iter().all(|id| {
+                        self.keyframe_indices
+                            .get(id)
+                            .is_some_and(|index| !self.point_metadata[*index].policy.lock_y)
+                    });
+                let delta = self.value_step(false);
+                let steps = if modifiers.shift { 5 } else { 1 };
+                let steps = if key == KeyCode::Down { -steps } else { steps };
+                if movable && delta.is_finite() && delta != 0.0 {
+                    self.dispatch_edit(
+                        CurveEdit::NudgeValueMany { keyframe_ids, delta, steps },
+                        ctx,
+                    );
+                }
+            }
             if self.selection_time_movement
                 && !self.has_active_pointer_interaction()
                 && matches!(key, KeyCode::Left | KeyCode::Right)
@@ -1885,7 +1940,13 @@ impl CurveEditor {
             && !modifiers.meta
             && let Some(keyframe_id) = self.selected_keyframe()
         {
-            if self.has_active_pointer_interaction() || self.fixed_value.is_some() {
+            if self.has_active_pointer_interaction()
+                || self.fixed_value.is_some()
+                || self
+                    .keyframe_indices
+                    .get(&keyframe_id)
+                    .is_none_or(|index| self.point_metadata[*index].policy.lock_y)
+            {
                 return true;
             }
             let delta = self.value_step(false);
@@ -2268,7 +2329,9 @@ impl Widget for CurveEditor {
             {
                 self.focus_visible = false;
                 ctx.tooltip.hide();
-                if (self.selection_deletion || self.selection_time_movement)
+                if (self.selection_deletion
+                    || self.selection_time_movement
+                    || self.selection_value_movement)
                     && *modifiers == Modifiers::shift()
                 {
                     if !self.has_active_pointer_interaction()
@@ -2412,7 +2475,9 @@ impl Widget for CurveEditor {
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::A, modifiers }
-                if (self.selection_deletion || self.selection_time_movement)
+                if (self.selection_deletion
+                    || self.selection_time_movement
+                    || self.selection_value_movement)
                     && self.focused
                     && ctx.focus.focused_widget() == Some(self.id)
                     && (modifiers.ctrl ^ modifiers.meta)
@@ -3280,10 +3345,157 @@ mod tests {
         assert_eq!(actions.borrow().as_slice(), &[Action::Paste]);
     }
 
+    #[test]
+    fn selected_value_keyboard_has_independent_capability_and_whole_set_lock_admission() {
+        let ids = [
+            mondrian_core::KeyframeId::new(),
+            mondrian_core::KeyframeId::new(),
+        ];
+        let range = mondrian_core::ParameterNumericRange::new(0.0, 1.0).expect("range");
+        let axis = CurveValueAxis::new(range, range, Some(0.125)).expect("axis");
+        let points = vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.25, 0.25),
+            CurvePoint::new(0.75, 0.75),
+            CurvePoint::new(1.0, 1.0),
+        ];
+        let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+        let mut editor = CurveEditor::with_author_points(points.clone(), axis)
+            .with_keyframe_ids(vec![None, Some(ids[0]), Some(ids[1]), None])
+            .with_selection_value_movement()
+            .on_edit(move |edit| {
+                emitted.borrow_mut().push(edit);
+                None
+            });
+        editor.layout(Rect::new(0.0, 0.0, 400.0, 200.0));
+        let mut focus = CurveFocus(Some(editor.id()));
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &|_| {});
+        editor.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        assert_eq!(editor.selected_keyframe_ids(), ids);
+        editor.point_metadata[1].policy.deletable = false;
+        for (key, modifiers) in [
+            (KeyCode::Down, Modifiers::none()),
+            (KeyCode::Up, Modifiers::shift()),
+        ] {
+            editor.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx);
+        }
+        assert_eq!(
+            *events.borrow(),
+            [
+                CurveEdit::NudgeValueMany {
+                    keyframe_ids: ids.to_vec(),
+                    delta: 0.125,
+                    steps: -1
+                },
+                CurveEdit::NudgeValueMany { keyframe_ids: ids.to_vec(), delta: 0.125, steps: 5 },
+            ]
+        );
+        assert_eq!(editor.points(), points);
+        for key in [KeyCode::Delete, KeyCode::Right] {
+            editor.event(
+                &UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+        }
+        assert_eq!(
+            events.borrow().len(),
+            2,
+            "value permission cannot admit other group operations"
+        );
+        editor.point_metadata[2].policy.lock_y = true;
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(
+            events.borrow().len(),
+            2,
+            "one locked key refuses the whole set"
+        );
+        editor.point_metadata[2].policy.lock_y = false;
+        editor.selection_value_movement = false;
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(
+            events.borrow().len(),
+            2,
+            "retained selection cannot bypass revoked capability"
+        );
+        assert_eq!(editor.selected_keyframe_ids(), ids);
+        assert_eq!(editor.points(), points);
+    }
+
+    #[test]
+    fn value_lock_constrains_pointer_coordinates_and_singleton_increment() {
+        let id = mondrian_core::KeyframeId::new();
+        let range = mondrian_core::ParameterNumericRange::new(0.0, 1.0).expect("range");
+        let axis = CurveValueAxis::new(range, range, Some(0.125)).expect("axis");
+        let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+        let mut editor = CurveEditor::with_author_points(
+            vec![
+                CurvePoint::new(0.0, 0.0),
+                CurvePoint::new(0.5, 0.5),
+                CurvePoint::new(1.0, 1.0),
+            ],
+            axis,
+        )
+        .with_keyframe_ids(vec![None, Some(id), None])
+        .on_edit(move |edit| {
+            emitted.borrow_mut().push(edit);
+            None
+        });
+        editor.point_metadata[1].policy.lock_y = true;
+        assert!(editor.move_point(1, CurvePoint::new(0.75, 0.9)));
+        assert_eq!(
+            editor.points()[1],
+            CurvePoint::new(0.75, 0.5),
+            "pointer constraint retains only locked coordinate"
+        );
+        editor.layout(Rect::new(0.0, 0.0, 400.0, 200.0));
+        editor.select(Some(1));
+        let mut focus = CurveFocus(Some(editor.id()));
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &|_| {});
+        editor.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert!(events.borrow().is_empty());
+        editor.point_metadata[1].policy.lock_y = false;
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(
+            *events.borrow(),
+            [CurveEdit::NudgeValue { keyframe_id: id, delta: 0.125, steps: 1 }]
+        );
+        assert_eq!(
+            editor.points()[1],
+            CurvePoint::new(0.75, 0.5),
+            "canonical preview owns value changes"
+        );
+    }
+
     fn curve_edit_action(edit: CurveEdit) -> Action {
         let name = match edit {
             CurveEdit::NudgeValue { keyframe_id, delta, steps } => {
                 format!("value:{keyframe_id}:{delta}:{steps}")
+            }
+            CurveEdit::NudgeValueMany { keyframe_ids, delta, steps } => {
+                format!("value-many:{keyframe_ids:?}:{delta}:{steps}")
             }
             CurveEdit::NudgeTime { keyframe_id, side, delta } => {
                 format!("time:{keyframe_id}:{side:?}:{delta:?}")

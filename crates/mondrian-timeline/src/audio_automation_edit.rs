@@ -90,6 +90,15 @@ pub enum AudioAutomationEdit {
         /// Signed exact owner-time translation.
         delta: TimelineTime,
     },
+    /// Offset selected values with one common definition-bounded displacement.
+    OffsetKeyframeValues {
+        /// Unique nonempty stable key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Finite author-unit increment.
+        delta: f64,
+        /// Signed increment count.
+        steps: i8,
+    },
     /// Edit one Bezier handle using canonical constrained geometry.
     EditHandle {
         /// Stable keyframe to edit.
@@ -212,7 +221,7 @@ impl AudioAutomationCurveContract {
             return Err(AudioAutomationEditError::InterpolationNotAllowed);
         }
         let mut candidate = curve.clone();
-        edit_curve(&mut candidate, edit)?;
+        edit_curve(&mut candidate, edit, &self.schema)?;
         self.validate(&candidate)?;
         Ok(candidate)
     }
@@ -837,6 +846,7 @@ fn publish_optional_curve(
 fn edit_curve(
     curve: &mut ExactAutomationCurve,
     edit: &AudioAutomationEdit,
+    schema: &ParameterSchema,
 ) -> Result<(), AudioAutomationEditError> {
     match edit {
         AudioAutomationEdit::RemoveKeyframes { keyframe_ids, retain_time } => {
@@ -844,6 +854,17 @@ fn edit_curve(
         }
         AudioAutomationEdit::ShiftKeyframes { keyframe_ids, delta } => {
             curve.shift_keyframes(keyframe_ids, *delta).map_err(invalid_automation)?;
+        }
+        AudioAutomationEdit::OffsetKeyframeValues { keyframe_ids, delta, steps } => {
+            let contract = schema
+                .numeric
+                .as_ref()
+                .and_then(|contracts| contracts.first())
+                .copied()
+                .ok_or_else(|| invalid_automation("numeric channel contract is absent"))?;
+            curve
+                .offset_keyframe_values(keyframe_ids, contract, *delta, *steps)
+                .map_err(invalid_automation)?;
         }
         AudioAutomationEdit::EditHandle { keyframe_id, side, edit } => {
             curve.edit_keyframe_handle(*keyframe_id, *side, *edit).map_err(
@@ -1310,6 +1331,173 @@ mod tests {
             .expect_err("locked target");
             assert!(matches!(error, AudioAutomationEditError::Blocked(_)));
         }
+    }
+
+    #[test]
+    fn selected_values_share_definition_preview_and_author_admission() {
+        for mode in [
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let mut sequence = Sequence::new("Group gain values");
+            let track_id = sequence.audio_tracks[0].id;
+            let target = AudioAutomationTarget::ChannelFader {
+                owner: AudioChannelStripOwner::Track { track_id },
+            };
+            let mut ids = Vec::new();
+            for (time, value) in [(1, -6.0), (2, -3.0), (3, 0.0)] {
+                let keyframe = ExactAutomationKeyframe::linear(
+                    TimelineTime::new(time, 7).expect("time"),
+                    value,
+                );
+                ids.push(keyframe.id);
+                apply_audio_automation_edit(
+                    &mut sequence,
+                    &AudioAutomationEditRequest {
+                        target: target.clone(),
+                        edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                    },
+                )
+                .expect("seed");
+            }
+            for id in &ids {
+                apply_audio_automation_edit(
+                    &mut sequence,
+                    &AudioAutomationEditRequest {
+                        target: target.clone(),
+                        edit: AudioAutomationEdit::SetInterpolation {
+                            keyframe_id: *id,
+                            interpolation: mode,
+                        },
+                    },
+                )
+                .expect("mode");
+            }
+            let source = inspect_audio_automation(&sequence, &target)
+                .expect("inspection")
+                .curve()
+                .expect("curve")
+                .clone();
+            let contract = inspect_audio_automation(&sequence, &target)
+                .expect("inspection")
+                .curve_contract()
+                .clone();
+            let edit = AudioAutomationEdit::OffsetKeyframeValues {
+                keyframe_ids: ids.clone(),
+                delta: AUDIO_GAIN_DB_MAX,
+                steps: 5,
+            };
+            let request = AudioAutomationEditRequest { target: target.clone(), edit: edit.clone() };
+            let reopened: AudioAutomationEditRequest =
+                serde_json::from_slice(&serde_json::to_vec(&request).expect("encode intent"))
+                    .expect("decode intent");
+            assert_eq!(reopened, request);
+            let candidate = contract.preview_edit(&source, &edit).expect("preview");
+            apply_audio_automation_edit(&mut sequence, &request).expect("commit");
+            assert_eq!(
+                inspect_audio_automation(&sequence, &target).expect("inspection").curve(),
+                Some(&candidate)
+            );
+            for (old, new) in source.keyframes.iter().zip(&candidate.keyframes) {
+                assert_eq!(new.id, old.id);
+                assert_eq!(new.time, old.time);
+                assert_eq!(new.value, old.value + AUDIO_GAIN_DB_MAX);
+                assert_eq!(new.tangent_mode, old.tangent_mode);
+            }
+            let before = sequence.clone();
+            apply_audio_automation_edit(&mut sequence, &request).expect("bound no-op");
+            assert_eq!(sequence, before);
+            for selection in [
+                vec![],
+                vec![ids[0], ids[0]],
+                vec![ids[0], KeyframeId::new()],
+            ] {
+                assert!(apply_audio_automation_edit(
+                    &mut sequence,
+                    &AudioAutomationEditRequest {
+                        target: target.clone(),
+                        edit: AudioAutomationEdit::OffsetKeyframeValues {
+                            keyframe_ids: selection,
+                            delta: 0.0,
+                            steps: 0
+                        }
+                    }
+                )
+                .is_err());
+                assert_eq!(sequence, before);
+            }
+            sequence.audio_tracks[0].is_locked = true;
+            let locked = sequence.clone();
+            assert!(matches!(
+                apply_audio_automation_edit(&mut sequence, &request),
+                Err(AudioAutomationEditError::Blocked(_))
+            ));
+            assert_eq!(sequence, locked);
+        }
+    }
+
+    #[test]
+    fn selected_values_refuse_new_control_overflow_before_preview_or_publication() {
+        use mondrian_core::{AutomationSegmentInterpolation, ExactBezierHandle};
+        let mut sequence = Sequence::new("Group gain control bounds");
+        let target = AudioAutomationTarget::ChannelFader {
+            owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+        };
+        let mut left = ExactAutomationKeyframe::linear(TimelineTime::ZERO, -119.0);
+        left.interpolation_to_next = AutomationSegmentInterpolation::Bezier;
+        let mut right = ExactAutomationKeyframe::linear(TimelineTime::ONE, -117.0);
+        right.in_handle = Some(ExactBezierHandle {
+            time_offset: TimelineTime::NEGATIVE_ONE_THIRD,
+            value_offset: 2.0,
+        });
+        let ids = vec![left.id, right.id];
+        for keyframe in [right, left] {
+            apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                },
+            )
+            .expect("legal controls");
+        }
+        let inspection = inspect_audio_automation(&sequence, &target).expect("inspection");
+        let contract = inspection.curve_contract().clone();
+        let curve = inspection.curve().expect("curve").clone();
+        let original = sequence.clone();
+        let edit = AudioAutomationEdit::OffsetKeyframeValues {
+            keyframe_ids: ids.clone(),
+            delta: f64::MAX,
+            steps: 1,
+        };
+        let error = contract
+            .preview_edit(&curve, &edit)
+            .expect_err("control exceeds gain bound despite legal keys");
+        assert_eq!(
+            apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest { target: target.clone(), edit }
+            )
+            .expect_err("canonical refusal"),
+            error
+        );
+        assert!(matches!(
+            error,
+            AudioAutomationEditError::AuthorState(AudioAuthoringError::InvalidGain)
+        ));
+        assert_eq!(sequence, original);
+        let edit =
+            AudioAutomationEdit::OffsetKeyframeValues { keyframe_ids: ids, delta: 1.0, steps: 1 };
+        let candidate = contract.preview_edit(&curve, &edit).expect("legal recovery");
+        apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest { target: target.clone(), edit },
+        )
+        .expect("legal commit");
+        assert_eq!(
+            inspect_audio_automation(&sequence, &target).expect("inspection").curve(),
+            Some(&candidate)
+        );
     }
 
     #[test]
