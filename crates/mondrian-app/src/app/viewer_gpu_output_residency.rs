@@ -238,11 +238,7 @@ fn declared_residency_from_layer_counts(
             all_media_native,
             all_media_gpu_input_eligible,
         ),
-        native_video_import: native_video_import_readiness(
-            has_media,
-            None,
-            GpuNativeDecodedFrameImportSupport::unavailable(),
-        ),
+        native_video_import: None,
     }
 }
 
@@ -457,6 +453,9 @@ mod tests {
         assert_eq!(residency.native_bridge_copy_count, 0);
         assert_eq!(residency.readback_count, 0);
         assert!(residency.reason.contains("have not been observed"));
+        assert!(residency.native_video_import.is_none());
+        let serialized = serde_json::to_value(&residency).expect("serializable planned evidence");
+        assert!(serialized["native_video_import"].is_null());
     }
 
     #[test]
