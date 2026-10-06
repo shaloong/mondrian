@@ -7001,13 +7001,57 @@ fn report_successful_viewer_gpu_fallbacks(
     }
 }
 
-fn retain_viewer_backend_candidate(session: &mut AppUiWindowSession, frame: Box<PreviewGpuFrame>) {
+fn retain_viewer_backend_candidate(
+    pending: &mut Option<Box<PreviewGpuFrame>>,
+    staged: &mut PreviewGpuFrameStaging,
+    frame: Box<PreviewGpuFrame>,
+) {
     if frame.is_successor_preparation() {
-        session.staged_viewer_gpu_successors.stage(frame);
+        staged.stage(frame);
     } else {
-        debug_assert!(session.pending_viewer_backend_frame.is_none());
-        session.pending_viewer_backend_frame = Some(frame);
+        debug_assert!(pending.is_none());
+        *pending = Some(frame);
     }
+}
+
+pub(super) fn take_window_viewer_gpu_candidate(
+    host: &AppUiHost,
+    preparation: ViewerGpuPreparation,
+    pending: &mut Option<Box<PreviewGpuFrame>>,
+    staged: &mut PreviewGpuFrameStaging,
+    submission_capacity_full: bool,
+) -> Option<PreviewGpuFrameState> {
+    let pending_current =
+        pending.take().and_then(|frame| host.bind_staged_gpu_frame_for_current(frame));
+    let candidate = match preparation {
+        ViewerGpuPreparation::Current => {
+            let retained_current = pending_current.or_else(|| {
+                staged
+                    .take_exact(host.viewer_gpu_current_intent())
+                    .and_then(|frame| host.bind_staged_gpu_frame_for_current(frame))
+            });
+            retained_current.map_or_else(
+                || host.gpu_preview_frame_for_current_state(),
+                PreviewGpuFrameState::Ready,
+            )
+        }
+        ViewerGpuPreparation::Successor => {
+            let successor =
+                host.viewer_gpu_successor_intent().and_then(|intent| staged.take_exact(intent));
+            successor.map_or_else(
+                || host.gpu_preview_successor_for_current_state(),
+                PreviewGpuFrameState::Ready,
+            )
+        }
+    };
+    // Submitted owners retain media until real GPU completion. Their capacity
+    // gates new work, not consumption of an already registered physical output
+    // or a transparent canvas through the existing presentation ticket.
+    if submission_capacity_full && let PreviewGpuFrameState::Ready(frame) = candidate {
+        retain_viewer_backend_candidate(pending, staged, frame);
+        return None;
+    }
+    Some(candidate)
 }
 
 fn viewer_program_backend_preparation(
@@ -7122,13 +7166,6 @@ fn prepare_viewer_gpu_preview(
         finish_prepare!();
     }
     let submission_in_flight = session.viewer_gpu_submissions.is_occupied();
-    if session.viewer_gpu_submissions.is_at_capacity() {
-        stage_window_viewer_gpu_lookahead(session, host);
-        session
-            .viewer_gpu_output_telemetry
-            .record_prepare_duration(prepare_started.elapsed());
-        return;
-    }
     let expected_prepared_output = host.exact_prepared_viewer_gpu_output_key();
     let expected_current_output = host.exact_current_viewer_gpu_output_key();
     if let Some(stale) = session.viewer_gpu_presentation.publications.retire_prepared_unless(
@@ -7220,34 +7257,18 @@ fn prepare_viewer_gpu_preview(
         session.viewer_gpu_output_telemetry.record_non_workspace_skip();
         finish_prepare!();
     }
-    let pending_current = session
-        .pending_viewer_backend_frame
-        .take()
-        .and_then(|frame| host.bind_staged_gpu_frame_for_current(frame));
-    let current_candidate = match preparation {
-        ViewerGpuPreparation::Current => {
-            let retained_current = pending_current.or_else(|| {
-                session
-                    .staged_viewer_gpu_successors
-                    .take_exact(host.viewer_gpu_current_intent())
-                    .and_then(|frame| host.bind_staged_gpu_frame_for_current(frame))
-            });
-            retained_current.map_or_else(
-                || host.gpu_preview_frame_for_current_state(),
-                PreviewGpuFrameState::Ready,
-            )
-        }
-        ViewerGpuPreparation::Successor => {
-            let staged = host
-                .viewer_gpu_successor_intent()
-                .and_then(|intent| session.staged_viewer_gpu_successors.take_exact(intent));
-            let candidate = staged.map_or_else(
-                || host.gpu_preview_successor_for_current_state(),
-                PreviewGpuFrameState::Ready,
-            );
-            stage_window_viewer_gpu_lookahead(session, host);
-            candidate
-        }
+    let current_candidate = take_window_viewer_gpu_candidate(
+        host,
+        preparation,
+        &mut session.pending_viewer_backend_frame,
+        &mut session.staged_viewer_gpu_successors,
+        session.viewer_gpu_submissions.is_at_capacity(),
+    );
+    if preparation == ViewerGpuPreparation::Successor || current_candidate.is_none() {
+        stage_window_viewer_gpu_lookahead(session, host);
+    }
+    let Some(current_candidate) = current_candidate else {
+        finish_prepare!();
     };
     let mut frame = match current_candidate {
         PreviewGpuFrameState::Ready(frame) => frame,
@@ -7309,13 +7330,18 @@ fn prepare_viewer_gpu_preview(
                 None,
             );
             session.viewer_gpu_output_telemetry.record_current_skip();
-            let staged = host
-                .viewer_gpu_successor_intent()
-                .and_then(|intent| session.staged_viewer_gpu_successors.take_exact(intent));
-            match staged.map_or_else(
-                || host.gpu_preview_successor_for_current_state(),
-                PreviewGpuFrameState::Ready,
-            ) {
+            let successor = take_window_viewer_gpu_candidate(
+                host,
+                ViewerGpuPreparation::Successor,
+                &mut session.pending_viewer_backend_frame,
+                &mut session.staged_viewer_gpu_successors,
+                session.viewer_gpu_submissions.is_at_capacity(),
+            );
+            let Some(successor) = successor else {
+                stage_window_viewer_gpu_lookahead(session, host);
+                finish_prepare!();
+            };
+            match successor {
                 PreviewGpuFrameState::Ready(frame) => {
                     stage_window_viewer_gpu_lookahead(session, host);
                     frame
@@ -7442,7 +7468,11 @@ fn prepare_viewer_gpu_preview(
             Ok(mondrian_renderer::ViewerGpuBackendPreparationStatus::Ready) => {}
             Ok(mondrian_renderer::ViewerGpuBackendPreparationStatus::Pending) => {
                 session.viewer_gpu_output_telemetry.record_loading_skip();
-                retain_viewer_backend_candidate(session, frame);
+                retain_viewer_backend_candidate(
+                    &mut session.pending_viewer_backend_frame,
+                    &mut session.staged_viewer_gpu_successors,
+                    frame,
+                );
                 finish_prepare!();
             }
             Err(error) => {

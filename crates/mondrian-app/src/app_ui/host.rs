@@ -3529,10 +3529,43 @@ mod tests {
                 AppUiPreferences::default(),
                 temp_preferences_path("current-visible-before-preflight"),
             );
+            let mut submissions =
+                crate::app::viewer_gpu_submission::ViewerGpuSubmissionLifecycle::<u32, ()>::new();
+            let mut callbacks = Vec::new();
+            while !submissions.is_at_capacity() {
+                let index = submissions.active_count() as u32;
+                submissions.reserve().expect("bounded slot").commit(
+                    index,
+                    Instant::now() + Duration::from_secs(60),
+                    |callback| callbacks.push(callback),
+                    || {},
+                );
+            }
+            let active_count = submissions.active_count();
+            let mut staged = crate::app::preview_execution::PreviewGpuFrameStaging::default();
             let PreviewGpuFrameState::Ready(frame) = host.gpu_preview_frame_for_current_state()
             else {
                 panic!("generated solid has a real GPU plan");
             };
+            let candidate_id = frame.candidate_id();
+            let mut pending_candidate = Some(frame);
+            for _ in 0..3 {
+                assert!(crate::app_ui::window::take_window_viewer_gpu_candidate(
+                    &host,
+                    ViewerGpuPreparation::Current,
+                    &mut pending_candidate,
+                    &mut staged,
+                    submissions.is_at_capacity(),
+                )
+                .is_none());
+                assert_eq!(
+                    pending_candidate.as_ref().expect("bounded pending owner").candidate_id(),
+                    candidate_id
+                );
+                assert_eq!(submissions.active_count(), active_count);
+                assert_eq!(staged.len(), 0);
+            }
+            let frame = pending_candidate.take().expect("same pending frame");
             let presentation =
                 ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
                     .expect("valid presentation");
@@ -3586,10 +3619,16 @@ mod tests {
                     Some(pending)
                 );
                 assert_eq!(host.app_state.borrow().playback_evidence_report(), before);
-                let PreviewGpuFrameState::Current(candidate) =
-                    host.gpu_preview_frame_for_current_state()
+                let Some(PreviewGpuFrameState::Current(candidate)) =
+                    crate::app_ui::window::take_window_viewer_gpu_candidate(
+                        &host,
+                        ViewerGpuPreparation::Current,
+                        &mut pending_candidate,
+                        &mut staged,
+                        submissions.is_at_capacity(),
+                    )
                 else {
-                    panic!("same solid must retain its exact physical artifact");
+                    panic!("a full submission horizon cannot block the exact retained artifact");
                 };
                 assert!(candidate.was_already_visible());
                 assert!(matches!(
@@ -3613,6 +3652,14 @@ mod tests {
                     "a different artifact keeps the ordinary expiry contract"
                 );
             }
+            assert_eq!(submissions.active_count(), active_count);
+            assert!(matches!(
+                submissions.reserve(),
+                Err(crate::app::viewer_gpu_submission::ViewerGpuSubmissionAdmissionError::Backpressured)
+            ));
+            assert!(pending_candidate.is_none());
+            assert_eq!(staged.len(), 0);
+            assert_eq!(callbacks.len(), active_count);
         }
     }
 
