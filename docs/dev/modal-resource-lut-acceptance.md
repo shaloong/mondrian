@@ -3,7 +3,7 @@
 ## Qualification scope
 
 The latest clean-source modal/resource and complete encoded Golden qualification is
-[66150cf qualification](#clean-current-modal-resource-and-encoded-lut-acceptance).
+[fb24582 qualification](#clean-fb24582-modal-resource-lut-and-native-plugin-acceptance).
 Native visual and audio group qualification retain the separately named sources
 in their receipts below.
 Source-level tests and native results qualify their named source and binary;
@@ -1403,3 +1403,63 @@ Final changed-curve widget regression: **100 passed, 0 failed, 0 ignored**, 3.13
 Strict workspace/all-target/all-feature Clippy with `-D warnings` passed (2m59s).
 Final formatting and diff checks passed before commit. The full original goal
 remains active; native receipts and remaining professional matrices are separate.
+
+## Clean fb24582 modal, resource, LUT and native plugin acceptance
+
+On 2026-10-07, clean source `fb24582191323569d78e51912e0f7aa3adeaa81a`
+was rebuilt and qualified with the current focused clipboard and group selection
+fixes. Product/Golden build passed (549361ms). Complete Golden passed **3/3**,
+all seven stages each, distinct projects, natural exit 0 and no forced exit.
+Source start/end were identical and clean; baseline eligibility was true and
+contract build/process timeouts remained 3600/1800s.
+
+Each final H.264 result retained maximum channel error **4/255** and **0** GPU
+output CPU fallbacks. Process elapsed times were 123410, 119388 and 120922ms.
+Encoder handoff remained `cpu_rawvideo_pipe`; this does not qualify zero-copy
+encoding or performance beyond the executed matrix.
+
+| Explicit current-source gate | Executed result |
+| --- | --- |
+| EventRouter modal scope, suspended shortcut and replacement/empty/removed owners | 1 passed, 0 failed, 0 ignored |
+| Native resource helper/Host/OpenFX paths and child cancellation/timeout/retry | 5 passed, 0 failed, 0 ignored; 8.18s |
+| App modal Tab/Shift+Tab, disabled Apply traversal and focus restoration | 16 passed, 0 failed, 0 ignored; 23.15s |
+| Resource drafts, atomic transactions, real cube Undo/save/reopen | 103 passed, 0 failed, 5 ignored; 24.43s |
+| Native OpenFX group interpolation/history/queries/pixels | 1 passed, 0 failed, 0 ignored; 5.41s |
+| Native OpenFX group time/history/queries/pixels | 1 passed, 0 failed, 0 ignored; 5.41s |
+| Native OpenFX group values/history/queries/pixels | 1 passed, 0 failed, 0 ignored; 5.28s |
+| Native CLAP/VST3 constrained group Undo/saved Redo/Unicode reopen/audio | 2 passed, 0 failed, 0 ignored; 38.81s |
+| CLAP sample-accurate event ranges | 1 passed, 0 failed, 0 ignored; 0.81s |
+| VST3 SDK linear parameter queues | 1 passed, 0 failed, 0 ignored; 1.36s |
+| VST3 state restoration and isolated-worker signal | 1 passed, 0 failed, 0 ignored; 0.93s |
+| Real CLAP/VST3 shared preview WAV execution | 2 passed, 0 failed, 0 ignored; 2.16s |
+
+The five ignored resource cases above were explicitly executed by the native
+resource gate. The wrapper requires positive exact executed counts for every
+filter, clean stable source and unchanged hashes for product and all used native
+plugin binaries. The owned CLAP and VST3 fixtures retain their documented correct
+SDK event/queue interpretation; external examples retain their limited static
+reference scope. Native signals/queries qualify the supported contracts exercised
+here, rather than unexecuted vendor/bus/editor/platform combinations.
+
+Qualified SHA256 identities:
+
+- Product: `A0389FBA5684DD0BCEA7A663F5D72A22DFAC4686210FA0CB41B7BE9A830F51E5`
+- Golden: `D3FB620AABE07DFBC312BF3FF41CC43395189DE7F57EA786A225A437C1D50FCF`
+- OpenFX SessionProbe: `BA8734FE2FC3CEF93D0973415B8C4FEE64B1A1C0CEA9ECDBD409B2401781978A`
+- Owned CLAP sample gain: `CB2FA1B4956CEDBDA4BBAA4B24EFA2D16924820C7C7FCEB4E4881633F21FD687`
+- Owned VST3 stateful gain: `523E714760F9BC47805B3EDE7C7FC4399AEF7D1BDEEF1DCC3832B6DA50D9907F`
+
+Consecutive report:
+`E:/dev/mondrian/target/validation/nle-backlog-complete/20261006T183029Z-complete-golden-a86e2348/complete-golden-consecutive-report.json`.
+This supersedes the older 661 encoded/modal/resource and c3/689 native-group
+scopes for these executed cases. Full App2579/0/68 ignored, final Curve100/0/0
+ignored, strict workspace Clippy, fmt and diff passed before the production
+commit. No push was performed.
+
+The complete goal remains active. In addition to the other professional matrices,
+raw canonical clipboard precision still needs direct channel-bit qualification:
+current complete-property capture uses `PropertyValue` readback, whose Float
+representation is f32 while canonical author channels retain f64. The accepted
+focused .25/.5/.75 fixture proves those values and handles, not arbitrary raw
+Number bits. A source audit and unexecuted reproduction draft identify this next
+qualification; they are not reported as an observed runtime failure.
