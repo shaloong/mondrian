@@ -1089,3 +1089,29 @@ all-target, all-feature Clippy with warnings as errors passed in **2m03s**.
 Final format/diff checks precede commit and clean-source native qualification. No current encoded or native
 audio group output is claimed by this probe. Professional group pointer,
 rubber-band, copy/reset and all broader original NLE matrices remain open.
+
+
+## Clean-source native group interpolation qualification for c3f5ee8
+
+Source `c3f5ee86a566700eaeca49c04698be8acbadfd45` was clean and unchanged
+through rebuilt-product and explicit native Interpolation, Time and Value
+acceptance. Product build reused the unchanged compiled inputs and passed in
+5.33s. The explicit ignored tests passed **1/1** each, zero failures or ignored:
+Interpolation 4.77s (both Auto/Continuous), Time 4.27s and Value 4.32s. Source
+files, product and owned fixture remained hash-stable. Both Git author and
+committer are Shalom Wang; no push was made.
+
+Product SHA256:
+`b3e285576773d238279d5ef9bccfdadeec9f986687d1a7eb7af940da4a57e489`.
+Fixture SHA256:
+`ba8734fe2fc3cef93d0973415b8c4fee64b1a1c0cea9ecdbd409b2401781978a`.
+
+This promotes the native visual group interpolation scope described above to
+a named clean-source receipt. The current parameter author state, complete
+constraint intent, independent native calculus and real pixels survive atomic
+refusal, one Undo/Redo, saved-undone live Redo and fresh Unicode archive reopen.
+Time/value sibling regressions retain their exact coordinates and scalar values.
+The earlier ce3edfb encoded Golden remains a separately named receipt; no new
+encoded or native audio group output is claimed by this run. Native audio,
+professional group pointer/rubber-band/copy/reset, vendor/platform/performance,
+tracking and broader i18n acceptance remain open under the complete NLE goal.
