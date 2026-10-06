@@ -36,6 +36,11 @@ fn sample_luma(source_center: vec2<f32>) -> vec2<f32> {
     let weight = fract(sample_coordinate);
     let dimensions = vec2<i32>(luma_dimensions());
     let y00 = load_luma(base, dimensions);
+    // At exact texel centers, finite UNORM components gain no information
+    // from zero-weight neighbors. Preserve interpolation at all other positions.
+    if all(weight == vec2<f32>(0.0)) {
+        return y00;
+    }
     let y10 = load_luma(base + vec2<i32>(1, 0), dimensions);
     let y01 = load_luma(base + vec2<i32>(0, 1), dimensions);
     let y11 = load_luma(base + vec2<i32>(1, 1), dimensions);

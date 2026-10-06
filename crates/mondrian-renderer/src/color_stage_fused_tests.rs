@@ -7,166 +7,189 @@ use crate::*;
 fn fused_yuv_input_matches_two_pass_sdr_pq_hlg() {
     mondrian_core::ensure_mondrian_default_ocio_loaded().expect("bundled OCIO");
     let context = pollster::block_on(GpuContext::new()).expect("required GPU adapter");
+    eprintln!("fused YUV input adapter: {:?}", context.adapter.get_info());
     let mut decoder = GpuNativeYuvDecoder::new(&context.device);
     decoder.enable_buffer_source(&context.device);
     for buffer_source in [false, true] {
         let mut runtime = RenderGpuOutputBoundaryRuntime::new().expect("color owner");
-        for space in [
-            ColorSpace::Rec709,
-            ColorSpace::Rec2100Pq,
-            ColorSpace::Rec2100Hlg,
-        ] {
-            for range in [GpuVideoRange::Limited, GpuVideoRange::Full] {
-                let input = handle(
-                    &mut runtime,
-                    space.into(),
-                    ColorFrameDomain::Source,
-                    ColorFrameEncoding::EncodedFloat,
-                );
-                let working = handle(
-                    &mut runtime,
-                    WorkingColorSpace::LinearRec2020.into(),
-                    ColorFrameDomain::Working,
-                    ColorFrameEncoding::LinearFloat,
-                );
-                let fused = handle(
-                    &mut runtime,
-                    WorkingColorSpace::LinearRec2020.into(),
-                    ColorFrameDomain::Working,
-                    ColorFrameEncoding::LinearFloat,
-                );
-                let plan = GpuNativeYuvDecodePlan::new(
-                    GpuNativeDecodedFrameTextureFormat::P010,
-                    GpuNativeVideoExtent { width: 2, height: 2 },
-                    GpuNativeVideoExtent { width: 3, height: 3 },
-                    GpuNativeVideoExtent { width: 2, height: 2 },
-                    GpuNativeDecodedFrameVideoSampling::from_source_color_space(
-                        space,
-                        range,
-                        10,
-                        GpuVideoChromaLocation::Left,
-                    ),
-                    input.clone(),
-                )
-                .expect("exact YUV sampling");
-                let luma = texture(
-                    &context,
-                    wgpu::TextureFormat::R16Unorm,
-                    2,
-                    2,
-                    4,
-                    bytemuck::cast_slice(&[0_u16, 64 * 64, 940 * 64, 1023 * 64]),
-                );
-                let chroma = texture(
-                    &context,
-                    wgpu::TextureFormat::Rg16Unorm,
-                    1,
-                    1,
-                    4,
-                    bytemuck::cast_slice(&[400_u16 * 64, 700 * 64]),
-                );
-                let y = luma.create_view(&Default::default());
-                let uv = chroma.create_view(&Default::default());
-                let prepared = decoder
-                    .prepare_pass(
-                        &context.device,
-                        &plan,
-                        GpuNativeYuvPlaneViews {
-                            luma: &y,
-                            chroma: &uv,
-                            chroma_v: &uv,
-                            alpha: None,
-                        },
+        for source_extent in [2_u32, 3] {
+            let storage_extent = source_extent.div_ceil(2) * 2;
+            for space in [
+                ColorSpace::Rec709,
+                ColorSpace::Rec2100Pq,
+                ColorSpace::Rec2100Hlg,
+            ] {
+                for range in [GpuVideoRange::Limited, GpuVideoRange::Full] {
+                    let input = handle(
+                        &mut runtime,
+                        space.into(),
+                        ColorFrameDomain::Source,
+                        ColorFrameEncoding::EncodedFloat,
+                    );
+                    let working = handle(
+                        &mut runtime,
+                        WorkingColorSpace::LinearRec2020.into(),
+                        ColorFrameDomain::Working,
+                        ColorFrameEncoding::LinearFloat,
+                    );
+                    let fused = handle(
+                        &mut runtime,
+                        WorkingColorSpace::LinearRec2020.into(),
+                        ColorFrameDomain::Working,
+                        ColorFrameEncoding::LinearFloat,
+                    );
+                    let plan = GpuNativeYuvDecodePlan::new(
+                        GpuNativeDecodedFrameTextureFormat::P010,
+                        GpuNativeVideoExtent { width: source_extent, height: source_extent },
+                        GpuNativeVideoExtent { width: 3, height: 3 },
+                        GpuNativeVideoExtent { width: storage_extent, height: storage_extent },
+                        GpuNativeDecodedFrameVideoSampling::from_source_color_space(
+                            space,
+                            range,
+                            10,
+                            GpuVideoChromaLocation::Left,
+                        ),
+                        input.clone(),
                     )
-                    .expect("opaque YUV plane contract");
-                let mut encoder = context.device.create_command_encoder(&Default::default());
-                let encoded = GpuNativeYuvDecoder::allocate_output(&context.device, &plan);
-                decoder
-                    .record(&mut encoder, &plan, &prepared, &encoded)
-                    .expect("ordinary YUV pass");
-                runtime.frame_table_mut().insert(encoded).expect("source table");
-                let transform = RenderInputTransform::to_working_gpu(
-                    WorkingColorSpace::LinearRec2020,
-                    false,
-                    ColorEngine::mondrian_standard(),
-                );
-                runtime
-                    .record_wgpu_input_stage_gpu_frame_owned_backend(
-                        &transform,
-                        &input,
-                        &working,
-                        RenderColorTransformGpuOptions::default(),
-                        RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
-                            device: &context.device,
-                            queue: &context.queue,
-                            encoder: &mut encoder,
-                            load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        },
-                    )
-                    .expect("ordinary OCIO pass");
-                use wgpu::util::DeviceExt;
-                let buffer = context.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("fused-input-test-p010"),
-                    contents: bytemuck::cast_slice(&[
-                        0_u16,
-                        64 * 64,
-                        940 * 64,
-                        1023 * 64,
-                        400 * 64,
-                        700 * 64,
-                    ]),
-                    usage: wgpu::BufferUsages::STORAGE,
-                });
-                let prepared_buffer = decoder
-                    .prepare_buffer_pass(&context.device, &plan, &buffer, 4, 8)
-                    .expect("buffer YUV sampling");
-                let source = if buffer_source {
-                    decoder.fused_buffer_input().expect("enabled buffer source")
-                } else {
-                    decoder.fused_texture_input()
-                };
-                let backend = runtime
-                    .prepare_fused_yuv_input(
-                        &transform,
-                        &input,
-                        &fused,
-                        source,
-                        &context.device,
-                        &context.queue,
-                    )
-                    .expect("fused production backend");
-                let output = runtime.resource_pool().acquire(
-                    &context.device,
-                    &GpuColorFrameAllocationPlan::for_handle(fused),
-                );
-                backend.record(
-                    &mut encoder,
-                    if buffer_source {
-                        &prepared_buffer.bind_group
+                    .expect("exact YUV sampling");
+                    let luma_codes = (0..storage_extent * storage_extent)
+                        .map(|index| {
+                            let x = index % storage_extent;
+                            let y = index / storage_extent;
+                            if x >= source_extent || y >= source_extent {
+                                1023 * 64
+                            } else {
+                                [0_u16, 64 * 64, 940 * 64, 1023 * 64]
+                                    [(y * source_extent + x) as usize % 4]
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let chroma_extent = source_extent.div_ceil(2);
+                    let chroma_codes = (0..chroma_extent * chroma_extent)
+                        .flat_map(|_| [400_u16 * 64, 700 * 64])
+                        .collect::<Vec<_>>();
+                    let luma = texture(
+                        &context,
+                        wgpu::TextureFormat::R16Unorm,
+                        storage_extent,
+                        storage_extent,
+                        storage_extent * 2,
+                        bytemuck::cast_slice(&luma_codes),
+                    );
+                    let chroma = texture(
+                        &context,
+                        wgpu::TextureFormat::Rg16Unorm,
+                        chroma_extent,
+                        chroma_extent,
+                        chroma_extent * 4,
+                        bytemuck::cast_slice(&chroma_codes),
+                    );
+                    let y = luma.create_view(&Default::default());
+                    let uv = chroma.create_view(&Default::default());
+                    let prepared = decoder
+                        .prepare_pass(
+                            &context.device,
+                            &plan,
+                            GpuNativeYuvPlaneViews {
+                                luma: &y,
+                                chroma: &uv,
+                                chroma_v: &uv,
+                                alpha: None,
+                            },
+                        )
+                        .expect("opaque YUV plane contract");
+                    let mut encoder = context.device.create_command_encoder(&Default::default());
+                    let encoded = GpuNativeYuvDecoder::allocate_output(&context.device, &plan);
+                    decoder
+                        .record(&mut encoder, &plan, &prepared, &encoded)
+                        .expect("ordinary YUV pass");
+                    runtime.frame_table_mut().insert(encoded).expect("source table");
+                    let transform = RenderInputTransform::to_working_gpu(
+                        WorkingColorSpace::LinearRec2020,
+                        false,
+                        ColorEngine::mondrian_standard(),
+                    );
+                    runtime
+                        .record_wgpu_input_stage_gpu_frame_owned_backend(
+                            &transform,
+                            &input,
+                            &working,
+                            RenderColorTransformGpuOptions::default(),
+                            RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                                device: &context.device,
+                                queue: &context.queue,
+                                encoder: &mut encoder,
+                                load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            },
+                        )
+                        .expect("ordinary OCIO pass");
+                    use wgpu::util::DeviceExt;
+                    let row_components = chroma_extent * 2;
+                    let mut buffer_codes = luma_codes.clone();
+                    buffer_codes.extend_from_slice(&chroma_codes);
+                    let buffer =
+                        context.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("fused-input-test-p010"),
+                            contents: bytemuck::cast_slice(&buffer_codes),
+                            usage: wgpu::BufferUsages::STORAGE,
+                        });
+                    let prepared_buffer = decoder
+                        .prepare_buffer_pass(
+                            &context.device,
+                            &plan,
+                            &buffer,
+                            row_components * 2,
+                            row_components * storage_extent * 2,
+                        )
+                        .expect("buffer YUV sampling");
+                    let source = if buffer_source {
+                        decoder.fused_buffer_input().expect("enabled buffer source")
                     } else {
-                        &prepared.bind_group
-                    },
-                    &output.resource().texture_view,
-                    None,
-                );
-                let reference = runtime.frame_table().get(&working).expect("working result");
-                let expected = readback(&context, &mut encoder, reference);
-                let actual = readback(&context, &mut encoder, &output);
-                context.queue.submit([encoder.finish()]);
-                let expected = map(&context, expected);
-                let actual = map(&context, actual);
-                for (index, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
-                    let tolerance = 2.0e-5 * expected.abs().max(1.0);
-                    assert!(
-                    expected.is_finite()
-                        && actual.is_finite()
-                        && (expected - actual).abs() <= tolerance,
-                    "buffer={buffer_source}/{space:?}/{range:?} channel {index}: {expected} versus {actual}"
-                );
+                        decoder.fused_texture_input()
+                    };
+                    let backend = runtime
+                        .prepare_fused_yuv_input(
+                            &transform,
+                            &input,
+                            &fused,
+                            source,
+                            &context.device,
+                            &context.queue,
+                        )
+                        .expect("fused production backend");
+                    let output = runtime.resource_pool().acquire(
+                        &context.device,
+                        &GpuColorFrameAllocationPlan::for_handle(fused),
+                    );
+                    backend.record(
+                        &mut encoder,
+                        if buffer_source {
+                            &prepared_buffer.bind_group
+                        } else {
+                            &prepared.bind_group
+                        },
+                        &output.resource().texture_view,
+                        None,
+                    );
+                    let reference = runtime.frame_table().get(&working).expect("working result");
+                    let expected = readback(&context, &mut encoder, reference);
+                    let actual = readback(&context, &mut encoder, &output);
+                    context.queue.submit([encoder.finish()]);
+                    let expected = map(&context, expected);
+                    let actual = map(&context, actual);
+                    for (index, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
+                        let tolerance = 2.0e-5 * expected.abs().max(1.0);
+                        assert!(
+                        expected.is_finite()
+                            && actual.is_finite()
+                            && (expected - actual).abs() <= tolerance,
+                        "source_extent={source_extent}/buffer={buffer_source}/{space:?}/{range:?} channel {index}: {expected} versus {actual}"
+                    );
+                    }
+                    assert!(actual.chunks_exact(4).all(|pixel| pixel[3] == 1.0));
+                    runtime.resource_pool().release(output);
+                    runtime.clear_frame_resources();
                 }
-                assert!(actual.chunks_exact(4).all(|pixel| pixel[3] == 1.0));
-                runtime.resource_pool().release(output);
-                runtime.clear_frame_resources();
             }
         }
     }
