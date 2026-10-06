@@ -393,12 +393,24 @@ impl WinitUiRuntime {
     }
 
     fn tick_tooltip(&mut self, window: &winit::window::Window, router: &mut EventRouter) {
-        let now = Instant::now();
-        let delta_ms = now.saturating_duration_since(self.last_timer_tick).as_millis();
-        self.last_timer_tick = now;
-        if advance_tooltip_timer(router, delta_ms.min(u128::from(u64::MAX)) as u64) {
+        if self.advance_tooltip_timer(router, Instant::now()) {
             window.request_redraw();
         }
+    }
+
+    fn advance_tooltip_timer(&mut self, router: &mut EventRouter, now: Instant) -> bool {
+        let delta_ms = now
+            .saturating_duration_since(self.last_timer_tick)
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        // Advance only the milliseconds consumed by the router. Frequent
+        // events must not discard the fractional remainder of its delay.
+        self.last_timer_tick += Duration::from_millis(delta_ms);
+        let tooltip_was_visible = router.current_tooltip().is_some();
+        router.update_tooltip(delta_ms);
+        // The timer only reveals delayed tooltips. An unchanged visible tooltip
+        // must not request another redraw and keep the native event loop awake.
+        tooltip_was_visible != router.current_tooltip().is_some()
     }
 
     fn apply_router_requests(
@@ -436,14 +448,6 @@ impl WinitUiRuntime {
             window.request_redraw();
         }
     }
-}
-
-fn advance_tooltip_timer(router: &mut EventRouter, delta_ms: u64) -> bool {
-    let tooltip_was_visible = router.current_tooltip().is_some();
-    router.update_tooltip(delta_ms);
-    // The timer only reveals delayed tooltips. An unchanged visible tooltip
-    // must not request another redraw and keep the native event loop awake.
-    tooltip_was_visible != router.current_tooltip().is_some()
 }
 
 fn desktop_sample_to_ui_color(sample: DesktopRgba8) -> Color {
@@ -804,12 +808,19 @@ mod tests {
             Box::new(tooltip),
         );
 
-        assert!(!advance_tooltip_timer(&mut router, 449));
-        assert!(advance_tooltip_timer(&mut router, 1));
+        let mut runtime = WinitUiRuntime::new();
+        let started = runtime.last_timer_tick;
+        // Frequent native events still accumulate the real 450 ms delay.
+        for tick in 1..4_500 {
+            let observed_at = started + Duration::from_micros(tick * 100);
+            assert!(!runtime.advance_tooltip_timer(&mut router, observed_at));
+        }
+        assert!(runtime.advance_tooltip_timer(&mut router, started + Duration::from_millis(450)));
         assert_eq!(router.current_tooltip().unwrap().text, "Play");
         assert_eq!(router.next_tooltip_update_in_ms(), None);
-        for _ in 0..1_000 {
-            assert!(!advance_tooltip_timer(&mut router, 1));
+        for tick in 4_501..5_500 {
+            let observed_at = started + Duration::from_micros(tick * 100);
+            assert!(!runtime.advance_tooltip_timer(&mut router, observed_at));
         }
         assert!(router.current_tooltip().is_some());
     }
