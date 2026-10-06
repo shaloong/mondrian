@@ -7,7 +7,7 @@ impl AppState {
     /// Whether `Copy` can place animation keyframes or timeline clips on the app clipboard.
     pub fn can_copy_to_app_clipboard(&self) -> bool {
         self.primary_selected_clip().is_some_and(|selection| {
-            !self.selected_animation_keyframes_for_clip(selection.clip_id).is_empty()
+            self.has_selected_animation_keyframes_for_clip(selection.clip_id)
         }) || self.selected_clip_clipboard_entries(false).is_some()
     }
 

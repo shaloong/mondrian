@@ -822,3 +822,13 @@ Clipboard content remains transient and is absent from project persistence/histo
 project mutations still use the existing atomic author-session paths. Regression
 qualification includes real Copy/Paste actions, refused-target author/history
 invariance and constrained key-group Undo/saved Redo/fresh Unicode reopen.
+
+
+Key-group Copy chooses its type from the explicit selected-key intent. It resolves
+all stable property/key addresses against one current Clip snapshot before
+replacing the transient clipboard. A missing property or key refuses the entire
+capture through typed ActionNotExecuted and preserves the old clipboard, selection,
+Sequence, generation and history; empty/nonexistent key capture cannot silently
+become a Clip copy. Valid Clip Copy remains available when no keys are selected.
+The error uses the existing typed localized core-failure projection, independent
+of its developer diagnostic text.

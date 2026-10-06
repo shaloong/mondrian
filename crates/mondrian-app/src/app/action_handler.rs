@@ -271,8 +271,9 @@ impl AppState {
             let copied = self.copy_selected_clips_to_clipboard()?;
             return require_action_executed(copied, "copy", "当前没有可复制的片段");
         };
-        if self.copy_selected_animation_keyframes(selection)? {
-            Ok(())
+        if self.has_selected_animation_keyframes_for_clip(selection.clip_id) {
+            let copied = self.copy_selected_animation_keyframes(selection)?;
+            require_action_executed(copied, "copy", "当前没有可复制的动画关键帧")
         } else {
             let copied = self.copy_selected_clips_to_clipboard()?;
             require_action_executed(copied, "copy", "当前没有可复制的片段")
@@ -8439,6 +8440,123 @@ mod tests {
             assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
             assert_eq!(reopened.active_clipboard_kind(), None);
         }
+    }
+
+    #[test]
+    fn dispatch_partial_stale_key_copy_preserves_clipboard() {
+        assert_stale_key_copy_refused(StaleKeyCopyCase::MissingKey);
+    }
+
+    #[test]
+    fn dispatch_stale_key_copy_with_missing_property_preserves_clipboard() {
+        assert_stale_key_copy_refused(StaleKeyCopyCase::MissingProperty);
+    }
+
+    #[test]
+    fn dispatch_fully_stale_key_copy_never_copies_clip() {
+        assert_stale_key_copy_refused(StaleKeyCopyCase::AllKeys);
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum StaleKeyCopyCase {
+        MissingKey,
+        MissingProperty,
+        AllKeys,
+    }
+
+    fn assert_stale_key_copy_refused(case: StaleKeyCopyCase) {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
+        state.selection.selected_clips = vec![selection];
+        state
+            .dispatch_action(mondrian_editor_state::Action::Copy)
+            .expect("copy clips first");
+        let tb = state.active_sequence().expect("sequence").time_base();
+        let times = [tt(4, tb), tt(8, tb)];
+        for (time, value) in times.into_iter().zip([0.25, 0.75]) {
+            state
+                .mutate_clip_property(
+                    selection,
+                    PropertyMutation::SetKeyframe {
+                        path: Transform2D::OPACITY_PATH.into(),
+                        keyframe: mondrian_core::automation::Keyframe::linear(
+                            time,
+                            PropertyValue::Float(value),
+                        ),
+                    },
+                    "seed source keys",
+                )
+                .expect("seed key");
+        }
+        let mut selected: Vec<_> = times
+            .into_iter()
+            .map(|time| opacity_keyframe_selection(&state, clip_id, time))
+            .collect();
+        state.set_animation_keyframe_selection(selected.clone());
+        state
+            .dispatch_action(mondrian_editor_state::Action::Copy)
+            .expect("capture valid group");
+        let clipboard = |state: &AppState| match &state.clipboard {
+            Some(crate::app::AppClipboard::AnimationKeyframes(clipboard)) => Some(
+                clipboard
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        (
+                            entry.property.clone(),
+                            entry.relative_time,
+                            entry.keyframe.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        };
+        let original_clipboard = clipboard(&state);
+        match case {
+            StaleKeyCopyCase::MissingKey => {
+                selected[1].keyframe_id = mondrian_core::KeyframeId::new()
+            }
+            StaleKeyCopyCase::MissingProperty => {
+                selected[1].property.property.animation_track_id =
+                    mondrian_core::AnimationTrackId::new()
+            }
+            StaleKeyCopyCase::AllKeys => {
+                for key in &mut selected {
+                    key.keyframe_id = mondrian_core::KeyframeId::new();
+                }
+            }
+        }
+        state.set_animation_keyframe_selection(selected);
+        let original_selection = state.animation_selection.selected_keyframes.clone();
+        let original_sequence = state.active_sequence().expect("original").clone();
+        let generation = state.project_author_generation();
+        let history = state.authoring_history().expect("history").diagnostics();
+        let result = state.dispatch_action(mondrian_editor_state::Action::Copy);
+        assert_eq!(
+            state.active_clipboard_kind(),
+            Some(AppClipboardKind::AnimationKeyframes),
+            "{case:?}: a key-group request cannot turn into a clip copy"
+        );
+        assert_eq!(clipboard(&state), original_clipboard,
+            "{case:?}: a stale member must refuse the whole capture, preserving the previous clipboard");
+        assert!(
+            result.is_err(),
+            "{case:?}: stale copy intent must report refusal"
+        );
+        assert_eq!(
+            state.animation_selection.selected_keyframes,
+            original_selection
+        );
+        assert!(state
+            .active_sequence()
+            .expect("unchanged source")
+            .author_state_eq_ignoring_revision(&original_sequence));
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
     }
 
     #[test]

@@ -65,6 +65,14 @@ impl AppState {
             .retain(|selection| selection.property.clip_id != clip_id);
     }
 
+    /// Inspect copy intent without allocating an owned selection snapshot.
+    pub(super) fn has_selected_animation_keyframes_for_clip(&self, clip_id: ClipId) -> bool {
+        self.animation_selection
+            .selected_keyframes
+            .iter()
+            .any(|selection| selection.property.clip_id == clip_id)
+    }
+
     pub fn selected_animation_keyframes_for_clip(
         &self,
         clip_id: ClipId,
@@ -218,23 +226,24 @@ impl AppState {
             mondrian_core::MondrianError::ClipNotFound { clip_id: selection.clip_id.to_string() }
         })?;
         let property_bag = clip.property_bag()?;
-        let mut resolved = Vec::new();
+        let stale_selection = || mondrian_core::MondrianError::ActionNotExecuted {
+            action: "copy".to_owned(),
+            reason: "Animation key selection is stale; select the keys again".to_owned(),
+        };
+        let mut resolved = Vec::with_capacity(selected.len());
         for selection in selected {
-            let Some((_, property)) =
-                property_bag.property_by_address(&selection.property.property)
-            else {
-                continue;
-            };
-            let Some(keyframe) = property.keyframe_by_id(selection.keyframe_id) else {
-                continue;
-            };
+            let (_, property) = property_bag
+                .property_by_address(&selection.property.property)
+                .ok_or_else(stale_selection)?;
+            let keyframe =
+                property.keyframe_by_id(selection.keyframe_id).ok_or_else(stale_selection)?;
             resolved.push((selection, keyframe));
         }
         let anchor_time = resolved
             .iter()
             .map(|(_, keyframe)| keyframe.time)
             .min()
-            .unwrap_or(TimelineTime::ZERO);
+            .ok_or_else(stale_selection)?;
 
         let mut entries = Vec::new();
         for (selection, mut keyframe) in resolved {

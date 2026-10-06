@@ -1262,3 +1262,23 @@ recorded runtime RED. The 68 explicitly ignored environment-dependent gates are
 not counted as executed here. Current encoded LUT and native audio acceptance
 retain their named clean ce3edfb/689aae9 source and binary identities; this App
 library result is not a new encoded or vendor-plugin receipt.
+
+## Complete key-group Copy refusal
+
+Three actual Copy regressions reproduced runtime failures against bc0d237:
+missing key and missing property captures overwrote a two-key clipboard with a
+one-key payload, while an entirely stale selection copied a timeline Clip.
+All three now pass (3 passed, 0 failed, 0 ignored; 0.39s). Copy chooses its type
+from explicit selected-key intent and resolves the entire stable selection against
+one current Clip snapshot before publishing. Missing members report typed refusal
+and preserve the complete old clipboard, selection, Sequence, author generation
+and history. Availability and dispatch share a nonallocating selection predicate.
+
+Full App all-feature library tests passed **2574 passed, 0 failed, 68 ignored**
+(570.07s), including clipboard/history, modal routing and resource workflows.
+The ignored environment-dependent tests are not counted as executed here.
+The focused CurveEditor's local selection and broader professional interaction
+matrix remain separate open work; this is not a claim of complete curve UI or
+new native/encoded output qualification.
+
+Strict workspace/all-target/all-feature Clippy with `-D warnings` passed (2m06s).
