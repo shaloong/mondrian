@@ -1229,3 +1229,36 @@ supersedes the candidate's audio scope, while the encoded LUT/modal/resource and
 native visual receipts retain their separately named ce3edfb/c3f5ee8 sources.
 No push was performed. The overall NLE goal remains active for the professional
 curve interaction, vendor/plugin/platform/performance and other named matrices.
+
+
+## Clipboard intent refusal and constrained group history
+
+Source baseline is clean docs commit `288421703678576dea3ce96dec3aec0cc38a6353`.
+A new actual ProductAction regression first reproduced an unintended author edit:
+after copying a Clip and then a key group, clearing the key target and dispatching
+Paste inserted the retained Clip (Clip count 2 versus original 1). Runtime RED:
+0 passed/1 failed, 0.22s; it was not a compile-only diagnostic.
+
+The fix replaces two clipboard caches plus a mutable kind with one private typed
+payload. Kind inspection derives from that payload. Availability and execution
+use the same current value; key paste errors have no Clip fallback. Successful
+nonempty Copy replaces the value, while failed/empty capture retains it. Cut
+publishes its captured value after author removal succeeds. The removed mutable
+fields have no compatibility aliases.
+
+Two new actual action regressions passed (2/0/0 ignored, 0.87s): refused key Paste
+leaves the Sequence, author generation, selection and history unchanged; constrained
+Auto/Continuous key-group Copy replaces the Clip payload, locked Paste refuses
+atomically, successful Paste commits once with fresh IDs and preserved values/
+constraint intent, single Undo restores the original, saving keeps live Redo,
+and fresh Unicode undone/edited archives restore the exact author state with
+empty history and an empty transient clipboard.
+
+Full current App all-feature library tests passed **2571/0/68 ignored** (321.57s).
+This includes modal routing, resource workflows and author history regressions.
+Strict workspace/all-target/all-feature Clippy with `-D warnings` passed (2m27s).
+A missing test import was corrected during compilation; it is distinct from the
+recorded runtime RED. The 68 explicitly ignored environment-dependent gates are
+not counted as executed here. Current encoded LUT and native audio acceptance
+retain their named clean ce3edfb/689aae9 source and binary identities; this App
+library result is not a new encoded or vendor-plugin receipt.

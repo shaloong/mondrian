@@ -202,10 +202,7 @@ impl AppState {
     }
 
     pub fn has_animation_clipboard(&self) -> bool {
-        self.animation_clipboard
-            .as_ref()
-            .map(|clipboard| !clipboard.entries.is_empty())
-            .unwrap_or(false)
+        matches!(&self.clipboard, Some(AppClipboard::AnimationKeyframes(clipboard)) if !clipboard.entries.is_empty())
     }
 
     pub fn copy_selected_animation_keyframes(
@@ -252,15 +249,13 @@ impl AppState {
         entries.sort_by(|a, b| {
             a.relative_time.cmp(&b.relative_time).then_with(|| a.property.cmp(&b.property))
         });
-        self.animation_clipboard = if entries.is_empty() {
-            None
-        } else {
-            Some(AnimationClipboard { entries })
-        };
-        if self.has_animation_clipboard() {
-            self.active_clipboard_kind = Some(AppClipboardKind::AnimationKeyframes);
+        if entries.is_empty() {
+            return Ok(false);
         }
-        Ok(self.has_animation_clipboard())
+        self.clipboard = Some(AppClipboard::AnimationKeyframes(AnimationClipboard {
+            entries,
+        }));
+        Ok(true)
     }
 
     pub fn paste_animation_keyframes(
@@ -268,7 +263,7 @@ impl AppState {
         selection: SelectedClipRef,
         destination_clip_time: TimelineTime,
     ) -> mondrian_core::Result<bool> {
-        let Some(clipboard) = self.animation_clipboard.clone() else {
+        let Some(AppClipboard::AnimationKeyframes(clipboard)) = self.clipboard.clone() else {
             return Ok(false);
         };
         if clipboard.entries.is_empty() {

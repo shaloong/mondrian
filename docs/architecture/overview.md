@@ -810,3 +810,15 @@ snapshot. Rendering consumes the same AudioProgramRuntime under realtime and
 offline contracts with unequal block partitions; it does not add an App curve
 interpreter. Actual test results and binary identities are recorded separately
 in docs/dev/modal-resource-lut-acceptance.md.
+
+
+App clipboard authority is one private typed payload (timeline clips or animation
+keys). Its public kind inspection derives from that payload; two retained caches
+and a separately mutable kind no longer exist. Copy replaces the current value
+only after a successful nonempty capture. Cut publishes its copied value after the
+author removal succeeds. Paste availability and dispatch both use the sole payload
+kind; missing/locked/incompatible key targets cannot fall back to an old clip copy.
+Clipboard content remains transient and is absent from project persistence/history;
+project mutations still use the existing atomic author-session paths. Regression
+qualification includes real Copy/Paste actions, refused-target author/history
+invariance and constrained key-group Undo/saved Redo/fresh Unicode reopen.

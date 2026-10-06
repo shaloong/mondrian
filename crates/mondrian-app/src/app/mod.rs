@@ -410,6 +410,13 @@ struct ClipClipboardEntry {
     audio_processing_scopes: Vec<mondrian_timeline::audio::AudioProcessingScope>,
 }
 
+/// Sole transient clipboard payload; copying replaces the previous author intent.
+#[derive(Debug, Clone)]
+enum AppClipboard {
+    AnimationKeyframes(AnimationClipboard),
+    Clips(ClipClipboard),
+}
+
 /// Active app clipboard payload kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppClipboardKind {
@@ -548,9 +555,8 @@ pub struct AppState {
 
     // 动画选择状态（timeline / inspector / future graph 共用）
     pub animation_selection: AnimationSelectionState,
-    pub animation_clipboard: Option<AnimationClipboard>,
-    pub clip_clipboard: Option<ClipClipboard>,
-    pub active_clipboard_kind: Option<AppClipboardKind>,
+    /// One current clipboard value; its kind is derived from its payload.
+    clipboard: Option<AppClipboard>,
 
     // 代理策略
     pub auto_proxy_enabled: bool,
@@ -711,9 +717,7 @@ impl AppState {
             status_log: Vec::new(),
             notifications: notifications::AppNotificationFeed::default(),
             animation_selection: AnimationSelectionState::default(),
-            animation_clipboard: None,
-            clip_clipboard: None,
-            active_clipboard_kind: None,
+            clipboard: None,
             auto_proxy_enabled: false,
             proxy_generation: ProxyGenerationService::new(),
             proxy_terminal_observed_sequence: 0,

@@ -1024,18 +1024,15 @@ impl AppState {
                 "剪贴板为空或当前没有可用的粘贴目标",
             ));
         }
-        match self.active_clipboard_kind {
-            Some(AppClipboardKind::AnimationKeyframes) => self
-                .paste_animation_keyframes_from_action()
-                .or_else(|_| self.paste_clip_clipboard_from_action()),
-            Some(AppClipboardKind::Clips) => self.paste_clip_clipboard_from_action(),
-            None => {
-                if self.has_animation_clipboard() {
-                    self.paste_animation_keyframes_from_action()
-                } else {
-                    self.paste_clip_clipboard_from_action()
-                }
+        match self.active_clipboard_kind() {
+            Some(AppClipboardKind::AnimationKeyframes) => {
+                self.paste_animation_keyframes_from_action()
             }
+            Some(AppClipboardKind::Clips) => self.paste_clip_clipboard_from_action(),
+            None => Err(action_not_executed(
+                "paste",
+                "剪贴板为空或当前没有可用的粘贴目标",
+            )),
         }
     }
 
@@ -8232,6 +8229,219 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_key_paste_without_target_never_inserts_previous_clip_copy() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
+        state.selection.selected_clips = vec![selection];
+        state
+            .dispatch_action(mondrian_editor_state::Action::Copy)
+            .expect("copy clip first");
+        let tb = state.active_sequence().expect("sequence").time_base();
+        let times = [tt(4, tb), tt(8, tb)];
+        for (time, value) in times.into_iter().zip([0.25, 0.75]) {
+            state
+                .mutate_clip_property(
+                    selection,
+                    PropertyMutation::SetKeyframe {
+                        path: Transform2D::OPACITY_PATH.into(),
+                        keyframe: mondrian_core::automation::Keyframe::linear(
+                            time,
+                            PropertyValue::Float(value),
+                        ),
+                    },
+                    "seed copied key group",
+                )
+                .expect("seed key");
+        }
+        state.set_animation_keyframe_selection(
+            times
+                .into_iter()
+                .map(|time| opacity_keyframe_selection(&state, clip_id, time))
+                .collect(),
+        );
+        state
+            .dispatch_action(mondrian_editor_state::Action::Copy)
+            .expect("copy key group");
+        assert!(state.has_animation_clipboard());
+        state.selection.selected_clips.clear();
+        state.seek(50).expect("seek to free clip paste position");
+        let original = state.active_sequence().expect("original").clone();
+        let generation = state.project_author_generation();
+        let history = state.authoring_history().expect("history").diagnostics();
+        let result = state.dispatch_action(mondrian_editor_state::Action::Paste);
+        assert_eq!(
+            state.active_sequence().expect("after refused key paste").video_tracks[0]
+                .clips
+                .len(),
+            original.video_tracks[0].clips.len(),
+            "key paste must never insert a previously copied clip when its target is absent"
+        );
+        assert!(
+            result.is_err(),
+            "key paste without a target must be refused"
+        );
+        assert!(!state.can_paste_from_app_clipboard());
+        assert!(state
+            .active_sequence()
+            .expect("unchanged author state")
+            .author_state_eq_ignoring_revision(&original));
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
+        assert!(state.selection.selected_clips.is_empty());
+        assert!(
+            state.has_animation_clipboard(),
+            "refusal preserves the copied keys"
+        );
+    }
+
+    #[test]
+    fn dispatch_key_group_clipboard_switches_intent_and_roundtrips_history() {
+        use mondrian_core::InterpolationType;
+        for mode in [
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let mut sequence = Sequence::new("clipboard group history");
+            let tb = sequence.time_base();
+            let title = Clip::new_basic_title("Clipboard", "Arial", tt(10, tb), tt(40, tb))
+                .expect("self-contained title");
+            let clip_id = title.id;
+            let track_id = sequence.video_tracks[0].id;
+            sequence.video_tracks[0].add_clip(title).expect("title clip");
+            let mut state = AppState::new();
+            state.test_set_sequence(Some(sequence));
+            let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
+            state.selection.selected_clips = vec![selection];
+            state.dispatch_action(mondrian_editor_state::Action::Copy).expect("copy clips");
+            assert_eq!(state.active_clipboard_kind(), Some(AppClipboardKind::Clips));
+            let times = [tt(4, tb), tt(8, tb), tt(12, tb)];
+            for (time, value) in times.into_iter().zip([0.2, 0.7, 0.3]) {
+                state
+                    .mutate_clip_property(
+                        selection,
+                        PropertyMutation::SetKeyframe {
+                            path: Transform2D::OPACITY_PATH.into(),
+                            keyframe: mondrian_core::automation::Keyframe::from_preset(
+                                time,
+                                PropertyValue::Float(value),
+                                mode,
+                            ),
+                        },
+                        "seed group",
+                    )
+                    .expect("seed constrained key");
+            }
+            state.set_animation_keyframe_selection(
+                times
+                    .into_iter()
+                    .map(|time| opacity_keyframe_selection(&state, clip_id, time))
+                    .collect(),
+            );
+            let original = state.active_sequence().expect("original").clone();
+            let original_property = state
+                .clip_snapshot(selection)
+                .expect("title")
+                .property_bag()
+                .expect("bag")
+                .property(Transform2D::OPACITY_PATH)
+                .expect("opacity")
+                .clone();
+            let original_keys: Vec<_> = times
+                .into_iter()
+                .map(|time| original_property.keyframe_at(time).expect("original key"))
+                .collect();
+            let generation = state.project_author_generation();
+            state
+                .dispatch_action(mondrian_editor_state::Action::Copy)
+                .expect("copy key group");
+            assert_eq!(
+                state.active_clipboard_kind(),
+                Some(AppClipboardKind::AnimationKeyframes)
+            );
+            assert!(state.has_animation_clipboard() && !state.has_clip_clipboard());
+            assert_eq!(state.project_author_generation(), generation);
+            state.active_sequence_mut_uncommitted().expect("lock fixture").video_tracks[0]
+                .is_locked = true;
+            let locked = state.active_sequence().expect("locked source").clone();
+            let history = state.authoring_history().expect("history").diagnostics();
+            assert!(!state.can_paste_from_app_clipboard());
+            state
+                .dispatch_action(mondrian_editor_state::Action::Paste)
+                .expect_err("locked key target refuses paste");
+            assert!(state
+                .active_sequence()
+                .expect("refused source")
+                .author_state_eq_ignoring_revision(&locked));
+            assert_eq!(state.project_author_generation(), generation);
+            assert_eq!(
+                state.authoring_history().expect("history").diagnostics(),
+                history
+            );
+            assert!(state.has_animation_clipboard() && !state.has_clip_clipboard());
+            state.active_sequence_mut_uncommitted().expect("unlock fixture").video_tracks[0]
+                .is_locked = false;
+            state.seek(26).expect("paste at clip-local frame sixteen");
+            state
+                .dispatch_action(mondrian_editor_state::Action::Paste)
+                .expect("paste group");
+            assert_eq!(state.project_author_generation(), generation + 1);
+            let edited = state.active_sequence().expect("edited").clone();
+            let bag = state.clip_snapshot(selection).expect("title").property_bag().expect("bag");
+            let property = bag.property(Transform2D::OPACITY_PATH).expect("opacity");
+            for (source, frame) in original_keys.iter().zip([16, 20, 24]) {
+                let key = property.keyframe_at(tt(frame, tb)).expect("pasted group key");
+                assert_ne!(key.id, source.id);
+                assert_eq!(key.value, source.value);
+                assert_eq!(
+                    mondrian_core::automation::interpolation_mode_from_keyframe(
+                        key.interp_in,
+                        key.interp_out,
+                        key.temporal_flags,
+                    ),
+                    mode
+                );
+            }
+            assert!(state.undo_timeline().expect("single paste Undo"));
+            assert!(state
+                .active_sequence()
+                .expect("undone")
+                .author_state_eq_ignoring_revision(&original));
+            let directory = tempfile::tempdir().expect("archives");
+            let undone_path = directory.path().join("关键帧粘贴撤销🙂.mdp");
+            state.save_project_file_as(undone_path.clone()).expect("save undone");
+            assert!(state.can_redo_action());
+            let mut reopened = AppState::new();
+            reopened.open_project_file(undone_path).expect("fresh undone reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("saved original")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            assert_eq!(reopened.active_clipboard_kind(), None);
+            drop(reopened);
+            assert!(state.redo_timeline().expect("Redo after save"));
+            assert!(state
+                .active_sequence()
+                .expect("redone")
+                .author_state_eq_ignoring_revision(&edited));
+            let edited_path = directory.path().join("关键帧粘贴重做🙂.mdp");
+            state.save_project_file_as(edited_path.clone()).expect("save edited");
+            drop(state);
+            let mut reopened = AppState::new();
+            reopened.open_project_file(edited_path).expect("fresh edited reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("saved edited")
+                .author_state_eq_ignoring_revision(&edited));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            assert_eq!(reopened.active_clipboard_kind(), None);
+        }
+    }
+
+    #[test]
     fn dispatch_clipboard_actions_reject_missing_selection_or_clipboard() {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
 
@@ -8280,7 +8490,7 @@ mod tests {
         let pasted = clips.iter().find(|clip| clip.id != clip_id).expect("pasted clip");
         assert_eq!(pasted.position, tt(50, tb));
         assert_eq!(pasted.duration, tt(20, tb));
-        assert_eq!(state.active_clipboard_kind, Some(AppClipboardKind::Clips));
+        assert_eq!(state.active_clipboard_kind(), Some(AppClipboardKind::Clips));
         assert_eq!(
             state.selection.selected_clips,
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id: pasted.id }]
@@ -8308,7 +8518,7 @@ mod tests {
         assert!(state.selection.selected_mask.is_none());
         assert!(state.animation_selection.active_property.is_none());
         assert!(state.has_clip_clipboard());
-        assert_eq!(state.active_clipboard_kind, Some(AppClipboardKind::Clips));
+        assert_eq!(state.active_clipboard_kind(), Some(AppClipboardKind::Clips));
         assert!(state.can_undo_action());
     }
 
@@ -8328,7 +8538,7 @@ mod tests {
         let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].clips.len(), 1);
         assert!(!state.has_clip_clipboard());
-        assert_eq!(state.active_clipboard_kind, None);
+        assert_eq!(state.active_clipboard_kind(), None);
         assert!(!state.can_undo_action());
     }
 

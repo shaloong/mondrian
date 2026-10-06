@@ -18,35 +18,40 @@ impl AppState {
 
     /// Whether `Paste` can apply the currently active app clipboard to the active target.
     pub fn can_paste_from_app_clipboard(&self) -> bool {
-        let can_paste_animation = self.has_animation_clipboard()
-            && self.primary_selected_clip().is_some_and(|selection| {
-                self.active_sequence()
-                    .and_then(|seq| seq.clip_track_location(selection.clip_id))
-                    .is_some_and(|location| !location.is_locked)
-            });
-        let can_paste_clips = self.active_sequence().is_some_and(|seq| {
-            self.clip_clipboard.as_ref().is_some_and(|clipboard| {
+        match &self.clipboard {
+            Some(AppClipboard::AnimationKeyframes(clipboard)) => {
                 !clipboard.entries.is_empty()
-                    && validate_clip_clipboard_targets(seq, &clipboard.entries).is_ok()
-            })
-        });
-        match self.active_clipboard_kind {
-            Some(AppClipboardKind::AnimationKeyframes) => can_paste_animation || can_paste_clips,
-            Some(AppClipboardKind::Clips) => can_paste_clips,
-            None => can_paste_animation || can_paste_clips,
+                    && self.primary_selected_clip().is_some_and(|selection| {
+                        self.active_sequence()
+                            .and_then(|seq| seq.clip_track_location(selection.clip_id))
+                            .is_some_and(|location| !location.is_locked)
+                    })
+            }
+            Some(AppClipboard::Clips(clipboard)) => {
+                !clipboard.entries.is_empty()
+                    && self.active_sequence().is_some_and(|seq| {
+                        validate_clip_clipboard_targets(seq, &clipboard.entries).is_ok()
+                    })
+            }
+            None => false,
         }
     }
 
+    /// Kind of the sole current clipboard value, derived without separate state.
+    pub fn active_clipboard_kind(&self) -> Option<AppClipboardKind> {
+        match self.clipboard.as_ref()? {
+            AppClipboard::AnimationKeyframes(_) => Some(AppClipboardKind::AnimationKeyframes),
+            AppClipboard::Clips(_) => Some(AppClipboardKind::Clips),
+        }
+    }
+
+    /// Whether the current clipboard contains timeline clips.
     pub fn has_clip_clipboard(&self) -> bool {
-        self.clip_clipboard
-            .as_ref()
-            .map(|clipboard| !clipboard.entries.is_empty())
-            .unwrap_or(false)
+        matches!(&self.clipboard, Some(AppClipboard::Clips(clipboard)) if !clipboard.entries.is_empty())
     }
 
     pub fn copy_selected_clips_to_clipboard(&mut self) -> mondrian_core::Result<bool> {
         let Some(seq) = self.active_sequence() else {
-            self.clip_clipboard = None;
             return Ok(false);
         };
 
@@ -59,15 +64,15 @@ impl AppState {
         let entries = collect_clip_clipboard_entries(seq, &selected_ids)?;
         let audio_transitions = collect_clipboard_audio_transitions(seq, &entries)?;
         let video_transitions = collect_clipboard_video_transitions(seq, &entries)?;
-        self.clip_clipboard = if entries.is_empty() {
-            None
-        } else {
-            Some(ClipClipboard { entries, audio_transitions, video_transitions })
-        };
-        if self.has_clip_clipboard() {
-            self.active_clipboard_kind = Some(AppClipboardKind::Clips);
+        if entries.is_empty() {
+            return Ok(false);
         }
-        Ok(self.has_clip_clipboard())
+        self.clipboard = Some(AppClipboard::Clips(ClipClipboard {
+            entries,
+            audio_transitions,
+            video_transitions,
+        }));
+        Ok(true)
     }
 
     fn selected_clip_clipboard_entries(
@@ -121,11 +126,13 @@ impl AppState {
             .collect::<Vec<_>>();
         let audio_transitions = collect_clipboard_audio_transitions(seq, &entries)?;
         let video_transitions = collect_clipboard_video_transitions(seq, &entries)?;
-        self.clip_clipboard = Some(ClipClipboard { entries, audio_transitions, video_transitions });
-        self.active_clipboard_kind = Some(AppClipboardKind::Clips);
-
         let removed = self.remove_clips_bulk(&selections, false)?;
         if removed > 0 {
+            self.clipboard = Some(AppClipboard::Clips(ClipClipboard {
+                entries,
+                audio_transitions,
+                video_transitions,
+            }));
             self.clear_selection();
         }
         Ok(removed)
@@ -140,7 +147,7 @@ impl AppState {
         &mut self,
         timeline_frame: i64,
     ) -> mondrian_core::Result<usize> {
-        let Some(clipboard) = self.clip_clipboard.clone() else {
+        let Some(AppClipboard::Clips(clipboard)) = self.clipboard.clone() else {
             return Ok(0);
         };
         let sequence = self.active_sequence().ok_or_else(|| {
