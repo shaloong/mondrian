@@ -68,9 +68,61 @@ Apply is disabled and restoration of background focus. Full UI widgets passed
 **1100 passed, 0 failed, 0 ignored** (310.02 s). Strict workspace, all-target,
 all-feature Clippy with `-D warnings` passed in 2 min 41 s; fmt and diff checks
 passed. The clean native/output evidence below belongs to its named historical
-source and will be renewed separately for this command routing implementation.
+source; the clean ee310cc qualification below renews it for this implementation.
 Audio curve clipboard, read-only curve selection, group pointer interactions and
 the broader professional workflow matrix remain open in the overall goal.
+
+## Clean ee310cc command routing, modal, resource and LUT acceptance
+
+Clean production `ee310cc3868c146e50f2eea07c5122ff6281d3fe` was rebuilt and
+qualified on 2026-10-07. The actual product and Golden build passed in **559227 ms**.
+Complete Golden passed **3/3**, all seven stages each, distinct project IDs and
+natural exit 0 with no forced exits. Process elapsed times were **121370, 124161
+and 135105 ms**. Starting and ending source were identical and clean, with stable
+attestation and baseline eligibility. Build/process timeouts remained 3600/1800 s.
+
+Every final H.264 export/reimport retained maximum channel error **4/255** and
+**0 GPU output CPU fallbacks**. Encoder handoff was `cpu_rawvideo_pipe`; this
+qualifies the executed output contract without a wider performance claim.
+
+| Explicit source-bound gate | Executed result |
+| --- | --- |
+| EventRouter modal containment | 1 passed, 0 failed, 0 ignored; 0.00 s |
+| Native resource paths, cancellation, timeout and retry | 5 passed, 0 failed, 0 ignored; 8.31 s |
+| App modal Tab and disabled Apply traversal | 16 passed, 0 failed, 0 ignored; 24.45 s |
+| Atomic resource drafts, real cube Undo/save/reopen | 103 passed, 0 failed, 5 ignored; 24.78 s |
+| Native OpenFX group interpolation/history/queries/output | 1 passed, 0 failed, 0 ignored; 5.39 s |
+| Native OpenFX group time/history/queries/output | 1 passed, 0 failed, 0 ignored; 5.60 s |
+| Native OpenFX group value/history/queries/output | 1 passed, 0 failed, 0 ignored; 5.53 s |
+| Native CLAP/VST3 group interpolation/Undo/Unicode reopen/output | 2 passed, 0 failed, 0 ignored; 37.67 s |
+| CLAP sample-accurate event ranges | 1 passed, 0 failed, 0 ignored; 0.89 s |
+| VST3 linear parameter queues | 1 passed, 0 failed, 0 ignored; 1.43 s |
+| VST3 state restoration and isolated-worker audio | 1 passed, 0 failed, 0 ignored; 1.07 s |
+| Native CLAP/VST3 preview execution | 2 passed, 0 failed, 0 ignored; 2.17 s |
+
+The resource gate's five ignored cases were explicitly executed by the native
+resource gate. Filters overlap; their counts are not a count of unique tests.
+All twelve filters required positive exact execution counts. Product and all five
+used plugin binaries retained identical SHA256 hashes through the qualification.
+Owned fixtures exercise their documented SDK event/queue contracts; external
+examples retain their static reference scope. Broader vendor, bus, editor,
+platform and performance matrices remain separate work in the active full goal.
+
+Qualified SHA256 identities:
+
+- Product: `CBD2C6B00A93BF3A863EFDAE602CBFED383BCB4B3B7347F82EC6F21F4FAE0463`
+- Golden: `BDF39466A0801F5331533640FC896174E75679712A913FE4CB4762FA72FCAF90`
+- clack_plugin_gain.dll: `171222FFE85360DBD5BDC8791073FFE7603D178E93118DFB7E15B42B1891039C`
+- mondrian_clap_sample_gain_fixture.dll: `CB2FA1B4956CEDBDA4BBAA4B24EFA2D16924820C7C7FCEB4E4881633F21FD687`
+- SessionProbe.ofx: `BA8734FE2FC3CEF93D0973415B8C4FEE64B1A1C0CEA9ECDBD409B2401781978A`
+- mondrian_vst3_stateful_gain_fixture.dll: `523E714760F9BC47805B3EDE7C7FC4399AEF7D1BDEEF1DCC3832B6DA50D9907F`
+- Gain.vst3: `CBCA9C3E9ED68554A5877889A81264D5C4910DEE38FCF02706272B0BB99F1AF5`
+
+Consecutive report:
+`E:/dev/mondrian/target/validation/nle-backlog-complete/20261006T230013Z-complete-golden-838960f6/complete-golden-consecutive-report.json`.
+This is the latest executed native/output scope and supersedes the historical
+26696ef scope below for these cases. The full changed-library and strict Clippy
+results above qualify the same production implementation. No push was performed.
 
 ## Clean 26696ef modal resource LUT and native plugin acceptance
 
@@ -1675,8 +1727,8 @@ scopes for these executed cases. Full App2579/0/68 ignored, final Curve100/0/0
 ignored, strict workspace Clippy, fmt and diff passed before the production
 commit. No push was performed.
 
-The complete goal remains active. In addition to the other professional matrices,
-raw canonical clipboard precision still needs direct channel-bit qualification:
+At this historical source, raw canonical clipboard precision still needed direct
+channel-bit qualification (subsequently repaired and qualified in b8460102):
 current complete-property capture uses `PropertyValue` readback, whose Float
 representation is f32 while canonical author channels retain f64. The accepted
 focused .25/.5/.75 fixture proves those values and handles, not arbitrary raw
