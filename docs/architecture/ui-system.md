@@ -3910,3 +3910,38 @@ state or introducing a second animation interpretation.
 ### Focused curve Cut
 
 Curve clipboard commands explicitly carry Copy, Cut or Paste plus the current complete stable selection. Exact Ctrl/Cmd+X is consumed by its focused owner, including empty selection and active drafts. Numeric intrinsic/effect curve menus dispatch the same closed owner-qualified Cut request. Capture preparation is pure: the App resolves every raw key first, then removes the group in one author transaction and publishes the sole clipboard only after success. Track locks, stale owners/keys and incomplete selections retain clipboard and history. Removed selection entries are cleared only for the addressed property; other parameter selections remain intact. Undo and saved Redo use ordinary author history; clipboard content remains transient and is cleared on fresh project reopen.
+
+### Command menus and editing focus
+
+Root Cut/Copy/Paste rows carry a semantic `EditCommand`, rather than dispatching
+an application action before identifying its editing owner. `EventRouter`
+suspends the original Widget focus while a menu-bar Dropdown receives input.
+Opening command chrome preserves the editor's selection and text draft. Closing
+or cancelling restores that owner; switching to another control, losing window
+focus or entering a modal ends the appropriate original editing session. Active
+pointer drafts still receive their ordinary focus-loss termination.
+
+The router applies menu side-effect requests after the originating widget call,
+then invokes the original control's command implementation. Missing owners and
+owners outside the active modal scope refuse without an application fallback.
+CurveEditor resolves complete stable keys through the existing closed App command;
+TextInput and MultilineTextInput reuse their platform clipboard and text editing implementations. All
+consume owned refusals, including empty selection and failed clipboard writes.
+Controls without an owned command retain the application's authoring path.
+Resolved global shortcut actions use this same seam, including user overrides.
+
+Control-owned availability is a transient presentation projection into semantic
+menu rows. Painting, keyboard navigation and activation use the same effective
+readiness. This projection stores no clipboard content or project interpretation;
+author mutations still validate the fresh exact owner and commit atomically.
+
+Menu commands use one typed request slot. Non-clipboard menu actions and resolved
+global shortcut actions confirm the original control's pending input before
+dispatch, so a save snapshot observes confirmed text. Cancellation preserves the
+draft without publishing author edits. Suspending a text editor cancels provisional
+IME preedit before disabling native IME; confirmed draft text remains intact.
+
+Multiline command availability also preserves read-only semantics: selected text
+can be copied, while Cut and Paste are owned refusals. Both text widgets reuse
+their existing editing commands and local history rather than interpreting menu
+commands through application Clip actions.

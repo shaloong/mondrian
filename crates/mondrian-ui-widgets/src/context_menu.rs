@@ -326,6 +326,7 @@ impl ContextMenu {
     fn apply_activation(&mut self, activation: MenuItemCommand, ctx: &mut EventContext) {
         match activation {
             MenuItemCommand::Action(action) => (ctx.dispatch)(action),
+            MenuItemCommand::Focused(command) => ctx.request_edit_command(command),
             MenuItemCommand::Local(command) => self.local_command = Some(command),
             MenuItemCommand::None => {}
         }
@@ -560,7 +561,7 @@ impl Widget for ContextMenu {
                 item.icon.as_ref(),
                 reserve_icon_lane,
                 MenuRowPaint {
-                    enabled: item.enabled,
+                    enabled: item.is_enabled(),
                     active: item.checked,
                     hovered: self.hover_depth.is_some_and(|(d, idx)| d == 0 && idx == i)
                         || self.submenu_chain.first() == Some(&i),
@@ -623,7 +624,7 @@ impl Widget for ContextMenu {
                     child.icon.as_ref(),
                     false,
                     MenuRowPaint {
-                        enabled: child.enabled,
+                        enabled: child.is_enabled(),
                         active: child.checked,
                         hovered,
                     },

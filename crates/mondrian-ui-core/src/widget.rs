@@ -208,12 +208,57 @@ impl AccessibilityNode {
     }
 }
 
+/// A semantic clipboard command addressed to the original editing control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditCommand {
+    /// Copy and remove the selected content.
+    Cut,
+    /// Copy the selected content.
+    Copy,
+    /// Insert clipboard content into the editing control.
+    Paste,
+}
+
+impl EditCommand {
+    /// All commands in availability projection order.
+    pub const ALL: [Self; 3] = [Self::Cut, Self::Copy, Self::Paste];
+
+    /// Index into a command availability projection.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Cut => 0,
+            Self::Copy => 1,
+            Self::Paste => 2,
+        }
+    }
+
+    /// The editor action used when a control does not own this command.
+    pub const fn action(self) -> &'static Action {
+        match self {
+            Self::Cut => &Action::Cut,
+            Self::Copy => &Action::Copy,
+            Self::Paste => &Action::Paste,
+        }
+    }
+}
+
+/// A single command issued by menu chrome after its widget event completes.
+#[derive(Debug, Clone)]
+pub enum MenuCommand {
+    /// Resolve against the original editing control.
+    Edit(EditCommand),
+    /// Confirm pending editor input before dispatching the application action.
+    Action(Action),
+}
+
 /// Side-effect requests emitted by widgets while handling an input event.
 ///
 /// Widgets stay platform independent: they record intent here, and the app or
 /// event router decides how to apply it to winit/the OS.
 #[derive(Debug, Clone, Default)]
 pub struct EventRequests {
+    /// Execute against the editing control after dismissing command chrome.
+    pub menu_command: Option<MenuCommand>,
     pub pointer_capture: Option<PointerCaptureRequest>,
     pub ime: Option<ImeRequest>,
     pub cursor: Option<CursorRequest>,
@@ -277,6 +322,16 @@ pub struct EventContext<'a> {
 }
 
 impl EventContext<'_> {
+    /// Request a semantic command without changing its editing owner.
+    pub fn request_edit_command(&mut self, command: EditCommand) {
+        self.requests.menu_command = Some(MenuCommand::Edit(command));
+    }
+
+    /// Confirm pending editor input before dispatching a menu action.
+    pub fn request_menu_action(&mut self, action: Action) {
+        self.requests.menu_command = Some(MenuCommand::Action(action));
+    }
+
     pub fn request_pointer_capture(&mut self, widget: WidgetId) {
         self.requests.request_pointer_capture(widget);
     }
@@ -495,6 +550,30 @@ pub trait Widget {
     /// 处理输入事件。
     /// 返回 `Handled` 则停止冒泡，`Ignored` 则继续向父级传递。
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult;
+
+    /// Whether this is command chrome that temporarily suspends editing focus.
+    fn is_command_menu(&self) -> bool {
+        false
+    }
+
+    /// Control-owned availability; `None` uses the application domain's fallback.
+    fn edit_command_available(&self, _command: EditCommand) -> Option<bool> {
+        None
+    }
+
+    /// Execute a semantic command. An owned refusal must return `Handled`.
+    fn edit_command(&mut self, _command: EditCommand, _ctx: &mut EventContext) -> EventResult {
+        EventResult::Ignored
+    }
+
+    /// Project the editing owner's availability into command chrome.
+    fn set_edit_command_availability(&mut self, availability: [Option<bool>; 3]) {
+        for index in 0..self.child_count() {
+            if let Some(child) = self.child_mut(index) {
+                child.set_edit_command_availability(availability);
+            }
+        }
+    }
 
     /// Commit pending input before a container submits its form.
     ///

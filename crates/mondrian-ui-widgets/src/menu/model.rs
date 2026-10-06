@@ -199,6 +199,8 @@ pub enum MenuItemKind {
 pub enum MenuItemCommand {
     /// Dispatch an editor/app action.
     Action(Action),
+    /// Execute against the original editing control through the event router.
+    Focused(mondrian_ui_core::widget::EditCommand),
     /// Report a widget-local command to the owning control.
     Local(String),
     /// No executable command. Used by separators and submenu parents.
@@ -219,9 +221,21 @@ pub struct MenuItem {
     pub icon: Option<VectorIcon>,
     pub shortcut: Option<String>,
     pub checked: bool,
+    /// Transient control-owned availability; `None` uses the application model.
+    pub context_enabled: Option<bool>,
 }
 
 impl MenuItem {
+    /// Create a semantic clipboard command for the original editing control.
+    pub fn focused(
+        label: impl Into<String>,
+        command: mondrian_ui_core::widget::EditCommand,
+    ) -> Self {
+        let mut item = Self::new(label, command.action().clone());
+        item.command = MenuItemCommand::Focused(command);
+        item
+    }
+
     pub fn new(label: impl Into<String>, action: impl Into<Option<Action>>) -> Self {
         let label = label.into();
         match action.into() {
@@ -234,6 +248,7 @@ impl MenuItem {
                 icon: None,
                 shortcut: None,
                 checked: false,
+                context_enabled: None,
             },
             None => Self::inert(label),
         }
@@ -251,6 +266,7 @@ impl MenuItem {
             icon: None,
             shortcut: None,
             checked: false,
+            context_enabled: None,
         }
     }
 
@@ -265,6 +281,7 @@ impl MenuItem {
             icon: None,
             shortcut: None,
             checked: false,
+            context_enabled: None,
         }
     }
 
@@ -282,6 +299,7 @@ impl MenuItem {
             icon: None,
             shortcut: None,
             checked: false,
+            context_enabled: None,
         }
     }
 
@@ -296,6 +314,7 @@ impl MenuItem {
             icon: None,
             shortcut: None,
             checked: false,
+            context_enabled: None,
         }
     }
 
@@ -340,7 +359,12 @@ impl MenuItem {
     }
 
     pub fn is_activatable(&self) -> bool {
-        self.enabled && !self.is_separator()
+        self.is_enabled() && !self.is_separator()
+    }
+
+    /// Effective readiness shared by painting, navigation and activation.
+    pub fn is_enabled(&self) -> bool {
+        self.context_enabled.unwrap_or(self.enabled)
     }
 
     pub fn is_submenu(&self) -> bool {
@@ -350,6 +374,7 @@ impl MenuItem {
     pub fn action(&self) -> Option<&Action> {
         match &self.command {
             MenuItemCommand::Action(action) => Some(action),
+            MenuItemCommand::Focused(command) => Some(command.action()),
             MenuItemCommand::Local(_) | MenuItemCommand::None => None,
         }
     }
@@ -357,7 +382,9 @@ impl MenuItem {
     pub fn local_command(&self) -> Option<&str> {
         match &self.command {
             MenuItemCommand::Local(command) => Some(command),
-            MenuItemCommand::Action(_) | MenuItemCommand::None => None,
+            MenuItemCommand::Action(_) | MenuItemCommand::Focused(_) | MenuItemCommand::None => {
+                None
+            }
         }
     }
 

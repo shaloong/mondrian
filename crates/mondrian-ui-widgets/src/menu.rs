@@ -421,7 +421,7 @@ impl Dropdown {
         let Some(activation) = menu_item_activation(&self.items[index]) else {
             return false;
         };
-        apply_menu_activation(activation, ctx);
+        apply_menu_activation(activation, ctx, self.is_command_menu());
         self.close(ctx);
         true
     }
@@ -466,9 +466,16 @@ fn set_checked_recursive(items: &mut [MenuItem], action: &Action, checked: bool)
     }
 }
 
-fn apply_menu_activation(activation: MenuItemCommand, ctx: &mut EventContext) {
+fn apply_menu_activation(activation: MenuItemCommand, ctx: &mut EventContext, command_menu: bool) {
     match activation {
-        MenuItemCommand::Action(action) => (ctx.dispatch)(action),
+        MenuItemCommand::Action(action) => {
+            if command_menu {
+                ctx.request_menu_action(action);
+            } else {
+                (ctx.dispatch)(action);
+            }
+        }
+        MenuItemCommand::Focused(command) => ctx.request_edit_command(command),
         MenuItemCommand::Local(_) | MenuItemCommand::None => {}
     }
 }
@@ -492,6 +499,14 @@ impl Widget for Dropdown {
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         if !self.enabled {
+            if matches!(event, UiEvent::FocusLost) {
+                self.focused = false;
+                self.focus_visible = false;
+                if self.open {
+                    self.close(ctx);
+                }
+                return EventResult::Handled;
+            }
             if self.open {
                 self.close(ctx);
             }
@@ -500,6 +515,25 @@ impl Widget for Dropdown {
             return EventResult::Ignored;
         }
         if self.open {
+            if self.is_command_menu()
+                && let UiEvent::KeyDown { key, modifiers } = event
+                && (modifiers.ctrl ^ modifiers.meta)
+                && !modifiers.alt
+                && !modifiers.shift
+            {
+                use mondrian_ui_core::widget::EditCommand;
+                let command = match key {
+                    KeyCode::X => Some(EditCommand::Cut),
+                    KeyCode::C => Some(EditCommand::Copy),
+                    KeyCode::V => Some(EditCommand::Paste),
+                    _ => None,
+                };
+                if let Some(command) = command {
+                    self.close(ctx);
+                    ctx.request_edit_command(command);
+                    return EventResult::Handled;
+                }
+            }
             match event {
                 UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
                     if self.trigger_rect().contains(*position) {
@@ -549,7 +583,7 @@ impl Widget for Dropdown {
                                 && let Some(child) = children.get(sub_item)
                                 && let Some(activation) = menu_item_activation(child)
                             {
-                                apply_menu_activation(activation, ctx);
+                                apply_menu_activation(activation, ctx, self.is_command_menu());
                             }
                             self.close(ctx);
                             return EventResult::Handled;
@@ -564,7 +598,7 @@ impl Widget for Dropdown {
                             } else if let Some(activation) =
                                 menu_item_activation(&self.items[released])
                             {
-                                apply_menu_activation(activation, ctx);
+                                apply_menu_activation(activation, ctx, self.is_command_menu());
                                 self.close(ctx);
                             } else {
                                 self.pressed_index = None;
@@ -683,11 +717,6 @@ impl Widget for Dropdown {
                     self.focus_visible = source.is_focus_visible();
                     return EventResult::Handled;
                 }
-                UiEvent::FocusLost => {
-                    self.focused = false;
-                    self.focus_visible = false;
-                    return EventResult::Handled;
-                }
                 UiEvent::KeyDown {
                     key: KeyCode::Enter | KeyCode::Space | KeyCode::Down,
                     modifiers,
@@ -767,6 +796,24 @@ impl Widget for Dropdown {
 
     fn can_focus(&self) -> bool {
         self.enabled
+    }
+
+    fn is_command_menu(&self) -> bool {
+        self.trigger_style == DropdownTriggerStyle::MenuBar
+    }
+
+    fn set_edit_command_availability(&mut self, availability: [Option<bool>; 3]) {
+        fn project(items: &mut [MenuItem], availability: [Option<bool>; 3]) {
+            for item in items {
+                if let MenuItemCommand::Focused(command) = item.command {
+                    item.context_enabled = availability[command.index()];
+                }
+                if let MenuItemKind::Submenu { children } = &mut item.kind {
+                    project(children, availability);
+                }
+            }
+        }
+        project(&mut self.items, availability);
     }
 
     fn accessibility(&self) -> Option<AccessibilityNode> {

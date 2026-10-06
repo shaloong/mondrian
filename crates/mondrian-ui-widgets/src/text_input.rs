@@ -861,6 +861,42 @@ impl Widget for TextInput {
         self.bounds.contains(point)
     }
 
+    fn edit_command_available(
+        &self,
+        command: mondrian_ui_core::widget::EditCommand,
+    ) -> Option<bool> {
+        use mondrian_ui_core::widget::EditCommand;
+        Some(
+            self.enabled
+                && !self.composition.is_active()
+                && (command == EditCommand::Paste || self.has_selection()),
+        )
+    }
+
+    fn edit_command(
+        &mut self,
+        command: mondrian_ui_core::widget::EditCommand,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        use mondrian_ui_core::widget::EditCommand;
+        if self.edit_command_available(command) != Some(true) {
+            return EventResult::Handled;
+        }
+        let command = match command {
+            EditCommand::Cut => TextInputKeyCommand::Cut,
+            EditCommand::Copy => TextInputKeyCommand::Copy,
+            EditCommand::Paste => TextInputKeyCommand::Paste,
+        };
+        let before = self.edit.text.clone();
+        self.execute_key_command(command, ctx);
+        self.refresh_ime_area(ctx);
+        if self.edit.text != before {
+            self.dispatch_change(ctx);
+        }
+        ctx.request_repaint();
+        EventResult::Handled
+    }
+
     fn can_focus(&self) -> bool {
         self.enabled
     }
@@ -2183,6 +2219,59 @@ mod tests {
         assert_eq!(ti.text(), "hello");
         assert_eq!(ti.selection_byte_range(), Some((1, 4)));
         assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn semantic_clipboard_commands_preserve_unicode_and_refuse_failed_cut() {
+        use mondrian_ui_core::widget::EditCommand;
+        for fail in [false, true] {
+            let platform = if fail {
+                ClipboardPlatform::copy_failure()
+            } else {
+                ClipboardPlatform::with_text("🙂你好")
+            };
+            let mut input = TextInput::new("name").with_text("A🙂中B").on_change(change_action);
+            input.focused = true;
+            input.edit.selection_start = Some(1);
+            input.edit.cursor = 3;
+            let actions = RefCell::new(Vec::new());
+            let dispatch = |action| actions.borrow_mut().push(action);
+            let mut focus = DummyFocus;
+            let mut shortcut = DummyShortcut;
+            let mut tooltip = DummyTooltip;
+            let mut requests = EventRequests::default();
+            let mut ctx = EventContext {
+                focus: &mut focus,
+                shortcut: &mut shortcut,
+                tooltip: &mut tooltip,
+                dispatch: &dispatch,
+                platform: &platform,
+                requests: &mut requests,
+            };
+            assert_eq!(input.edit_command_available(EditCommand::Cut), Some(true));
+            assert_eq!(
+                input.edit_command(EditCommand::Cut, &mut ctx),
+                EventResult::Handled
+            );
+            if fail {
+                assert_eq!(input.text(), "A🙂中B");
+                assert_eq!(input.selection_byte_range(), Some((1, 8)));
+                assert!(actions.borrow().is_empty());
+            } else {
+                assert_eq!(input.text(), "AB");
+                assert_eq!(actions.borrow().len(), 1);
+                assert_eq!(input.edit_command_available(EditCommand::Cut), Some(false));
+                input.edit_command(EditCommand::Cut, &mut ctx);
+                assert_eq!(
+                    actions.borrow().len(),
+                    1,
+                    "empty Cut is owned without a Clip fallback"
+                );
+                input.edit_command(EditCommand::Paste, &mut ctx);
+                assert_eq!(input.text(), "A🙂你好B");
+                assert_eq!(actions.borrow().len(), 2);
+            }
+        }
     }
 
     #[test]

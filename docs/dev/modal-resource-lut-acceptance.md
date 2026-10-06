@@ -24,8 +24,53 @@ Final App all-feature library suite: **2585 passed, 0 failed, 68 ignored**,
 this is the module filter, not the entire widgets suite. Strict workspace,
 all-target, all-feature Clippy with `-D warnings` passed in 2 min 32 s.
 The clean-source qualification below now includes this Cut implementation.
-Root Edit menu focus,
-audio clipboard and read-only interaction remain open in the overall goal.
+The root Edit menu follow-up is described below; audio clipboard and read-only
+curve interaction remain open in the overall goal.
+
+## Root command menus and text editor ownership
+
+A real Host/EventRouter regression opened Edit after selecting visual curve keys,
+clicked Cut and observed the owning Clip disappear (0 passed, 1 failed, 2.39 s).
+Root Cut/Copy/Paste now carry typed semantic requests. The router preserves the
+original editor while menu chrome receives focus, projects its command readiness,
+and executes its owned command after closing the menu. Missing, disabled and
+out-of-modal owners refuse without falling through to Clip operations. Global
+shortcut overrides share this route; no clipboard payload or author state is
+cached in the menu.
+
+The six actual Host cases cover row Cut, standard and customized shortcuts,
+Copy/Paste with fresh IDs and exact complete channels, cancellation and empty
+selection. Successful edits retain the Clip, advance one author generation and
+are restored by one Undo. Cancellation retains selection, clipboard and history.
+
+Two further runtime regressions caught Save before pending text confirmation
+(0 passed, 1 failed, 1.84 s) and live IME preedit after menu cancellation
+(0 passed, 1 failed, 1.94 s). Non-clipboard requests now confirm the original
+editor before dispatch; opening command chrome cancels provisional IME before
+disabling it and preserves confirmed draft text. Save and cancellation regressions
+use actual text components, Dropdowns and EventRouter.
+
+The actual multiline text regression initially emitted Clip Cut when the platform
+clipboard write failed (0 passed, 1 failed, 1.82 s). MultilineTextInput now invokes
+its existing text commands, consumes owned refusals and preserves Unicode text on
+failed writes. Read-only fields allow Copy, refuse Cut/Paste and keep disabled menu
+rows inactive. The four Save/IME/multiline cases passed together (4 passed,
+0 failed, 0 ignored, 7.24 s).
+
+The two standalone MenuBar tests now assert the exact typed About request and no
+premature dispatch. Their earlier expectation of direct dispatch contradicted the
+new confirmation seam; no production compatibility path was added.
+
+Current full source gates: App **2595 passed, 0 failed, 68 ignored** (349.44 s),
+UI core **84 passed, 0 failed, 0 ignored** and UI events **76 passed, 0 failed,
+0 ignored**. Both actual modal Tab tests passed, including traversal after resource
+Apply is disabled and restoration of background focus. Full UI widgets passed
+**1100 passed, 0 failed, 0 ignored** (310.02 s). Strict workspace, all-target,
+all-feature Clippy with `-D warnings` passed in 2 min 41 s; fmt and diff checks
+passed. The clean native/output evidence below belongs to its named historical
+source and will be renewed separately for this command routing implementation.
+Audio curve clipboard, read-only curve selection, group pointer interactions and
+the broader professional workflow matrix remain open in the overall goal.
 
 ## Clean 26696ef modal resource LUT and native plugin acceptance
 

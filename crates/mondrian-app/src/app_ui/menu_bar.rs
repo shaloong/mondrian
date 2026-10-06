@@ -293,8 +293,14 @@ fn menu_item_with_shortcut(item: MenuItem) -> MenuItem {
 
 fn command_menu_item(id: &str) -> MenuItem {
     let command = command_by_id(id).unwrap_or_else(|| panic!("unknown app UI command id {id}"));
-    menu_item_with_shortcut(MenuItem::new(command.menu_title, command.action()))
-        .with_message_id(format!("command-{}", id.replace('.', "-")))
+    use mondrian_ui_core::widget::EditCommand;
+    let item = match command.action() {
+        Action::Cut => MenuItem::focused(command.menu_title, EditCommand::Cut),
+        Action::Copy => MenuItem::focused(command.menu_title, EditCommand::Copy),
+        Action::Paste => MenuItem::focused(command.menu_title, EditCommand::Paste),
+        action => MenuItem::new(command.menu_title, action),
+    };
+    menu_item_with_shortcut(item).with_message_id(format!("command-{}", id.replace('.', "-")))
 }
 
 fn apply_shortcut_overrides_to_menu_items(
@@ -1410,9 +1416,16 @@ mod tests {
         click_menu(&mut menu, &mut ctx, help_trigger);
         assert_eq!(press_enter(&mut menu, &mut ctx), EventResult::Handled);
 
-        assert_eq!(dispatched.borrow().len(), 1);
-        let action = dispatched.borrow()[0].clone();
-        match &action {
+        assert!(
+            dispatched.borrow().is_empty(),
+            "router confirms the editor before dispatch"
+        );
+        let Some(mondrian_ui_core::widget::MenuCommand::Action(action)) =
+            ctx.requests.menu_command.as_ref()
+        else {
+            panic!("expected a confirmed menu action request");
+        };
+        match action {
             Action::Custom { namespace, name, .. } => {
                 assert_eq!(namespace, APP_SHELL_NAMESPACE);
                 assert_eq!(name, APP_SHELL_ABOUT);
@@ -1495,9 +1508,16 @@ mod tests {
         );
         assert_eq!(press_enter(&mut menu, &mut ctx), EventResult::Handled);
 
-        assert_eq!(dispatched.borrow().len(), 1);
-        let action = dispatched.borrow()[0].clone();
-        match &action {
+        assert!(
+            dispatched.borrow().is_empty(),
+            "router confirms the editor before dispatch"
+        );
+        let Some(mondrian_ui_core::widget::MenuCommand::Action(action)) =
+            ctx.requests.menu_command.as_ref()
+        else {
+            panic!("expected a confirmed menu action request");
+        };
+        match action {
             Action::Custom { namespace, name, .. } => {
                 assert_eq!(namespace, APP_SHELL_NAMESPACE);
                 assert_eq!(name, APP_SHELL_ABOUT);

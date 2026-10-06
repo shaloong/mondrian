@@ -1383,6 +1383,40 @@ impl Widget for MultilineTextInput {
         self.bounds.contains(point)
     }
 
+    fn edit_command_available(
+        &self,
+        command: mondrian_ui_core::widget::EditCommand,
+    ) -> Option<bool> {
+        use mondrian_ui_core::widget::EditCommand;
+        Some(
+            self.enabled
+                && !self.composition.is_active()
+                && match command {
+                    EditCommand::Copy => self.edit.selection().is_some(),
+                    EditCommand::Cut => !self.read_only && self.edit.selection().is_some(),
+                    EditCommand::Paste => !self.read_only,
+                },
+        )
+    }
+
+    fn edit_command(
+        &mut self,
+        command: mondrian_ui_core::widget::EditCommand,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        use mondrian_ui_core::widget::EditCommand;
+        if self.edit_command_available(command) != Some(true) {
+            return EventResult::Handled;
+        }
+        let command = match command {
+            EditCommand::Cut => MultilineTextKeyCommand::Cut,
+            EditCommand::Copy => MultilineTextKeyCommand::Copy,
+            EditCommand::Paste => MultilineTextKeyCommand::Paste,
+        };
+        self.execute_command(command, ctx);
+        EventResult::Handled
+    }
+
     fn can_focus(&self) -> bool {
         self.enabled
     }

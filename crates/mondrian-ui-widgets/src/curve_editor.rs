@@ -630,21 +630,30 @@ impl CurveEditor {
         {
             return false;
         }
-        if self.has_active_pointer_interaction() || self.gesture.is_some() {
-            return true;
-        }
-        let ids = self.selected_keyframe_ids();
         let command = match key {
             KeyCode::C => CurveClipboardCommand::Copy,
             KeyCode::X => CurveClipboardCommand::Cut,
             _ => CurveClipboardCommand::Paste,
         };
+        self.execute_clipboard(command, callback, ctx);
+        true
+    }
+
+    fn execute_clipboard(
+        &self,
+        command: CurveClipboardCommand,
+        callback: &CurveClipboardAction,
+        ctx: &mut EventContext,
+    ) {
+        if !self.enabled || self.has_active_pointer_interaction() || self.gesture.is_some() {
+            return;
+        }
+        let ids = self.selected_keyframe_ids();
         if (command == CurveClipboardCommand::Paste || !ids.is_empty())
             && let Some(action) = callback(command, &ids)
         {
             (ctx.dispatch)(action);
         }
-        true
     }
 
     fn open_selection_menu(&mut self, position: Point, keyboard: bool, ctx: &mut EventContext) {
@@ -2851,6 +2860,41 @@ impl Widget for CurveEditor {
 
     fn has_active_pointer_interaction(&self) -> bool {
         self.dragging.is_some() || self.tangent_drag.is_some() || self.panning.is_some()
+    }
+
+    fn edit_command_available(
+        &self,
+        command: mondrian_ui_core::widget::EditCommand,
+    ) -> Option<bool> {
+        use mondrian_ui_core::widget::EditCommand;
+        if !self.enabled
+            || self.on_clipboard.is_none()
+            || self.has_active_pointer_interaction()
+            || self.gesture.is_some()
+        {
+            return Some(false);
+        }
+        match command {
+            EditCommand::Copy | EditCommand::Cut => Some(!self.selected_keyframe_ids().is_empty()),
+            EditCommand::Paste => None,
+        }
+    }
+
+    fn edit_command(
+        &mut self,
+        command: mondrian_ui_core::widget::EditCommand,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        use mondrian_ui_core::widget::EditCommand;
+        let command = match command {
+            EditCommand::Copy => CurveClipboardCommand::Copy,
+            EditCommand::Cut => CurveClipboardCommand::Cut,
+            EditCommand::Paste => CurveClipboardCommand::Paste,
+        };
+        if let Some(callback) = &self.on_clipboard {
+            self.execute_clipboard(command, callback, ctx);
+        }
+        EventResult::Handled
     }
 
     fn can_focus(&self) -> bool {

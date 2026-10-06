@@ -5816,6 +5816,567 @@ mod tests {
     }
 
     #[test]
+    fn command_menu_save_commits_the_preserved_text_draft_before_saving() {
+        assert_command_menu_text_session(false);
+    }
+
+    #[test]
+    fn command_menu_cancel_preserves_text_draft_and_cancels_only_ime_preedit() {
+        assert_command_menu_text_session(true);
+    }
+
+    #[test]
+    fn command_menu_multiline_failed_cut_keeps_text_and_never_cuts_clip() {
+        assert_command_menu_multiline_cut(false);
+    }
+
+    #[test]
+    fn command_menu_multiline_read_only_refuses_cut_without_clip_fallback() {
+        assert_command_menu_multiline_cut(true);
+    }
+
+    fn assert_command_menu_multiline_cut(read_only: bool) {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        use mondrian_ui_core::types::KeyCode;
+        use mondrian_ui_core::widget::EditCommand;
+        use mondrian_ui_events::EventRouter;
+        use mondrian_ui_widgets::menu::{Dropdown, DropdownTriggerStyle, MenuItem};
+        use mondrian_ui_widgets::{FlexChild, FlexContainer, MultilineTextInput};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let text = "第一行🙂\nsecond line";
+        let input = MultilineTextInput::new("Title").with_text(text).read_only(read_only);
+        let input_id = input.id();
+        let menu = Dropdown::new("Edit", vec![MenuItem::focused("Cut", EditCommand::Cut)])
+            .with_trigger_style(DropdownTriggerStyle::MenuBar);
+        let menu_id = menu.id();
+        let mut root = FlexContainer::row(vec![
+            FlexChild::fixed(Box::new(input)),
+            FlexChild::fixed(Box::new(menu)),
+        ]);
+        TreeWalker::layout(&mut root, Rect::new(0.0, 0.0, 600.0, 200.0));
+        {
+            let mut tree = WidgetTreeView::new(&mut root);
+            tree.get_mut(input_id).expect("input").layout(Rect::new(0.0, 0.0, 200.0, 80.0));
+            tree.get_mut(menu_id).expect("menu").layout(Rect::new(220.0, 0.0, 80.0, 24.0));
+        }
+        let mut router = EventRouter::new(root.id());
+        let actions = std::cell::RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        for event in [
+            UiEvent::MouseDown {
+                position: Point::new(20.0, 16.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseUp {
+                position: Point::new(20.0, 16.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            UiEvent::MouseDown {
+                position: Point::new(230.0, 12.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseUp {
+                position: Point::new(230.0, 12.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+        ] {
+            router.route(event, &mut WidgetTreeView::new(&mut root), &dispatch);
+        }
+        assert!(
+            actions.borrow().is_empty(),
+            "failed text clipboard write cannot fall through to Clip Cut"
+        );
+        if read_only {
+            assert_eq!(
+                router.focused(),
+                Some(menu_id),
+                "disabled Cut cannot activate"
+            );
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::X, modifiers: Modifiers::ctrl() },
+                &mut WidgetTreeView::new(&mut root),
+                &dispatch,
+            );
+            assert!(
+                actions.borrow().is_empty(),
+                "read-only shortcut is an owned refusal"
+            );
+        }
+        assert_eq!(router.focused(), Some(input_id));
+        let tree = WidgetTreeView::new(&mut root);
+        let input = tree
+            .get(input_id)
+            .expect("input")
+            .as_any()
+            .expect("downcast")
+            .downcast_ref::<MultilineTextInput>()
+            .expect("MultilineTextInput");
+        assert_eq!(
+            input.text(),
+            text,
+            "failed clipboard write preserves Unicode text"
+        );
+        assert_eq!(
+            input.edit_command_available(EditCommand::Cut),
+            Some(!read_only),
+            "selection and read-only availability survive command chrome"
+        );
+    }
+
+    fn assert_command_menu_text_session(cancel_ime: bool) {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        use mondrian_ui_core::types::KeyCode;
+        use mondrian_ui_events::EventRouter;
+        use mondrian_ui_widgets::menu::{Dropdown, DropdownTriggerStyle, MenuItem};
+        use mondrian_ui_widgets::{FlexChild, FlexContainer, TextInput};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let committed = Action::Custom {
+            namespace: "test.editor".into(),
+            name: "commit-name".into(),
+            payload: serde_json::json!({"text": "after🙂"}),
+        };
+        let input = TextInput::new("Name").with_text("before").on_commit(|text| {
+            Some(Action::Custom {
+                namespace: "test.editor".into(),
+                name: "commit-name".into(),
+                payload: serde_json::json!({"text": text}),
+            })
+        });
+        let input_id = input.id();
+        let menu = Dropdown::new("File", vec![MenuItem::new("Save", Action::SaveProject)])
+            .with_trigger_style(DropdownTriggerStyle::MenuBar);
+        let menu_id = menu.id();
+        let mut root = FlexContainer::row(vec![
+            FlexChild::fixed(Box::new(input)),
+            FlexChild::fixed(Box::new(menu)),
+        ]);
+        TreeWalker::layout(&mut root, Rect::new(0.0, 0.0, 600.0, 200.0));
+        {
+            let mut tree = WidgetTreeView::new(&mut root);
+            tree.get_mut(input_id).expect("input").layout(Rect::new(0.0, 0.0, 200.0, 32.0));
+            tree.get_mut(menu_id).expect("menu").layout(Rect::new(220.0, 0.0, 80.0, 24.0));
+        }
+        let mut router = EventRouter::new(root.id());
+        let actions = std::cell::RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut events = vec![
+            UiEvent::MouseDown {
+                position: Point::new(20.0, 16.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseUp {
+                position: Point::new(20.0, 16.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            UiEvent::TextInput("after🙂".into()),
+            UiEvent::MouseDown {
+                position: Point::new(230.0, 12.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseUp {
+                position: Point::new(230.0, 12.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+        ];
+        if cancel_ime {
+            events.insert(4, UiEvent::ImePreedit("未确认".into()));
+        }
+        for event in events {
+            assert_eq!(
+                router.route(event, &mut WidgetTreeView::new(&mut root), &dispatch),
+                EventResult::Handled
+            );
+        }
+        assert!(
+            actions.borrow().is_empty(),
+            "opening chrome preserves the pending text session"
+        );
+        assert_eq!(router.focused(), Some(menu_id));
+        if cancel_ime {
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut WidgetTreeView::new(&mut root),
+                &dispatch,
+            );
+            assert_eq!(router.focused(), Some(input_id));
+            let tree = WidgetTreeView::new(&mut root);
+            let input = tree
+                .get(input_id)
+                .expect("input")
+                .as_any()
+                .expect("downcast")
+                .downcast_ref::<TextInput>()
+                .expect("TextInput");
+            assert_eq!(
+                input.text(),
+                "after🙂",
+                "confirmed draft survives menu cancel"
+            );
+            assert!(
+                !input.is_composing(),
+                "IME was disabled for command chrome; provisional preedit cannot remain live"
+            );
+            assert!(
+                actions.borrow().is_empty(),
+                "menu cancellation does not confirm the draft"
+            );
+            for event in [
+                UiEvent::MouseDown {
+                    position: Point::new(230.0, 12.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::MouseUp {
+                    position: Point::new(230.0, 12.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+            ] {
+                router.route(event, &mut WidgetTreeView::new(&mut root), &dispatch);
+            }
+        }
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut WidgetTreeView::new(&mut root),
+            &dispatch,
+        );
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[committed, Action::SaveProject],
+            "Save must observe the confirmed text before taking its author snapshot"
+        );
+        assert_eq!(router.focused(), Some(input_id));
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RootCurveMenuOperation {
+        CutClick,
+        CutShortcut,
+        CutCustomShortcut,
+        CopyPaste,
+        Cancel,
+        EmptyCut,
+    }
+
+    #[test]
+    fn root_edit_menu_cut_uses_original_focused_curve_owner() {
+        assert_root_curve_menu_operation(RootCurveMenuOperation::CutClick);
+    }
+
+    #[test]
+    fn root_edit_menu_shortcut_cuts_only_original_curve_keys() {
+        assert_root_curve_menu_operation(RootCurveMenuOperation::CutShortcut);
+    }
+
+    #[test]
+    fn root_edit_menu_custom_shortcut_keeps_the_original_curve_owner() {
+        assert_root_curve_menu_operation(RootCurveMenuOperation::CutCustomShortcut);
+    }
+
+    #[test]
+    fn root_edit_menu_copy_paste_preserves_exact_curve_owner_and_one_undo() {
+        assert_root_curve_menu_operation(RootCurveMenuOperation::CopyPaste);
+    }
+
+    #[test]
+    fn root_edit_menu_cancel_preserves_curve_selection_and_author_state() {
+        assert_root_curve_menu_operation(RootCurveMenuOperation::Cancel);
+    }
+
+    #[test]
+    fn root_edit_menu_empty_curve_cut_cannot_fall_through_to_clip() {
+        assert_root_curve_menu_operation(RootCurveMenuOperation::EmptyCut);
+    }
+
+    fn assert_root_curve_menu_operation(operation: RootCurveMenuOperation) {
+        use mondrian_core::automation::{Keyframe, PropertyMutation};
+        use mondrian_core::{PropertyHost, TimeScale};
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        use mondrian_ui_core::types::KeyCode;
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1600.0);
+        let mut state = workspace_app_state_with_timed_solid();
+        let sequence = state.active_sequence_mut_uncommitted().expect("fixture");
+        let track_id = sequence.video_tracks[0].id;
+        let clip = &mut sequence.video_tracks[0].clips[0];
+        let clip_id = clip.id;
+        let duration = clip.duration;
+        for (time, value) in [
+            (TimelineTime::ZERO, 0.25),
+            (
+                duration.checked_scale(TimeScale::new(1, 2).expect("half")).expect("middle"),
+                0.5,
+            ),
+            (duration, 0.75),
+        ] {
+            clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: mondrian_timeline::clip::Transform2D::OPACITY_PATH.into(),
+                keyframe: Keyframe::linear(time, mondrian_core::PropertyValue::Float(value)),
+            })
+            .expect("seed key");
+        }
+        state.selection.selected_clips =
+            vec![crate::app::SelectedClipRef { track_id, clip_id, is_video_track: true }];
+        let original = state.active_sequence().expect("original").clone();
+        let generation = state.project_author_generation();
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("root-menu-cut-owner"),
+        );
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let curve_id =
+            panel_curve_with_point_count(host.active_root(), PanelKind::Inspector, false, 3)
+                .expect("opacity curve");
+        let point = {
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let editor = tree
+                .get(curve_id)
+                .expect("curve")
+                .as_any()
+                .expect("downcast")
+                .downcast_ref::<mondrian_ui_widgets::CurveEditor>()
+                .expect("editor");
+            editor.point_position(editor.points()[1])
+        };
+        let pending = PendingUiActions::default();
+        let emitted = std::cell::RefCell::new(Vec::new());
+        let dispatch = |action: Action| {
+            emitted.borrow_mut().push(action.clone());
+            pending.push(action);
+        };
+        let mut router = EventRouter::new(host.active_root().id());
+        router.shortcut_manager_mut().register_global(
+            mondrian_ui_core::shortcut::ShortcutBinding::ctrl(KeyCode::K),
+            Action::Cut,
+        );
+        for event in [
+            UiEvent::MouseDown {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseUp {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+        ] {
+            router.route(
+                event,
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &dispatch,
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        }
+        if operation == RootCurveMenuOperation::EmptyCut {
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &dispatch,
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        }
+        let history_before = host
+            .app_state()
+            .authoring_history()
+            .expect("history")
+            .diagnostics()
+            .undo_entries;
+        fn edit_menu_id(widget: &dyn Widget) -> Option<mondrian_ui_core::WidgetId> {
+            if widget.accessibility().is_some_and(|node| {
+                node.role == mondrian_ui_core::widget::AccessibilityRole::Menu
+                    && matches!(node.name.as_deref(), Some("编辑") | Some("Edit"))
+            }) {
+                return Some(widget.id());
+            }
+            (0..widget.child_count()).find_map(|index| widget.child(index).and_then(edit_menu_id))
+        }
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let menu_id = edit_menu_id(host.active_root()).expect("real Edit menu trigger");
+        let menu_bounds = host.root().menu_bar_bounds_for_test();
+        let menu_point = {
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let menu = tree.get(menu_id).expect("Edit menu");
+            (menu_bounds.x.floor() as i32..(menu_bounds.x + menu_bounds.width).ceil() as i32)
+                .map(|x| Point::new(x as f32 + 0.5, menu_bounds.center().y))
+                .find(|point| menu.hit_test(*point))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "laid out semantic Edit trigger within {menu_bounds:?}, node {:?}",
+                        menu.accessibility()
+                    )
+                })
+        };
+        assert_eq!(router.focused(), Some(curve_id));
+        let theme = current_theme();
+        let spacing = &theme.spacing;
+        let cut_point = Point::new(
+            menu_point.x + spacing.menu_row_padding_x,
+            menu_bounds.y
+                + menu_bounds.height
+                + spacing.menu_popup_gap
+                + spacing.menu_popup_padding
+                + spacing.menu_item_height * 3.5,
+        );
+        drop(theme);
+        let click = |position| {
+            [
+                UiEvent::MouseDown {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::MouseUp {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+            ]
+        };
+        let mut events = click(menu_point).to_vec();
+        match operation {
+            RootCurveMenuOperation::CutClick => events.extend(click(cut_point)),
+            RootCurveMenuOperation::CutShortcut | RootCurveMenuOperation::EmptyCut => {
+                events.push(UiEvent::KeyDown { key: KeyCode::X, modifiers: Modifiers::ctrl() })
+            }
+            RootCurveMenuOperation::CutCustomShortcut => {
+                events.push(UiEvent::KeyDown { key: KeyCode::K, modifiers: Modifiers::ctrl() })
+            }
+            RootCurveMenuOperation::Cancel => {
+                events.push(UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() })
+            }
+            RootCurveMenuOperation::CopyPaste => {
+                events.push(UiEvent::KeyDown { key: KeyCode::C, modifiers: Modifiers::ctrl() });
+                events.extend(click(menu_point));
+                events.push(UiEvent::KeyDown { key: KeyCode::V, modifiers: Modifiers::ctrl() });
+            }
+        }
+        for event in events {
+            assert_eq!(
+                router.route(
+                    event,
+                    &mut WidgetTreeView::new(host.active_root_mut()),
+                    &dispatch
+                ),
+                EventResult::Handled,
+                "actual menu opening and activation: {operation:?}"
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            TreeWalker::layout(host.active_root_mut(), bounds);
+        }
+        assert_eq!(
+            router.focused(),
+            Some(curve_id),
+            "menu restores editing focus"
+        );
+        assert!(
+            !emitted
+                .borrow()
+                .iter()
+                .any(|action| matches!(action, Action::Cut | Action::Copy | Action::Paste)),
+            "a curve-owned command cannot fall through to generic Clip actions"
+        );
+        let sequence = host.app_state().active_sequence().expect("after Cut").clone();
+        let clip = sequence
+            .find_clip(clip_id)
+            .expect("focused curve Cut must retain its owning Clip");
+        let bag = clip.intrinsic_parameter_bag();
+        let keys = bag
+            .property(mondrian_timeline::clip::Transform2D::OPACITY_PATH)
+            .expect("opacity")
+            .channel(0)
+            .expect("channel")
+            .keyframes();
+        if matches!(
+            operation,
+            RootCurveMenuOperation::Cancel | RootCurveMenuOperation::EmptyCut
+        ) {
+            assert!(sequence.author_state_eq_ignoring_revision(&original));
+            assert_eq!(host.app_state().project_author_generation(), generation);
+            assert_eq!(host.app_state().active_clipboard_kind(), None);
+            assert_eq!(
+                host.app_state()
+                    .authoring_history()
+                    .expect("history")
+                    .diagnostics()
+                    .undo_entries,
+                history_before
+            );
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let curve = tree
+                .get(curve_id)
+                .expect("retained curve")
+                .as_any()
+                .expect("downcast")
+                .downcast_ref::<mondrian_ui_widgets::CurveEditor>()
+                .expect("curve");
+            let expected = if operation == RootCurveMenuOperation::Cancel {
+                3
+            } else {
+                0
+            };
+            assert_eq!(
+                curve.selected_keyframe_ids().len(),
+                expected,
+                "cancel retains the original local selection"
+            );
+            return;
+        }
+        if operation == RootCurveMenuOperation::CopyPaste {
+            assert_eq!(keys.len(), 3);
+            let source =
+                original.find_clip(clip_id).expect("original Clip").intrinsic_parameter_bag();
+            let source_keys = source
+                .property(mondrian_timeline::clip::Transform2D::OPACITY_PATH)
+                .expect("source")
+                .channel(0)
+                .expect("channel")
+                .keyframes();
+            for (pasted, source) in keys.iter().zip(source_keys) {
+                assert_ne!(pasted.id, source.id);
+                assert_eq!(pasted.time, source.time);
+                assert_eq!(pasted.value, source.value);
+                assert_eq!(pasted.interp_in, source.interp_in);
+                assert_eq!(pasted.interp_out, source.interp_out);
+                assert_eq!(pasted.temporal_flags, source.temporal_flags);
+            }
+        } else {
+            assert!(bag
+                .property(mondrian_timeline::clip::Transform2D::OPACITY_PATH)
+                .expect("opacity")
+                .channels()
+                .iter()
+                .all(|channel| channel.keyframes().is_empty()));
+        }
+        assert_eq!(
+            host.app_state().active_clipboard_kind(),
+            Some(crate::app::AppClipboardKind::AnimationKeyframes)
+        );
+        assert_eq!(host.app_state().project_author_generation(), generation + 1);
+        pending.push(Action::Undo);
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("one Undo")
+            .author_state_eq_ignoring_revision(&original));
+    }
+
+    #[test]
     fn focused_curve_paste_refresh_selects_new_group_and_preserves_keyboard_owner() {
         use mondrian_core::automation::{Keyframe, PropertyMutation};
         use mondrian_core::{PropertyHost, TimeScale};
