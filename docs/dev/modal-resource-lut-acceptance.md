@@ -375,7 +375,43 @@ production callers now share it instead of repeating its fields. Corrected
 whole-workspace/all-targets/all-features Clippy passed (3m17s), followed by affected
 audio App tests **134 passed / 0 failed / 7 ignored** and final fmt/diff checks.
 
-Fresh native/encoded qualification is pending on the committed source. Historical
-native results remain pinned to their original commit. Group movement/interpolation,
+Fresh native/encoded qualification now passes on production commit
+`99db114278986387ec81f227dfd4cb0256f4d5c3`. Group movement/interpolation,
 rubber-band selection, ambiguous same-Clip occurrences and broader plugin/platform
 qualification remain open; the overall NLE goal is active.
+
+### Native and encoded evidence for 99db114
+
+The first native invocation built successfully (1131214ms) but could not acquire
+a production logical Project lease: Windows access denied before rendering.
+Production uses the platform-owned LocalAppData authority namespace, independent
+of TEMP; the workspace sandbox did not permit this write. No active product
+process was present. Retrying with normal host execution permission, unchanged
+source and unchanged binaries, resolved admission without weakening any lock,
+identity, timeout or output assertion. The failed report remains retained at
+`target/validation/nle-backlog-complete/20261006T011959Z-complete-golden-3b0effdc/complete-golden-consecutive-report.json`.
+
+The qualified consecutive report is
+`target/validation/nle-backlog-complete/20261006T014046Z-complete-golden-97f32469/complete-golden-consecutive-report.json`.
+It records **3/3 passing rounds**, **baseline_eligible=true**, clean/stable source
+attestation, three different Project identities and natural exit in every round.
+Round durations: 123405, 120954 and 121013ms. Each round executes all seven
+contract stages. The color-media encoded/reimport maximum channel error is
+**4/255 in every round** and GPU output CPU fallback count is **0 in every round**.
+Frame transport is `cpu_rawvideo_pipe`; this is not a zero-copy or general
+performance qualification.
+
+Product worker SHA256:
+`2fff0b0f2af4775a04a56b3faa7b9e1edafa0a952da13170ac0e7fb6a29c8cf0`.
+Golden SHA256:
+`109bce8d4ceff6bd1b45aefabb13b4616b7b7072fb2740fa7ab48b06e030fa63`.
+Both match the initial successful build. Native follow-up gates: resource worker
+**5/0**, effect curve author edit/Undo/saved Redo/reopen/output **1/0**, modal
+**16/0**, resource workflow **103/0** (the five separately executed native worker
+cases remain ignored in this non-ignored resource filter), plus integer, dense
+curve and raw-float author history **1/0 each**. Final native identity attestation
+confirms the same source, same product hash and clean/stable worktree.
+
+Physical keyboard/file picker, high-DPI layouts and macOS remain separately
+unqualified. This validates the stated Windows contract paths, not the full
+vendor/plugin/platform matrix or completion of the overall NLE goal.
