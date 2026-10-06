@@ -3,9 +3,9 @@
 ## Qualification scope
 
 The latest clean-source native group/resource qualification is
-[d5ed1ae qualification](#clean-source-native-and-encoded-qualification-for-d5ed1ae).
+[ce3edfb qualification](#clean-source-native-and-encoded-qualification-for-ce3edfb).
 The latest complete encoded Golden is
-[d5ed1ae qualification](#clean-source-native-and-encoded-qualification-for-d5ed1ae).
+[ce3edfb qualification](#clean-source-native-and-encoded-qualification-for-ce3edfb).
 Source-level tests and native results qualify their named source and binary;
 they do not automatically cover later edits.
 The complete NLE goal remains active while the listed professional matrices are
@@ -976,3 +976,49 @@ selection. This removes the introduced quadratic preflight work; no latency or
 allocation benchmark is claimed. Current native/plugin/encoded output has not yet been
 qualified for this menu source. Group pointer/rubber-band and the broader full
 NLE vendor/platform/performance/i18n/tracking matrices remain open.
+
+
+## Clean-source native and encoded qualification for ce3edfb
+
+On 2026-10-06, source `ce3edfb51ac27476c7b35bd829405cdacb59afa2` was
+clean and unchanged through the product rebuild, twelve current acceptance
+filters and the complete three-round Golden. Product rebuild took 19m46s.
+Both Git author and committer are Shalom Wang; no push was made.
+
+| Identity | SHA256 |
+| --- | --- |
+| Product `mondrian.exe` | `37be9e8a545c84225b7c1fb43a7d0b7155fb2752ed97b99119e4be1c4e41dcba` |
+| Owned SessionProbe fixture | `fabf11ea8d81c2bf8f698d854b8bf4568597a4e11b26f5bd45d30bd124cebb5c` |
+| Golden executable | `22ef0cb2aee3a387fdac2f6fc71e232dfa5cb3b1c4db24f5de019404a4c7cb16` |
+
+The twelve filters passed: native group value and time (one each), actual group
+interpolation and value menu histories (one each), retained native window role
+(one), explicitly ignored resource supervision/native execution (five), native
+single-curve Undo/saved Redo/reopen/output (one), modal focus/input (16), resources
+(103; five ignored cases already executed separately), exact integer history,
+dense temporal history and raw Float history (one each). Filter counts overlap;
+they are not a sum of unique tests. These current results include pending Apply
+Tab/Shift+Tab containment, cancellation/stale/locked resource refusal, Unicode
+resource paths and archives, real LUT float pixels, live Redo after an undone save,
+and fresh reopened history. The menu-history filter covers complete selection
+interpolation through the actual EventRouter and author transaction; it does not
+claim a native interpolation-specific or native audio output probe.
+
+Complete Golden passed **3/3**, seven required stages per round, baseline eligible.
+The process elapsed times were 120278, 120271 and 119359ms. All three natural
+exits were 0, with no forced exit after the terminal report and distinct project
+identities. Source attestation starts and ends at ce3edfb, both clean and stable.
+Final H.264 decoded maximum channel error was **4/255** in every round; GPU
+output CPU fallback count was **0**. Encoding used the existing rawvideo handoff;
+this is not a zero-copy or throughput qualification.
+
+Aggregate receipt:
+`E:/dev/mondrian/target/validation/nle-backlog-complete/20261006T120747Z-complete-golden-5da120b3/complete-golden-consecutive-report.json`.
+The source-level App 2569, Curve Editor 85 and strict workspace Clippy gates are
+recorded immediately above. The complete NLE goal remains active: native group
+interpolation/audio, group pointer/rubber-band/copy/reset and wider vendor,
+platform, performance, tracking and i18n matrices still require work. An
+independent diagnostic on the actual compiled Timeline enum also reproduced
+acceptance of omitted native audio binary revision fields; that explicit-null
+contract gap is tracked for a source fix, without invalidating the named valid
+resource/output acceptance above.
