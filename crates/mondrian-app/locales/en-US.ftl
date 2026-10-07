@@ -955,7 +955,7 @@ export-color-health-summary = Color: { $verdict } / { $frames } frames / metadat
 
 # Runtime status bar and retained notification history
 status-ready = Ready
-status-history-title = Recent notifications
+status-history-title = Recent notifications · ↑/↓ · PgUp/PgDn · Home/End · Esc
 status-history-empty = No notifications
 status-history-accessibility = Recent notifications. Current status: { $status }
 status-export-pending = Export queued ({ $count })
@@ -1483,3 +1483,8 @@ curve-editor-clipboard-keyboard-help = { curve-editor-selection-keyboard-help } 
 
 curve-editor-read-only-keyboard-help = Read-only curve. Click to inspect points; Home/End and Ctrl/Cmd + Left/Right navigate. Ctrl/Cmd + wheel zooms; middle drag pans; Ctrl/Cmd + 0 resets the view.
 curve-editor-read-only-clipboard-keyboard-help = { curve-editor-read-only-keyboard-help } Shift or Ctrl/Cmd + click a key toggles selection; Ctrl/Cmd + A selects authored keys; Ctrl/Cmd + C copies. Editing is unavailable. Drag empty space to select; Shift adds, Ctrl/Cmd+Shift toggles; Escape restores the prior selection.
+status-history-accessibility-open = Recent notifications. Current status: { $status }. Showing { $first }–{ $last } of { $total }, newest first.
+    { $entries }
+    Up/Down: newer/older. Page Up/Down: previous/next page. Home/End: newest/oldest. Escape: close.
+status-history-accessibility-empty = Recent notifications. Current status: { $status }. No notifications. Escape: close.
+status-history-entry-error = Error: { $message }

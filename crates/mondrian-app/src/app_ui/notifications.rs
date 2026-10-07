@@ -63,23 +63,31 @@ impl NotificationOverlay {
             if self.seen.contains(&notification.id) {
                 continue;
             }
+            self.visible.retain(|toast| {
+                toast.source.operation_key != notification.operation_key
+                    || toast.source.severity != notification.severity
+            });
+            if self.visible.len() == MAX_VISIBLE_TOASTS
+                && let Some((index, toast)) =
+                    self.visible.iter().enumerate().min_by_key(|(index, toast)| {
+                        (toast_priority(toast.source.severity), *index)
+                    })
+            {
+                if toast_priority(notification.severity) < toast_priority(toast.source.severity) {
+                    continue;
+                }
+                self.visible.remove(index);
+            }
             let duration = match notification.severity {
                 AppNotificationSeverity::Success => Duration::from_secs(5),
                 AppNotificationSeverity::Warning => Duration::from_secs(8),
                 AppNotificationSeverity::Error => Duration::from_secs(10),
             };
-            self.visible.retain(|toast| {
-                toast.source.operation_key != notification.operation_key
-                    || toast.source.severity != notification.severity
-            });
             self.visible.push(VisibleToast {
                 source: notification.clone(),
                 text: localized_message(notification, locale),
                 expires_at: now + duration,
             });
-            if self.visible.len() > MAX_VISIBLE_TOASTS {
-                self.visible.remove(0);
-            }
             changed = true;
         }
         self.seen = retained;
@@ -163,6 +171,14 @@ impl NotificationOverlay {
     }
 }
 
+fn toast_priority(severity: AppNotificationSeverity) -> u8 {
+    match severity {
+        AppNotificationSeverity::Success => 0,
+        AppNotificationSeverity::Warning => 1,
+        AppNotificationSeverity::Error => 2,
+    }
+}
+
 fn toast_rect(bar: Rect, index_from_latest: usize) -> Rect {
     let width = (bar.width - 32.0).clamp(0.0, TOAST_WIDTH);
     Rect::new(
@@ -191,6 +207,65 @@ mod tests {
     use crate::app::notifications::AppNotificationSeverity;
     use crate::app::AppMessage;
     use mondrian_ui_core::types::Modifiers;
+
+    #[test]
+    fn terminal_failures_remain_visible_when_success_notifications_burst() {
+        let mut feed = AppNotificationFeed::default();
+        let now = Instant::now();
+        let mut overlay = NotificationOverlay::from_existing(&feed, AppUiLocale::EnUs);
+        for operation in ["export:error", "save:error"] {
+            feed.publish(
+                operation,
+                AppNotificationSeverity::Error,
+                AppMessage::new("export-status-error").with_text("error", operation),
+            );
+        }
+        assert!(overlay.sync(&feed, AppUiLocale::EnUs, now));
+        for index in 0..1000 {
+            feed.publish(
+                format!("import:{index}"),
+                AppNotificationSeverity::Success,
+                AppMessage::new("notification-import-complete").with_number("count", 1),
+            );
+        }
+        let changed = overlay.sync(&feed, AppUiLocale::EnUs, now);
+        assert_eq!(overlay.visible.len(), 2);
+        assert!(overlay
+            .visible
+            .iter()
+            .all(|toast| toast.source.severity == AppNotificationSeverity::Error));
+        assert!(!changed, "suppressed successes do not request a repaint");
+        assert!(overlay.seen.len() <= 64);
+        assert_eq!(overlay.next_deadline(), Some(now + Duration::from_secs(10)));
+        let later = now + Duration::from_secs(11);
+        assert!(overlay.sync(&feed, AppUiLocale::EnUs, later));
+        assert!(
+            overlay.visible.is_empty(),
+            "suppressed facts are not replayed after expiration"
+        );
+        for (operation, severity) in [
+            ("import:warning", AppNotificationSeverity::Warning),
+            ("save:success", AppNotificationSeverity::Success),
+            ("save:other-success", AppNotificationSeverity::Success),
+            ("export:error", AppNotificationSeverity::Error),
+        ] {
+            feed.publish(
+                operation,
+                severity,
+                AppMessage::new("status-opaque-detail").with_text("detail", operation),
+            );
+        }
+        assert!(overlay.sync(&feed, AppUiLocale::EnUs, later));
+        assert_eq!(overlay.visible.len(), 2);
+        assert_eq!(
+            overlay.visible[0].source.severity,
+            AppNotificationSeverity::Warning
+        );
+        assert_eq!(
+            overlay.visible[1].source.severity,
+            AppNotificationSeverity::Error
+        );
+    }
 
     #[test]
     fn overlay_seeds_existing_facts_then_bounds_and_expires_new_toasts() {

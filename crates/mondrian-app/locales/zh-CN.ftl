@@ -910,7 +910,7 @@ export-color-health-summary = 色彩：{ $verdict } / { $frames } 帧 / 元数�
 
 # Runtime status bar and retained notification history
 status-ready = 就绪
-status-history-title = 最近通知
+status-history-title = 最近通知 · ↑/↓ · PgUp/PgDn · Home/End · Esc
 status-history-empty = 暂无通知
 status-history-accessibility = 最近通知，当前状态：{ $status }
 status-export-pending = 导出队列处理中（{ $count }）
@@ -1418,3 +1418,8 @@ curve-editor-clipboard-keyboard-help = { curve-editor-selection-keyboard-help } 
 
 curve-editor-read-only-keyboard-help = 只读曲线。单击查看点；Home/End 和 Ctrl/Cmd＋左右导航。Ctrl/Cmd＋滚轮缩放，中键拖动平移，Ctrl/Cmd＋0 复位视图。
 curve-editor-read-only-clipboard-keyboard-help = { curve-editor-read-only-keyboard-help } Shift 或 Ctrl/Cmd＋点选切换关键帧选择，Ctrl/Cmd＋A 全选作者关键帧，Ctrl/Cmd＋C 复制。当前不可编辑。 拖动空白框选，Shift 追加，Ctrl/Cmd＋Shift 切换；Escape 恢复原选择。
+status-history-accessibility-open = 最近通知，当前状态：{ $status }。第 { $first }–{ $last } 条，共 { $total } 条，按从新到旧排列。
+    { $entries }
+    上/下方向键：较新/较旧；Page Up/Down：上一页/下一页；Home/End：最新/最旧；Escape：关闭。
+status-history-accessibility-empty = 最近通知，当前状态：{ $status }。暂无通知。Escape：关闭。
+status-history-entry-error = 错误：{ $message }

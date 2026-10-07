@@ -3,7 +3,6 @@
 //! Developer binaries own native window setup and event-loop plumbing. This
 //! module owns the reusable root widget composition above the dock/panel layer.
 
-#[cfg(test)]
 use crate::app::AppMessage;
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::{Action, AuthoringSessionId};
@@ -199,6 +198,8 @@ impl Default for StatusBarModel {
     }
 }
 
+const STATUS_HISTORY_PAGE_SIZE: usize = 8;
+
 struct StatusBar {
     id: WidgetId,
     bounds: Rect,
@@ -222,8 +223,53 @@ impl StatusBar {
     fn sync_history(&mut self, history: &[StatusLogEntry]) {
         if self.history != history {
             self.history = history.to_vec();
-            self.history_offset = self.history_offset.min(self.history.len().saturating_sub(8));
+            self.history_offset = self
+                .history_offset
+                .min(self.history.len().saturating_sub(STATUS_HISTORY_PAGE_SIZE));
         }
+    }
+
+    fn accessible_history_name(&self) -> String {
+        if !self.history_open {
+            return self.localizer.format_text(
+                "status-history-accessibility",
+                "status",
+                &self.model.message,
+            );
+        }
+        let mut message = AppMessage::new(if self.history.is_empty() {
+            "status-history-accessibility-empty"
+        } else {
+            "status-history-accessibility-open"
+        })
+        .with_text("status", &self.model.message);
+        if !self.history.is_empty() {
+            let entries = self
+                .history
+                .iter()
+                .rev()
+                .skip(self.history_offset)
+                .take(STATUS_HISTORY_PAGE_SIZE)
+                .map(|entry| {
+                    let body = self.history_entry_text(entry);
+                    if entry.is_error {
+                        self.localizer.format_text("status-history-entry-error", "message", &body)
+                    } else {
+                        body
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            message = message
+                .with_count("first", self.history_offset + 1)
+                .with_count(
+                    "last",
+                    (self.history_offset + STATUS_HISTORY_PAGE_SIZE).min(self.history.len()),
+                )
+                .with_count("total", self.history.len())
+                .with_text("entries", entries);
+        }
+        self.localizer.message(&message)
     }
 
     fn expire_notifications(&mut self, now: std::time::Instant) -> bool {
@@ -235,7 +281,7 @@ impl StatusBar {
     }
 
     fn history_rect(&self) -> Rect {
-        let rows = self.history.len().clamp(1, 8);
+        let rows = self.history.len().clamp(1, STATUS_HISTORY_PAGE_SIZE);
         let height = 34.0 + rows as f32 * 26.0;
         let width = (self.bounds.width - 24.0).clamp(0.0, 520.0);
         Rect::new(
@@ -273,6 +319,7 @@ impl Widget for StatusBar {
                 ctx.focus.request_focus(self.id);
                 self.history_open = !self.history_open;
                 self.history_offset = 0;
+                ctx.request_repaint();
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, modifiers }
@@ -281,6 +328,39 @@ impl Widget for StatusBar {
             {
                 self.history_open = !self.history_open;
                 self.history_offset = 0;
+                ctx.request_repaint();
+                EventResult::Handled
+            }
+            UiEvent::KeyDown { key, modifiers }
+                if self.history_open
+                    && ctx.focus.focused_widget() == Some(self.id)
+                    && *modifiers == Modifiers::none()
+                    && matches!(
+                        key,
+                        KeyCode::Up
+                            | KeyCode::Down
+                            | KeyCode::PageUp
+                            | KeyCode::PageDown
+                            | KeyCode::Home
+                            | KeyCode::End
+                    ) =>
+            {
+                let previous = self.history_offset;
+                let maximum = self.history.len().saturating_sub(STATUS_HISTORY_PAGE_SIZE);
+                self.history_offset = match key {
+                    KeyCode::Down => previous.saturating_add(1).min(maximum),
+                    KeyCode::Up => previous.saturating_sub(1),
+                    KeyCode::PageDown => {
+                        previous.saturating_add(STATUS_HISTORY_PAGE_SIZE).min(maximum)
+                    }
+                    KeyCode::PageUp => previous.saturating_sub(STATUS_HISTORY_PAGE_SIZE),
+                    KeyCode::Home => 0,
+                    KeyCode::End => maximum,
+                    _ => previous,
+                };
+                if self.history_offset != previous {
+                    ctx.request_repaint();
+                }
                 EventResult::Handled
             }
             UiEvent::MouseDown { position, .. }
@@ -295,21 +375,29 @@ impl Widget for StatusBar {
             }
             UiEvent::MouseDown { .. } if self.history_open => {
                 self.history_open = false;
+                ctx.request_repaint();
                 EventResult::Ignored
             }
             UiEvent::MouseWheel { position, delta, .. }
                 if self.history_open && self.history_rect().contains(*position) =>
             {
-                let max_offset = self.history.len().saturating_sub(8);
+                let previous = self.history_offset;
+                let max_offset = self.history.len().saturating_sub(STATUS_HISTORY_PAGE_SIZE);
                 if *delta > 0.0 {
                     self.history_offset = self.history_offset.saturating_add(1).min(max_offset);
                 } else if *delta < 0.0 {
                     self.history_offset = self.history_offset.saturating_sub(1);
                 }
+                if self.history_offset != previous {
+                    ctx.request_repaint();
+                }
                 EventResult::Handled
             }
-            UiEvent::KeyDown { key: KeyCode::Escape, .. } if self.history_open => {
+            UiEvent::KeyDown { key: KeyCode::Escape, .. } | UiEvent::FocusLost
+                if self.history_open =>
+            {
                 self.history_open = false;
+                ctx.request_repaint();
                 EventResult::Handled
             }
             _ => EventResult::Ignored,
@@ -381,33 +469,49 @@ impl Widget for StatusBar {
             if panel.width < 48.0 {
                 return;
             }
-            ctx.encoder.draw_rect(panel, colors.popover, 8.0);
+            let padding_x = ctx.theme.spacing.panel_inner_margin.0;
+            let available_width = (panel.width - padding_x * 2.0).max(0.0);
+            ctx.push_clip(panel);
+            ctx.encoder.draw_rect(panel, colors.popover, ctx.theme.spacing.radius_md);
             ctx.encoder.draw_text(
-                &self.localizer.text("status-history-title"),
+                &elide_text_to_width(
+                    &self.localizer.text("status-history-title"),
+                    font_size,
+                    available_width,
+                ),
                 font_size,
-                Point::new(panel.x + 12.0, panel.y + 10.0),
+                Point::new(panel.x + padding_x, panel.y + ctx.theme.spacing.md),
                 colors.popover_foreground,
             );
             if self.history.is_empty() {
                 ctx.encoder.draw_text(
-                    &self.localizer.text("status-history-empty"),
+                    &elide_text_to_width(
+                        &self.localizer.text("status-history-empty"),
+                        font_size,
+                        available_width,
+                    ),
                     font_size,
-                    Point::new(panel.x + 12.0, panel.y + 36.0),
+                    Point::new(panel.x + padding_x, panel.y + 36.0),
                     colors.muted_foreground,
                 );
             } else {
-                for (index, entry) in
-                    self.history.iter().rev().skip(self.history_offset).take(8).enumerate()
+                for (index, entry) in self
+                    .history
+                    .iter()
+                    .rev()
+                    .skip(self.history_offset)
+                    .take(STATUS_HISTORY_PAGE_SIZE)
+                    .enumerate()
                 {
                     let text = elide_text_to_width(
                         &self.history_entry_text(entry),
                         font_size,
-                        panel.width - 24.0,
+                        available_width,
                     );
                     ctx.encoder.draw_text(
                         &text,
                         font_size,
-                        Point::new(panel.x + 12.0, panel.y + 36.0 + index as f32 * 26.0),
+                        Point::new(panel.x + padding_x, panel.y + 36.0 + index as f32 * 26.0),
                         if entry.is_error {
                             colors.destructive_foreground
                         } else {
@@ -416,6 +520,7 @@ impl Widget for StatusBar {
                     );
                 }
             }
+            ctx.pop_clip();
         }
         if !self.history_open {
             self.notifications.paint(ctx, self.bounds);
@@ -435,11 +540,7 @@ impl Widget for StatusBar {
     fn accessibility(&self) -> Option<AccessibilityNode> {
         Some(
             AccessibilityNode::new(self.id, AccessibilityRole::Button)
-                .with_name(self.localizer.format_text(
-                    "status-history-accessibility",
-                    "status",
-                    &self.model.message,
-                ))
+                .with_name(self.accessible_history_name())
                 .with_state(AccessibilityState {
                     focusable: true,
                     pressed: Some(self.history_open),
@@ -5425,6 +5526,233 @@ mod tests {
             EventResult::Handled
         );
         assert!(!root.status_bar.history_open);
+    }
+
+    #[test]
+    fn status_history_actual_router_navigates_keyboard_pages_and_reads_full_localized_entries() {
+        use crate::app_ui::localization::AppUiLocalePreference;
+        use mondrian_ui_core::FocusManager;
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        for locale_preference in [
+            AppUiLocalePreference::EnUs,
+            AppUiLocalePreference::ZhCn,
+            AppUiLocalePreference::Pseudo,
+        ] {
+            let mut state = AppState::new();
+            for index in 0..20 {
+                state.set_status_hint(
+                    AppMessage::new("status-opaque-detail").with_text(
+                        "detail",
+                        format!("Activity {index:02} · E:/项目/完整消息🙂.mdp"),
+                    ),
+                    index == 0,
+                );
+            }
+            let mut root = AppUiAppRoot::from_app_state_with_preferences(
+                &state,
+                &AppUiPreferences { locale_preference, ..Default::default() },
+            );
+            root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+            let id = root.status_bar.id;
+            let history = root.status_bar.history.clone();
+            let generation = state.project_author_generation();
+            let actions = std::cell::RefCell::new(Vec::new());
+            let dispatch = |action| actions.borrow_mut().push(action);
+            let mut router = EventRouter::new(root.id());
+            router.focus_manager_mut().set_focused_widget(Some(id), None);
+            for (key, expected) in [
+                (KeyCode::Enter, 0),
+                (KeyCode::Down, 1),
+                (KeyCode::PageDown, 9),
+                (KeyCode::End, 12),
+                (KeyCode::Down, 12),
+                (KeyCode::Up, 11),
+                (KeyCode::PageUp, 3),
+                (KeyCode::Home, 0),
+                (KeyCode::Up, 0),
+            ] {
+                router.route(
+                    UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                    &mut WidgetTreeView::new(&mut root),
+                    &dispatch,
+                );
+                assert!(root.status_bar.history_open);
+                assert_eq!(root.status_bar.history_offset, expected, "{key:?}");
+                assert_eq!(router.focus_manager().focused_widget(), Some(id));
+                let name =
+                    root.status_bar.accessibility().expect("history access").name.expect("name");
+                for entry in history.iter().rev().skip(expected).take(8) {
+                    let body = root.localizer.message(&entry.message);
+                    assert!(
+                        name.contains(&body),
+                        "accessible history retains full entry: {name}"
+                    );
+                }
+                assert!(name.contains("E:/项目/完整消息🙂.mdp"));
+                if expected == 12 {
+                    let severity = match locale_preference {
+                        AppUiLocalePreference::EnUs => "Error:",
+                        AppUiLocalePreference::ZhCn => "错误：",
+                        AppUiLocalePreference::Pseudo => "错·误·",
+                        _ => panic!("explicit test locale"),
+                    };
+                    assert!(
+                        name.contains(severity),
+                        "error severity is accessible: {name}"
+                    );
+                }
+                assert_eq!(root.status_bar.history, history);
+                assert!(
+                    actions.borrow().is_empty(),
+                    "history inspection never dispatches editor actions"
+                );
+                assert_eq!(state.project_author_generation(), generation);
+            }
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::PageUp, modifiers: Modifiers::ctrl() },
+                &mut WidgetTreeView::new(&mut root),
+                &dispatch,
+            );
+            assert_eq!(
+                root.status_bar.history_offset, 0,
+                "modified navigation is not history input"
+            );
+            router.route(
+                UiEvent::FocusLost,
+                &mut WidgetTreeView::new(&mut root),
+                &dispatch,
+            );
+            assert!(!root.status_bar.history_open, "unfocused popup closes");
+        }
+    }
+
+    #[test]
+    fn status_history_keyboard_handles_empty_short_and_replaced_history() {
+        use crate::app_ui::localization::AppUiLocalePreference;
+        use mondrian_ui_core::FocusManager;
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let preferences = AppUiPreferences {
+            locale_preference: AppUiLocalePreference::EnUs,
+            ..Default::default()
+        };
+        for (count, oldest_offset) in [(0, 0), (1, 0), (9, 1)] {
+            let mut state = AppState::new();
+            for index in 0..count {
+                state.set_status_hint(
+                    AppMessage::new("status-opaque-detail")
+                        .with_text("detail", format!("Entry {index}")),
+                    false,
+                );
+            }
+            let mut root = AppUiAppRoot::from_app_state_with_preferences(&state, &preferences);
+            root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+            let id = root.status_bar.id;
+            let mut router = EventRouter::new(root.id());
+            router.focus_manager_mut().set_focused_widget(Some(id), None);
+            let dispatch = |_| panic!("notification history cannot author");
+            for key in [
+                KeyCode::Space,
+                KeyCode::End,
+                KeyCode::PageDown,
+                KeyCode::Down,
+            ] {
+                router.route(
+                    UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                    &mut WidgetTreeView::new(&mut root),
+                    &dispatch,
+                );
+            }
+            assert!(root.status_bar.history_open);
+            assert_eq!(root.status_bar.history_offset, oldest_offset);
+            assert_eq!(router.focus_manager().focused_widget(), Some(id));
+            let name = root.status_bar.accessibility().expect("history access").name.expect("name");
+            if count == 0 {
+                assert!(name.contains("No notifications"));
+            } else {
+                assert!(name.contains("Entry 0"), "oldest entry is inspectable");
+            }
+            let empty_state = AppState::new();
+            root.refresh_from_app_state_with_preferences(&empty_state, &preferences);
+            assert_eq!(root.status_bar.id, id);
+            assert_eq!(router.focus_manager().focused_widget(), Some(id));
+            assert_eq!(root.status_bar.history_offset, 0);
+            assert!(root.status_bar.history.is_empty());
+            assert!(root
+                .status_bar
+                .accessibility()
+                .expect("history access")
+                .name
+                .expect("name")
+                .contains("No notifications"));
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut WidgetTreeView::new(&mut root),
+                &dispatch,
+            );
+            assert!(!root.status_bar.history_open);
+        }
+    }
+
+    #[test]
+    fn status_history_paint_clips_localized_text_using_theme_padding_without_truncating_accessibility(
+    ) {
+        use crate::app_ui::localization::AppUiLocalePreference;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let detail = "E:/项目/需要保留的完整诊断🙂/".repeat(12);
+        for populated in [false, true] {
+            let mut state = AppState::new();
+            if populated {
+                state.set_status_hint(
+                    AppMessage::new("status-opaque-detail").with_text("detail", &detail),
+                    true,
+                );
+            }
+            let mut root = AppUiAppRoot::from_app_state_with_preferences(
+                &state,
+                &AppUiPreferences {
+                    locale_preference: AppUiLocalePreference::Pseudo,
+                    ..Default::default()
+                },
+            );
+            root.layout(Rect::new(0.0, 0.0, 220.0, 720.0));
+            root.status_bar.history_open = true;
+            root.status_bar.model.context.clear();
+            let mut theme = ThemePreset::Dark.build();
+            theme.spacing.panel_inner_margin.0 = 36.0;
+            let available = root.status_bar.history_rect().width - 72.0;
+            let mut encoder = PaintOrderRecorder::default();
+            root.status_bar.paint(&mut PaintContext {
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect: root.bounds,
+            });
+            assert_eq!(
+                encoder.texts.len(),
+                3,
+                "status, history title, history body"
+            );
+            for text in encoder.texts.iter().skip(1) {
+                assert!(
+                    estimate_text_width(text, theme.typography.metadata.font_size) <= available
+                );
+            }
+            assert!(
+                encoder.texts[1].ends_with("..."),
+                "expanded title elides within themed content"
+            );
+            if populated {
+                assert!(encoder.texts[2].ends_with("..."));
+                assert!(root
+                    .status_bar
+                    .accessibility()
+                    .expect("access")
+                    .name
+                    .expect("name")
+                    .contains(&detail));
+            }
+        }
     }
 
     #[test]

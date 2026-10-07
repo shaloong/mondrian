@@ -4096,3 +4096,32 @@ English/Chinese help exposes the insertion and modifier policy. Existing
 complete-selection author actions and clipboard dispatch consume the resulting
 stable IDs, so marquee does not introduce an alternate author or selection
 service.
+
+### Notification history keyboard and accessibility
+
+The retained StatusBar history is one focusable, nonmodal inspection surface.
+Enter/Space toggles it. Its displayed order is newest first: Down/PageDown show
+older entries, Up/PageUp show newer entries, Home selects the newest viewport,
+and End the oldest viewport. Movement is bounded and consumes only unmodified
+keys while this widget owns focus; inspection never dispatches editor actions.
+Escape and FocusLost dismiss the popup. Navigation requests repaint only when
+the viewport changes. The existing history remains the sole message authority.
+
+Open accessibility projection includes current status, page range/count, every
+full localized visible message, error severity and keyboard instructions. Opaque
+user paths and diagnostic details remain intact; only painted text is elided.
+English/Chinese catalogs and pseudo-locale use the same message identities.
+The heading exposes compact keys and elides within the existing panel bounds.
+Empty/short histories and replacement snapshots clamp the same viewport state.
+
+The toast overlay still displays at most two terminal facts. Admission preserves
+errors ahead of warnings and warnings ahead of successes; equal priority retains
+the newest facts. Suppressed low-priority facts are observed without formatting,
+allocating a toast, requesting repaint or replaying after higher-priority expiry.
+The feed remains bounded and detailed status history remains available. Existing
+5/8/10-second lifetimes, per-operation deduplication and locale projection apply.
+The history painter consumes theme panel padding and rounding, clips to its
+popup bounds, and elides title, empty state and message rows to the same content
+width. Full accessible messages are independent of paint elision. A narrow
+pseudo-locale/custom-padding case checks this separation with opaque Unicode
+paths; it is widget draw-command evidence, not native screen-reader qualification.

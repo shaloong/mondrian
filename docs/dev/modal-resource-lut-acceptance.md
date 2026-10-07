@@ -2263,3 +2263,32 @@ committer; nothing was pushed.
 This completes the named stereo Float32 main-bus reference joint-output
 history slice. It does not establish arbitrary vendor, multi-bus, MIDI, native
 editor, macOS or performance completeness. The original goal remains active.
+
+## Notification history inspection and bounded priority
+
+Two actual runtime regressions preceded the repair: opened history exposed only
+the current message to accessibility clients, and a burst of successes evicted
+both unexpired errors. The existing StatusBar and toast overlay now own the fix;
+no additional authoring or message authority was introduced.
+
+Actual EventRouter tests exercise English, Chinese and expanded Chinese pseudo
+copy, full visible-page messages and opaque Unicode paths, newest-first arrow
+and page navigation, Home/End, modifiers, boundaries, empty/short/replaced
+history, focus preservation and FocusLost/Escape dismissal. Inspection publishes
+no editor actions or author generation changes. The narrow painter test uses
+custom theme padding and checks elided drawing independently of full accessible
+text. The existing two-toast limit preserves error/warning priority during a
+1,000-success burst; suppressed facts do not repaint or replay after expiry.
+
+Before the final paint refinement, the full all-features App library suite
+executed 2,618 passed, 0 failed, 69 ignored (680.92s); the dedicated modal filter
+executed 16 passed, 0 failed (24.05s). After the final clip/theme/paint refinement,
+history executed 4 passed (7.75s), notifications 7 passed (0.19s), and the locale
+filter 30 passed (9.69s), all with 0 failed and 0 ignored. Full workspace,
+all-targets, all-features Clippy with warnings denied passed (2m08s), followed by
+formatting and whitespace checks. Counts from overlapping filters are not added.
+
+These are source-level routed and draw-command checks, not a new native worker
+build or native screen-reader/physical keyboard/macOS qualification. The prior
+source-bound native modal/resource/LUT and joint output results above retain
+their original product identities. The original overall goal remains active.
