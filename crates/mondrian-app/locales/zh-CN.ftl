@@ -1436,3 +1436,12 @@ audio-input-none = 此处理器不提供辅助输入
 audio-input-ready = 可用辅助输入：{ $count } 个
 audio-input-failed = 输入不可用：{ $error }
 audio-input-not-inspected = 尚未检查
+
+audio-sidechain-input = 辅助输入 · { $identity }
+audio-sidechain-bus = 总线 · { $identity }
+audio-sidechain-add-source = 添加来源…
+audio-sidechain-level = 侧链电平
+audio-sidechain-status = 侧链状态
+audio-sidechain-controls = 侧链控制
+audio-sidechain-disconnect = 断开来源
+audio-sidechain-missing-track = 缺失轨道 · { $identity }

@@ -1822,6 +1822,86 @@ pub(super) fn with_audio_processor_rack_sections(
                     );
                 }
             }
+            for input in &processor.sidechain_inputs {
+                let items = input
+                    .options
+                    .iter()
+                    .map(|option| {
+                        MenuItem::new(
+                            option.label.clone(),
+                            crate::app_ui::audio_sidechain::edit_action(option.edit.clone()),
+                        )
+                    })
+                    .collect();
+                section = section.with_row(PropertyRow::new(
+                    input.label.clone(),
+                    Box::new(
+                        Dropdown::new(localizer.text("audio-sidechain-add-source"), items)
+                            .with_max_visible_items(12),
+                    ),
+                ));
+            }
+            for route in &processor.sidechain_routes {
+                let enabled_route = route.clone();
+                section = section.with_row(PropertyRow::new(
+                    route.label.clone(),
+                    Box::new(
+                        Checkbox::new(localizer.text("mixer-pass-signal"), route.enabled)
+                            .enabled(route.is_editable)
+                            .on_change(move |enabled| {
+                                crate::app_ui::audio_sidechain::enabled_action(
+                                    &enabled_route,
+                                    enabled,
+                                )
+                            }),
+                    ),
+                ));
+                if let Some(value) = route.static_gain {
+                    let gain_route = route.clone();
+                    section = section.with_row(PropertyRow::new(
+                        localizer.text("audio-sidechain-level"),
+                        numeric_slider_input_control_with_hard_range(
+                            value,
+                            -60.0,
+                            12.0,
+                            AUDIO_GAIN_DB_MIN,
+                            AUDIO_GAIN_DB_MAX,
+                            Some(0.1),
+                            1,
+                            route.is_editable,
+                            move |value| {
+                                crate::app_ui::audio_sidechain::gain_action(&gain_route, value)
+                            },
+                        ),
+                    ));
+                } else {
+                    section = section.with_row(PropertyRow::new(
+                        localizer.text("audio-sidechain-level"),
+                        Box::new(
+                            Label::new(mixer_automation_label(
+                                localizer,
+                                route.automation_key_count,
+                            ))
+                            .muted(),
+                        ),
+                    ));
+                }
+                if let Some(reason) = &route.disabled_reason {
+                    section = section.with_row(PropertyRow::new(
+                        localizer.text("audio-sidechain-status"),
+                        Box::new(Label::new(reason.clone()).muted()),
+                    ));
+                }
+                let action = crate::app_ui::audio_sidechain::remove_action(route);
+                section = section.with_row(PropertyRow::new(
+                    localizer.text("audio-sidechain-controls"),
+                    Box::new(
+                        Button::new(localizer.text("audio-sidechain-disconnect"))
+                            .enabled(action.is_some())
+                            .on_click(action),
+                    ),
+                ));
+            }
             panel = panel.with_section(section);
         }
     }

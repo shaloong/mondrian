@@ -13,6 +13,7 @@ mod audio_component_mapping;
 mod audio_device_catalog;
 mod audio_mixer;
 mod audio_processor_rack;
+mod audio_sidechain;
 mod background_runtime;
 mod color_management_controls;
 pub mod commands;

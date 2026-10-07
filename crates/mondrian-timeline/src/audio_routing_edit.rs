@@ -243,6 +243,42 @@ impl<'a> AudioRouteInspection<'a> {
     }
 }
 
+/// Canonical processor sidechain and source-lock admission.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioProcessorSidechainInspection<'a> {
+    route: &'a AudioProcessorSidechainRoute,
+    edit_blocker: Option<AudioRoutingEditBlocker>,
+}
+
+impl<'a> AudioProcessorSidechainInspection<'a> {
+    /// Retained canonical route, even when its native bus is unavailable.
+    pub fn route(&self) -> &'a AudioProcessorSidechainRoute {
+        self.route
+    }
+    /// Authoritative source-lock blocker.
+    pub fn edit_blocker(&self) -> Option<&AudioRoutingEditBlocker> {
+        self.edit_blocker.as_ref()
+    }
+    /// Whether controls on this retained route may enter a transaction.
+    pub fn is_editable(&self) -> bool {
+        self.edit_blocker.is_none()
+    }
+}
+
+/// Inspect a retained sidechain without loading its target plugin or bus.
+///
+/// Native bus availability does not remove author routes or prevent their removal.
+/// Source identity and lock admission are shared with actual routing edits.
+pub fn inspect_audio_processor_sidechain(
+    sequence: &Sequence,
+    route_id: AudioRouteId,
+) -> Result<AudioProcessorSidechainInspection<'_>, AudioRoutingAddressError> {
+    let route = resolve_sidechain_route(sequence, route_id)?;
+    let edit_blocker =
+        source_locked_track(sequence, route.source)?.map(AudioRoutingEditBlocker::LockedTrack);
+    Ok(AudioProcessorSidechainInspection { route, edit_blocker })
+}
+
 /// Read-only projection of one Bus and its strong Route dependencies.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioMixBusInspection<'a> {
@@ -814,9 +850,9 @@ fn admit_sidechain_route(
     sequence: &Sequence,
     route_id: AudioRouteId,
 ) -> Result<(), AudioRoutingEditError> {
-    let route = resolve_sidechain_route(sequence, route_id)?;
-    if let Some(track_id) = source_locked_track(sequence, route.source)? {
-        Err(AudioRoutingEditBlocker::LockedTrack(track_id).into())
+    let inspection = inspect_audio_processor_sidechain(sequence, route_id)?;
+    if let Some(blocker) = inspection.edit_blocker {
+        Err(blocker.into())
     } else {
         Ok(())
     }

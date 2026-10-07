@@ -203,6 +203,7 @@ impl AudioMixerPanelModel {
                 &mut channel.processor_racks,
                 state,
                 localizer,
+                routing.route_candidates.as_ref(),
             );
         }
         Self {

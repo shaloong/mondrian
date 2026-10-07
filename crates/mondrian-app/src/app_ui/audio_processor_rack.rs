@@ -97,6 +97,8 @@ pub(crate) struct AudioProcessorInstanceModel {
     pub(crate) native_format: Option<NativeAudioFormat>,
     pub(crate) parameters: Vec<AudioProcessorParameterModel>,
     pub(crate) input_query: Option<AudioProcessorInputQueryModel>,
+    pub(crate) sidechain_routes: Vec<super::audio_sidechain::SidechainRouteModel>,
+    pub(crate) sidechain_inputs: Vec<super::audio_sidechain::SidechainInputModel>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -504,6 +506,12 @@ fn project_processor(
     };
     AudioProcessorInstanceModel {
         input_query: None,
+        sidechain_routes: super::audio_sidechain::retained_routes(
+            sequence,
+            processor.id,
+            localizer,
+        ),
+        sidechain_inputs: Vec::new(),
         processor_id: processor.id,
         label: processor_label(&processor.definition, localizer),
         bypassed: processor.bypassed,
@@ -1294,6 +1302,7 @@ pub(crate) fn bind_processor_input_queries(
     racks: &mut [AudioProcessorRackModel],
     state: &crate::app::AppState,
     localizer: &Localizer,
+    routing: Option<&mondrian_timeline::AudioRouteCandidateInspection>,
 ) {
     use crate::app::audio_input_observation::AudioInputObservation;
     use crate::app::product_action::{
@@ -1307,11 +1316,16 @@ pub(crate) fn bind_processor_input_queries(
     if state.project_close_blocks_actions() {
         return;
     }
+    let Some(sequence) = state.active_sequence() else {
+        return;
+    };
+    let local_routing = std::cell::OnceCell::new();
     for rack in racks {
         let Some(target) = rack.input_inspection_target else {
             continue;
         };
         for processor in &mut rack.processors {
+            processor.sidechain_inputs.clear();
             if processor.native_format.is_none() {
                 continue;
             }
@@ -1336,6 +1350,19 @@ pub(crate) fn bind_processor_input_queries(
                     )
                 }
                 AudioInputObservation::Ready(inputs) => {
+                    processor.sidechain_inputs = super::audio_sidechain::input_options(
+                        sequence,
+                        processor.processor_id,
+                        &inputs.auxiliary_inputs,
+                        routing.or_else(|| {
+                            local_routing
+                                .get_or_init(|| {
+                                    mondrian_timeline::inspect_audio_route_candidates(sequence).ok()
+                                })
+                                .as_ref()
+                        }),
+                        localizer,
+                    );
                     let status = if inputs.auxiliary_inputs.buses.is_empty() {
                         localizer.text("audio-input-none")
                     } else {
@@ -1413,7 +1440,7 @@ mod input_query_tests {
                     &localizer,
                     AudioAutomationTimeContext::at_sequence_time(sequence, sequence.playhead),
                 )];
-                bind_processor_input_queries(&mut racks, state, &localizer);
+                bind_processor_input_queries(&mut racks, state, &localizer, None);
                 let model =
                     racks[0].processors[0].input_query.clone().expect("Native query control");
                 (model, localizer)

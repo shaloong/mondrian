@@ -1504,3 +1504,12 @@ audio-input-ready = { $count ->
     }
 audio-input-failed = Inputs unavailable: { $error }
 audio-input-not-inspected = Not inspected
+
+audio-sidechain-input = Auxiliary input · { $identity }
+audio-sidechain-bus = Bus · { $identity }
+audio-sidechain-add-source = Add source…
+audio-sidechain-level = Sidechain level
+audio-sidechain-status = Sidechain status
+audio-sidechain-controls = Sidechain controls
+audio-sidechain-disconnect = Disconnect source
+audio-sidechain-missing-track = Missing track · { $identity }

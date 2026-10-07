@@ -1710,3 +1710,10 @@ of retained routes are unavailable. Unused Scopes retain processor identity
 without inventing a signal occurrence. Native bus keys/layouts remain processor
 preparation facts, and complete author transactions remain the final authority.
 Inspection and refused edits never publish state or history.
+
+### Retained processor sidechain inspection
+
+`inspect_audio_processor_sidechain` resolves a canonical route and its source-lock
+admission without querying native bus availability. Product route controls and
+actual mutations share this inspection; disabled routes and unavailable plugin
+ports retain their author identity and remain removable under the same lock rule.

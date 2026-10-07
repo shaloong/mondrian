@@ -2779,7 +2779,7 @@ impl InspectorPanelModel {
                     append_vst3_insert_options(&mut racks, &descriptors);
                 }
                 super::audio_processor_rack::bind_processor_input_queries(
-                    &mut racks, state, localizer,
+                    &mut racks, state, localizer, None,
                 );
                 racks
             },

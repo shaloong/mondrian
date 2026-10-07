@@ -4178,3 +4178,12 @@ so a reply or catalog invalidation updates copy without shifting parameter rows
 and their restored focus/drafts. Native control work contributes a 25 ms maximum
 idle wake delay, including canceled work until physical termination; no forced
 continuous redraw or synchronous native probe is added.
+
+### Shared processor sidechain controls
+
+Inspector and Mixer share `audio_sidechain` route projection and typed action
+construction. Every retained route appears independently with enable, exact
+static gain and disconnection; automation is displayed instead of overwritten.
+Native cached input contracts offer additive source menus, admitted by Timeline
+complete retained routing graph and source locks. Projection loads no native
+factory and creates no alternate author/routing state.

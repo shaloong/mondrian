@@ -2771,3 +2771,37 @@ OCIO/LUT relocation, source removal, tampering, cancellation cleanup, foreign
 bindings and bundled video decode/preview/export. The five ignored native resource
 cases were not executed in these source gates; no new encoded Golden or vendor
 qualification is inferred.
+
+## Shared retained sidechain route controls
+
+A shared product projection now renders every retained processor sidechain in
+Inspector and Mixer. Independent route identity, disabled state, unavailable
+native bus keys, precise static level, automation indication and disconnection
+are preserved. Source menus for cached auxiliary contracts use canonical complete
+routing admission. Mixer lends its existing candidate index; Inspector resolves
+one lazy fallback per projection. Route controls use the existing typed routing
+transaction and sole Undo history. Timeline's new retained-sidechain inspection
+is also consumed by actual source-lock mutation admission. No DSP is invoked by
+this projection. Sidechain rows follow parameter controls so query completion
+does not insert rows ahead of existing parameter drafts.
+
+First pipeline 8708 failed compilation in new tests: one output field name and
+six uses of the fallible localization constructor were incorrect. The fixtures
+were corrected to `.strip` and explicit successful catalog construction; no
+production compatibility workaround was added. Pipeline 32636 then passed the
+complete new sidechain projection/action module **3/0/0** (0.28s), input observation
+**6/0/0** (0.84s), Rack **11/0/0** (0.24s), Mixer **8/0/0** (0.86s), and Timeline
+routing edits **8/0/0** (0.01s). Tests include actual App transaction dispatch,
+precise gain Undo/Redo and restoring the exact disconnected route identity while
+retaining the other route; lock refusal and disabled/unavailable route visibility
+are covered in English, Chinese and pseudo locale.
+
+This is product projection/action qualification. Native human bus display names,
+current observed-contract/session admission for menu creation, source rewiring,
+sidechain automation editing and actual Host/Scope/save-reopen/native output
+qualification remain required to complete the professional workflow. No current
+native SDK, physical GUI, encoded Golden or full goal completion is inferred.
+
+Final source gate 62414 passed strict workspace/all-target/all-feature Clippy
+`-D warnings` in 4m26s, format and diff checks. Native output and actual Host
+interaction qualification remain separate pending work.
