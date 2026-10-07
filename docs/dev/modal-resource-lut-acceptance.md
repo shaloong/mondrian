@@ -1808,3 +1808,53 @@ plugin or encoded LUT receipt; the source-bound native receipts above remain
 historical. Audio Component/Scope/route/rack boundary matrices, root menu and
 Undo/Redo selection projection, read-only inspection and newly pasted native
 CLAP/VST3 output still require acceptance. The full product goal remains active.
+
+## Clean 3d26dfc modal, resource, LUT and native output acceptance
+
+On 2026-10-07, clean source `3d26dfc5fd4db4f8f0bdb107d67ae37241458262`
+was rebuilt after audio clipboard integration. Build passed in 1146306ms.
+Complete Golden passed **3/3**, with all seven stages per run and distinct
+project/run identities. Source start/end revisions were identical, both clean;
+baseline eligibility was true. Contract build/process timeouts remained
+3600/1800s. All processes exited naturally with code 0; none required forced
+termination. Outer process times were 125069, 121582 and 120984ms.
+
+Each LUT/color-media H.264 roundtrip measured maximum channel error **4/255**
+across its five sampled pixels and **0** GPU output CPU fallbacks. The encoder
+handoff remained `cpu_rawvideo_pipe`. This qualifies the executed color fixture
+and its defined output checks, not zero-copy encoding or arbitrary LUTs.
+
+| Explicit current-production-source gate | Executed result |
+| --- | --- |
+| EventRouter modal scope and shortcut ownership | 1 passed, 0 failed, 0 ignored |
+| Native resource helper/Host/OpenFX and child cancellation/timeout/retry | 5 passed, 0 failed, 0 ignored; 9.63s |
+| App modal Tab/Shift+Tab, disabled Apply and focus restoration | 16 passed, 0 failed, 0 ignored; 24.05s |
+| Resource drafts, atomic transactions, real cube Undo/save/reopen | 103 passed, 0 failed, 5 ignored; 24.52s |
+| Native OpenFX group interpolation/history/queries/pixels | 1 passed, 0 failed, 0 ignored; 5.49s |
+| Native OpenFX group time/history/queries/pixels | 1 passed, 0 failed, 0 ignored; 5.42s |
+| Native OpenFX group values/history/queries/pixels | 1 passed, 0 failed, 0 ignored; 5.76s |
+| Native CLAP/VST3 constrained group Undo/saved Redo/Unicode reopen/audio | 2 passed, 0 failed, 0 ignored; 37.18s |
+| CLAP sample-accurate event ranges | 1 passed, 0 failed, 0 ignored; 0.78s |
+| VST3 SDK linear parameter queues | 1 passed, 0 failed, 0 ignored; 1.43s |
+| VST3 state restoration and isolated-worker audio | 1 passed, 0 failed, 0 ignored; 0.95s |
+| Real CLAP/VST3 shared preview WAV execution | 2 passed, 0 failed, 0 ignored; 2.49s |
+
+The five ignored resource cases were explicitly run in the native resource gate.
+Filters overlap, so their counts are not summed as unique tests. The wrapper
+required positive exact counts and unchanged source and native binary hashes
+through all gates. Qualified SHA256 identities:
+
+- Product: `A94F1B5BADC3DD559C054725360E3123E6BDE1700C0BFDA6664A2269B6F6FF1E`
+- Golden: `9B8FEEEEB8D0553F5B060E148DECBDB081C05BBE40BC4350E6C20A7B4CF0BE8A`
+- OpenFX SessionProbe: `BA8734FE2FC3CEF93D0973415B8C4FEE64B1A1C0CEA9ECDBD409B2401781978A`
+- Owned CLAP sample gain: `CB2FA1B4956CEDBDA4BBAA4B24EFA2D16924820C7C7FCEB4E4881633F21FD687`
+- Owned VST3 stateful gain: `523E714760F9BC47805B3EDE7C7FC4399AEF7D1BDEEF1DCC3832B6DA50D9907F`
+- External CLAP static gain reference: `171222FFE85360DBD5BDC8791073FFE7603D178E93118DFB7E15B42B1891039C`
+- External VST3 static gain reference: `CBCA9C3E9ED68554A5877889A81264D5C4910DEE38FCF02706272B0BB99F1AF5`
+
+Consecutive report:
+`E:/dev/mondrian/target/validation/nle-backlog-complete/20261007T021257Z-complete-golden-7cf8ed32/complete-golden-consecutive-report.json`.
+This is the current receipt for the executed modal/resource/LUT and native
+interpolation/time/value/history cases. Newly pasted audio groups still require
+their separate native output gate; read-only interaction and wider owner, vendor,
+bus, editor, platform and performance matrices remain open. No push occurred.

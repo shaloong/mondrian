@@ -1693,5 +1693,6 @@ Paste creates fresh identities, maps current exact owner time, checks whole
 Component extent and reuses Timeline batch admission. Sequence curves remain
 unbounded by the viewport. Global Paste refuses an audio payload without an
 explicit focused target. Localized actual curve menus share the same commands.
-Real Host Copy/Cut and App codec/history/Unicode reopen matrices pass; new-group
-selection after Paste and wider owner/native acceptance remain to qualify.
+Real Host Copy/Cut/Paste, fresh pasted-group selection and subsequent Cut preserving
+the original key pass. App codec/history/Unicode reopen matrices also pass. Wider
+owner admission and newly pasted native processor output remain to qualify.
