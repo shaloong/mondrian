@@ -421,6 +421,7 @@ pub struct CurveEditor {
     focus_visible: bool,
     pending_capture_release: bool,
     enabled: bool,
+    editable: bool,
     on_change: Option<Box<CurveChangeAction>>,
     on_edit: Option<Box<CurveEditAction>>,
     on_gesture: Option<Box<CurveGestureAction>>,
@@ -513,6 +514,7 @@ impl CurveEditor {
             focus_visible: false,
             pending_capture_release: false,
             enabled: true,
+            editable: true,
             on_change: None,
             on_edit: None,
             on_gesture: None,
@@ -645,7 +647,11 @@ impl CurveEditor {
         callback: &CurveClipboardAction,
         ctx: &mut EventContext,
     ) {
-        if !self.enabled || self.has_active_pointer_interaction() || self.gesture.is_some() {
+        if !self.enabled
+            || self.has_active_pointer_interaction()
+            || self.gesture.is_some()
+            || (!self.editable && command != CurveClipboardCommand::Copy)
+        {
             return;
         }
         let ids = self.selected_keyframe_ids();
@@ -827,6 +833,33 @@ impl CurveEditor {
             self.cancel_drag_state();
             self.focused = false;
             self.focus_visible = false;
+        }
+    }
+
+    /// Set whether user input may author points or tangents.
+    /// A read-only editor retains focus, selection, viewport input and Copy.
+    /// Owner-provided menus must disable their own authoring actions.
+    pub fn editable(mut self, editable: bool) -> Self {
+        self.set_editable(editable);
+        self
+    }
+
+    /// Whether user input may author points or tangents.
+    pub fn is_editable(&self) -> bool {
+        self.editable
+    }
+
+    /// Set whether user input may author the curve.
+    /// Revoking edits cancels an outstanding draft; the next routed event
+    /// balances gesture cancellation and pointer release.
+    pub fn set_editable(&mut self, editable: bool) {
+        self.editable = editable;
+        if !editable {
+            self.context_menu = None;
+            if self.dragging.is_some() || self.tangent_drag.is_some() || self.gesture.is_some() {
+                self.pending_capture_release = true;
+                self.cancel_drag_state();
+            }
         }
     }
 
@@ -1473,6 +1506,9 @@ impl CurveEditor {
     }
 
     fn dispatch_change(&self, ctx: &mut EventContext) {
+        if !self.editable {
+            return;
+        }
         if let Some(action) = &self.on_value_edit
             && let Some(action) = action(
                 self.gesture.map_or(ValueEdit::Single, ValueEdit::Update),
@@ -1562,6 +1598,9 @@ impl CurveEditor {
     }
 
     fn dispatch_edit(&mut self, edit: CurveEdit, ctx: &mut EventContext) -> bool {
+        if !self.editable {
+            return false;
+        }
         if !self.dispatch_gesture(
             CurveGestureEvent::Edit { gesture_id: self.gesture, edit: edit.clone() },
             ctx,
@@ -1999,6 +2038,14 @@ impl CurveEditor {
         modifiers: Modifiers,
         ctx: &mut EventContext,
     ) -> bool {
+        if !self.editable {
+            return matches!(
+                key,
+                KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
+            ) && !modifiers.ctrl
+                && !modifiers.alt
+                && !modifiers.meta;
+        }
         if self.selected_keys.len() > 1 {
             if !matches!(
                 key,
@@ -2189,6 +2236,9 @@ impl CurveEditor {
         position: Point,
         ctx: &mut EventContext,
     ) -> Option<usize> {
+        if !self.editable {
+            return None;
+        }
         let (index, point) = self.insertion_at(position)?;
         self.begin_value_gesture(ctx);
         self.points.insert(index, point);
@@ -2208,6 +2258,9 @@ impl CurveEditor {
     }
 
     fn delete_selected_from_input(&mut self, ctx: &mut EventContext) -> bool {
+        if !self.editable {
+            return true;
+        }
         if self.selected_keys.len() > 1 {
             if !self.selection_deletion
                 || self.has_active_pointer_interaction()
@@ -2514,6 +2567,19 @@ impl Widget for CurveEditor {
                     }
                     return EventResult::Handled;
                 }
+                if !self.editable {
+                    ctx.focus.request_focus(self.id);
+                    if let Some(tangent) = self.hit_tangent(*position) {
+                        let index = self.keyframe_indices[&tangent.keyframe_id];
+                        self.select(Some(index));
+                        self.selected_tangent = Some((tangent.keyframe_id, tangent.side));
+                    } else {
+                        self.selected_tangent = None;
+                        self.select(self.hit_point(*position));
+                    }
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 if let Some(tangent) = self.hit_tangent(*position) {
                     let index = self.keyframe_indices[&tangent.keyframe_id];
                     self.select(Some(index));
@@ -2699,6 +2765,11 @@ impl Widget for CurveEditor {
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::Delete | KeyCode::Backspace, .. }
+                if !self.editable =>
+            {
+                EventResult::Handled
+            }
+            UiEvent::KeyDown { key: KeyCode::Delete | KeyCode::Backspace, .. }
                 if self.selected_tangent.is_some() =>
             {
                 EventResult::Handled
@@ -2740,7 +2811,7 @@ impl Widget for CurveEditor {
         let v = CurveEditorVisualTokens::from_theme(ctx.theme);
         let plot = self.plot_rect();
         let grid = color_with_alpha(colors.border, v.grid_alpha);
-        let curve = if self.enabled {
+        let curve = if self.enabled && self.editable {
             color_with_alpha(colors.foreground, v.curve_alpha)
         } else {
             colors.muted_foreground
@@ -2875,6 +2946,7 @@ impl Widget for CurveEditor {
             return Some(false);
         }
         match command {
+            EditCommand::Cut | EditCommand::Paste if !self.editable => Some(false),
             EditCommand::Copy | EditCommand::Cut => Some(!self.selected_keyframe_ids().is_empty()),
             EditCommand::Paste => None,
         }
@@ -2907,6 +2979,7 @@ impl Widget for CurveEditor {
                 focusable: self.enabled,
                 focused: self.focused,
                 disabled: !self.enabled,
+                read_only: !self.editable,
                 selected: Some(self.selected.is_some()),
                 expanded: Some(self.context_menu.is_some()),
                 ..AccessibilityState::default()
@@ -2980,6 +3053,207 @@ mod tests {
             name,
             payload: Default::default(),
         }
+    }
+
+    #[test]
+    fn read_only_curve_preserves_copy_navigation_viewport_and_refuses_author_input() {
+        let id = mondrian_core::KeyframeId::new();
+        let points = vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.4),
+            CurvePoint::new(1.0, 1.0),
+        ];
+        let requests = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let captured = requests.clone();
+        let edits = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let emitted = edits.clone();
+        let mut editor = CurveEditor::with_points(points.clone())
+            .with_keyframe_ids(vec![None, Some(id), None])
+            .with_selection_deletion()
+            .with_tangents(vec![CurveTangent {
+                keyframe_id: id,
+                side: mondrian_core::BezierHandleSide::Outgoing,
+                point: CurvePoint::new(0.7, 0.6),
+                time_limits: [0.5, 1.0],
+            }])
+            .on_clipboard(move |command, ids| {
+                captured.borrow_mut().push((command, ids.to_vec()));
+                Some(Action::Copy)
+            })
+            .on_edit(move |edit| {
+                emitted.borrow_mut().push(edit);
+                None
+            })
+            .editable(false);
+        editor.layout(Rect::new(0.0, 0.0, 480.0, 200.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = CurveFocus(Some(editor.id()));
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        editor.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        for modifiers in [
+            Modifiers::ctrl(),
+            Modifiers { meta: true, ..Modifiers::none() },
+        ] {
+            for key in [KeyCode::C, KeyCode::X, KeyCode::V] {
+                assert_eq!(
+                    editor.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                    EventResult::Handled
+                );
+            }
+        }
+        assert_eq!(
+            requests.borrow().as_slice(),
+            &[
+                (CurveClipboardCommand::Copy, vec![id]),
+                (CurveClipboardCommand::Copy, vec![id])
+            ]
+        );
+        assert_eq!(actions.borrow().as_slice(), &[Action::Copy, Action::Copy]);
+        for key in [
+            KeyCode::Delete,
+            KeyCode::Backspace,
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Up,
+            KeyCode::Down,
+        ] {
+            assert_eq!(
+                editor.event(
+                    &UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                    &mut ctx
+                ),
+                EventResult::Handled
+            );
+        }
+        for point in [
+            editor.to_screen(points[1]),
+            editor.to_screen(editor.tangents[0].point),
+            editor.to_screen(CurvePoint::new(0.25, 0.8)),
+        ] {
+            editor.event(
+                &UiEvent::MouseDown {
+                    position: point,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            assert!(!editor.has_active_pointer_interaction());
+            editor.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(point.x + 15.0, point.y - 10.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            editor.event(
+                &UiEvent::MouseUp {
+                    position: point,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+        }
+        assert_eq!(editor.points(), points);
+        assert!(edits.borrow().is_empty());
+        let viewport = editor.viewport;
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::PageUp, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        assert_ne!(editor.viewport, viewport);
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Digit0, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        assert_eq!(editor.viewport, viewport);
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Home, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(editor.selected_index(), Some(0));
+        assert!(
+            editor.edit_command_available(mondrian_ui_core::widget::EditCommand::Cut)
+                == Some(false)
+        );
+        assert!(
+            editor.edit_command_available(mondrian_ui_core::widget::EditCommand::Paste)
+                == Some(false)
+        );
+        let node = editor.accessibility().expect("read-only canvas");
+        assert!(node.state.read_only && node.state.focusable && !node.state.disabled);
+    }
+
+    #[test]
+    fn read_only_transition_cancels_live_author_draft_without_finish_or_geometry_drift() {
+        let range = mondrian_core::ParameterNumericRange::new(0.0, 1.0).expect("range");
+        let axis = CurveValueAxis::new(range, range, Some(0.1)).expect("axis");
+        let points = vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.4),
+            CurvePoint::new(1.0, 1.0),
+        ];
+        let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+        let mut editor = CurveEditor::with_author_points(points.clone(), axis)
+            .with_keyframe_ids(vec![None, Some(mondrian_core::KeyframeId::new()), None])
+            .on_gesture(move |event| {
+                emitted.borrow_mut().push(event);
+                None
+            });
+        editor.layout(Rect::new(0.0, 0.0, 480.0, 200.0));
+        let mut focus = CurveFocus(Some(editor.id()));
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &|_| {});
+        let point = editor.to_screen(points[1]);
+        editor.event(
+            &UiEvent::MouseDown {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        editor.event(
+            &UiEvent::MouseMove {
+                position: Point::new(point.x + 15.0, point.y - 10.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_ne!(editor.points(), points);
+        editor.set_editable(false);
+        editor.event(
+            &UiEvent::MouseUp {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(editor.points(), points);
+        assert!(!editor.has_active_pointer_interaction() && editor.gesture.is_none());
+        assert_eq!(
+            events
+                .borrow()
+                .iter()
+                .filter(|event| matches!(event, CurveGestureEvent::Cancel(_)))
+                .count(),
+            1
+        );
+        assert!(!events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, CurveGestureEvent::Finish(_))));
     }
 
     #[test]

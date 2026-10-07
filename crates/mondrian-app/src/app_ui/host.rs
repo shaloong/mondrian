@@ -5715,20 +5715,25 @@ mod tests {
 
     #[test]
     fn focused_audio_curve_copy_uses_stable_keys_without_authoring() {
-        assert_focused_audio_curve_clipboard(false, false);
+        assert_focused_audio_curve_clipboard(false, false, false);
     }
 
     #[test]
     fn focused_audio_curve_cut_retains_clips_and_commits_one_restoring_undo() {
-        assert_focused_audio_curve_clipboard(true, false);
+        assert_focused_audio_curve_clipboard(true, false, false);
     }
 
     #[test]
     fn focused_audio_curve_paste_selects_new_group_and_subsequent_cut_keeps_original() {
-        assert_focused_audio_curve_clipboard(false, true);
+        assert_focused_audio_curve_clipboard(false, true, false);
     }
 
-    fn assert_focused_audio_curve_clipboard(cut: bool, paste: bool) {
+    #[test]
+    fn locked_audio_curve_copy_is_focusable_and_preserves_author_state() {
+        assert_focused_audio_curve_clipboard(false, false, true);
+    }
+
+    fn assert_focused_audio_curve_clipboard(cut: bool, paste: bool, locked: bool) {
         use crate::app::ui_actions::audio_automation_edit_action;
         use mondrian_core::{ExactAutomationKeyframe, TimeScale};
         use mondrian_timeline::{
@@ -5758,6 +5763,10 @@ mod tests {
                 edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
             }))
             .expect("authored audio key");
+        if locked {
+            state.active_sequence_mut_uncommitted().expect("locked fixture").audio_tracks[0]
+                .is_locked = true;
+        }
         let original = state.active_sequence().expect("original").clone();
         let generation = state.project_author_generation();
         let history = state.authoring_history().expect("history").diagnostics();
@@ -5771,7 +5780,24 @@ mod tests {
             temp_preferences_path("focused-audio-clipboard"),
         );
         TreeWalker::layout(host.active_root_mut(), bounds);
-        let curve_id = panel_curve_with_point_count(host.active_root(), PanelKind::Mixer, false, 3)
+        fn find_audio_curve(
+            widget: &dyn Widget,
+            in_mixer: bool,
+        ) -> Option<mondrian_ui_core::WidgetId> {
+            let in_mixer = in_mixer || widget.panel_kind() == Some(PanelKind::Mixer);
+            if in_mixer
+                && widget
+                    .as_any()
+                    .and_then(|value| value.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+                    .is_some_and(|curve| curve.points().len() == 3)
+            {
+                return Some(widget.id());
+            }
+            (0..widget.child_count()).find_map(|index| {
+                widget.child(index).and_then(|child| find_audio_curve(child, in_mixer))
+            })
+        }
+        let curve_id = find_audio_curve(host.active_root(), false)
             .expect("actual audio curve with one authored key and two virtual boundaries");
         let point = {
             let tree = WidgetTreeView::new(host.active_root_mut());
@@ -5848,6 +5874,87 @@ mod tests {
                 host.app_state().authoring_history().expect("history").diagnostics(),
                 history
             );
+            if locked {
+                assert_eq!(router.focused(), Some(curve_id));
+                let original_points = {
+                    let tree = WidgetTreeView::new(host.active_root_mut());
+                    let editor = tree
+                        .get(curve_id)
+                        .expect("read-only curve")
+                        .as_any()
+                        .expect("type")
+                        .downcast_ref::<mondrian_ui_widgets::CurveEditor>()
+                        .expect("editor");
+                    assert!(editor.can_focus() && !editor.is_editable());
+                    let node = editor.accessibility().expect("accessible read-only curve");
+                    assert!(node.state.read_only && !node.state.disabled);
+                    editor.points().to_vec()
+                };
+                for (key, modifiers) in [
+                    (KeyCode::X, Modifiers::ctrl()),
+                    (KeyCode::V, Modifiers::ctrl()),
+                    (KeyCode::Delete, Modifiers::none()),
+                    (KeyCode::Backspace, Modifiers::none()),
+                    (KeyCode::Up, Modifiers::none()),
+                    (KeyCode::Down, Modifiers::shift()),
+                    (KeyCode::Left, Modifiers::none()),
+                    (KeyCode::Right, Modifiers::shift()),
+                ] {
+                    router.route(
+                        UiEvent::KeyDown { key, modifiers },
+                        &mut WidgetTreeView::new(host.active_root_mut()),
+                        &dispatch,
+                    );
+                    host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+                }
+                for event in [
+                    UiEvent::MouseDown {
+                        position: point,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    UiEvent::MouseMove {
+                        position: Point::new(point.x + 20.0, point.y - 10.0),
+                        modifiers: Modifiers::none(),
+                    },
+                    UiEvent::MouseUp {
+                        position: Point::new(point.x + 20.0, point.y - 10.0),
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                ] {
+                    router.route(
+                        event,
+                        &mut WidgetTreeView::new(host.active_root_mut()),
+                        &dispatch,
+                    );
+                    host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+                }
+                let tree = WidgetTreeView::new(host.active_root_mut());
+                let editor = tree
+                    .get(curve_id)
+                    .expect("read-only curve")
+                    .as_any()
+                    .expect("type")
+                    .downcast_ref::<mondrian_ui_widgets::CurveEditor>()
+                    .expect("editor");
+                assert_eq!(editor.points(), original_points);
+                assert!(!editor.has_active_pointer_interaction());
+                assert!(host
+                    .app_state()
+                    .active_sequence()
+                    .expect("unchanged")
+                    .author_state_eq_ignoring_revision(&original));
+                assert_eq!(host.app_state().project_author_generation(), generation);
+                assert_eq!(
+                    host.app_state().authoring_history().expect("history").diagnostics(),
+                    history
+                );
+                assert_eq!(
+                    host.app_state().active_clipboard_kind(),
+                    Some(crate::app::AppClipboardKind::AudioAutomation)
+                );
+            }
             if paste {
                 router.route(
                     UiEvent::KeyDown { key: KeyCode::V, modifiers: Modifiers::ctrl() },

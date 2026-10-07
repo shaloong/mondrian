@@ -3986,3 +3986,29 @@ selection projection replaces local selection only when the explicit group chang
 Missing Undo keys filter out at the widget boundary and restored Redo keys reappear.
 This does not put selection into author history or introduce a second clipboard.
 Command readiness and the wider owner/native matrix remain acceptance work.
+
+### Read-only curve inspection
+
+CurveEditor uses independent input availability and authoring permission.
+`enabled` governs focus and general input; `editable` governs changes to points,
+values and tangents. Locked author models use a focusable read-only curve rather
+than disabling the entire inspection surface. Stable selection, Copy, keyboard
+navigation and viewport zoom/pan remain available. Cut/Paste, deletion, nudges,
+point insertion and pointer drags are owned refusals without local geometry
+mutation or fallback to Clip commands. Root edit readiness follows the same
+permission. Owner-provided menus disable their own interpolation and mutation
+commands while retaining Copy.
+
+Revoking author permission restores an outstanding pointer draft and defers its
+balanced gesture cancellation/pointer release to the next routed event. It keeps
+inspection focus and selection. UI-core AccessibilityState exposes `read_only`
+separately from `disabled`, so the accessible canvas reports its actual capability.
+Audio, numeric visual animation and curve-shape controls share this widget policy;
+canonical author admission remains the final mutation boundary.
+
+Read-only help is localized separately for inspection-only shapes and
+clipboard-capable animation curves; instructions do not advertise blocked edits.
+The native window-role fixture uses an explicit temporary preference path. Its
+actual Windows cycle checks fixed Startup/resizable Workspace, remembered normal
+size/maximization, stable Window/Surface/Device authority and bounded resource
+shutdown independently of the user's machine preference and plugin selections.

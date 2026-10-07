@@ -1863,7 +1863,9 @@ pub(super) fn audio_automation_curve_control(
         .with_frame_time_step(model.frame_time_step)
         .with_keyboard_help(
             localizer.text("curve-editor-name"),
-            localizer.text(if model.current_author_time.is_ok() {
+            localizer.text(if !model.is_editable {
+                "curve-editor-read-only-clipboard-keyboard-help"
+            } else if model.current_author_time.is_ok() {
                 "curve-editor-clipboard-keyboard-help"
             } else {
                 "curve-editor-keyboard-help"
@@ -1977,7 +1979,7 @@ pub(super) fn audio_automation_curve_control(
             }));
             items
         })
-        .enabled(model.is_editable);
+        .editable(model.is_editable);
     if model.current_author_time.is_ok() {
         editor = editor
             .with_selection_deletion()
@@ -2724,6 +2726,9 @@ fn numeric_curve_editor(
         .collect();
     let on_interpolation = std::rc::Rc::new(
         move |model: &InspectorCurveModel, ids: &[KeyframeId], interpolation| {
+            if !can_edit {
+                return None;
+            }
             let edit = ClipCurveEditPayload::SetInterpolations {
                 keyframe_ids: ids.to_vec(),
                 interpolation,
@@ -2787,7 +2792,13 @@ fn numeric_curve_editor(
         .with_frame_time_step(model.frame_time_step)
         .with_keyboard_help(
             localizer.text("curve-editor-name"),
-            localizer.text("curve-editor-clipboard-keyboard-help"),
+            localizer.text(if can_edit {
+                "curve-editor-clipboard-keyboard-help"
+            } else if clipboard_target.is_some() {
+                "curve-editor-read-only-clipboard-keyboard-help"
+            } else {
+                "curve-editor-read-only-keyboard-help"
+            }),
         )
         .with_view_key(target.as_ref().and_then(|target| serde_json::to_string(target).ok()))
         .with_keyframe_ids(ids)
@@ -2867,7 +2878,7 @@ fn numeric_curve_editor(
                 items.push(
                     MenuItem::new(
                         cut_label.clone(),
-                        (!ids.is_empty()).then(|| {
+                        (can_edit && !ids.is_empty()).then(|| {
                             focused_curve_clipboard_action(
                                 *clip_id,
                                 parameter,
@@ -2895,21 +2906,26 @@ fn numeric_curve_editor(
                 items.push(
                     MenuItem::new(
                         paste_label.clone(),
-                        focused_curve_clipboard_action(
-                            *clip_id,
-                            parameter,
-                            CurveClipboardCommand::Paste,
-                            ids,
-                        ),
+                        can_edit.then(|| {
+                            focused_curve_clipboard_action(
+                                *clip_id,
+                                parameter,
+                                CurveClipboardCommand::Paste,
+                                ids,
+                            )
+                        }),
                     )
                     .with_message_id("command-edit-paste"),
                 );
             }
             items
         })
-        .enabled(can_edit);
+        .editable(can_edit);
     if let Some((clip_id, parameter)) = clipboard_target {
         editor = editor.on_clipboard(move |command, ids| {
+            if !can_edit && command != mondrian_ui_widgets::CurveClipboardCommand::Copy {
+                return None;
+            }
             Some(focused_curve_clipboard_action(
                 clip_id, &parameter, command, ids,
             ))
@@ -3550,12 +3566,16 @@ pub(super) fn inspector_property_value_widget(
                     }))
                     .with_keyboard_help(
                         localizer.text("curve-editor-name"),
-                        localizer.text("curve-editor-shape-keyboard-help"),
+                        localizer.text(if can_edit {
+                            "curve-editor-shape-keyboard-help"
+                        } else {
+                            "curve-editor-read-only-keyboard-help"
+                        }),
                     )
                     .with_point_insertion_limit(
                         mondrian_core::automation::MAX_NORMALIZED_CURVE_POINTS,
                     )
-                    .enabled(can_edit)
+                    .editable(can_edit)
                     .on_value_edit(move |phase, points| {
                         use mondrian_ui_widgets::ValueEdit;
                         match phase {

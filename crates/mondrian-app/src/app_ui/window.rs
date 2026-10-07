@@ -9321,8 +9321,12 @@ mod tests {
         let background = AppUiBackgroundRuntimeOwner::start(deadline)
             .unwrap_or_else(|_| panic!("native test background startup failed"));
         let runtime_guard = background.enter();
-        let mut host = AppUiHost::new(AppState::new());
         let project_dir = tempfile::tempdir().expect("native role project directory");
+        let mut host = AppUiHost::new_with_preferences_path(
+            AppState::new(),
+            crate::app_ui::preferences_store::AppUiPreferences::default(),
+            project_dir.path().join("preferences.json"),
+        );
         let project_file = project_dir.path().join("窗口角色.mdp");
         let mut builder = winit::event_loop::EventLoop::<AppUiUserEvent>::with_user_event();
         builder.with_any_thread(true);

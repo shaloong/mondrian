@@ -1480,3 +1480,6 @@ error-curve-clipboard-missing-playhead = Select a sequence and position the play
 error-curve-clipboard-out-of-bounds = The whole key group must fit inside the target clip. Move the playhead or select fewer keys.
 
 curve-editor-clipboard-keyboard-help = { curve-editor-selection-keyboard-help } Ctrl/Cmd+C: copy the selected keys; Ctrl/Cmd+X: cut the selected keys in one Undo; Ctrl/Cmd+V: paste into this curve at the playhead in one Undo.
+
+curve-editor-read-only-keyboard-help = Read-only curve. Click to inspect points; Home/End and Ctrl/Cmd + Left/Right navigate. Ctrl/Cmd + wheel zooms; middle drag pans; Ctrl/Cmd + 0 resets the view.
+curve-editor-read-only-clipboard-keyboard-help = { curve-editor-read-only-keyboard-help } Shift + click toggles key selection; Ctrl/Cmd + A selects authored keys; Ctrl/Cmd + C copies. Editing is unavailable.

@@ -108,6 +108,8 @@ pub struct AccessibilityState {
     pub focused: bool,
     /// Whether the control is disabled.
     pub disabled: bool,
+    /// Whether the control exposes readable content without authoring input.
+    pub read_only: bool,
     /// Optional checked state for checkboxes and similar controls.
     pub checked: Option<bool>,
     /// Optional pressed state for push buttons.

@@ -1896,3 +1896,57 @@ Strict workspace/all-target/all-feature Clippy with `-D warnings` passed
 (2m07s), followed by formatting and diff checks. No production code changed in
 this test extension; the prior full library and clean Golden receipts retain
 their named source scope. No push was performed; the overall goal stays active.
+
+## Read-only curve inspection and native window roles
+
+Actual locked Track audio-curve input reproduced a failure: after real Host /
+EventRouter click and Ctrl+A/C, the clipboard remained empty (**0 passed,
+1 failed**, 3.01s). The backend admitted locked Copy, but the widget was disabled.
+CurveEditor now separates author permission from input availability. Read-only
+audio, numeric visual and shape curves retain inspection focus, selection and
+viewport input. Clipboard-capable curves retain Copy; mutation commands are
+owned refusals without local geometry drift or fallback to Clip operations.
+Revoking author permission balances draft cancellation and pointer release.
+Accessible state marks `read_only` independently from `disabled`.
+
+The original actual Host assertion passed, including Cut/Paste, Delete/Backspace,
+arrow and pointer refusal with unchanged curve, clips, generation, history and
+clipboard kind. Shared widget cases also check Ctrl/Meta Copy, tangent and point
+input refusal, insertion refusal, navigation, zoom/reset and cancellation without
+Finish or geometry drift. Core/UI authoring qualification before the final
+localized-help and isolated-native-fixture adjustments:
+
+| Gate | Result |
+| --- | --- |
+| UI-core library | 84 passed, 0 failed, 0 ignored; 0.02s |
+| All CurveEditor regression cases | 102 passed, 0 failed, 0 ignored; 3.67s |
+| App library | 2607 passed, 0 failed, 68 ignored; 655.96s |
+| Strict workspace/all-target/all-feature Clippy | Passed; 2m45s |
+
+Final adjustments add English/Chinese help describing available read-only
+operations and isolate native-test preferences from machine configuration.
+Final-source gates then passed:
+
+| Gate | Result |
+| --- | --- |
+| Original locked audio Host Copy/refusal regression | 1 passed, 0 failed, 0 ignored; 3.02s |
+| Focused audio Copy/Cut/Paste Host regressions | 3 passed, 0 failed, 0 ignored; 7.42s |
+| Localization, catalog and pseudo-locale tests | 26 passed, 0 failed, 0 ignored; 0.52s |
+| Explicit native Windows window-role cycle | 1 passed, 0 failed, 0 ignored; 9.57s |
+| Strict workspace/all-target/all-feature Clippy, `-D warnings` | Passed; 2m20s |
+| Formatting and diff checks | Passed |
+
+The native role cycle uses temporary project/preferences files and the actual
+winit window and GPU surface. It verifies fixed Startup size and resize policy,
+resizable Workspace, requested 1300x800 normal size, maximize/close/reopen state,
+cleared staged GPU successors and retained Window/Surface/Device identities. It
+acquires/presents the retained surface and requires complete UI/App/background
+resource release. Eight-direction border admission is separately covered by the
+App regressions and routes through `drag_resize_window`; this run does not prove
+physical pointer dragging or every monitor/platform combination.
+
+Final App test binary SHA256: `D22E5705F15702D1C4C36F7BCDD26B9465E2F97CF65F3DC11CEB7D9CC8CD70B2`.
+The prior clean production/native receipts remain tied to their named revisions;
+this does not assert a new packaged product build. Wider owner-domain, group
+pointer/marquee/reset, plugin/platform/performance and full-goal matrices remain
+open. No push was performed.
