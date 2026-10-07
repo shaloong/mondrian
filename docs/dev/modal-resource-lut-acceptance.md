@@ -2060,3 +2060,67 @@ all audio-related App cases 148/0/9 ignored (39.28s), strict complete Clippy 2m0
 format/diff checks passed. Overlapping cases are not added as unique test counts.
 Actions pin validation passed. Current product/native encoded output remains to
 rebuild and qualify on a clean commit; no inferred native acceptance or push.
+
+## Clean c47b9a5 modal, resource, history and native output acceptance
+
+The group pointer implementation is committed as `ebae929`; `c47b9a5` then merges
+develop's community, package metadata and CI changes. Both commits use Shalom
+Wang as author and committer. This receipt supersedes the pending native status
+above for its explicitly executed scope. The original full NLE goal remains
+active, and no push or remote CI result is claimed.
+
+The current product and Golden binaries were rebuilt from clean `c47b9a5`.
+Complete Golden passed **3/3** independent runs, each executing all seven required
+stages with distinct Project and run identities. Build exit was zero after
+1,147,386ms; process durations were 121,353/118,537/117,704ms, all natural zero
+exits without forced termination. Source attestation starts and ends at
+`c47b9a549935963e08a97df59efe93a3b8901a9f`, clean and stable, with dirty diagnostic
+mode disabled and contract timeouts unchanged.
+
+All three color-media H.264 roundtrips checked five decoded sample pixels and
+measured maximum channel error **4/255**, with zero GPU output CPU fallbacks.
+Encoding uses the qualified CPU rawvideo route; these results do not establish
+zero-copy encoding, arbitrary-LUT accuracy or a performance/platform matrix.
+
+| Current-source gate | Executed result |
+| --- | --- |
+| Actual visual/audio group pointer input, terminal policy, Undo and Unicode reopen | 4 passed, 0 failed, 0 ignored; 9.24s |
+| Exact Component extent versus Sequence/Scope viewport admission | 1 passed, 0 failed, 0 ignored |
+| Shared audio out-of-view projection, keyboard history and saved live Redo | 1 passed, 0 failed, 0 ignored; 0.58s |
+| EventRouter modal replacement, empty scope, removed owner and suspended shortcuts | 1 passed, 0 failed, 0 ignored |
+| Actual product resource helper, native paths, cancellation/timeout/retry and child reaping | 5 passed, 0 failed, 0 ignored; 8.43s |
+| App modal Tab/Shift+Tab, disabled Apply and focus restoration | 16 passed, 0 failed, 0 ignored; 23.24s |
+| Resource transactions, stale/canceled/locked drafts, Undo/save/reopen and real cube pixels | 103 passed, 0 failed, 5 ignored; 25.45s |
+| Native OpenFX group interpolation/time/value histories, queries and pixels | Three separate gates, each 1 passed, 0 failed, 0 ignored; 5.46/5.75/5.41s |
+| Native CLAP/VST3 group interpolation, Undo/save/reopen and PCM output | 2 passed, 0 failed, 0 ignored; 72.37s |
+| CLAP event ranges / VST3 linear parameter queues / isolated state restoration | Three separate gates, each 1 passed, 0 failed, 0 ignored; 0.80/1.49/0.98s |
+| Installed CLAP/VST3 Preview execution | 2 passed, 0 failed, 0 ignored; 2.39s |
+| Portable LUT/OCIO dependencies, relocation, source removal, tampering, cancellation and real-video rebinding | 11 passed, 0 failed, 0 ignored; 8.39s |
+| Native Windows Startup/workspace role cycle, sizing and retained surface/device authority | 1 passed, 0 failed, 0 ignored; 8.99s |
+
+The resource row's five ignored tests were separately executed in the explicit
+native-resource gate above; ignored tests are not counted as executed passes.
+Filters overlap, so the rows are not added into a unique test total. Resource
+coverage includes edit-away-and-back invalidation, duplicate confirmation,
+pending IME and a Save As directory change. LUT Undo rejects an unbound resource
+instead of reusing stale compiled output; saving preserves live Redo, while a
+fresh Session does not resurrect history.
+
+Product SHA-256:
+`1c339be231c44981fb25a42b861beb05b0ad5d486c5b20f817dfab4ae916c8ef`.
+Golden SHA-256:
+`aa48956577255634d62b1917ae8d7f60e67602292f8588f909b2d45825256b1f`.
+The complete gate report is
+`target/validation/nle-backlog-complete/20261007T072712Z-complete-golden-2fbeaea5/complete-golden-consecutive-report.json`.
+Local native and supplemental receipts retain source, product and fixture hashes
+and exact logs. All binaries and tracked source remained unchanged throughout
+both receipts. Strict workspace/all-targets/all-features Clippy, fmt, cached diff
+and Actions pin validation passed before the merge commit; the merged dependency
+policy additionally passed `cargo deny --offline check bans licenses sources`.
+
+This scope uses the owned SessionProbe OpenFX fixture and installed reference
+gain processors. It does not qualify combined group-pointer native output,
+arbitrary vendor plugins, multi-bus/MIDI/editor completeness, all monitor edges
+or macOS. Marquee selection and the wider original workflow, platform, i18n and
+performance obligations remain open. Subsequent documentation-only commits do
+not imply a rebuilt product at a different source revision.
