@@ -1673,3 +1673,14 @@ numeric-contract value displacement for a complete stable key set. The existing
 Timeline curve editor delegates atomic final-topology preparation to Core and
 validates the resulting author state before publication. Preview and execution
 consume the same definition-admitted edit; the UI does not own another evaluator.
+
+### Definition reset for audio author parameters
+
+AudioAutomationEdit::ResetToDefault uses the resolved definition schema,
+independent of playhead or sampled curve value. Timeline's shared
+default_numeric_automation prepares and validates the unkeyed definition curve;
+AudioProcessorRackEdit::ResetParameterToDefault reuses it for both animatable
+and static integer processor parameters. Existing target/rack locks, schema
+validation, no-op outcomes and sequence publication apply. Optional automation
+returns to its static field; processor curves retain parameter and instance
+identity. App author transactions provide one Undo and durable snapshot history.

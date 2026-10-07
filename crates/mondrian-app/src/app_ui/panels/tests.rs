@@ -22,6 +22,227 @@ fn chinese_localizer() -> Localizer {
 }
 
 #[test]
+fn parameter_reset_audio_menu_routes_keyboard_without_a_key_selection() {
+    use mondrian_timeline::{
+        AudioAutomationEdit, AudioAutomationEditRequest, AudioAutomationTarget,
+        AudioChannelStripOwner,
+    };
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let mut sequence = mondrian_timeline::Sequence::new("Audio reset menu");
+        let track_id = sequence.audio_tracks[0].id;
+        let target = AudioAutomationTarget::ChannelFader {
+            owner: AudioChannelStripOwner::Track { track_id },
+        };
+        sequence.video_tracks[0]
+            .add_clip(
+                mondrian_timeline::Clip::new_basic_title(
+                    "Menu",
+                    "Arial",
+                    TimelineTime::ZERO,
+                    TimelineTime::ONE,
+                )
+                .expect("title"),
+            )
+            .expect("viewport clip");
+        mondrian_timeline::apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::UpsertKeyframe {
+                    keyframe: mondrian_core::ExactAutomationKeyframe::linear(
+                        TimelineTime::ZERO,
+                        -6.0,
+                    ),
+                },
+            },
+        )
+        .expect("authored curve");
+        let original = sequence.clone();
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        let mixer = AudioMixerPanelModel::from_app_state(&state, &localizer);
+        let model = mixer
+            .channels
+            .iter()
+            .find(|channel| channel.owner == AudioChannelStripOwner::Track { track_id })
+            .and_then(|channel| channel.fader_automation.as_ref())
+            .expect("fader projection");
+        let mut widget = audio_automation_curve_control(model, &localizer);
+        widget.layout(Rect::new(0.0, 0.0, 320.0, 120.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut router = EventRouter::new(widget.id());
+        {
+            let mut tree = WidgetTreeView::new(widget.as_mut());
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+                &mut tree,
+                &dispatch,
+            );
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::F10, modifiers: Modifiers::shift() },
+                &mut tree,
+                &dispatch,
+            );
+        }
+        assert_eq!(
+            widget.accessibility().expect("curve").state.expanded,
+            Some(true)
+        );
+        {
+            let mut tree = WidgetTreeView::new(widget.as_mut());
+            for key in [KeyCode::End, KeyCode::Enter] {
+                router.route(
+                    UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                    &mut tree,
+                    &dispatch,
+                );
+            }
+        }
+        assert_eq!(actions.borrow().len(), 1);
+        let action = actions.borrow_mut().remove(0);
+        assert_eq!(
+            ProductAction::decode_external(&action).expect("codec"),
+            Some(ProductAction::Audio(
+                crate::app::product_action::AudioProductAction::EditAutomation(
+                    AudioAutomationEditRequest {
+                        target: target.clone(),
+                        edit: AudioAutomationEdit::ResetToDefault,
+                    }
+                ),
+            ))
+        );
+        state.dispatch_action(action).expect("reset from keyboard menu");
+        let inspection = mondrian_timeline::inspect_audio_automation(
+            state.active_sequence().expect("sequence"),
+            &target,
+        )
+        .expect("target");
+        assert!(inspection.curve().is_none());
+        assert_eq!(inspection.default_value(), 0.0);
+        let mixer = AudioMixerPanelModel::from_app_state(&state, &localizer);
+        let model = mixer
+            .channels
+            .iter()
+            .find(|channel| channel.owner == AudioChannelStripOwner::Track { track_id })
+            .and_then(|channel| channel.fader_automation.as_ref())
+            .expect("default projection");
+        assert!(crate::app_ui::audio_automation::audio_parameter_reset_action(model).is_none());
+        assert!(state.undo_timeline().expect("one Undo"));
+        assert!(state
+            .active_sequence()
+            .expect("restored")
+            .author_state_eq_ignoring_revision(&original));
+    }
+}
+
+#[test]
+fn parameter_reset_inspector_routes_localized_keyboard_and_disables_default_or_locked_state() {
+    use mondrian_ui_core::tree::WidgetTreeView;
+    use mondrian_ui_events::EventRouter;
+    fn find_button<'a>(widget: &'a dyn Widget, name: &str) -> Option<&'a dyn Widget> {
+        if widget.accessibility().is_some_and(|node| node.name.as_deref() == Some(name)) {
+            return Some(widget);
+        }
+        (0..widget.child_count()).find_map(|index| find_button(widget.child(index)?, name))
+    }
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let mut authored = mondrian_core::automation::AnimatedProperty::from_descriptor(
+            mondrian_core::automation::PropertyDescriptor::new(
+                "parameter",
+                "Parameter",
+                PropertyValue::Float(1.0),
+            ),
+        );
+        let selection = SelectedClipRef {
+            clip_id: ClipId::new(),
+            track_id: TrackId::new(),
+            is_video_track: true,
+        };
+        for changed in [false, true] {
+            authored
+                .set_static_value(PropertyValue::Float(if changed { 0.5 } else { 1.0 }))
+                .expect("static");
+            let model =
+                inspector_property_model("parameter", &authored, TimelineTime::ZERO, &localizer);
+            assert_eq!(model.can_reset, changed);
+            for can_edit in [false, true] {
+                for target in [
+                    InspectorPropertyTarget::Clip { parameter: authored.address() },
+                    InspectorPropertyTarget::Effect {
+                        effect_id: EffectId::new(),
+                        parameter: authored.address(),
+                    },
+                    InspectorPropertyTarget::Mask {
+                        mask_id: MaskId::new(),
+                        parameter: authored.address(),
+                    },
+                ] {
+                    let row = inspector_property_row(
+                        &localizer,
+                        &model,
+                        can_edit,
+                        Some(selection),
+                        target.clone(),
+                    );
+                    let mut panel = PropertyPanel::new("Inspector")
+                        .with_section(PropertySection::new("Parameter").with_row(row));
+                    panel.layout(Rect::new(0.0, 0.0, 420.0, 120.0));
+                    let reset = find_button(&panel, &localizer.text("parameter-reset-to-default"))
+                        .expect("reset button");
+                    assert_eq!(
+                        reset.accessibility().expect("button").state.disabled,
+                        !changed || !can_edit
+                    );
+                    let id = reset.id();
+                    let actions = RefCell::new(Vec::new());
+                    let dispatch = |action| actions.borrow_mut().push(action);
+                    let mut router = EventRouter::new(panel.id());
+                    router.focus_manager_mut().set_focused_widget(Some(id), None);
+                    let mut tree = WidgetTreeView::new(&mut panel);
+                    router.route(
+                        UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                        &mut tree,
+                        &dispatch,
+                    );
+                    let actions = actions.borrow();
+                    assert_eq!(actions.len(), usize::from(changed && can_edit));
+                    if let Some(action) = actions.first() {
+                        let decoded = ProductAction::decode_external(action)
+                            .expect("codec")
+                            .expect("typed action");
+                        let write = match (target, decoded) {
+                            (InspectorPropertyTarget::Clip { .. }, ProductAction::Clip(crate::app::product_action::ClipProductAction::WriteParameterValues(payload))) => {
+                                assert_eq!(payload.clip_id, selection.clip_id);
+                                assert_eq!(payload.writes.len(), 1);
+                                payload.writes[0].clone()
+                            }
+                            (InspectorPropertyTarget::Effect { effect_id, .. }, ProductAction::VisualEffect(crate::app::product_action::VisualEffectProductAction::SetParameterValue(payload))) => {
+                                assert_eq!(payload.clip_id, selection.clip_id);
+                                assert_eq!(payload.effect_id, effect_id);
+                                payload.write
+                            }
+                            (InspectorPropertyTarget::Mask { mask_id, .. }, ProductAction::VisualMask(crate::app::product_action::VisualMaskProductAction::SetParameterValue(payload))) => {
+                                assert_eq!(payload.clip_id, selection.clip_id);
+                                assert_eq!(payload.mask_id, mask_id);
+                                payload.write
+                            }
+                            _ => panic!("reset must retain owner identity"),
+                        };
+                        assert_eq!(
+                            write,
+                            ParameterValueWrite::ResetToDefault { parameter: authored.address() }
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn mask_shape_and_tracking_status_follow_locale_without_label_based_branching() {
     let chinese = chinese_localizer();
     let english = Localizer::new(AppUiLocale::EnUs).expect("bundled English catalog");
@@ -5879,6 +6100,7 @@ fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity
         hard_min: None,
         hard_max: None,
         step: None,
+        can_reset: true,
         is_animatable: false,
         numeric_curve: None,
     };
@@ -6061,6 +6283,7 @@ fn inspector_effect_curve_editor_dispatches_structured_curve_value() {
         hard_min: None,
         hard_max: None,
         step: None,
+        can_reset: true,
         is_animatable: false,
         numeric_curve: None,
     };
@@ -6183,6 +6406,7 @@ fn inspector_effect_vec3_property_widget_dispatches_component_change() {
         hard_min: None,
         hard_max: None,
         step: Some(0.01),
+        can_reset: true,
         is_animatable: true,
         numeric_curve: None,
     };
@@ -6399,6 +6623,7 @@ fn inspector_vector_slider_uses_its_own_channel_contract() {
         hard_min: None,
         hard_max: None,
         step: Some(0.01),
+        can_reset: true,
         is_animatable: true,
         numeric_curve: None,
     };
@@ -6728,6 +6953,7 @@ fn precise_inspector_entry_commits_and_undoes_exact_integer_and_double_values() 
             hard_min: None,
             hard_max: None,
             step: (name == "double").then_some(0.1),
+            can_reset: true,
             is_animatable: true,
             numeric_curve: None,
         };
@@ -6831,6 +7057,7 @@ fn inspector_effect_float_property_text_input_preserves_value_between_steps() {
         hard_min: None,
         hard_max: None,
         step: Some(0.25),
+        can_reset: true,
         is_animatable: true,
         numeric_curve: None,
     };
@@ -6928,6 +7155,7 @@ fn inspector_disabled_effect_property_row_remains_editable_for_unlocked_clip() {
         hard_min: None,
         hard_max: None,
         step: Some(0.1),
+        can_reset: true,
         is_animatable: true,
         numeric_curve: None,
     };
@@ -7026,6 +7254,7 @@ fn inspector_effect_float_property_keyboard_nudge_sanitizes_descriptor_bounds() 
         hard_min: None,
         hard_max: None,
         step: Some(0.25),
+        can_reset: true,
         is_animatable: true,
         numeric_curve: None,
     };
@@ -7115,6 +7344,7 @@ fn inspector_effect_int_property_number_input_defaults_to_unit_step() {
         hard_min: None,
         hard_max: None,
         step: None,
+        can_reset: true,
         is_animatable: false,
         numeric_curve: None,
     };
@@ -7576,6 +7806,7 @@ fn effect_vector_controls_preserve_current_siblings_keys_and_exact_history() {
                     hard_min: None,
                     hard_max: None,
                     step: None,
+                    can_reset: true,
                     is_animatable: true,
                     numeric_curve: None,
                 };

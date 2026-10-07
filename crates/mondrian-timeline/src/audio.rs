@@ -1639,6 +1639,21 @@ fn validate_curve(curve: &ExactAutomationCurve) -> Result<(), AudioAuthoringErro
         .map_err(|error| AudioAuthoringError::InvalidAutomation { reason: error.to_string() })
 }
 
+/// Prepare an unkeyed curve using the current definition default.
+pub(crate) fn default_numeric_automation(
+    schema: &ParameterSchema,
+) -> Result<ExactAutomationCurve, AudioAuthoringError> {
+    let value = match schema.default_value {
+        mondrian_core::automation::PropertyValue::Double(value) => value,
+        mondrian_core::automation::PropertyValue::Int(value) => value as f64,
+        _ => return Err(AudioAuthoringError::UnsupportedProcessorParameterType),
+    };
+    let curve = ExactAutomationCurve::new(schema.parameter_id.clone(), value)
+        .map_err(|error| AudioAuthoringError::InvalidAutomation { reason: error.to_string() })?;
+    validate_numeric_automation(schema, &curve)?;
+    Ok(curve)
+}
+
 /// Admit an exact audio curve against the same complete definition used by authoring.
 pub(crate) fn validate_numeric_automation(
     schema: &ParameterSchema,

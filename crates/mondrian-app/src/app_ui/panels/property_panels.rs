@@ -1752,16 +1752,42 @@ pub(super) fn with_audio_processor_rack_sections(
                     .and_then(|contracts| contracts.first())
                     .copied()
                 {
-                    section = section.with_row(PropertyRow::new(
-                        label.clone(),
-                        audio_processor_static_parameter_control(
-                            rack,
-                            processor,
-                            parameter,
-                            numeric,
-                            rack_can_edit,
+                    let can_reset = rack_can_edit
+                        && parameter
+                            .schema
+                            .default_value
+                            .to_channel_values()
+                            .first()
+                            .is_some_and(|value| *value != parameter.static_value);
+                    let reset_action = crate::app::ui_actions::audio_processor_rack_edit_action(
+                        mondrian_timeline::AudioProcessorRackEditRequest {
+                            address: rack.address,
+                            edit:
+                                mondrian_timeline::AudioProcessorRackEdit::ResetParameterToDefault {
+                                    processor_id: processor.processor_id,
+                                    parameter_id: parameter.parameter_id.clone(),
+                                },
+                        },
+                    );
+                    let reset = Button::new(localizer.text("parameter-reset-to-default"))
+                        .minimal()
+                        .enabled(can_reset)
+                        .on_click(Some(reset_action));
+                    let value = FlexContainer::row(vec![
+                        FlexChild::flex(
+                            audio_processor_static_parameter_control(
+                                rack,
+                                processor,
+                                parameter,
+                                numeric,
+                                rack_can_edit,
+                            ),
+                            1.0,
                         ),
-                    ));
+                        FlexChild::fixed(Box::new(reset)),
+                    ])
+                    .with_gap(4.0);
+                    section = section.with_row(PropertyRow::new(label.clone(), Box::new(value)));
                 } else {
                     section = section.with_row(PropertyRow::new(
                         label.clone(),
@@ -1821,6 +1847,7 @@ pub(super) fn audio_automation_curve_control(
     model: &AudioAutomationCurveModel,
     localizer: &Localizer,
 ) -> Box<dyn Widget> {
+    let reset_label = localizer.text("parameter-reset-to-default");
     let action_model = model.clone();
     let menu_model = model.clone();
     let clipboard_model = model.clone();
@@ -1978,6 +2005,14 @@ pub(super) fn audio_automation_curve_control(
                 )
                 .with_message_id(*message)
             }));
+            items.push(MenuItem::separator());
+            items.push(
+                MenuItem::new(
+                    reset_label.clone(),
+                    crate::app_ui::audio_automation::audio_parameter_reset_action(&menu_model),
+                )
+                .with_message_id("parameter-reset-to-default"),
+            );
             items
         })
         .editable(model.is_editable);
@@ -3307,6 +3342,21 @@ pub(super) fn inspector_property_row(
     } else {
         property.label.clone()
     };
+    let reset = inspector_property_write_action(selection, target.clone(), |parameter| {
+        ParameterValueWrite::ResetToDefault { parameter }
+    });
+    let value = Box::new(
+        FlexContainer::row(vec![
+            FlexChild::flex(value, 1.0),
+            FlexChild::fixed(Box::new(
+                Button::new(localizer.text("parameter-reset-to-default"))
+                    .minimal()
+                    .enabled(can_edit && property.can_reset && reset.is_some())
+                    .on_click(reset),
+            )),
+        ])
+        .with_gap(4.0),
+    );
     let row = PropertyRow::new(label, value);
     let height = if matches!(&target, InspectorPropertyTarget::Clip { .. })
         && property.path == mondrian_core::BasicTitle::TEXT_PATH

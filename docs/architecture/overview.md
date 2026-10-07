@@ -899,3 +899,17 @@ relative to the keys. PropertyMutation::TransformKeyframes uses the same contrac
 through property/bag dispatch and nested owner path mapping. This is the atomic
 foundation for group pointer gestures; App/UI authoring and input acceptance
 remain separate work and are not implied by the Core qualification.
+
+### Declared-default parameter reset
+
+Core ParameterValueWrite::ResetToDefault resolves the existing stable parameter
+address against its current PropertyBag. PropertyMutation::ResetToDefault admits
+the current schema default before replacing static author value, disabling
+animation and removing every channel key. Property/schema/channel identities
+remain intact; disabled retained keys also make reset a real edit. Static and
+nonnumeric properties share this operation. is_at_default projects complete
+author state for UI availability, rather than comparing only the evaluated value.
+
+Reset replaces shared channel key storage with empty author lists; it avoids
+copying the Undo snapshot's keys merely to clear them and retains no emptied key
+capacity in the new author state. The original shared snapshot remains reversible.

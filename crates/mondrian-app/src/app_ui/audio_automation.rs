@@ -427,6 +427,21 @@ pub(crate) fn audio_automation_interpolations_action(
     }))
 }
 
+/// Reset using fresh definition admission, independent of playhead edit time.
+pub(crate) fn audio_parameter_reset_action(model: &AudioAutomationCurveModel) -> Option<Action> {
+    if !model.is_editable {
+        return None;
+    }
+    let edit = AudioAutomationEdit::ResetToDefault;
+    let candidate = model.curve_contract.preview_edit(&model.source_curve, &edit).ok()?;
+    (candidate != model.source_curve).then(|| {
+        audio_automation_edit_action(AudioAutomationEditRequest {
+            target: model.target.clone(),
+            edit,
+        })
+    })
+}
+
 pub(crate) fn audio_keyframe_interpolation(
     keyframe: &ExactAutomationKeyframe,
 ) -> InterpolationType {

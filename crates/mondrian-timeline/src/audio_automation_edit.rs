@@ -148,6 +148,8 @@ pub enum AudioAutomationEdit {
         /// One of the supported hold, linear, or Bezier modes.
         interpolation: InterpolationType,
     },
+    /// Restore the current definition default and remove every authored key.
+    ResetToDefault,
     /// Remove every keyframe and retain one explicit unkeyed value.
     Clear {
         /// Definition-domain value retained after clearing the curve.
@@ -957,6 +959,10 @@ fn edit_curve(
                     }
                     other => invalid_automation(other),
                 })?;
+        }
+        AudioAutomationEdit::ResetToDefault => {
+            *curve = crate::audio::default_numeric_automation(schema)
+                .map_err(AudioAutomationEditError::AuthorState)?;
         }
         AudioAutomationEdit::Clear { default_value } => {
             curve.default_value = *default_value;

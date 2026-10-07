@@ -196,7 +196,8 @@ impl ParameterGestureEdit {
                     ParameterValueWrite::Channels { channel_values, .. } => {
                         Some(channel_values.iter().map(|(index, _)| *index).collect())
                     }
-                    ParameterValueWrite::Value { .. } => None,
+                    ParameterValueWrite::Value { .. }
+                    | ParameterValueWrite::ResetToDefault { .. } => None,
                 },
             )
         };

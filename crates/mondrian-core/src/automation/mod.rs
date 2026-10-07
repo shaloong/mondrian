@@ -2493,6 +2493,31 @@ impl AnimatedProperty {
         Ok(())
     }
 
+    /// Whether the complete author state already equals the declared default.
+    /// Disabled retained keys still require reset.
+    pub fn is_at_default(&self) -> bool {
+        self.static_value == self.descriptor.schema.default_value
+            && !self.animation_enabled
+            && !self.is_animated()
+    }
+
+    /// Restore the current definition default and remove all authored keys.
+    ///
+    /// Retains the property, schema and channel identities. Admission completes
+    /// before mutation, including for static and nonnumeric parameters.
+    pub fn reset_to_default(&mut self) -> Result<()> {
+        self.descriptor
+            .validate()
+            .map_err(|error| parameter_value_error(&self.descriptor.path, &error.to_string()))?;
+        let value = self.normalize_value(self.descriptor.schema.default_value.clone())?;
+        self.static_value = value;
+        self.animation_enabled = false;
+        for channel in &mut self.channels {
+            channel.keyframes = AuthoringList::new();
+        }
+        Ok(())
+    }
+
     pub fn clear_animation(&mut self, time: TimelineTime) -> Result<()> {
         self.disable_animation(time)?;
         for channel in &mut self.channels {
@@ -3861,6 +3886,10 @@ impl AnimatedProperty {
                 self.ensure_path(&path)?;
                 self.disable_animation(time)
             }
+            PropertyMutation::ResetToDefault { path } => {
+                self.ensure_path(&path)?;
+                self.reset_to_default()
+            }
             PropertyMutation::ClearAnimation { path, time } => {
                 self.ensure_path(&path)?;
                 self.clear_animation(time)
@@ -3912,10 +3941,15 @@ pub struct AnimationParameterAddress {
     pub parameter_id: ParameterId,
 }
 
-/// One complete or sparse value edit addressed to a current author parameter.
+/// One complete, sparse or declared-default edit of a current author parameter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ParameterValueWrite {
+    /// Restore the current definition default and remove every authored key.
+    ResetToDefault {
+        /// Stable owner-local parameter instance and definition identity.
+        parameter: AnimationParameterAddress,
+    },
     /// Replace the complete parameter value, including explicit complete gestures.
     Value {
         /// Stable owner-local parameter instance and Definition identity.
@@ -3933,10 +3967,12 @@ pub enum ParameterValueWrite {
 }
 
 impl ParameterValueWrite {
-    /// Resolve the stable target shared by complete and component edits.
+    /// Resolve the stable target shared by value edits and parameter reset.
     pub fn parameter(&self) -> &AnimationParameterAddress {
         match self {
-            Self::Value { parameter, .. } | Self::Channels { parameter, .. } => parameter,
+            Self::Value { parameter, .. }
+            | Self::Channels { parameter, .. }
+            | Self::ResetToDefault { parameter } => parameter,
         }
     }
 }
@@ -4037,16 +4073,38 @@ impl PropertyBag {
         }))
     }
 
-    /// Prepare a complete or sparse write against this current author owner.
+    /// Prepare a value write or definition reset against this current author owner.
     ///
-    /// Both edit forms resolve stable identity and reuse the canonical value and
-    /// channel preparation rules, including no-op suppression and key metadata.
+    /// Every form resolves stable identity. Value edits retain key metadata;
+    /// reset clears all animation and resolves the current definition default.
+    /// Both reuse definition admission and suppress unchanged author state.
     pub fn prepare_parameter_write(
         &self,
         write: &ParameterValueWrite,
         time: TimelineTime,
     ) -> Result<Option<PropertyMutation>> {
         match write {
+            ParameterValueWrite::ResetToDefault { parameter } => {
+                let (path, property) = self.property_by_address(parameter).ok_or_else(|| {
+                    MondrianError::WorkflowStepFailed {
+                        step_id: "property_address_resolution".to_owned(),
+                        reason: format!(
+                            "parameter instance {} / {} is not owned by this Property Bag",
+                            parameter.animation_track_id, parameter.parameter_id
+                        ),
+                    }
+                })?;
+                property
+                    .descriptor
+                    .validate()
+                    .map_err(|error| parameter_value_error(path, &error.to_string()))?;
+                let value =
+                    property.normalize_value(property.descriptor.schema.default_value.clone())?;
+                Ok((property.static_value() != &value
+                    || property.is_enabled()
+                    || property.is_animated())
+                .then(|| PropertyMutation::ResetToDefault { path: path.to_owned() }))
+            }
             ParameterValueWrite::Value { parameter, value } => {
                 self.prepare_value_write_by_address(parameter, time, value.clone())
             }
@@ -4440,6 +4498,9 @@ impl PropertyBag {
             PropertyMutation::DisableAnimation { path, time } => {
                 self.disable_animation(&path, time)
             }
+            PropertyMutation::ResetToDefault { path } => {
+                self.require_property_mut(&path)?.reset_to_default()
+            }
             PropertyMutation::ClearAnimation { path, time } => self.clear_animation(&path, time),
             PropertyMutation::WriteValue { path, time, value, interpolation } => {
                 self.write_value(&path, time, value, interpolation)
@@ -4591,6 +4652,11 @@ pub enum PropertyMutation {
         path: String,
         time: TimelineTime,
     },
+    /// Restore the current declared default and clear animation atomically.
+    ResetToDefault {
+        /// Current property path resolved by its owning author interface.
+        path: String,
+    },
     ClearAnimation {
         path: String,
         time: TimelineTime,
@@ -4634,6 +4700,7 @@ impl PropertyMutation {
             | Self::UpdateKeyframeTemporalFlags { path, .. }
             | Self::EnableAnimation { path, .. }
             | Self::DisableAnimation { path, .. }
+            | Self::ResetToDefault { path }
             | Self::ClearAnimation { path, .. }
             | Self::WriteValue { path, .. }
             | Self::WriteChannels { path, .. }
@@ -4718,6 +4785,7 @@ impl PropertyMutation {
             }
             EnableAnimation { path, time } => EnableAnimation { path: f(path), time },
             DisableAnimation { path, time } => DisableAnimation { path: f(path), time },
+            ResetToDefault { path } => ResetToDefault { path: f(path) },
             ClearAnimation { path, time } => ClearAnimation { path: f(path), time },
             WriteValue { path, time, value, interpolation } => {
                 WriteValue { path: f(path), time, value, interpolation }
@@ -9278,6 +9346,83 @@ mod tests {
         assert!((out_handle.time_offset.to_f64() - 0.09).abs() < 1e-6);
         assert!(stored.temporal_flags.continuous);
         assert!(!stored.temporal_flags.broken_handles);
+    }
+
+    #[test]
+    fn parameter_reset_uses_current_declared_default_and_retains_identity() {
+        for (default, authored) in [
+            (PropertyValue::Float(0.5), PropertyValue::Float(0.75)),
+            (
+                PropertyValue::Vec3(Vec3::ONE),
+                PropertyValue::Vec3(Vec3::ZERO),
+            ),
+            (
+                PropertyValue::Text("定义默认值".into()),
+                PropertyValue::Text("作者内容".into()),
+            ),
+        ] {
+            let mut bag = PropertyBag::default();
+            bag.define(PropertyDescriptor::new(
+                "parameter",
+                "Parameter",
+                default.clone(),
+            ));
+            let address = bag.property("parameter").expect("property").address();
+            let write = ParameterValueWrite::ResetToDefault { parameter: address.clone() };
+            assert!(bag.prepare_parameter_write(&write, tt(5)).expect("already default").is_none());
+            bag.set_static_value("parameter", authored.clone()).expect("authored static");
+            if authored.value_type().supports_animation() {
+                for (time, value) in [(tt(0), authored.clone()), (tt(10), default.clone())] {
+                    bag.apply_mutation(PropertyMutation::SetKeyframe {
+                        path: "parameter".into(),
+                        keyframe: Keyframe::from_preset(time, value, InterpolationType::AutoBezier),
+                    })
+                    .expect("authored keys");
+                }
+                bag.apply_mutation(PropertyMutation::DisableAnimation {
+                    path: "parameter".into(),
+                    time: tt(5),
+                })
+                .expect("disabled keys remain authored");
+                assert!(bag.property("parameter").expect("property").is_animated());
+            }
+            if authored.value_type().supports_animation() {
+                bag.set_static_value("parameter", default.clone())
+                    .expect("default static with latent keys");
+            }
+            let descriptor = bag.property("parameter").expect("property").descriptor.clone();
+            let undo_snapshot = bag.clone();
+            let reset =
+                bag.prepare_parameter_write(&write, tt(99)).expect("prepare").expect("changed");
+            bag.apply_mutation(reset).expect("reset");
+            let property = bag.property("parameter").expect("property");
+            assert_eq!(property.address(), address);
+            assert_eq!(property.descriptor, descriptor);
+            assert_eq!(property.static_value(), &default);
+            assert!(!property.is_enabled() && !property.is_animated());
+            assert!(
+                property.channels.iter().all(|channel| channel.keyframes.capacity() == 0),
+                "reset must not retain emptied key storage in the new snapshot"
+            );
+            if authored.value_type().supports_animation() {
+                assert!(undo_snapshot
+                    .property("parameter")
+                    .expect("shared undo snapshot")
+                    .is_animated());
+            }
+            assert_eq!(property.evaluate(tt(5)), default);
+            bag.validate().expect("canonical reset");
+            assert!(bag.prepare_parameter_write(&write, tt(0)).expect("no-op reset").is_none());
+            let before = bag.clone();
+            let stale = ParameterValueWrite::ResetToDefault {
+                parameter: AnimationParameterAddress {
+                    animation_track_id: AnimationTrackId::new(),
+                    ..address
+                },
+            };
+            assert!(bag.prepare_parameter_write(&stale, tt(0)).is_err());
+            assert_eq!(bag, before);
+        }
     }
 
     #[test]

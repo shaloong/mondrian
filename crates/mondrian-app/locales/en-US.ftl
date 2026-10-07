@@ -1488,3 +1488,5 @@ status-history-accessibility-open = Recent notifications. Current status: { $sta
     Up/Down: newer/older. Page Up/Down: previous/next page. Home/End: newest/oldest. Escape: close.
 status-history-accessibility-empty = Recent notifications. Current status: { $status }. No notifications. Escape: close.
 status-history-entry-error = Error: { $message }
+
+parameter-reset-to-default = Reset

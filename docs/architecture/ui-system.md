@@ -4125,3 +4125,20 @@ popup bounds, and elides title, empty state and message rows to the same content
 width. Full accessible messages are independent of paint elision. A narrow
 pseudo-locale/custom-padding case checks this separation with opaque Unicode
 paths; it is widget draw-command evidence, not native screen-reader qualification.
+
+### Parameter reset affordances
+
+Inspector Clip, Effect and Mask property rows expose a localized Reset button
+using the existing stable owner/write action. Complete author-state projection
+disables the button at the definition default, including retained-animation
+awareness; owner read-only state also disables it. Audio curve context menus
+expose the same localized reset intent, while static processor controls expose
+a button, including non-animatable integer parameters. The current definition
+is admitted again at author execution; UI does not reconstruct defaults or own
+an alternate reversible snapshot. Reset is independent of curve key selection.
+
+Curve context-menu factories also receive empty selections for parameter-level
+commands. Shift+F10 anchors an unselected menu to the plot center; blank-area
+right-click retains selection and uses the same factory. Empty and virtual-only
+curves remain inspectable. Existing pointer-draft and author-gesture guards block
+menu opening until the interaction ends; the factory admits enabled commands.

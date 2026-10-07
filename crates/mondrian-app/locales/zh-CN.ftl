@@ -1423,3 +1423,5 @@ status-history-accessibility-open = 最近通知，当前状态：{ $status }。
     上/下方向键：较新/较旧；Page Up/Down：上一页/下一页；Home/End：最新/最旧；Escape：关闭。
 status-history-accessibility-empty = 最近通知，当前状态：{ $status }。暂无通知。Escape：关闭。
 status-history-entry-error = 错误：{ $message }
+
+parameter-reset-to-default = 重置

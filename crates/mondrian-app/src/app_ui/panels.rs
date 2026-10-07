@@ -2455,6 +2455,8 @@ pub struct InspectorEffectPropertyModel {
     pub hard_min: Option<f64>,
     pub hard_max: Option<f64>,
     pub step: Option<f64>,
+    /// Whether the complete author state differs from the current definition default.
+    pub can_reset: bool,
     /// Whether the property supports animation.
     pub is_animatable: bool,
     /// Exact numeric key state and sampled curve for scalar Effect parameters.
@@ -2518,6 +2520,7 @@ fn inspector_property_model(
         hard_min: numeric.map(|contract| contract.hard_range.min),
         hard_max: numeric.map(|contract| contract.hard_range.max),
         step: numeric.and_then(|contract| contract.step),
+        can_reset: !property.is_at_default(),
         is_animatable: property.descriptor.schema.is_animatable,
         numeric_curve: None,
     }

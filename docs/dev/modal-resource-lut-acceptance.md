@@ -2292,3 +2292,45 @@ These are source-level routed and draw-command checks, not a new native worker
 build or native screen-reader/physical keyboard/macOS qualification. The prior
 source-bound native modal/resource/LUT and joint output results above retain
 their original product identities. The original overall goal remains active.
+
+## Declared-default parameter reset and empty-selection menus
+
+Reset enters the existing parameter authoring transaction for Clip intrinsic,
+visual Effect/Mask, audio automation and static audio processor parameters.
+The current definition supplies the default; reset removes the complete authored
+animation, including disabled retained keys, while preserving owner, property
+and parameter identities. Removing shared key storage replaces the author list
+rather than copying Undo-owned keys merely to clear them.
+
+Actual authoring and routed tests cover vector, scalar, text and integer defaults,
+stale and locked targets, no-op generation/history, constrained Auto/Continuous
+keys, one Undo restoring exact controls/IDs, saving the undone state with live
+Redo, and fresh Unicode undone/redone archives with empty history. Mask shape
+keys are retained. English, Chinese and expanded Chinese pseudo Inspector
+buttons and audio menus route the existing typed actions; default and read-only
+states disable reset.
+
+The audio keyboard case reproduced an actual empty-selection failure: Shift+F10
+required a selected point before building parameter commands. The shared curve
+now opens its factory at the plot center without keys, and blank right-click
+retains inspection state. Empty/virtual-only geometry, read-only commands,
+Escape, focus and selection preservation are covered. A separate failed widget
+test incorrectly expected an empty constructor input to remain an empty display;
+the test now snapshots the constructor's actual virtual endpoints.
+
+The focused four-package union-feature parameter filter passed: App 27 (10.14s),
+Core 14 (0.01s), Timeline 7 (0.01s), Widgets 1 (0s), with zero failures or ignored
+tests. The subsequent complete all-features library invocation for these four
+packages passed its runtime stage; Timeline executed 242 passed (0.75s), Widgets
+1,112 passed (593.12s), with zero failures or ignored tests. Its initial strict
+Clippy stage rejected a redundant clone of a Copy rack address; that expression
+was corrected directly without a lint suppression.
+The corrected final parameter filter again passed App 27 (9.62s), Core 14,
+Timeline 7 and Widgets 1 (each below 0.01s), all zero failed/ignored. Complete
+workspace/all-targets/all-features Clippy with warnings denied passed (4m18s),
+followed by formatting and whitespace checks.
+
+These checks qualify source authoring, persistence and routed UI behavior. The
+native product and SDK/output receipts above retain their original identities;
+this slice does not establish newly rebuilt native reset output, physical input,
+screen-reader or macOS qualification. The overall goal remains active.

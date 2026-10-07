@@ -101,6 +101,13 @@ pub enum AudioProcessorRackEdit {
         /// Definition produced by the verified installed plugin probe.
         new_definition: AudioProcessorDefinitionRef,
     },
+    /// Restore one parameter's definition default and remove every authored key.
+    ResetParameterToDefault {
+        /// Processor instance to edit.
+        processor_id: AudioProcessorInstanceId,
+        /// Current definition parameter identity.
+        parameter_id: ParameterId,
+    },
     /// Replace one parameter's unkeyed value by stable definition identity.
     SetParameterStaticValue {
         /// Processor identity to edit.
@@ -120,7 +127,8 @@ impl AudioProcessorRackEdit {
             | Self::Move { processor_id, .. }
             | Self::SetBypassed { processor_id, .. }
             | Self::RebindNative { processor_id, .. }
-            | Self::SetParameterStaticValue { processor_id, .. } => *processor_id,
+            | Self::SetParameterStaticValue { processor_id, .. }
+            | Self::ResetParameterToDefault { processor_id, .. } => *processor_id,
         }
     }
 }
@@ -530,6 +538,25 @@ fn apply_to_rack(
             processor.definition = new_definition.clone();
             Ok(true)
         }
+        AudioProcessorRackEdit::ResetParameterToDefault { processor_id, parameter_id } => {
+            let index = processor_index(rack, *processor_id)?;
+            let processor = &mut rack.processors[index];
+            let parameter = processor.parameters.get(parameter_id).ok_or_else(|| {
+                AudioProcessorRackEditError::UnknownParameter {
+                    processor_id: *processor_id,
+                    parameter_id: parameter_id.clone(),
+                }
+            })?;
+            let curve = crate::audio::default_numeric_automation(&parameter.schema)
+                .map_err(AudioProcessorRackEditError::AuthorState)?;
+            if curve == parameter.automation {
+                return Ok(false);
+            }
+            processor
+                .set_parameter_automation(curve)
+                .map_err(AudioProcessorRackEditError::AuthorState)?;
+            Ok(true)
+        }
         AudioProcessorRackEdit::SetParameterStaticValue { processor_id, parameter_id, value } => {
             let index = processor_index(rack, *processor_id)?;
             set_parameter_static_value(&mut rack.processors[index], parameter_id, *value)
@@ -746,6 +773,92 @@ mod tests {
             track.edit_blocker(),
             Some(&AudioProcessorRackEditError::LockedTrack(track_id))
         );
+    }
+
+    #[test]
+    fn parameter_reset_processor_uses_schema_for_animated_and_static_integer_values() {
+        for (definition, parameter_id, authored) in [
+            (BUILTIN_GAIN_DEFINITION_ID, GAIN_DB_PARAMETER_ID, -6.0),
+            (
+                crate::audio::BUILTIN_SAMPLE_DELAY_DEFINITION_ID,
+                crate::audio::SAMPLE_DELAY_FRAMES_PARAMETER_ID,
+                32.0,
+            ),
+        ] {
+            let (mut sequence, track_id, _) = sequence_with_audio_clip();
+            let address = AudioProcessorRackAddress::ChannelStrip {
+                owner: AudioChannelStripOwner::Track { track_id },
+                rack: AudioChannelStripRack::PreFader,
+            };
+            let processor_id = insert(
+                &mut sequence,
+                address,
+                AudioProcessorInstance::built_in(definition, 1),
+            );
+            let parameter_id = ParameterId::new_static(parameter_id);
+            apply_audio_processor_rack_edit(
+                &mut sequence,
+                &request(
+                    address,
+                    AudioProcessorRackEdit::SetParameterStaticValue {
+                        processor_id,
+                        parameter_id: parameter_id.clone(),
+                        value: authored,
+                    },
+                ),
+            )
+            .expect("authored static");
+            if definition == BUILTIN_GAIN_DEFINITION_ID {
+                crate::apply_audio_automation_edit(
+                    &mut sequence,
+                    &crate::AudioAutomationEditRequest {
+                        target: crate::AudioAutomationTarget::ProcessorParameter {
+                            rack: address,
+                            processor_id,
+                            parameter_id: parameter_id.clone(),
+                        },
+                        edit: crate::AudioAutomationEdit::UpsertKeyframe {
+                            keyframe: mondrian_core::ExactAutomationKeyframe::linear(
+                                TimelineTime::ONE,
+                                -3.0,
+                            ),
+                        },
+                    },
+                )
+                .expect("animated gain");
+            }
+            let reset = request(
+                address,
+                AudioProcessorRackEdit::ResetParameterToDefault {
+                    processor_id,
+                    parameter_id: parameter_id.clone(),
+                },
+            );
+            sequence.audio_tracks[0].is_locked = true;
+            let locked = sequence.clone();
+            assert!(apply_audio_processor_rack_edit(&mut sequence, &reset).is_err());
+            assert_eq!(sequence, locked);
+            sequence.audio_tracks[0].is_locked = false;
+            assert!(apply_audio_processor_rack_edit(&mut sequence, &reset).expect("reset").changed);
+            let processor = &audio_processor_rack(&sequence, &address).expect("rack").processors[0];
+            assert_eq!(processor.id, processor_id);
+            let parameter = &processor.parameters[&parameter_id];
+            assert_eq!(parameter.automation.default_value, 0.0);
+            assert!(parameter.automation.keyframes.is_empty());
+            let before = sequence.clone();
+            assert!(
+                !apply_audio_processor_rack_edit(&mut sequence, &reset).expect("no-op").changed
+            );
+            let stale = request(
+                address,
+                AudioProcessorRackEdit::ResetParameterToDefault {
+                    processor_id,
+                    parameter_id: ParameterId::new_static("missing.parameter"),
+                },
+            );
+            assert!(apply_audio_processor_rack_edit(&mut sequence, &stale).is_err());
+            assert_eq!(sequence, before);
+        }
     }
 
     #[test]

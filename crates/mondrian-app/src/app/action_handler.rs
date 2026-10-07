@@ -7770,6 +7770,172 @@ mod tests {
     }
 
     #[test]
+    fn parameter_reset_clip_and_effect_roundtrips_exact_history_and_unicode_archives() {
+        for effect_owned in [false, true] {
+            let mut sequence = Sequence::new("Parameter reset");
+            let mut clip = Clip::new_basic_title(
+                "Reset",
+                "Arial",
+                TimelineTime::ZERO,
+                TimelineTime::new(2, 1).expect("duration"),
+            )
+            .expect("title");
+            let clip_id = clip.id;
+            let (effect_id, address, default) = if effect_owned {
+                let mut effect =
+                    mondrian_effects::instantiate_effect_node(EffectType::Crop).expect("Crop");
+                let (path, property) = effect.properties.iter().next().expect("parameter");
+                let (path, address, default) = (
+                    path.to_owned(),
+                    property.address(),
+                    property.descriptor.schema.default_value.clone(),
+                );
+                for (time, value) in [(0, 0.1), (1, 0.3), (2, 0.2)] {
+                    effect
+                        .properties
+                        .apply_mutation(PropertyMutation::SetKeyframe {
+                            path: path.clone(),
+                            keyframe: mondrian_core::automation::Keyframe::from_preset(
+                                TimelineTime::new(time, 1).expect("time"),
+                                PropertyValue::Float(value),
+                                mondrian_core::InterpolationType::ContinuousBezier,
+                            ),
+                        })
+                        .expect("effect keys");
+                }
+                let id = effect.id;
+                clip.add_effect_node(effect);
+                (Some(id), address, default)
+            } else {
+                let bag = clip.property_bag().expect("bag");
+                let property = bag.property(Transform2D::POSITION_PATH).expect("position");
+                let address = property.address();
+                let default = property.descriptor.schema.default_value.clone();
+                for (time, x) in [(0, 10.0), (1, 30.0), (2, 20.0)] {
+                    clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+                        path: Transform2D::POSITION_PATH.into(),
+                        keyframe: mondrian_core::automation::Keyframe::from_preset(
+                            TimelineTime::new(time, 1).expect("time"),
+                            PropertyValue::Vec2(glam::Vec2::new(x, -x)),
+                            mondrian_core::InterpolationType::AutoBezier,
+                        ),
+                    })
+                    .expect("vector keys");
+                }
+                (None, address, default)
+            };
+            sequence.video_tracks[0].add_clip(clip).expect("clip");
+            let mut state = AppState::new();
+            state.test_set_sequence(Some(sequence));
+            let action = |parameter| {
+                let write = ParameterValueWrite::ResetToDefault { parameter };
+                match effect_id {
+                    Some(effect_id) => visual_effect_set_parameter_value_action(
+                        VisualEffectSetParameterValuePayload { clip_id, effect_id, write },
+                    ),
+                    None => clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
+                        clip_id,
+                        writes: vec![write],
+                    }),
+                }
+            };
+            let generation = state.project_author_generation();
+            let history = state.authoring_history().expect("history").diagnostics();
+            state.active_sequence_mut_uncommitted().expect("lock").video_tracks[0].is_locked = true;
+            let locked = state.active_sequence().expect("locked").clone();
+            state.dispatch_action(action(address.clone())).expect_err("locked reset");
+            assert!(state
+                .active_sequence()
+                .expect("unchanged")
+                .author_state_eq_ignoring_revision(&locked));
+            assert_eq!(state.project_author_generation(), generation);
+            assert_eq!(
+                state.authoring_history().expect("history").diagnostics(),
+                history
+            );
+            state.active_sequence_mut_uncommitted().expect("unlock").video_tracks[0].is_locked =
+                false;
+            let original = state.active_sequence().expect("original").clone();
+            state
+                .dispatch_action(action(AnimationParameterAddress {
+                    animation_track_id: mondrian_core::AnimationTrackId::new(),
+                    ..address.clone()
+                }))
+                .expect_err("stale parameter");
+            assert!(state
+                .active_sequence()
+                .expect("unchanged")
+                .author_state_eq_ignoring_revision(&original));
+            assert_eq!(state.project_author_generation(), generation);
+            state.dispatch_action(action(address.clone())).expect("reset");
+            assert_eq!(state.project_author_generation(), generation + 1);
+            let edited = state.active_sequence().expect("reset snapshot").clone();
+            let clip = edited.find_clip(clip_id).expect("clip");
+            let bag = match effect_id {
+                Some(id) => clip
+                    .effects
+                    .iter()
+                    .find(|effect| effect.id == id)
+                    .expect("effect")
+                    .properties
+                    .clone(),
+                None => clip.property_bag().expect("bag"),
+            };
+            let (_, property) = bag
+                .property_by_address(&address)
+                .expect("reset parameter retains stable identity");
+            assert_eq!(property.address(), address);
+            assert_eq!(property.static_value(), &default);
+            assert!(property.is_at_default());
+            let reset_history = state.authoring_history().expect("history").diagnostics();
+            state
+                .dispatch_action(action(address))
+                .expect_err("already default refuses redundant command");
+            assert_eq!(
+                state.authoring_history().expect("history").diagnostics(),
+                reset_history
+            );
+            assert_eq!(state.project_author_generation(), generation + 1);
+            assert!(state.undo_timeline().expect("one Undo"));
+            assert!(state
+                .active_sequence()
+                .expect("undone")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(
+                !state.can_undo_action(),
+                "one transaction restores all vector channels and keys"
+            );
+            let directory = tempfile::tempdir().expect("archives");
+            let undone = directory.path().join("参数重置撤销🙂.mdp");
+            state.save_project_file_as(undone.clone()).expect("save undone");
+            assert!(state.can_redo_action());
+            let mut reopened = AppState::new();
+            reopened.open_project_file(undone).expect("reopen original");
+            assert!(reopened
+                .active_sequence()
+                .expect("original archive")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            drop(reopened);
+            assert!(state.redo_timeline().expect("Redo after save"));
+            assert!(state
+                .active_sequence()
+                .expect("redone")
+                .author_state_eq_ignoring_revision(&edited));
+            let redone = directory.path().join("参数重置重做🙂.mdp");
+            state.save_project_file_as(redone.clone()).expect("save redone");
+            drop(state);
+            let mut reopened = AppState::new();
+            reopened.open_project_file(redone).expect("reopen reset");
+            assert!(reopened
+                .active_sequence()
+                .expect("reset archive")
+                .author_state_eq_ignoring_revision(&edited));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        }
+    }
+
+    #[test]
     fn dispatch_crop_parameter_by_stable_address_has_reversible_author_snapshot() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
         let (effect_id, path, parameter, initial_value) =

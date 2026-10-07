@@ -651,8 +651,10 @@ impl CurveEditor {
         self
     }
 
-    /// Build single-key or group commands only when an authored selection menu opens.
+    /// Build parameter, single-key or group commands when a context menu opens.
     /// Right-clicking a selected key retains the group; Shift+F10 uses the same menu.
+    /// Without a selection, the factory receives no key IDs and keyboard opening
+    /// anchors to the plot center. Blank-area right-click retains inspection state.
     pub fn with_selection_context_menu(
         mut self,
         menu: impl Fn(&[mondrian_core::KeyframeId]) -> Vec<MenuItem> + 'static,
@@ -2244,9 +2246,11 @@ impl CurveEditor {
             return true;
         }
         if menu && self.selection_menu.is_some() {
-            if let Some(index) = self.selected {
-                self.open_selection_menu(self.to_screen(self.points[index]), true, ctx);
-            }
+            let position = self.selected.map_or_else(
+                || self.plot_rect().center(),
+                |index| self.to_screen(self.points[index]),
+            );
+            self.open_selection_menu(position, true, ctx);
             return true;
         }
         if menu && self.selected_keys.len() > 1 {
@@ -2873,6 +2877,14 @@ impl Widget for CurveEditor {
                     self.context_menu = Some(menu);
                     ctx.request_repaint();
                     return EventResult::Handled;
+                }
+                if self.selection_menu.is_some() {
+                    self.open_selection_menu(*position, false, ctx);
+                    return if self.context_menu.is_some() {
+                        EventResult::Handled
+                    } else {
+                        EventResult::Ignored
+                    };
                 }
                 EventResult::Ignored
             }
@@ -4607,6 +4619,78 @@ mod tests {
             events.borrow().last(),
             Some(CurveGestureEvent::Cancel(_))
         ));
+    }
+
+    #[test]
+    fn parameter_context_menu_opens_without_keys_or_selection_and_preserves_inspection() {
+        for points in [
+            Vec::new(),
+            vec![CurvePoint::new(0.0, 0.5)],
+            vec![CurvePoint::new(0.0, 0.5), CurvePoint::new(1.0, 0.5)],
+        ] {
+            let requests = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let menu_requests = requests.clone();
+            let actions = RefCell::new(Vec::new());
+            let dispatch = |action| actions.borrow_mut().push(action);
+            let mut editor = CurveEditor::with_points(points.clone())
+                .with_keyframe_ids(vec![None; points.len()])
+                .editable(false)
+                .with_selection_context_menu(move |ids| {
+                    menu_requests.borrow_mut().push(ids.to_vec());
+                    vec![MenuItem::new("Inspect parameter", Some(Action::Copy))]
+                });
+            editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+            let original_points = editor.points().to_vec();
+            let id = editor.id();
+            let mut focus = CurveFocus(Some(id));
+            let mut shortcuts = DummyShortcut;
+            let mut tooltip = DummyTooltip;
+            let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+            editor.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+            assert!(editor.selected_keyframe_ids().is_empty());
+            assert_eq!(
+                editor.event(
+                    &UiEvent::KeyDown { key: KeyCode::F10, modifiers: Modifiers::shift() },
+                    &mut ctx
+                ),
+                EventResult::Handled
+            );
+            assert!(editor.context_menu.is_some());
+            assert_eq!(
+                requests.borrow().as_slice(),
+                &[Vec::<mondrian_core::KeyframeId>::new()]
+            );
+            for key in [KeyCode::End, KeyCode::Enter] {
+                editor.event(
+                    &UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                    &mut ctx,
+                );
+            }
+            assert_eq!(actions.borrow().as_slice(), &[Action::Copy]);
+            assert!(editor.context_menu.is_none());
+            assert_eq!(editor.points(), original_points);
+            assert!(editor.selected_keyframe_ids().is_empty());
+            assert_eq!(
+                editor.event(
+                    &UiEvent::MouseDown {
+                        position: editor.plot_rect().center(),
+                        button: MouseButton::Right,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx
+                ),
+                EventResult::Handled
+            );
+            assert!(editor.context_menu.is_some());
+            editor.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+            assert!(editor.context_menu.is_none());
+            assert_eq!(ctx.focus.focused_widget(), Some(id));
+            assert_eq!(editor.points(), original_points);
+            assert_eq!(actions.borrow().as_slice(), &[Action::Copy]);
+        }
     }
 
     #[test]
