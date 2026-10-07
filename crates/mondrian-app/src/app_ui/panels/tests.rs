@@ -90,6 +90,24 @@ fn parameter_reset_audio_menu_routes_keyboard_without_a_key_selection() {
             widget.accessibility().expect("curve").state.expanded,
             Some(true)
         );
+        let nodes = mondrian_ui_core::widget::collect_accessibility_nodes(widget.as_ref());
+        let reset = nodes
+            .iter()
+            .find(|node| {
+                node.name.as_deref() == Some(localizer.text("parameter-reset-to-default").as_str())
+            })
+            .expect("localized reset menu item");
+        assert_eq!(
+            reset.role,
+            mondrian_ui_core::widget::AccessibilityRole::MenuItem
+        );
+        assert!(reset.parent_id.is_some());
+        assert!(reset.focus_order.is_none());
+        assert!(
+            actions.borrow().is_empty(),
+            "inspection must not dispatch an edit"
+        );
+
         {
             let mut tree = WidgetTreeView::new(widget.as_mut());
             for key in [KeyCode::End, KeyCode::Enter] {
@@ -1266,7 +1284,7 @@ fn inspector_blend_menu_keeps_typed_order_groups_and_locale() {
         .iter()
         .find(|item| item.label == "Inherit Track")
         .expect("inherit row");
-    assert!(inherit.checked);
+    assert_eq!(inherit.checked, Some(true));
     assert!(!inherit.enabled);
     let multiply = dropdown
         .items()
@@ -1447,7 +1465,11 @@ fn app_state_models_are_safe_without_an_open_project() {
         models.timeline.empty_message.as_deref(),
         Some("未载入序列\n打开项目或创建序列以开始编辑")
     );
-    assert!(!timeline_panel(&models.timeline).can_focus());
+    assert!(!timeline_panel(
+        &models.timeline,
+        &Localizer::new(AppUiLocale::ZhCn).expect("catalog")
+    )
+    .can_focus());
     assert_eq!(models.assets.items[0].title, "没有项目素材库");
     assert!(models.assets.items[0].icon.is_some());
     assert!(models.assets.items[0].disabled);
@@ -1480,6 +1502,19 @@ fn app_state_models_are_safe_without_an_open_project() {
 }
 
 #[test]
+fn timeline_accessibility_uses_current_catalog_in_all_product_locales() {
+    let sequence = Sequence::new("Vendor🙂 sequence");
+    let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let panel = timeline_panel(&model, &localizer);
+        let nodes = mondrian_ui_core::widget::collect_accessibility_nodes(&panel);
+        assert_eq!(nodes[0].name, Some(localizer.text("panel-timeline")));
+        assert_eq!(nodes[0].focus_order, Some(0));
+    }
+}
+
+#[test]
 fn sequence_backed_empty_timeline_keeps_add_track_entrypoints_enabled() {
     let mut sequence = Sequence::new("empty edit");
     sequence.video_tracks.clear();
@@ -1494,7 +1529,9 @@ fn sequence_backed_empty_timeline_keeps_add_track_entrypoints_enabled() {
         model.empty_message.as_deref(),
         Some("当前序列没有轨道\n添加视频轨道或音频轨道后开始编辑")
     );
-    assert!(timeline_panel(&model).can_focus());
+    assert!(
+        timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog")).can_focus()
+    );
 }
 
 #[test]
@@ -3539,7 +3576,8 @@ fn timeline_panel_context_menu_add_track_emits_typed_timeline_actions() {
         let model = demo_timeline_model();
         let actions = RefCell::new(Vec::<Action>::new());
         let dispatch = |action| actions.borrow_mut().push(action);
-        let mut panel = timeline_panel(&model);
+        let mut panel =
+            timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
         panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
 
         let mut focus = DummyFocus;
@@ -3622,7 +3660,7 @@ fn timeline_panel_track_header_drag_emits_typed_move_track_action() {
     let anchor = model.track_identity(TimelineTrackRef { track_index: 0 }).expect("anchor");
     let actions = RefCell::new(Vec::<Action>::new());
     let dispatch = |action| actions.borrow_mut().push(action);
-    let mut panel = timeline_panel(&model);
+    let mut panel = timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
     panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 220.0));
 
     let mut focus = DummyFocus;
@@ -3698,7 +3736,7 @@ fn timeline_panel_disabled_clip_still_selects_for_inspection() {
 
     let actions = RefCell::new(Vec::<Action>::new());
     let dispatch = |action| actions.borrow_mut().push(action);
-    let mut panel = timeline_panel(&model);
+    let mut panel = timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
     panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
 
     let mut focus = DummyFocus;
@@ -3744,7 +3782,7 @@ fn timeline_panel_asset_drop_emits_typed_drop_asset_action() {
     let asset_id = AssetId::new();
     let actions = RefCell::new(Vec::<Action>::new());
     let dispatch = |action| actions.borrow_mut().push(action);
-    let mut panel = timeline_panel(&model);
+    let mut panel = timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
     panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 220.0));
 
     let mut focus = DummyFocus;
@@ -3801,7 +3839,7 @@ fn router_drags_asset_grid_card_to_timeline_drop_action() {
                 .with_drag_payload(DragPayload::Asset(asset_id)),
         ],
     );
-    let timeline = timeline_panel(&model);
+    let timeline = timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
     let mut root = AssetTimelineDragHarness::new(assets, timeline);
     root.layout(Rect::new(0.0, 0.0, 840.0, 240.0));
     let asset_card = root.assets.card_rect_for_index(0).expect("asset card");
@@ -3887,7 +3925,7 @@ fn timeline_panel_delete_key_emits_shared_delete_selection_action() {
     let model = demo_timeline_model();
     let actions = RefCell::new(Vec::<Action>::new());
     let dispatch = |action| actions.borrow_mut().push(action);
-    let mut panel = timeline_panel(&model);
+    let mut panel = timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
     panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
 
     let mut focus = DummyFocus;
@@ -3920,7 +3958,7 @@ fn timeline_panel_shift_delete_key_emits_shared_ripple_delete_action() {
     let model = demo_timeline_model();
     let actions = RefCell::new(Vec::<Action>::new());
     let dispatch = |action| actions.borrow_mut().push(action);
-    let mut panel = timeline_panel(&model);
+    let mut panel = timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
     panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
 
     let mut focus = DummyFocus;
@@ -3956,7 +3994,7 @@ fn timeline_panel_clipboard_keys_emit_shared_edit_actions() {
     let model = demo_timeline_model();
     let actions = RefCell::new(Vec::<Action>::new());
     let dispatch = |action| actions.borrow_mut().push(action);
-    let mut panel = timeline_panel(&model);
+    let mut panel = timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
     panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
 
     let mut focus = DummyFocus;
@@ -3999,7 +4037,7 @@ fn timeline_panel_ctrl_b_emits_shared_split_action() {
     let model = demo_timeline_model();
     let actions = RefCell::new(Vec::<Action>::new());
     let dispatch = |action| actions.borrow_mut().push(action);
-    let mut panel = timeline_panel(&model);
+    let mut panel = timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
     panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
 
     let mut focus = DummyFocus;
@@ -4029,7 +4067,7 @@ fn timeline_panel_i_o_emit_shared_mark_actions() {
     let model = demo_timeline_model();
     let actions = RefCell::new(Vec::<Action>::new());
     let dispatch = |action| actions.borrow_mut().push(action);
-    let mut panel = timeline_panel(&model);
+    let mut panel = timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
     panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
 
     let mut focus = DummyFocus;
@@ -4069,7 +4107,7 @@ fn timeline_panel_dragged_in_marker_emits_typed_range_payload() {
     model.out_point_frame = Some(30);
     let actions = RefCell::new(Vec::<Action>::new());
     let dispatch = |action| actions.borrow_mut().push(action);
-    let mut panel = timeline_panel(&model);
+    let mut panel = timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
     panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
 
     let mut focus = DummyFocus;

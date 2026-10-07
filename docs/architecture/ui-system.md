@@ -4142,3 +4142,21 @@ commands. Shift+F10 anchors an unselected menu to the plot center; blank-area
 right-click retains selection and uses the same factory. Empty and virtual-only
 curves remain inspectable. Existing pointer-draft and author-gesture guards block
 menu opening until the interaction ends; the factory admits enabled commands.
+
+### Menu semantic inspection
+
+Widget semantic visitation derives virtual menu items from the existing shared
+MenuItem model without inserting extra hit-test, focus or capture widgets. The
+collector retains semantic parent IDs and real keyboard focus order. Dropdown
+and ContextMenu share the projection; items have lazy control-scoped identities,
+checked/unchecked/non-checkable states, effective disabled state and open submenu
+ancestry. Only open branches are emitted. Renaming/localizing labels retains IDs
+and interaction state; replacing a Dropdown model invalidates its item IDs.
+Curve, asset, timeline and shortcut owners include their popups in visitation.
+
+Application adapters provide localized popup names; ContextMenu has no invented
+English default. Timeline naming comes from the current application catalog.
+Semantic inspection and relabeling publish no editor action. This is the widget
+semantic contract; a native assistive-technology bridge and physical screen-reader
+qualification remain separate work. No native accessibility publication is
+claimed merely because these nodes can be collected.

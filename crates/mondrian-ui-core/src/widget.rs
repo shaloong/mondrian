@@ -83,6 +83,8 @@ pub enum AccessibilityRole {
     TextInput,
     /// Popup or dropdown menu.
     Menu,
+    /// Command or submenu entry within a menu.
+    MenuItem,
     /// Scrollable viewport.
     ScrollView,
     /// Draggable splitter between panes.
@@ -165,6 +167,8 @@ pub enum AccessibilityValue {
 pub struct AccessibilityNode {
     /// Widget identifier that owns this metadata.
     pub widget_id: WidgetId,
+    /// Nearest semantic parent, including a control-owned virtual item parent.
+    pub parent_id: Option<WidgetId>,
     /// Semantic role.
     pub role: AccessibilityRole,
     /// User-facing accessible name.
@@ -182,6 +186,7 @@ impl AccessibilityNode {
     pub fn new(widget_id: WidgetId, role: AccessibilityRole) -> Self {
         Self {
             widget_id,
+            parent_id: None,
             role,
             name: None,
             state: AccessibilityState::default(),
@@ -744,6 +749,18 @@ pub trait Widget {
     fn accessibility(&self) -> Option<AccessibilityNode> {
         None
     }
+
+    /// Visit semantic nodes derived from this control's existing model.
+    ///
+    /// The default emits the control's single node. Controls with virtual items
+    /// may emit additional nodes with stable identifiers and explicit parents.
+    /// These nodes do not become hit-test, Tab or pointer-capture targets;
+    /// their input remains owned by the control. Inspection must not dispatch.
+    fn visit_accessibility_nodes(&self, visitor: &mut dyn FnMut(AccessibilityNode)) {
+        if let Some(node) = self.accessibility() {
+            visitor(node);
+        }
+    }
 }
 
 /// Collect accessibility metadata from a widget subtree.
@@ -753,25 +770,33 @@ pub trait Widget {
 pub fn collect_accessibility_nodes(root: &dyn Widget) -> Vec<AccessibilityNode> {
     let mut nodes = Vec::new();
     let mut next_focus_order = 0;
-    collect_accessibility_nodes_inner(root, &mut nodes, &mut next_focus_order);
+    collect_accessibility_nodes_inner(root, None, &mut nodes, &mut next_focus_order);
     nodes
 }
 
 fn collect_accessibility_nodes_inner(
     widget: &dyn Widget,
+    parent_id: Option<WidgetId>,
     nodes: &mut Vec<AccessibilityNode>,
     next_focus_order: &mut u32,
 ) {
-    if let Some(mut node) = widget.accessibility() {
+    let mut child_parent = parent_id;
+    widget.visit_accessibility_nodes(&mut |mut node| {
+        if node.widget_id == widget.id() {
+            node.parent_id = parent_id;
+            child_parent = Some(node.widget_id);
+        } else if node.parent_id.is_none() {
+            node.parent_id = child_parent;
+        }
         if node.state.focusable && node.focus_order.is_none() {
             node.focus_order = Some(*next_focus_order);
             *next_focus_order = next_focus_order.saturating_add(1);
         }
         nodes.push(node);
-    }
+    });
     for index in 0..widget.child_count() {
         if let Some(child) = widget.child(index) {
-            collect_accessibility_nodes_inner(child, nodes, next_focus_order);
+            collect_accessibility_nodes_inner(child, child_parent, nodes, next_focus_order);
         }
     }
 }
@@ -1027,6 +1052,24 @@ mod tests {
     fn widget_id_is_accessible() {
         let w = TestWidget::new(Color::from_hex(0xFF0000));
         assert_eq!(w.id(), w.id); // idempotent
+    }
+
+    #[test]
+    fn accessibility_collection_uses_nearest_semantic_parent_through_structural_wrappers() {
+        let mut group = AccessibilityTestWidget::with_children(vec![Box::new(
+            AccessibilityTestWidget::with_children(vec![Box::new(AccessibilityTestWidget::new(
+                Some(AccessibilityRole::Button),
+                true,
+            ))]),
+        )]);
+        group.role = Some(AccessibilityRole::Group);
+        let group_id = group.id;
+        let root = AccessibilityTestWidget::with_children(vec![Box::new(group)]);
+        let nodes = collect_accessibility_nodes(&root);
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].parent_id, None);
+        assert_eq!(nodes[1].parent_id, Some(group_id));
+        assert_eq!(nodes[1].focus_order, Some(0));
     }
 
     #[test]

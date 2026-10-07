@@ -3693,7 +3693,11 @@ fn panel_content_for_slot(kind: PanelKind, models: &AppUiPanelModels) -> Box<dyn
         PanelKind::Effects => Box::new(panel_list(&models.effects)),
         PanelKind::Viewer => Box::new(viewer_panel(&models.viewer)),
         PanelKind::Scopes => Box::new(scopes_panel(&models.scopes)),
-        PanelKind::Timeline => Box::new(timeline_panel(&models.timeline)),
+        PanelKind::Timeline => {
+            let localizer =
+                Localizer::new(models.locale).expect("bundled UI catalogs must be valid");
+            Box::new(timeline_panel(&models.timeline, &localizer))
+        }
         PanelKind::Export => {
             let localizer =
                 Localizer::new(models.locale).expect("bundled UI catalogs must be valid");
@@ -5465,11 +5469,12 @@ fn demo_selection(sequence: &Sequence) -> Option<SelectedClipRef> {
     })
 }
 
-fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
+fn timeline_panel(model: &TimelinePanelModel, localizer: &Localizer) -> TimelineView {
     let action_model = model.clone();
     let frame_rate = model.timeline_display.frame_rate();
     let in_out_time_base = Rational::new(frame_rate.den, frame_rate.num);
     let timeline = TimelineView::new(model.tracks.clone())
+        .with_accessible_name(localizer.text("panel-timeline"))
         .enabled(model.enabled)
         .with_header_width(144.0)
         .with_timeline_display(model.timeline_display)

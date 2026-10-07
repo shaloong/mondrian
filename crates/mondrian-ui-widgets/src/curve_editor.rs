@@ -733,7 +733,8 @@ impl CurveEditor {
         if !items.iter().any(MenuItem::is_activatable) {
             return;
         }
-        let mut menu = ContextMenu::new(position, items);
+        let mut menu = ContextMenu::new(position, items)
+            .with_accessible_name(self.accessible_name.as_deref().unwrap_or(""));
         menu.layout(self.bounds);
         if keyboard {
             menu.event(
@@ -2261,7 +2262,8 @@ impl CurveEditor {
                 && let Some(items) = self.point_metadata[index].context_menu.as_ref()
                 && items.iter().any(MenuItem::is_activatable)
             {
-                let mut menu = ContextMenu::new(self.to_screen(self.points[index]), items.clone());
+                let mut menu = ContextMenu::new(self.to_screen(self.points[index]), items.clone())
+                    .with_accessible_name(self.accessible_name.as_deref().unwrap_or(""));
                 menu.layout(self.bounds);
                 menu.event(
                     &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
@@ -2872,7 +2874,8 @@ impl Widget for CurveEditor {
                 {
                     let items = items.clone();
                     self.select(Some(index));
-                    let mut menu = ContextMenu::new(*position, items);
+                    let mut menu = ContextMenu::new(*position, items)
+                        .with_accessible_name(self.accessible_name.as_deref().unwrap_or(""));
                     menu.layout(self.bounds);
                     self.context_menu = Some(menu);
                     ctx.request_repaint();
@@ -3364,6 +3367,20 @@ impl Widget for CurveEditor {
 
     fn can_focus(&self) -> bool {
         self.enabled
+    }
+
+    fn visit_accessibility_nodes(&self, visitor: &mut dyn FnMut(AccessibilityNode)) {
+        if let Some(node) = self.accessibility() {
+            visitor(node);
+        }
+        if let Some(menu) = &self.context_menu {
+            menu.visit_accessibility_nodes(&mut |mut node| {
+                if node.widget_id == menu.id() {
+                    node.parent_id = Some(self.id);
+                }
+                visitor(node);
+            });
+        }
     }
 
     fn accessibility(&self) -> Option<AccessibilityNode> {

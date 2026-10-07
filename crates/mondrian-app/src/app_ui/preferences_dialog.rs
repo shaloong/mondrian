@@ -857,7 +857,8 @@ impl PreferencesDialog {
         };
         Some(ShortcutActionMenuState {
             id: row.id.clone(),
-            menu: ContextMenu::new(anchor, vec![reset, disable]),
+            menu: ContextMenu::new(anchor, vec![reset, disable])
+                .with_accessible_name(pref_text(locale, "preferences-tab-shortcuts")),
         })
     }
 
@@ -1469,6 +1470,20 @@ impl Widget for PreferencesDialog {
 
     fn accepts_text_input(&self) -> bool {
         self.active_tab == PreferencesDialogTab::Shortcuts && self.shortcut_search.is_focused()
+    }
+
+    fn visit_accessibility_nodes(
+        &self,
+        visitor: &mut dyn FnMut(mondrian_ui_core::widget::AccessibilityNode),
+    ) {
+        if let Some(node) = self.accessibility() {
+            visitor(node);
+        }
+        if self.active_tab == PreferencesDialogTab::Shortcuts
+            && let Some(menu) = &self.shortcut_actions_menu
+        {
+            menu.menu.visit_accessibility_nodes(visitor);
+        }
     }
 
     fn child_count(&self) -> usize {
@@ -3717,7 +3732,10 @@ mod tests {
 
         assert_eq!(model.audio_output_device_label, "Studio Output · 共享");
         let items = audio_output_device_items(&model);
-        let selected = items.iter().find(|item| item.checked).expect("checked device row");
+        let selected = items
+            .iter()
+            .find(|item| item.checked == Some(true))
+            .expect("checked device row");
         let action = selected.action().expect("device selection action");
         let Action::Custom { name, payload, .. } = action else {
             panic!("expected custom device selection action");

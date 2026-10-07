@@ -910,12 +910,21 @@ mod tests {
             Some(&layout),
         );
 
-        assert!(menu_item(&menu_items, "窗口", "素材").checked);
-        assert!(menu_item(&menu_items, "窗口", "效果").checked);
-        assert!(menu_item(&menu_items, "窗口", "预览").checked);
-        assert!(!menu_item(&menu_items, "窗口", "时间线").checked);
-        assert!(submenu_item(&menu_items, "窗口", "工作区", "编辑").checked);
-        assert!(!submenu_item(&menu_items, "窗口", "工作区", "调色").checked);
+        assert_eq!(menu_item(&menu_items, "窗口", "素材").checked, Some(true));
+        assert_eq!(menu_item(&menu_items, "窗口", "效果").checked, Some(true));
+        assert_eq!(menu_item(&menu_items, "窗口", "预览").checked, Some(true));
+        assert_eq!(
+            menu_item(&menu_items, "窗口", "时间线").checked,
+            Some(false)
+        );
+        assert_eq!(
+            submenu_item(&menu_items, "窗口", "工作区", "编辑").checked,
+            Some(true)
+        );
+        assert_eq!(
+            submenu_item(&menu_items, "窗口", "工作区", "调色").checked,
+            Some(false)
+        );
     }
 
     #[test]
@@ -943,11 +952,17 @@ mod tests {
             Some(&layout),
         );
 
-        assert!(menu_item(&menu_items, "窗口", "素材").checked);
-        assert!(!menu_item(&menu_items, "窗口", "效果").checked);
-        assert!(menu_item(&menu_items, "窗口", "预览").checked);
-        assert!(!submenu_item(&menu_items, "窗口", "工作区", "编辑").checked);
-        assert!(!submenu_item(&menu_items, "窗口", "工作区", "导出").checked);
+        assert_eq!(menu_item(&menu_items, "窗口", "素材").checked, Some(true));
+        assert_eq!(menu_item(&menu_items, "窗口", "效果").checked, Some(false));
+        assert_eq!(menu_item(&menu_items, "窗口", "预览").checked, Some(true));
+        assert_eq!(
+            submenu_item(&menu_items, "窗口", "工作区", "编辑").checked,
+            Some(false)
+        );
+        assert_eq!(
+            submenu_item(&menu_items, "窗口", "工作区", "导出").checked,
+            Some(false)
+        );
     }
 
     #[test]

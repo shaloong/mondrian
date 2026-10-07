@@ -3,13 +3,14 @@
 //! 在指定位置弹出菜单项列表。点击选项或外部区域关闭。
 //! 支持嵌套子菜单，与 Dropdown 共享相同的深度链架构。
 
+use crate::menu::{localize_menu_items, visit_menu_items, MenuAccessibilityIds};
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
     AccessibilityNode, AccessibilityRole, AccessibilityState, EventContext, PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_theme::{Theme, ThemePreset};
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell};
 
 use crate::menu::{
     anchored_menu_rect, geometry_item_at, geometry_item_rect, menu_item_activation,
@@ -27,6 +28,8 @@ const MAX_VISIBLE_ITEMS: usize = 40;
 pub struct ContextMenu {
     id: WidgetId,
     items: Vec<MenuItem>,
+    accessible_name: Option<String>,
+    accessibility_ids: OnceCell<Vec<MenuAccessibilityIds>>,
     anchor: Point,
     bounds: Rect,
     visible: bool,
@@ -78,6 +81,8 @@ impl ContextMenu {
         Self {
             id: WidgetId::new(),
             items,
+            accessible_name: None,
+            accessibility_ids: OnceCell::new(),
             anchor,
             bounds: Rect::ZERO,
             visible: true,
@@ -88,6 +93,24 @@ impl ContextMenu {
             scroll_offset: Cell::new(0.0),
             visual: Cell::new(ContextMenuVisualTokens::default()),
         }
+    }
+
+    /// Name the popup using application-owned localized text.
+    pub fn with_accessible_name(mut self, name: impl Into<String>) -> Self {
+        self.set_accessible_name(name);
+        self
+    }
+
+    /// Update the name without changing selection, geometry or input ownership.
+    pub fn set_accessible_name(&mut self, name: impl Into<String>) {
+        let name = name.into();
+        self.accessible_name = (!name.is_empty()).then_some(name);
+    }
+
+    /// Reformat keyed labels while retaining command identity and the open path.
+    /// The owner must relayout after changing measured label widths.
+    pub fn localize_item_labels(&mut self, mut translate: impl FnMut(&str) -> String) {
+        localize_menu_items(&mut self.items, &mut translate);
     }
 
     pub fn is_visible(&self) -> bool {
@@ -169,7 +192,7 @@ impl ContextMenu {
     }
 
     fn icon_lane_width(&self) -> f32 {
-        if self.items.iter().any(|item| item.icon.is_some() || item.checked) {
+        if self.items.iter().any(|item| item.icon.is_some() || item.checked == Some(true)) {
             self.visual.get().icon_lane_width
         } else {
             0.0
@@ -555,7 +578,7 @@ impl Widget for ContextMenu {
                 reserve_icon_lane,
                 MenuRowPaint {
                     enabled: item.is_enabled(),
-                    active: item.checked,
+                    active: item.checked == Some(true),
                     hovered: self.hover_depth.is_some_and(|(d, idx)| d == 0 && idx == i)
                         || self.submenu_chain.first() == Some(&i),
                 },
@@ -618,7 +641,7 @@ impl Widget for ContextMenu {
                     false,
                     MenuRowPaint {
                         enabled: child.is_enabled(),
-                        active: child.checked,
+                        active: child.checked == Some(true),
                         hovered,
                     },
                 );
@@ -642,15 +665,38 @@ impl Widget for ContextMenu {
         self.visible && self.bounds_rect().contains(point)
     }
 
+    fn visit_accessibility_nodes(&self, visitor: &mut dyn FnMut(AccessibilityNode)) {
+        if !self.visible {
+            return;
+        }
+        if let Some(node) = self.accessibility() {
+            visitor(node);
+        }
+        let ids = self
+            .accessibility_ids
+            .get_or_init(|| MenuAccessibilityIds::for_items(&self.items));
+        visit_menu_items(
+            &self.items,
+            ids,
+            self.id,
+            &self.submenu_chain,
+            self.hover_depth,
+            0,
+            visitor,
+        );
+    }
+
     fn accessibility(&self) -> Option<AccessibilityNode> {
         self.visible.then(|| {
-            AccessibilityNode::new(self.id, AccessibilityRole::Menu)
-                .with_name("Context menu")
-                .with_state(AccessibilityState {
+            let mut node = AccessibilityNode::new(self.id, AccessibilityRole::Menu).with_state(
+                AccessibilityState {
                     expanded: Some(true),
                     selected: Some(self.hover_depth.is_some()),
                     ..AccessibilityState::default()
-                })
+                },
+            );
+            node.name = self.accessible_name.clone();
+            node
         })
     }
 }
@@ -768,6 +814,126 @@ mod tests {
     }
 
     #[test]
+    fn context_menu_accessibility_projects_items_and_open_submenu_without_dispatch() {
+        use mondrian_ui_core::widget::collect_accessibility_nodes;
+        let mut menu = ContextMenu::new(
+            Point::new(10.0, 10.0),
+            vec![
+                MenuItem::new("复制🙂", Action::Copy).checked(true),
+                MenuItem::separator(),
+                MenuItem::new("不可用", Action::Cut).disabled(),
+                MenuItem::submenu(
+                    "选择",
+                    vec![
+                        MenuItem::new("未选中", Action::Paste).checked(false),
+                        MenuItem::inert("只读说明"),
+                    ],
+                ),
+            ],
+        );
+        menu.layout(Rect::new(0.0, 0.0, 300.0, 200.0));
+        let original_model = format!("{:?}", menu.items);
+        let nodes = collect_accessibility_nodes(&menu);
+        assert_eq!(nodes.len(), 4, "menu plus non-separator top-level items");
+        assert_eq!(nodes[1].name.as_deref(), Some("复制🙂"));
+        assert_eq!(nodes[1].state.checked, Some(true));
+        assert!(nodes[2].state.disabled);
+        assert_eq!(nodes[3].state.expanded, Some(false));
+        assert_eq!(nodes[2].state.checked, None);
+        assert_eq!(nodes[0].parent_id, None);
+        assert!(nodes[1..].iter().all(|node| node.parent_id == Some(menu.id())));
+        assert!(nodes.iter().all(|node| node.focus_order.is_none()));
+        assert_eq!(
+            nodes,
+            collect_accessibility_nodes(&menu),
+            "inspection identity is stable"
+        );
+        assert_eq!(format!("{:?}", menu.items), original_model);
+        let dispatched = RefCell::new(Vec::new());
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let dispatch = |action| dispatched.borrow_mut().push(action);
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        for key in [KeyCode::Down, KeyCode::End, KeyCode::Right] {
+            menu.event(
+                &UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+        }
+        let expanded = collect_accessibility_nodes(&menu);
+        assert_eq!(expanded.len(), 6, "only the open submenu is projected");
+        assert_eq!(expanded[3].state.expanded, Some(true));
+        assert_eq!(expanded[4].name.as_deref(), Some("未选中"));
+        assert_eq!(expanded[4].state.checked, Some(false));
+        assert!(expanded[5].state.disabled);
+        assert_eq!(expanded[4].parent_id, Some(expanded[3].widget_id));
+        assert_eq!(expanded[5].parent_id, Some(expanded[3].widget_id));
+        assert_eq!(nodes[1].widget_id, expanded[1].widget_id);
+        assert_eq!(format!("{:?}", menu.items), original_model);
+        for _ in 0..3 {
+            if !menu.is_visible() {
+                break;
+            }
+            menu.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+        }
+        assert!(collect_accessibility_nodes(&menu).is_empty());
+        assert!(dispatched.borrow().is_empty());
+    }
+
+    #[test]
+    fn context_menu_accessibility_relabel_keeps_local_command_and_open_path() {
+        use mondrian_ui_core::widget::collect_accessibility_nodes;
+        let mut menu = ContextMenu::new(
+            Point::ZERO,
+            vec![MenuItem::submenu(
+                "操作",
+                vec![
+                    MenuItem::local("重置", "reset").with_message_id("reset"),
+                    MenuItem::inert("Vendor🙂/opaque"),
+                ],
+            )
+            .with_message_id("operations")],
+        )
+        .with_accessible_name("曲线");
+        menu.submenu_chain = vec![0];
+        menu.hover_depth = Some((1, 0));
+        let before = collect_accessibility_nodes(&menu);
+        menu.set_accessible_name("[Curve extended🙂]");
+        menu.localize_item_labels(|id| match id {
+            "operations" => "[Operations extended🙂]".to_owned(),
+            "reset" => "[Reset extended🙂]".to_owned(),
+            _ => panic!("unexpected key"),
+        });
+        let after = collect_accessibility_nodes(&menu);
+        assert_eq!(
+            before.iter().map(|n| n.widget_id).collect::<Vec<_>>(),
+            after.iter().map(|n| n.widget_id).collect::<Vec<_>>()
+        );
+        assert_eq!(after[0].name.as_deref(), Some("[Curve extended🙂]"));
+        assert_eq!(after[2].name.as_deref(), Some("[Reset extended🙂]"));
+        assert_eq!(after[3].name.as_deref(), Some("Vendor🙂/opaque"));
+        assert_eq!(menu.submenu_chain, [0]);
+        assert_eq!(menu.hover_depth, Some((1, 0)));
+        let actions = RefCell::new(Vec::new());
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+        menu.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(menu.take_local_command().as_deref(), Some("reset"));
+        assert!(actions.borrow().is_empty());
+        assert!(collect_accessibility_nodes(&menu).is_empty());
+    }
+
+    #[test]
     fn context_menu_accessibility_tracks_visibility_and_hover_selection() {
         let mut menu = ContextMenu::new(
             Point::new(100.0, 100.0),
@@ -778,7 +944,10 @@ mod tests {
         let node = menu.accessibility().expect("visible context menu should expose accessibility");
 
         assert_eq!(node.role, AccessibilityRole::Menu);
-        assert_eq!(node.name.as_deref(), Some("Context menu"));
+        assert_eq!(
+            node.name, None,
+            "the widget must not invent an untranslated name"
+        );
         assert_eq!(node.state.expanded, Some(true));
         assert_eq!(node.state.selected, Some(true));
 

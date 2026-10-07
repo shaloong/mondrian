@@ -354,3 +354,10 @@ file browsing uses the open picker and never presents overwrite confirmation.
 Inspection progress, timeout and IME reconfirmation use shared English/Chinese
 messages. Locale refresh changes presentation while keeping the inspection ticket
 and editable candidate; it does not initiate a filesystem request.
+
+Context menu names come from localized owner or application text. Keyed context
+and dropdown row labels share recursive relabeling against the current catalog,
+without changing commands, checked state, stable semantic IDs or submenu paths.
+The widget library does not supply an English context-menu or timeline name.
+Unkeyed user/vendor labels remain opaque. Expanded pseudo copy is inspected in
+full independently of width-limited drawing.

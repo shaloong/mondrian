@@ -4,6 +4,7 @@
 //! Shared paint, geometry, and model primitives are consumed by
 //! `ContextMenu`, `ColorPicker` mode dropdowns, and menu bars.
 
+mod accessibility;
 mod geometry;
 mod model;
 mod paint;
@@ -28,7 +29,8 @@ pub(crate) use popup::{
     root_hovered_index, PopupKeyOutcome,
 };
 
-use std::cell::Cell;
+pub(crate) use accessibility::{localize_menu_items, visit_menu_items, MenuAccessibilityIds};
+use std::cell::{Cell, OnceCell};
 
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
@@ -53,6 +55,7 @@ pub struct Dropdown {
     id: WidgetId,
     label: String,
     items: Vec<MenuItem>,
+    accessibility_ids: OnceCell<Vec<MenuAccessibilityIds>>,
     bounds: Rect,
     enabled: bool,
     open: bool,
@@ -80,6 +83,7 @@ impl Dropdown {
             id: WidgetId::new(),
             label: label.into(),
             items,
+            accessibility_ids: OnceCell::new(),
             bounds: Rect::ZERO,
             enabled: true,
             open: false,
@@ -146,6 +150,7 @@ impl Dropdown {
     pub fn set_model(&mut self, label: impl Into<String>, items: Vec<MenuItem>) {
         self.set_label(label);
         self.items = items;
+        self.accessibility_ids.take();
         self.pressed_index = None;
         self.submenu_chain.clear();
         self.hover_depth = None;
@@ -154,17 +159,7 @@ impl Dropdown {
 
     /// Reformat keyed row labels without changing open, focus, or submenu state.
     pub fn localize_item_labels(&mut self, mut translate: impl FnMut(&str) -> String) {
-        fn visit(items: &mut [MenuItem], translate: &mut impl FnMut(&str) -> String) {
-            for item in items {
-                if let Some(message_id) = &item.message_id {
-                    item.label = translate(message_id);
-                }
-                if let MenuItemKind::Submenu { children } = &mut item.kind {
-                    visit(children, translate);
-                }
-            }
-        }
-        visit(&mut self.items, &mut translate);
+        localize_menu_items(&mut self.items, &mut translate);
     }
 
     /// Select the visual style for the closed trigger.
@@ -190,7 +185,7 @@ impl Dropdown {
         while i < items_to_check.len() {
             let item = items_to_check[i];
             if item.action().is_some_and(|candidate| candidate == action) {
-                return Some(item.checked);
+                return item.checked;
             }
             if let MenuItemKind::Submenu { ref children } = item.kind {
                 items_to_check.extend(children);
@@ -442,7 +437,7 @@ impl Dropdown {
 fn set_checked_recursive(items: &mut [MenuItem], action: &Action, checked: bool) {
     for item in items.iter_mut() {
         if item.action().is_some_and(|candidate| candidate == action) {
-            item.checked = checked;
+            item.checked = Some(checked);
         }
         if let MenuItemKind::Submenu { ref mut children } = item.kind {
             set_checked_recursive(children, action, checked);
@@ -823,6 +818,26 @@ impl Widget for Dropdown {
         project(&mut self.items, availability);
     }
 
+    fn visit_accessibility_nodes(&self, visitor: &mut dyn FnMut(AccessibilityNode)) {
+        if let Some(node) = self.accessibility() {
+            visitor(node);
+        }
+        if self.open {
+            let ids = self
+                .accessibility_ids
+                .get_or_init(|| MenuAccessibilityIds::for_items(&self.items));
+            visit_menu_items(
+                &self.items,
+                ids,
+                self.id,
+                &self.submenu_chain,
+                self.hover_depth,
+                0,
+                visitor,
+            );
+        }
+    }
+
     fn accessibility(&self) -> Option<AccessibilityNode> {
         Some(
             AccessibilityNode::new(self.id, AccessibilityRole::Menu)
@@ -1008,22 +1023,42 @@ mod tests {
 
     #[test]
     fn dropdown_updates_checked_state_for_matching_action() {
+        use mondrian_ui_core::widget::collect_accessibility_nodes;
         let mut d = Dropdown::new(
             "View",
             vec![
-                MenuItem::new("Viewer", Action::TogglePanel(PanelKind::Viewer)),
-                MenuItem::new("Timeline", Action::TogglePanel(PanelKind::Timeline)),
+                MenuItem::new("Viewer", Action::TogglePanel(PanelKind::Viewer)).checked(false),
+                MenuItem::new("Timeline", Action::TogglePanel(PanelKind::Timeline)).checked(false),
+                MenuItem::new("Save", Action::SaveProject),
             ],
         );
-
+        d.open = true;
+        let before = collect_accessibility_nodes(&d);
+        assert_eq!(before[1].state.checked, Some(false));
+        assert_eq!(before[2].state.checked, Some(false));
+        assert_eq!(before[3].state.checked, None);
         d.set_checked_for_action(&Action::TogglePanel(PanelKind::Viewer), true);
-
         assert_eq!(
             d.checked_for_action(&Action::TogglePanel(PanelKind::Viewer)),
             Some(true)
         );
         assert_eq!(
             d.checked_for_action(&Action::TogglePanel(PanelKind::Timeline)),
+            Some(false)
+        );
+        assert_eq!(d.checked_for_action(&Action::SaveProject), None);
+        assert_eq!(d.checked_for_action(&Action::CloseProject), None);
+        let after = collect_accessibility_nodes(&d);
+        assert_eq!(
+            before.iter().map(|node| node.widget_id).collect::<Vec<_>>(),
+            after.iter().map(|node| node.widget_id).collect::<Vec<_>>()
+        );
+        assert_eq!(after[1].state.checked, Some(true));
+        assert_eq!(after[2].state.checked, Some(false));
+        assert_eq!(after[3].state.checked, None);
+        d.set_checked_for_action(&Action::TogglePanel(PanelKind::Viewer), false);
+        assert_eq!(
+            d.checked_for_action(&Action::TogglePanel(PanelKind::Viewer)),
             Some(false)
         );
     }
@@ -1176,6 +1211,38 @@ mod tests {
         assert!(!d.can_focus());
         assert!(ctx.requests.pointer_capture.is_none());
         assert!(cell.into_inner().is_empty());
+    }
+
+    #[test]
+    fn dropdown_accessibility_identity_follows_model_lifetime_without_extra_tab_targets() {
+        use mondrian_ui_core::widget::collect_accessibility_nodes;
+        let mut menu = Dropdown::new(
+            "文件",
+            vec![MenuItem::new("保存", Action::SaveProject).with_message_id("save")],
+        );
+        let closed = collect_accessibility_nodes(&menu);
+        assert_eq!(closed.len(), 1);
+        assert!(menu.accessibility_ids.get().is_none());
+        menu.open = true;
+        let before = collect_accessibility_nodes(&menu);
+        assert_eq!(before.len(), 2);
+        assert_eq!(before[1].parent_id, Some(menu.id()));
+        assert_eq!(before[1].state.checked, None);
+        assert_eq!(before[1].focus_order, None);
+        assert_eq!(menu.child_count(), 0);
+        menu.set_label("File");
+        menu.localize_item_labels(|_| "Save".to_owned());
+        let relabeled = collect_accessibility_nodes(&menu);
+        assert_eq!(before[1].widget_id, relabeled[1].widget_id);
+        assert_eq!(relabeled[1].name.as_deref(), Some("Save"));
+        let other = Dropdown::new("File", vec![]);
+        assert_ne!(other.id(), menu.id());
+        menu.set_model("File", vec![MenuItem::new("保存", Action::CloseProject)]);
+        let replaced = collect_accessibility_nodes(&menu);
+        assert_eq!(before[0].widget_id, replaced[0].widget_id);
+        assert_ne!(before[1].widget_id, replaced[1].widget_id);
+        assert_eq!(replaced[0].focus_order, Some(0));
+        assert_eq!(replaced[1].focus_order, None);
     }
 
     #[test]

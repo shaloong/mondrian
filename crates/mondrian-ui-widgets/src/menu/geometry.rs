@@ -90,7 +90,7 @@ pub(crate) fn preferred_trigger_width(label: &str, trigger_style: DropdownTrigge
 
 pub(crate) fn icon_lane_width(items: &[MenuItem]) -> f32 {
     let metrics = MenuMetrics::current();
-    if items.iter().any(|item| item.icon.is_some() || item.checked) {
+    if items.iter().any(|item| item.icon.is_some() || item.checked == Some(true)) {
         metrics.row_icon_size + metrics.row_icon_gap
     } else {
         0.0

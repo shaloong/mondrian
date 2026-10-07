@@ -220,7 +220,8 @@ pub struct MenuItem {
     pub kind: MenuItemKind,
     pub icon: Option<VectorIcon>,
     pub shortcut: Option<String>,
-    pub checked: bool,
+    /// Checkable state; `None` denotes an ordinary command rather than unchecked.
+    pub checked: Option<bool>,
     /// Transient control-owned availability; `None` uses the application model.
     pub context_enabled: Option<bool>,
 }
@@ -247,7 +248,7 @@ impl MenuItem {
                 kind: MenuItemKind::Action,
                 icon: None,
                 shortcut: None,
-                checked: false,
+                checked: None,
                 context_enabled: None,
             },
             None => Self::inert(label),
@@ -265,7 +266,7 @@ impl MenuItem {
             kind: MenuItemKind::Action,
             icon: None,
             shortcut: None,
-            checked: false,
+            checked: None,
             context_enabled: None,
         }
     }
@@ -280,7 +281,7 @@ impl MenuItem {
             kind: MenuItemKind::Submenu { children },
             icon: None,
             shortcut: None,
-            checked: false,
+            checked: None,
             context_enabled: None,
         }
     }
@@ -298,7 +299,7 @@ impl MenuItem {
             kind: MenuItemKind::Action,
             icon: None,
             shortcut: None,
-            checked: false,
+            checked: None,
             context_enabled: None,
         }
     }
@@ -313,7 +314,7 @@ impl MenuItem {
             kind: MenuItemKind::Separator,
             icon: None,
             shortcut: None,
-            checked: false,
+            checked: None,
             context_enabled: None,
         }
     }
@@ -345,7 +346,7 @@ impl MenuItem {
 
     /// Mark this item as representing the current checked/selected state.
     pub fn checked(mut self, checked: bool) -> Self {
-        self.checked = checked;
+        self.checked = Some(checked);
         self
     }
 

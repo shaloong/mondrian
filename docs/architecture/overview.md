@@ -913,3 +913,9 @@ author state for UI availability, rather than comparing only the evaluated value
 Reset replaces shared channel key storage with empty author lists; it avoids
 copying the Undo snapshot's keys merely to clear them and retains no emptied key
 capacity in the new author state. The original shared snapshot remains reversible.
+
+The UI core accessibility collector accepts control-owned semantic visitation
+for virtual items and records the nearest semantic parent. These metadata IDs do
+not become WidgetTree input/focus/capture targets. Controls remain the sole input
+owner; projections must derive from their existing model and cannot dispatch
+editor actions. Native accessibility adapters consume this contract separately.

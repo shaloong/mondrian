@@ -1021,7 +1021,8 @@ impl AssetGrid {
         if items.iter().all(|item| !item.is_activatable()) {
             return false;
         }
-        let mut menu = ContextMenu::new(position, items);
+        let mut menu =
+            ContextMenu::new(position, items).with_accessible_name(self.header.title.clone());
         menu.layout(self.bounds);
         self.context_menu = Some(menu);
         self.context_menu_target = target;
@@ -1895,6 +1896,20 @@ impl Widget for AssetGrid {
                 .rename_editor
                 .as_ref()
                 .is_some_and(|editor| editor.input.accepts_text_input())
+    }
+
+    fn visit_accessibility_nodes(&self, visitor: &mut dyn FnMut(AccessibilityNode)) {
+        if let Some(node) = self.accessibility() {
+            visitor(node);
+        }
+        if let Some(menu) = &self.context_menu {
+            menu.visit_accessibility_nodes(&mut |mut node| {
+                if node.widget_id == menu.id() {
+                    node.parent_id = Some(self.id);
+                }
+                visitor(node);
+            });
+        }
     }
 
     fn accessibility(&self) -> Option<AccessibilityNode> {

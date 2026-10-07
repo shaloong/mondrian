@@ -1786,7 +1786,7 @@ pub(super) fn with_audio_processor_rack_sections(
                         ),
                         FlexChild::fixed(Box::new(reset)),
                     ])
-                    .with_gap(4.0);
+                    .with_gap(mondrian_ui_theme::current_theme().spacing.xs);
                     section = section.with_row(PropertyRow::new(label.clone(), Box::new(value)));
                 } else {
                     section = section.with_row(PropertyRow::new(
@@ -3355,7 +3355,7 @@ pub(super) fn inspector_property_row(
                     .on_click(reset),
             )),
         ])
-        .with_gap(4.0),
+        .with_gap(mondrian_ui_theme::current_theme().spacing.xs),
     );
     let row = PropertyRow::new(label, value);
     let height = if matches!(&target, InspectorPropertyTarget::Clip { .. })

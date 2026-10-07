@@ -831,6 +831,7 @@ pub struct TimelineView {
     transition_resize_drag: Option<TimelineTransitionResizeDrag>,
     scrollbar_drag: Option<TimelineScrollbarDrag>,
     pointer_capture_active: bool,
+    accessible_name: Option<String>,
     context_menu: Option<ContextMenu>,
     horizontal_scrollbar_hovered: bool,
     vertical_scrollbar_hovered: bool,
@@ -938,6 +939,13 @@ struct TimelineScrollbarDrag {
 }
 
 impl TimelineView {
+    /// Supply an application-localized semantic name without changing input.
+    pub fn with_accessible_name(mut self, name: impl Into<String>) -> Self {
+        let name = name.into();
+        self.accessible_name = (!name.is_empty()).then_some(name);
+        self
+    }
+
     /// Create a timeline view with the provided tracks.
     pub fn new(tracks: Vec<TimelineTrack>) -> Self {
         let metrics = TimelineMetrics::current();
@@ -990,6 +998,7 @@ impl TimelineView {
             transition_resize_drag: None,
             scrollbar_drag: None,
             pointer_capture_active: false,
+            accessible_name: None,
             context_menu: None,
             horizontal_scrollbar_hovered: false,
             vertical_scrollbar_hovered: false,
@@ -3155,7 +3164,8 @@ impl TimelineView {
         if items.iter().all(|item| !item.is_activatable()) {
             return EventResult::Ignored;
         }
-        let mut menu = ContextMenu::new(position, items);
+        let mut menu = ContextMenu::new(position, items)
+            .with_accessible_name(self.accessible_name.as_deref().unwrap_or(""));
         menu.layout(self.bounds);
         self.context_menu = Some(menu);
         ctx.request_repaint();
@@ -5363,6 +5373,20 @@ impl Widget for TimelineView {
         self.enabled
     }
 
+    fn visit_accessibility_nodes(&self, visitor: &mut dyn FnMut(AccessibilityNode)) {
+        if let Some(node) = self.accessibility() {
+            visitor(node);
+        }
+        if let Some(menu) = &self.context_menu {
+            menu.visit_accessibility_nodes(&mut |mut node| {
+                if node.widget_id == menu.id() {
+                    node.parent_id = Some(self.id);
+                }
+                visitor(node);
+            });
+        }
+    }
+
     fn accessibility(&self) -> Option<AccessibilityNode> {
         let track_count = self.tracks.len();
         let clip_count = self.tracks.iter().map(|track| track.clips.len()).sum();
@@ -5395,7 +5419,7 @@ impl Widget for TimelineView {
 
         Some(
             AccessibilityNode::new(self.id, AccessibilityRole::Timeline)
-                .with_name("Timeline")
+                .with_name(self.accessible_name.as_deref().unwrap_or(""))
                 .with_state(AccessibilityState {
                     focusable: self.enabled,
                     focused: self.focused,
@@ -5473,14 +5497,14 @@ mod tests {
 
     #[test]
     fn timeline_accessibility_exposes_playhead_counts_selection_and_state() {
-        let mut view = timeline().with_playhead(12);
+        let mut view = timeline().with_accessible_name("时间线").with_playhead(12);
         view.focused = true;
         view.selected_clip = Some(TimelineClipRef { track_index: 0, clip_index: 1 });
 
         let node = view.accessibility().expect("timeline should expose accessibility metadata");
 
         assert_eq!(node.role, AccessibilityRole::Timeline);
-        assert_eq!(node.name.as_deref(), Some("Timeline"));
+        assert_eq!(node.name.as_deref(), Some("时间线"));
         assert!(node.state.focusable);
         assert!(node.state.focused);
         assert!(!node.state.disabled);
