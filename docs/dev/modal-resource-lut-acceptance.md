@@ -2158,3 +2158,67 @@ counted as executed by the complete App run. The preceding c47b9a5 native receip
 retains its named source scope; this marquee change has not yet received a fresh
 product-binary qualification. Broader plugin, platform, i18n, output and
 performance obligations remain open under the original goal.
+
+## Clean a258187 marquee, modal, resource and joint native output acceptance
+
+The product includes marquee commit `3e88d09`; test commit `a258187` adds joint
+native curve acceptance. Both author and committer are Shalom Wang; no push was
+performed. Current product and owned SessionProbe were rebuilt from clean
+`a25818723f9e1d59d1760e2a8c25b7176791e52c` (product build 571524ms).
+
+| Explicit gate | Terminal result |
+| --- | --- |
+| OpenFX joint time/value transform history and output | 1 passed, 0 failed, 0 ignored; 4.89s |
+| OpenFX time, value and interpolation sibling history/output | 1 each passed, 0 failed, 0 ignored; 4.52s / 4.62s / 4.60s |
+| Complete Golden | 3/3, all seven stages per pass; natural exit 0, no forced termination |
+| App modal Tab/Shift+Tab and disabled Apply routing | 16 passed, 0 failed, 0 ignored; 23.96s |
+| EventRouter modal replacement, empty and removed owners | 1 passed, 0 failed, 0 ignored |
+| App resources | 103 passed, 0 failed, 5 ignored; 25.83s |
+| Explicit native resource/process tests | 5 passed, 0 failed, 0 ignored; 8.56s |
+| Portable LUT/OCIO and media dependency tests | 11 passed, 0 failed, 0 ignored; 8.57s |
+| Native Windows startup/workspace window role cycle | 1 passed, 0 failed, 0 ignored; 9.40s |
+| Actual group-pointer routing, including marquee | 6 passed, 0 failed, 0 ignored; 23.83s |
+
+The five ignored resource tests in the broad filter were explicitly executed;
+the rows overlap and must not be added as unique tests. The first supplemental
+attempt missed the `strings_paths` SDK mode and stopped at the test's environment
+precondition (4 passed, 1 failed). Its failure log is retained. The corrected
+script supplies and checks product/fixture paths and mode, validates the existing
+exact-source Golden receipt and hashes, and executes the remaining gates. This
+was a harness error, not a resource authoring regression; Golden was not rerun.
+
+Golden elapsed process times were 121991 / 121259 / 121035ms, with distinct
+Project and Run IDs. Each encoded color-media roundtrip sampled five pixels and
+retained maximum channel error 4/255. The tested encoder used the CPU rawvideo
+pipe with NVENC; this does not establish zero-copy or performance qualification.
+The 3600s build / 1800s process contract timeouts were unchanged. Starting and
+ending source revisions were identical and clean, dirty diagnostics disabled,
+source stable and the receipt baseline eligible.
+
+The joint native case dispatches the existing TransformMany author action for
+Auto and Continuous constraints. SDK queries reject a partial-axis snapshot;
+independent finite-difference derivatives and split Simpson integrals retain
+their original tolerance. Collision refusal leaves both axes, generation and
+history unchanged. Shared production-graph native pixels match canonical curve
+samples before/after one Undo, saving the undone state with live Redo, and fresh
+Unicode reopen with empty history. Existing time/value/interpolation cases remain
+qualified after the fixture extension.
+
+Product SHA-256:
+`685cd2bcdb644221adbb8966de06d9cc0333021212fbe708b9275ae4cc129b05`.
+SessionProbe SHA-256:
+`458766854983fd3152e33570471c633788356756bb8b625f49b7ecff07b8b4b7`.
+Golden SHA-256:
+`4352a32f6e7fc35ed5d08e719cb956014a6a20fe135119c2982dda5f1fcbc72c`.
+Report:
+`target/validation/nle-backlog-complete/20261007T093719Z-complete-golden-635a1bc7/complete-golden-consecutive-report.json`.
+Local receipts `acceptance-joint-native-history.json` and
+`acceptance-marquee-current-modal-resource-lut.json` retain exact source/binary
+hashes and logs. All tracked source and native binaries remained unchanged during
+these gates. Workspace/all-targets/all-features Clippy with warnings denied,
+formatting and whitespace checks passed before both implementation/test commits.
+
+This qualifies the named Windows workflow and owned SDK fixture. Native audio
+joint time/value output, complete vendor/bus/MIDI/editor contracts, physical
+high-DPI input, macOS, broader i18n and performance matrices remain under the
+active original goal. Subsequent documentation commits do not imply a new binary.
