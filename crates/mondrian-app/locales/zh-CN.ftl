@@ -1425,3 +1425,14 @@ status-history-accessibility-empty = 最近通知，当前状态：{ $status }�
 status-history-entry-error = 错误：{ $message }
 
 parameter-reset-to-default = 重置
+
+audio-input-row = 辅助输入
+audio-input-status = 输入状态
+audio-input-query = 检查输入
+audio-input-requery = 刷新输入
+audio-input-cancel = 取消检查
+audio-input-pending = 正在检查输入…
+audio-input-none = 此处理器不提供辅助输入
+audio-input-ready = 可用辅助输入：{ $count } 个
+audio-input-failed = 输入不可用：{ $error }
+audio-input-not-inspected = 尚未检查

@@ -84,6 +84,39 @@ pub enum AudioProcessorInputInspectionError {
     Processor(#[from] AudioProcessorHostError),
 }
 
+/// Resolve a control observation's exact canonical author instance.
+///
+/// This read-only seam verifies Scope occurrence bindings and processor/rack
+/// membership without invoking a resolver. Product adapters use it to compare
+/// asynchronous snapshots and reject stale results; locks do not block reading.
+pub fn inspect_audio_processor_input_author(
+    sequence: &Sequence,
+    target: AudioProcessorInputInspectionTarget,
+    processor_id: AudioProcessorInstanceId,
+) -> Result<&mondrian_timeline::audio::AudioProcessorInstance, AudioProcessorInputInspectionError> {
+    let address = match target {
+        AudioProcessorInputInspectionTarget::ChannelStrip { owner, rack } => {
+            AudioProcessorRackAddress::ChannelStrip { owner, rack }
+        }
+        AudioProcessorInputInspectionTarget::ProcessingScope { scope_id, occurrence } => {
+            let component = inspect_audio_component(sequence, occurrence)?;
+            if component.component().processing.scope_id != scope_id {
+                return Err(AudioProcessorInputInspectionError::ScopeBindingChanged(
+                    scope_id,
+                ));
+            }
+            AudioProcessorRackAddress::ProcessingScope { scope_id }
+        }
+    };
+    let inspection = inspect_audio_processor_rack(sequence, &address)?;
+    inspection
+        .rack()
+        .processors
+        .iter()
+        .find(|processor| processor.id == processor_id)
+        .ok_or_else(|| AudioProcessorRackEditError::UnknownProcessor(processor_id).into())
+}
+
 /// Inspect one actual author instance through the normal preparation resolver.
 ///
 /// Call from a bounded non-realtime control worker: native resolvers may load
@@ -96,9 +129,10 @@ pub fn inspect_audio_processor_inputs(
     resolver: &dyn AudioProcessorResolver,
 ) -> Result<AudioProcessorInputInspection, AudioProcessorInputInspectionError> {
     request.render_contract.validate()?;
-    let (address, owner, insertion) = match request.target {
+    let processor =
+        inspect_audio_processor_input_author(sequence, request.target, request.processor_id)?;
+    let (owner, insertion) = match request.target {
         AudioProcessorInputInspectionTarget::ChannelStrip { owner, rack } => (
-            AudioProcessorRackAddress::ChannelStrip { owner, rack },
             match owner {
                 AudioChannelStripOwner::Track { track_id } => {
                     AudioProcessorOccurrenceOwner::Track(track_id)
@@ -115,32 +149,11 @@ pub fn inspect_audio_processor_inputs(
                 AudioChannelStripRack::PostFader => AudioProcessorInsertionPoint::PostFader,
             },
         ),
-        AudioProcessorInputInspectionTarget::ProcessingScope { scope_id, occurrence } => {
-            let component = inspect_audio_component(sequence, occurrence)?;
-            if component.component().processing.scope_id != scope_id {
-                return Err(AudioProcessorInputInspectionError::ScopeBindingChanged(
-                    scope_id,
-                ));
-            }
-            (
-                AudioProcessorRackAddress::ProcessingScope { scope_id },
-                AudioProcessorOccurrenceOwner::Contribution {
-                    edit_id: occurrence.edit_id,
-                    scope_id,
-                },
-                AudioProcessorInsertionPoint::Scope,
-            )
-        }
+        AudioProcessorInputInspectionTarget::ProcessingScope { scope_id, occurrence } => (
+            AudioProcessorOccurrenceOwner::Contribution { edit_id: occurrence.edit_id, scope_id },
+            AudioProcessorInsertionPoint::Scope,
+        ),
     };
-    let inspection = inspect_audio_processor_rack(sequence, &address)?;
-    let processor = inspection
-        .rack()
-        .processors
-        .iter()
-        .find(|processor| processor.id == request.processor_id)
-        .ok_or(AudioProcessorRackEditError::UnknownProcessor(
-            request.processor_id,
-        ))?;
     let occurrence = AudioProcessorOccurrence { instance_id: processor.id, owner, insertion };
     let factory = PreparedProcessorFactoryBinding::resolve(
         resolver,

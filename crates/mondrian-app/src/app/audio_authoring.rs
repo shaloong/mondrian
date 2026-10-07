@@ -67,6 +67,9 @@ impl AppState {
         action: AudioProductAction,
     ) -> Result<()> {
         match action {
+            AudioProductAction::QueryProcessorInputs(payload) => {
+                self.query_audio_processor_inputs(payload)
+            }
             AudioProductAction::SelectScopeOccurrence(payload) => {
                 self.select_audio_scope_occurrence(payload)
             }
@@ -107,6 +110,7 @@ impl AppState {
                 let descriptors = catalog
                     .install_library(payload.path)
                     .map_err(|error| clap_unavailable(error.to_string()))?;
+                self.audio_input_observations.invalidate();
                 self.set_status_hint(
                     AppMessage::new("status-clap-installed").with_count("count", descriptors.len()),
                     false,
@@ -158,6 +162,7 @@ impl AppState {
                 let descriptors = catalog
                     .install_plugin(payload.path)
                     .map_err(|error| vst3_unavailable(error.to_string()))?;
+                self.audio_input_observations.invalidate();
                 self.set_status_hint(
                     AppMessage::new("status-vst3-installed").with_count("count", descriptors.len()),
                     false,
@@ -212,7 +217,7 @@ impl AppState {
         catalog.descriptors().map_err(|error| vst3_unavailable(error.to_string()))
     }
 
-    fn plugin_render_contract(
+    pub(super) fn plugin_render_contract(
         &self,
         channel_layout: mondrian_core::AudioChannelLayout,
     ) -> AudioRenderContract {

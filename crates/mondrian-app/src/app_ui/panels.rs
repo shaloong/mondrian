@@ -2778,6 +2778,9 @@ impl InspectorPanelModel {
                 if let Ok(descriptors) = state.installed_vst3_processors() {
                     append_vst3_insert_options(&mut racks, &descriptors);
                 }
+                super::audio_processor_rack::bind_processor_input_queries(
+                    &mut racks, state, localizer,
+                );
                 racks
             },
             clip_properties,

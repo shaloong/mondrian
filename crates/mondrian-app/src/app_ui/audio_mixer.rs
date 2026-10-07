@@ -198,6 +198,13 @@ impl AudioMixerPanelModel {
                 append_vst3_insert_options(&mut channel.processor_racks, &descriptors);
             }
         }
+        for channel in &mut channels {
+            super::audio_processor_rack::bind_processor_input_queries(
+                &mut channel.processor_racks,
+                state,
+                localizer,
+            );
+        }
         Self {
             channels,
             next_bus_name: Some(next_bus_name(sequence)),

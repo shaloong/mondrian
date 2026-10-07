@@ -4535,6 +4535,9 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         next_wake,
                     ));
                 }
+                if let Some(delay) = host.native_audio_control_next_wake_delay() {
+                    elwt.set_control_flow(control_flow_wake_no_later_than(elwt.control_flow(), Instant::now() + delay));
+                }
                 if let Some(delay) = host.resource_inspection_next_wake_delay() {
                     elwt.set_control_flow(control_flow_wake_no_later_than(elwt.control_flow(), Instant::now() + delay));
                 }

@@ -126,6 +126,7 @@ mod audio_rendering;
 mod basic_titles;
 mod messages;
 pub use messages::{AppMessage, AppMessageValue};
+pub(crate) mod audio_input_observation;
 mod clip_clipboard;
 mod clip_retime;
 mod curve_clipboard;
@@ -598,6 +599,7 @@ pub struct AppState {
     /// Session-installed CLAP definitions shared by Preview and Export.
     clap_catalog: Option<Arc<InstalledClapAudioProcessorSpecResolver>>,
     native_audio_restore: Option<native_audio_catalog_restore::NativeAudioCatalogRestore>,
+    audio_input_observations: audio_input_observation::AudioInputObservationService,
     openfx_catalog: Option<openfx_catalog::OpenFxCatalog>,
     completed_openfx_installs: Vec<PathBuf>,
     vst3_catalog: Option<Arc<InstalledVst3AudioProcessorSpecResolver>>,
@@ -747,6 +749,8 @@ impl AppState {
             audio_processor_resolver: Arc::clone(&audio_processor_resolver),
             clap_catalog: None,
             native_audio_restore: None,
+            audio_input_observations:
+                audio_input_observation::AudioInputObservationService::default(),
             openfx_catalog: None,
             completed_openfx_installs: Vec::new(),
             vst3_catalog: None,

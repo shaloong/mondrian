@@ -4160,3 +4160,21 @@ Semantic inspection and relabeling publish no editor action. This is the widget
 semantic contract; a native assistive-technology bridge and physical screen-reader
 qualification remain separate work. No native accessibility publication is
 claimed merely because these nodes can be collected.
+
+
+### Cached audio processor input controls
+
+The shared Rack projection gives native processors a localized input query row
+in Inspector and Mixer. It binds exact session/Sequence/owner/processor intent;
+shared Scopes require an explicit occurrence. Unknown/ready/failed states offer
+inspect or refresh, while pending state offers cancellation. Widget construction
+only reads App's transient observation cache and never resolves a native factory.
+Host polling refreshes the model when bounded control work terminates. Existing
+modal focus policy applies to these ordinary Buttons. Querying locked authors is
+read-only; future routing controls must use Timeline lock and cycle admission.
+
+The input status row remains mounted across unknown/pending/ready/failed states,
+so a reply or catalog invalidation updates copy without shifting parameter rows
+and their restored focus/drafts. Native control work contributes a 25 ms maximum
+idle wake delay, including canceled work until physical termination; no forced
+continuous redraw or synchronous native probe is added.

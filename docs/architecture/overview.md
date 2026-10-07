@@ -928,3 +928,14 @@ lock/missing-owner refusal, live Redo after save and fresh project archives use
 the canonical Sequence and SQLite library; the fixture creates no alternate
 routing, persistence or Undo implementation. Native receipts identify the exact
 worker and fixture binaries separately from source-only regressions.
+
+
+### Transient session identity in control actions
+
+`mondrian-editor-state::AuthoringSessionId` can serialize as a transparent typed
+ID in transient product Actions. It still identifies one in-memory editing
+session, never persisted author intent. Background input observations and their
+UI actions compare this exact identity, so reopening the same archive with the
+same Sequence/processor identities cannot accept a previous session's reply.
+ProjectDocument and archive schemas are unchanged; this adds no migration or
+compatibility owner.

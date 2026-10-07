@@ -300,7 +300,7 @@ impl AppUiHost {
     }
 
     /// Temporarily lend the exact validation App owner to a phase-local pump.
-    #[cfg(feature = "validation")]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn with_validation_app_state_mut<T>(
         &self,
         operation: impl FnOnce(&mut AppState) -> T,
@@ -1210,6 +1210,8 @@ impl AppUiHost {
         let project_path_before_persistence =
             self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
         let persistence_changed = self.app_state.borrow_mut().poll_project_persistence();
+        let audio_input_observations_changed =
+            self.app_state.borrow_mut().poll_audio_processor_input_observations();
         let native_audio_catalog_changed =
             self.app_state.borrow_mut().poll_native_audio_catalog_restore();
         let openfx_catalog_changed = self.app_state.borrow_mut().poll_openfx_catalog();
@@ -1282,6 +1284,7 @@ impl AppUiHost {
             self.preview_dirty.set(true);
         }
         let full_model_changed = resource_inspection_changed
+            || audio_input_observations_changed
             || native_audio_catalog_changed
             || openfx_catalog_changed
             || persistence_changed
@@ -1309,6 +1312,13 @@ impl AppUiHost {
         self.refresh_if_dirty(bounds);
         self.sync_playback_feedback_from_viewer();
         outcome
+    }
+
+    pub(crate) fn native_audio_control_next_wake_delay(&self) -> Option<Duration> {
+        self.app_state
+            .borrow()
+            .has_native_audio_control_work()
+            .then_some(Duration::from_millis(25))
     }
 
     pub(crate) fn resource_inspection_next_wake_delay(&self) -> Option<Duration> {

@@ -1735,6 +1735,22 @@ pub(super) fn with_audio_processor_rack_sections(
                     ),
                 ));
             }
+            if let Some(query) = &processor.input_query {
+                let action = crate::app::product_action::ProductAction::Audio(
+                    crate::app::product_action::AudioProductAction::QueryProcessorInputs(
+                        query.payload,
+                    ),
+                )
+                .into_external_action();
+                section = section.with_row(PropertyRow::new(
+                    localizer.text("audio-input-row"),
+                    Box::new(Button::new(query.button_label.clone()).on_click(Some(action))),
+                ));
+                section = section.with_row(PropertyRow::new(
+                    localizer.text("audio-input-status"),
+                    Box::new(Label::new(query.status_label.clone()).muted()),
+                ));
+            }
             for parameter in &processor.parameters {
                 let label = audio_processor_parameter_label(parameter);
                 if parameter.keyframe_count > 0 {

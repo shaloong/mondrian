@@ -2729,3 +2729,45 @@ retain their exact source and binary identities; the overall goal stays active.
 Final source gate 65659 passed full-workspace/all-target/all-feature Clippy
 `-D warnings` in 4m05s, plus format and diff checks after the Mixer regression
 and qualification documentation were added. No remote CI result is inferred.
+
+## Session-bound asynchronous processor input controls
+
+Inspector and Mixer now use one read-only App service for explicit native input
+inspection. A single physical worker, result channel of one, coalescing FIFO of
+16 and semantic cache of 16 bound control work. Capacity refusal preserves all
+accepted distinct requests; cancellation retains worker ownership until physical
+termination. Replies are admitted only for the exact current session, canonical
+processor author, occurrence and render contract. Closing/reopening the same
+Sequence identity rejects old intents and clears old-session cache references.
+Catalog replacement invalidates observations without starting overlapping work.
+
+The shared Rack projection offers localized inspect/cancel/refresh controls and
+numeric plural status in English, Chinese and pseudo locale. Its status row stays
+mounted across all states to preserve parameter row focus and drafts. The idle
+window wakes at most 25 ms later while native control work exists, including
+canceled work until termination; querying adds no author generation or Undo item.
+
+Pipeline 11531 executed App observation **6 passed, 0 failed, 0 ignored** (0.94s),
+Rack **11/0/0** (0.24s), Mixer **8/0/0** (0.82s), localization **26/0/0** (0.21s),
+modal **16/0/0** (17.36s), and Audio **115/0/15 ignored** (0.71s). Controlled test
+factories prove read-only query semantics, FIFO pressure/coalescing, cancellation,
+bounded cache, late author/render/catalog/session refusal, actual product action
+transport and Host idle wake. These factories do not qualify a native SDK.
+
+The initial strict lint gate found two collapsible conditionals and one eager
+Option fallback opportunity; the actual code was corrected without lint bypasses.
+Real auxiliary display names, multiple-source routing controls and native output
+qualification of the new product interaction remain open. Historical native,
+resource/LUT and Golden evidence keeps its exact source/binary identity; the full
+NLE goal remains active.
+
+Final corrected source gate 70096 passed strict workspace/all-target/all-feature
+Clippy `-D warnings` in 2m44s, plus format and diff checks. Pipeline 58394 re-ran
+input observations **6/0/0** (1.44s) and resource regressions **103/0/5 ignored**
+(40.88s), including real cube commit/Undo/save/reopen. Its broad `portable` filter
+matched only two path/dialog tests and is not used as package qualification.
+The explicit complete packaging module, pipeline 65869, passed **11/0/0** (8.93s):
+OCIO/LUT relocation, source removal, tampering, cancellation cleanup, foreign
+bindings and bundled video decode/preview/export. The five ignored native resource
+cases were not executed in these source gates; no new encoded Golden or vendor
+qualification is inferred.

@@ -106,6 +106,9 @@ impl AppState {
                 }
             }
         }
+        if new_plugins {
+            self.audio_input_observations.invalidate();
+        }
         if new_plugins && self.active_sequence().is_some() {
             self.reconcile_audio_after_committed_authoring_change("native_audio_catalog_restore");
         }

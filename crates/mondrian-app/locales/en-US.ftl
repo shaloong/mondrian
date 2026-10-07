@@ -1490,3 +1490,17 @@ status-history-accessibility-empty = Recent notifications. Current status: { $st
 status-history-entry-error = Error: { $message }
 
 parameter-reset-to-default = Reset
+
+audio-input-row = Auxiliary inputs
+audio-input-status = Input status
+audio-input-query = Inspect inputs
+audio-input-requery = Refresh inputs
+audio-input-cancel = Cancel inspection
+audio-input-pending = Inspecting inputs…
+audio-input-none = This processor has no auxiliary inputs
+audio-input-ready = { $count ->
+    [one] One auxiliary input available
+   *[other] { $count } auxiliary inputs available
+    }
+audio-input-failed = Inputs unavailable: { $error }
+audio-input-not-inspected = Not inspected

@@ -25,7 +25,8 @@ use uuid::Uuid;
 /// Project identity is intentionally insufficient: closing and reopening the
 /// same Project must reject completions produced by the previous in-memory
 /// session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct AuthoringSessionId(Uuid);
 
 impl AuthoringSessionId {

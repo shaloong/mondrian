@@ -96,11 +96,13 @@ pub(crate) struct AudioProcessorInstanceModel {
     pub(crate) bypassed: bool,
     pub(crate) native_format: Option<NativeAudioFormat>,
     pub(crate) parameters: Vec<AudioProcessorParameterModel>,
+    pub(crate) input_query: Option<AudioProcessorInputQueryModel>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AudioProcessorRackModel {
     pub(crate) address: AudioProcessorRackAddress,
+    pub(crate) input_inspection_target: Option<mondrian_audio::AudioProcessorInputInspectionTarget>,
     pub(crate) title: String,
     pub(crate) ownership_label: String,
     pub(crate) is_editable: bool,
@@ -276,6 +278,19 @@ pub(crate) fn project_audio_processor_rack(
     };
     AudioProcessorRackModel {
         address,
+        input_inspection_target: match address {
+            AudioProcessorRackAddress::ChannelStrip { owner, rack } => Some(
+                mondrian_audio::AudioProcessorInputInspectionTarget::ChannelStrip { owner, rack },
+            ),
+            AudioProcessorRackAddress::ProcessingScope { scope_id } => {
+                time_context.scope_occurrence.map(|occurrence| {
+                    mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+                        scope_id,
+                        occurrence,
+                    }
+                })
+            }
+        },
         title: rack_title(address, localizer),
         ownership_label,
         is_editable,
@@ -488,6 +503,7 @@ fn project_processor(
         AudioProcessorDefinitionRef::Vst3 { .. } | AudioProcessorDefinitionRef::Clap { .. } => None,
     };
     AudioProcessorInstanceModel {
+        input_query: None,
         processor_id: processor.id,
         label: processor_label(&processor.definition, localizer),
         bypassed: processor.bypassed,
@@ -1263,5 +1279,264 @@ mod tests {
                 .current_author_time
                 .is_err());
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AudioProcessorInputQueryModel {
+    pub(crate) payload: crate::app::product_action::AudioProcessorInputQueryPayload,
+    pub(crate) button_label: String,
+    pub(crate) status_label: String,
+}
+
+/// Attach cached control observations without loading a native plugin on UI.
+pub(crate) fn bind_processor_input_queries(
+    racks: &mut [AudioProcessorRackModel],
+    state: &crate::app::AppState,
+    localizer: &Localizer,
+) {
+    use crate::app::audio_input_observation::AudioInputObservation;
+    use crate::app::product_action::{
+        AudioProcessorInputQueryOperation, AudioProcessorInputQueryPayload,
+    };
+    let (Some(session_id), Some(sequence_id)) =
+        (state.authoring_session_id(), state.active_sequence_id())
+    else {
+        return;
+    };
+    if state.project_close_blocks_actions() {
+        return;
+    }
+    for rack in racks {
+        let Some(target) = rack.input_inspection_target else {
+            continue;
+        };
+        for processor in &mut rack.processors {
+            if processor.native_format.is_none() {
+                continue;
+            }
+            let mut payload = AudioProcessorInputQueryPayload {
+                session_id,
+                sequence_id,
+                target,
+                processor_id: processor.processor_id,
+                operation: AudioProcessorInputQueryOperation::Query,
+            };
+            let observation = state.audio_processor_input_observation(payload);
+            let (button_label, status_label) = match observation {
+                AudioInputObservation::Unknown => (
+                    localizer.text("audio-input-query"),
+                    localizer.text("audio-input-not-inspected"),
+                ),
+                AudioInputObservation::Pending => {
+                    payload.operation = AudioProcessorInputQueryOperation::Cancel;
+                    (
+                        localizer.text("audio-input-cancel"),
+                        localizer.text("audio-input-pending"),
+                    )
+                }
+                AudioInputObservation::Ready(inputs) => {
+                    let status = if inputs.auxiliary_inputs.buses.is_empty() {
+                        localizer.text("audio-input-none")
+                    } else {
+                        let mut args = FluentArgs::new();
+                        args.set("count", inputs.auxiliary_inputs.buses.len() as f64);
+                        localizer.format("audio-input-ready", Some(&args))
+                    };
+                    (localizer.text("audio-input-requery"), status)
+                }
+                AudioInputObservation::Failed(error) => (
+                    localizer.text("audio-input-requery"),
+                    localizer.format_text("audio-input-failed", "error", &error.to_string()),
+                ),
+            };
+            processor.input_query =
+                Some(AudioProcessorInputQueryModel { payload, button_label, status_label });
+        }
+    }
+}
+
+#[cfg(test)]
+mod input_query_tests {
+    use crate::app::audio_input_observation::tests::{finish, fixture};
+    use crate::app::audio_input_observation::AudioInputObservation;
+    use crate::app::product_action::{
+        AudioProcessorInputQueryOperation, AudioProductAction, ProductAction,
+    };
+    use crate::app::AppState;
+    use mondrian_audio::AudioProcessorInputInspectionTarget;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    #[test]
+    fn input_observation_rack_controls_localize_query_cancel_refresh_and_failure_without_probing() {
+        use super::{bind_processor_input_queries, project_audio_processor_rack};
+        use crate::app_ui::audio_automation::AudioAutomationTimeContext;
+        use crate::app_ui::localization::{AppUiLocale, Localizer};
+        use mondrian_timeline::{audio::AudioProcessorDefinitionRef, AudioProcessorRackAddress};
+        for vst3 in [false, true] {
+            let (mut state, payloads, calls, started, release) = fixture(1);
+            let payload = payloads[0];
+            state
+                .active_sequence_mut_uncommitted()
+                .expect("Fixture Sequence")
+                .audio_program
+                .outputs[0]
+                .strip
+                .pre_fader
+                .processors[0]
+                .definition = if vst3 {
+                AudioProcessorDefinitionRef::Vst3 {
+                    class_id: "00000000000000000000000000000001".to_owned(),
+                    vendor: None,
+                    schema_version: 1,
+                    binary_sha256: Some([7; 32]),
+                }
+            } else {
+                AudioProcessorDefinitionRef::Clap {
+                    plugin_id: "fixture.inputs".to_owned(),
+                    schema_version: 1,
+                    binary_sha256: Some([7; 32]),
+                }
+            };
+            let project = |state: &AppState, locale| {
+                let localizer = Localizer::new(locale).expect("Input control locale");
+                let sequence = state.active_sequence().expect("Fixture Sequence");
+                let AudioProcessorInputInspectionTarget::ChannelStrip { owner, rack } =
+                    payload.target
+                else {
+                    panic!("Fixture channel target");
+                };
+                let mut racks = vec![project_audio_processor_rack(
+                    sequence,
+                    AudioProcessorRackAddress::ChannelStrip { owner, rack },
+                    &localizer,
+                    AudioAutomationTimeContext::at_sequence_time(sequence, sequence.playhead),
+                )];
+                bind_processor_input_queries(&mut racks, state, &localizer);
+                let model =
+                    racks[0].processors[0].input_query.clone().expect("Native query control");
+                (model, localizer)
+            };
+            for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+                let (model, localizer) = project(&state, locale);
+                assert_eq!(model.button_label, localizer.text("audio-input-query"));
+                assert_eq!(
+                    model.status_label,
+                    localizer.text("audio-input-not-inspected")
+                );
+                assert_eq!(model.payload, payload);
+            }
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "Projection never loads native code"
+            );
+            state
+                .dispatch_action(
+                    ProductAction::Audio(AudioProductAction::QueryProcessorInputs(payload))
+                        .into_external_action(),
+                )
+                .expect("Actual control dispatch");
+            started
+                .recv_timeout(Duration::from_secs(2))
+                .expect("Controlled native adapter query");
+            let (pending, localizer) = project(&state, AppUiLocale::EnUs);
+            assert_eq!(pending.button_label, localizer.text("audio-input-cancel"));
+            assert_eq!(
+                pending.payload.operation,
+                AudioProcessorInputQueryOperation::Cancel
+            );
+            release.send(()).expect("Resolve fixture ports");
+            finish(&mut state);
+            for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+                let (ready, localizer) = project(&state, locale);
+                assert_eq!(ready.button_label, localizer.text("audio-input-requery"));
+                let mut args = fluent_bundle::FluentArgs::new();
+                args.set("count", 2);
+                assert_eq!(
+                    ready.status_label,
+                    localizer.format("audio-input-ready", Some(&args))
+                );
+                assert_eq!(
+                    ready.payload.operation,
+                    AudioProcessorInputQueryOperation::Query
+                );
+            }
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "Locale/model updates only read facts"
+            );
+            // Actual failed adapter preparation remains a quiet localized, retryable control state.
+            state.active_sequence_mut_uncommitted().expect("Sequence").audio_program.outputs[0]
+                .strip
+                .pre_fader
+                .processors[0]
+                .definition = AudioProcessorDefinitionRef::Clap {
+                plugin_id: "fixture.missing".to_owned(),
+                schema_version: 1,
+                binary_sha256: Some([7; 32]),
+            };
+            state
+                .dispatch_action(
+                    ProductAction::Audio(AudioProductAction::QueryProcessorInputs(payload))
+                        .into_external_action(),
+                )
+                .expect("Retry changed definition");
+            started.recv_timeout(Duration::from_secs(2)).expect("Missing adapter query");
+            release.send(()).expect("Finish failed query");
+            finish(&mut state);
+            let (failed, localizer) = project(&state, AppUiLocale::ZhCn);
+            assert_eq!(failed.button_label, localizer.text("audio-input-requery"));
+            let AudioInputObservation::Failed(error) =
+                state.audio_processor_input_observation(payload)
+            else {
+                panic!("Expected actual adapter failure");
+            };
+            assert_eq!(
+                failed.status_label,
+                localizer.format_text("audio-input-failed", "error", &error.to_string())
+            );
+            assert!(!state.can_undo_action());
+        }
+    }
+
+    #[test]
+    fn input_observation_idle_native_wake_stops_only_after_owned_work_terminates() {
+        use crate::app_ui::host::AppUiHost;
+        use crate::app_ui::preferences_store::AppUiPreferences;
+        let (state, payloads, _calls, started, release) = fixture(1);
+        let path = std::env::temp_dir().join(format!(
+            "mondrian-input-wake-{}.json",
+            payloads[0].sequence_id
+        ));
+        let host = AppUiHost::new_with_preferences_path(state, AppUiPreferences::default(), path);
+        assert_eq!(host.native_audio_control_next_wake_delay(), None);
+        host.with_validation_app_state_mut(|state| {
+            state.dispatch_action(
+                ProductAction::Audio(AudioProductAction::QueryProcessorInputs(payloads[0]))
+                    .into_external_action(),
+            )
+        })
+        .expect("Start query through native host state");
+        started.recv_timeout(Duration::from_secs(2)).expect("Worker started");
+        assert_eq!(
+            host.native_audio_control_next_wake_delay(),
+            Some(Duration::from_millis(25))
+        );
+        let mut cancel = payloads[0];
+        cancel.operation = AudioProcessorInputQueryOperation::Cancel;
+        host.with_validation_app_state_mut(|state| {
+            state.dispatch_action(
+                ProductAction::Audio(AudioProductAction::QueryProcessorInputs(cancel))
+                    .into_external_action(),
+            )
+        })
+        .expect("Cancel query without detaching worker");
+        assert!(host.native_audio_control_next_wake_delay().is_some());
+        release.send(()).expect("Terminate canceled worker");
+        host.with_validation_app_state_mut(finish);
+        assert_eq!(host.native_audio_control_next_wake_delay(), None);
     }
 }

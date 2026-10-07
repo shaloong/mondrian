@@ -1906,3 +1906,33 @@ See [the scoped receipt](../dev/modal-resource-lut-acceptance.md#current-vst3-au
 These owned stereo Float32 references do not qualify sidechain GUI controls,
 mixed layouts, MIDI, plugin editors, arbitrary vendors, devices or performance.
 The prior ac6f069 source and 3b44084 Golden receipts retain their original scope.
+
+
+### Session-bound product input observations
+
+App owns a non-realtime input-observation service with one physical worker,
+a capacity-one result channel, a 16-request coalescing FIFO and a 16-entry
+transient cache. Explicit queries for different targets remain accepted FIFO
+intents; repeated target state is coalesced, and capacity pressure refuses a
+new request rather than silently dropping an accepted one. Cancel/catalog
+invalidation retains ownership of running discovery until it terminates.
+A received message alone does not authorize joining: UI polls `is_finished`
+and only joins terminal threads. Queue work is checked against current state
+before admission and before starting the next job.
+
+The cache key contains the actual author processor, exact target and Scope
+binding, Render Contract, Sequence and typed in-memory AuthoringSessionId.
+`inspect_audio_processor_input_author` owns read-only membership/binding checks
+for both Audio preparation and App stale-result comparison. Structurally shared
+semantic author equality avoids native probing or author allocation identities
+in UI projection. The existing resolver and processor-preparation contracts
+remain the sole native interpretation; control queries create no DSP Session,
+project mutation, history or EventBus request.
+
+The closed product Action carries query/cancel intent and typed session identity.
+Inspector and Mixer bind read-only cached state to localized inspect, cancel and
+refresh controls. Project/canonical processor/render/session changes and catalog
+invalidation reject late replies. Errors are retained as quiet control state;
+explicit refresh retries. Native bus display metadata and source/disconnect
+controls remain subsequent work; available input counts alone do not complete
+sidechain routing or its native Undo/archive/output acceptance.

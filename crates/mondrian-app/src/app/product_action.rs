@@ -212,6 +212,9 @@ pub const GALLERY_APPLY_SHOT_MATCH: &str = "apply_shot_match";
 /// External custom-action namespace for Sequence audio authoring operations.
 pub const AUDIO_NAMESPACE: &str = "ui.audio";
 
+/// External read-only processor input control operation.
+pub const AUDIO_QUERY_PROCESSOR_INPUTS: &str = "query_processor_inputs";
+
 /// External action name for one atomic Audio Processor Rack edit.
 pub const AUDIO_EDIT_PROCESSOR_RACK: &str = "edit_processor_rack";
 /// External action name for inserting one product-visible built-in Processor.
@@ -465,6 +468,8 @@ pub enum ViewerProductAction {
 pub enum AudioProductAction {
     /// Navigate a shared Scope curve using an explicit Component occurrence.
     SelectScopeOccurrence(AudioScopeOccurrencePayload),
+    /// Query or cancel transient processor input observation.
+    QueryProcessorInputs(AudioProcessorInputQueryPayload),
     /// Change one transient Track audition flag without mutating author state.
     SetTrackSolo(AudioTrackSoloPayload),
     /// Apply one exact owner-time curve mutation.
@@ -729,6 +734,11 @@ impl ProductAction {
                 _ => Ok(None),
             },
             AUDIO_NAMESPACE => match name.as_str() {
+                AUDIO_QUERY_PROCESSOR_INPUTS => {
+                    Ok(Some(Self::Audio(AudioProductAction::QueryProcessorInputs(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
                 AUDIO_SELECT_SCOPE_OCCURRENCE => Ok(Some(Self::Audio(
                     AudioProductAction::SelectScopeOccurrence(decode_payload(
                         namespace, name, payload,
@@ -1117,6 +1127,11 @@ impl ProductAction {
     /// names or payloads.
     pub fn into_external_action(self) -> Action {
         let (namespace, name, payload) = match self {
+            Self::Audio(AudioProductAction::QueryProcessorInputs(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_QUERY_PROCESSOR_INPUTS,
+                serde_json::json!(payload),
+            ),
             Self::Audio(AudioProductAction::SelectScopeOccurrence(payload)) => (
                 AUDIO_NAMESPACE,
                 AUDIO_SELECT_SCOPE_OCCURRENCE,
@@ -5197,4 +5212,30 @@ mod tests {
             ))
         );
     }
+}
+
+/// Read-only processor input observation operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioProcessorInputQueryOperation {
+    /// Inspect the actual selected class/state in a bounded control worker.
+    Query,
+    /// Discard this target's observations while retaining ownership of active work.
+    Cancel,
+}
+
+/// Session-bound input observation intent; this never edits the project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioProcessorInputQueryPayload {
+    /// Exact in-memory editing session, including across reopening the same archive.
+    pub session_id: mondrian_editor_state::AuthoringSessionId,
+    /// Exact active author Sequence.
+    pub sequence_id: SequenceId,
+    /// Canonical owner and explicit Scope occurrence.
+    pub target: mondrian_audio::AudioProcessorInputInspectionTarget,
+    /// Processor within the addressed rack.
+    pub processor_id: AudioProcessorInstanceId,
+    /// Query or cancel transient observation work.
+    pub operation: AudioProcessorInputQueryOperation,
 }
