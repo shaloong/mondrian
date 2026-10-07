@@ -1055,6 +1055,169 @@ mod tests {
             assert_native_audio_group_signal(&reopened, target, resolver),
             before
         );
+        qualify_native_audio_transform_history(reopened, target, resolver, directory);
+    }
+
+    fn qualify_native_audio_transform_history(
+        mut state: AppState,
+        target: &mondrian_timeline::AudioAutomationTarget,
+        resolver: &dyn AudioProcessorResolver,
+        directory: &std::path::Path,
+    ) {
+        use super::super::product_action::{AudioProductAction, ProductAction};
+        use mondrian_core::{KeyframeId, TimelineTime};
+        use mondrian_timeline::{
+            inspect_audio_automation, AudioAutomationEdit, AudioAutomationEditRequest,
+        };
+        let original_sequence = state.active_sequence().expect("native joint source").clone();
+        let snapshot = |state: &AppState| {
+            inspect_audio_automation(state.active_sequence().expect("sequence"), target)
+                .expect("native target")
+                .curve()
+                .expect("native curve")
+                .clone()
+        };
+        let original = snapshot(&state);
+        let ids: Vec<_> = original.keyframes.iter().map(|key| key.id).collect();
+        assert_eq!(ids.len(), 3);
+        assert!(!state.can_undo_action() && !state.can_redo_action());
+        let time_delta = TimelineTime::new(32, 48_000).expect("exact joint displacement");
+        let action = |keyframe_ids, time_delta, value_delta| {
+            ProductAction::Audio(AudioProductAction::EditAutomation(
+                AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::TransformKeyframes {
+                        keyframe_ids,
+                        time_delta,
+                        value_delta,
+                        steps: 1,
+                    },
+                },
+            ))
+            .into_external_action()
+        };
+        let before = assert_native_audio_group_signal(&state, target, resolver);
+        let generation = state.project_author_generation();
+        for refused in [
+            action(vec![ids[1], KeyframeId::new()], time_delta, 0.05),
+            action(
+                ids[1..].to_vec(),
+                TimelineTime::new(-128, 48_000).expect("collision displacement"),
+                0.05,
+            ),
+        ] {
+            state
+                .dispatch_action(refused)
+                .expect_err("complete joint edit refuses atomically");
+            assert!(state
+                .active_sequence()
+                .expect("unchanged")
+                .author_state_eq_ignoring_revision(&original_sequence));
+            assert_eq!(snapshot(&state), original);
+            assert_eq!(state.project_author_generation(), generation);
+            assert!(!state.can_undo_action() && !state.can_redo_action());
+            assert_eq!(
+                assert_native_audio_group_signal(&state, target, resolver),
+                before
+            );
+        }
+        let mut locked = original_sequence.clone();
+        locked.audio_tracks[0].is_locked = true;
+        let mut refused = AppState::new();
+        refused.test_set_sequence(Some(locked.clone()));
+        let locked_generation = refused.project_author_generation();
+        refused
+            .dispatch_action(action(ids[1..].to_vec(), time_delta, 0.05))
+            .expect_err("locked native joint owner");
+        assert!(refused
+            .active_sequence()
+            .expect("locked")
+            .author_state_eq_ignoring_revision(&locked));
+        assert_eq!(refused.project_author_generation(), locked_generation);
+        assert!(!refused.can_undo_action() && !refused.can_redo_action());
+        drop(refused);
+
+        state
+            .dispatch_action(action(ids[1..].to_vec(), time_delta, 0.05))
+            .expect("one native joint transaction");
+        assert_eq!(state.project_author_generation(), generation + 1);
+        let edited = snapshot(&state);
+        for (index, (old, new)) in original.keyframes.iter().zip(&edited.keyframes).enumerate() {
+            assert_eq!(new.id, old.id);
+            assert_eq!(new.tangent_mode, old.tangent_mode);
+            assert_eq!(new.interpolation_to_next, old.interpolation_to_next);
+            if index == 0 {
+                assert_eq!(new.time, old.time);
+                assert_eq!(
+                    new.value.to_bits(),
+                    old.value.to_bits(),
+                    "unselected author value"
+                );
+            } else {
+                assert_eq!(
+                    new.time,
+                    old.time.checked_add(time_delta).expect("translated time")
+                );
+                assert_eq!(new.value, old.value + 0.05);
+            }
+        }
+        let after = assert_native_audio_group_signal(&state, target, resolver);
+        assert_ne!(after, before, "joint native edit changes actual stereo PCM");
+        let history = state.authoring_history().expect("history").diagnostics();
+        assert_eq!(history.undo_entries, 1);
+        state
+            .dispatch_action(action(ids[1..].to_vec(), TimelineTime::ZERO, 0.0))
+            .expect("zero joint displacement");
+        assert_eq!(state.project_author_generation(), generation + 1);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
+        let edited_sequence = state.active_sequence().expect("edited").clone();
+        assert!(state.undo_timeline().expect("one joint Undo"));
+        assert!(state
+            .active_sequence()
+            .expect("undone")
+            .author_state_eq_ignoring_revision(&original_sequence));
+        assert!(!state.can_undo_action() && state.can_redo_action());
+        assert_eq!(
+            assert_native_audio_group_signal(&state, target, resolver),
+            before
+        );
+        let undone_path = directory.join("原生音频联合撤销🙂.mdp");
+        state.save_project_file_as(undone_path.clone()).expect("save joint Undo");
+        assert!(state.can_redo_action(), "save preserves live joint Redo");
+        assert!(state.redo_timeline().expect("joint Redo after save"));
+        assert_eq!(snapshot(&state), edited);
+        assert_eq!(
+            assert_native_audio_group_signal(&state, target, resolver),
+            after
+        );
+        let edited_path = directory.join("原生音频联合重做🙂.mdp");
+        state.save_project_file_as(edited_path.clone()).expect("save joint Redo");
+        drop(state);
+        for (path, sequence, curve, output) in [
+            (undone_path, &original_sequence, &original, &before),
+            (edited_path, &edited_sequence, &edited, &after),
+        ] {
+            let mut reopened = AppState::new();
+            reopened.open_project_file(path).expect("fresh Unicode joint reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("reopened")
+                .author_state_eq_ignoring_revision(sequence));
+            assert_eq!(&snapshot(&reopened), curve);
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            assert!(reopened.active_clipboard_kind().is_none());
+            assert_eq!(
+                &assert_native_audio_group_signal(&reopened, target, resolver),
+                output
+            );
+            assert_eq!(
+                reopened.asset_library().expect("SQLite").list_assets().expect("assets").len(),
+                1
+            );
+        }
     }
 
     fn assert_native_audio_group_signal(

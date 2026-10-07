@@ -1709,3 +1709,13 @@ prepares UI candidates and canonical edits. ExactAutomationCurve admits the join
 candidate and normalizes Auto/Continuous controls against final topology once;
 there are no intermediate axis-specific publications. Pointer requests use the
 existing origin-relative parameter gesture so repeated moves do not accumulate.
+
+Native CLAP/VST3 group-history qualification extends the same owned authoring
+path with a joint time/value TransformKeyframes request after fresh clipboard
+reopen. Stable identities and interpolation intent are retained; unselected time
+and raw value remain unchanged while constraint normalization may adjust handles.
+Missing identities, collision and locked owners refuse the whole transaction.
+A successful request has one Undo entry; zero displacement retains generation
+and history. Native realtime/offline PCM comparison is reused through Undo,
+saved live Redo and fresh Unicode reopen. Execution receipts must name their
+test source separately from any previously qualified product-worker source.
