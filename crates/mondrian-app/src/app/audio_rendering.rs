@@ -1217,6 +1217,189 @@ mod tests {
                 reopened.asset_library().expect("SQLite").list_assets().expect("assets").len(),
                 1
             );
+            qualify_native_audio_reset_history(reopened, target, resolver, directory, output);
+        }
+    }
+
+    fn qualify_native_audio_reset_history(
+        mut state: AppState,
+        target: &mondrian_timeline::AudioAutomationTarget,
+        resolver: &dyn AudioProcessorResolver,
+        directory: &std::path::Path,
+        before: &[f32],
+    ) {
+        use super::super::product_action::{AudioProductAction, ProductAction};
+        use mondrian_core::{automation::PropertyValue, AudioProcessorInstanceId};
+        use mondrian_timeline::{
+            inspect_audio_automation, AudioAutomationEdit, AudioAutomationEditRequest,
+            AudioAutomationTarget, AudioChannelStripOwner, AudioChannelStripRack,
+            AudioProcessorRackAddress,
+        };
+        let original = state.active_sequence().expect("reset origin").clone();
+        let AudioAutomationTarget::ProcessorParameter {
+            rack:
+                AudioProcessorRackAddress::ChannelStrip {
+                    owner: AudioChannelStripOwner::Track { track_id },
+                    rack: AudioChannelStripRack::PreFader,
+                },
+            processor_id,
+            parameter_id,
+        } = target
+        else {
+            panic!("native gain fixture must address a track pre-fader parameter");
+        };
+        let original_parameter = original.audio_program.track_channels[track_id]
+            .strip
+            .pre_fader
+            .processors
+            .iter()
+            .find(|processor| processor.id == *processor_id)
+            .expect("native instance")
+            .parameters[parameter_id]
+            .clone();
+        let PropertyValue::Double(declared_default) = original_parameter.schema.default_value
+        else {
+            panic!("native normalized gain fixture must declare a Double default");
+        };
+        assert!(!original_parameter.automation.keyframes.is_empty());
+        assert!(!state.can_undo_action() && !state.can_redo_action());
+        let action = |target| {
+            ProductAction::Audio(AudioProductAction::EditAutomation(
+                AudioAutomationEditRequest { target, edit: AudioAutomationEdit::ResetToDefault },
+            ))
+            .into_external_action()
+        };
+        let generation = state.project_author_generation();
+        let initial_history = state.authoring_history().expect("history").diagnostics();
+        let mut missing = target.clone();
+        let AudioAutomationTarget::ProcessorParameter { processor_id: missing_instance_id, .. } =
+            &mut missing
+        else {
+            panic!("native target");
+        };
+        *missing_instance_id = AudioProcessorInstanceId::new();
+        state
+            .dispatch_action(action(missing))
+            .expect_err("missing native instance reset");
+        assert!(state
+            .active_sequence()
+            .expect("unchanged")
+            .author_state_eq_ignoring_revision(&original));
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            initial_history
+        );
+        let mut locked = original.clone();
+        locked.audio_tracks[0].is_locked = true;
+        let mut refused = AppState::new();
+        refused.test_set_sequence(Some(locked.clone()));
+        let locked_generation = refused.project_author_generation();
+        refused
+            .dispatch_action(action(target.clone()))
+            .expect_err("locked native reset");
+        assert!(refused
+            .active_sequence()
+            .expect("locked")
+            .author_state_eq_ignoring_revision(&locked));
+        assert_eq!(refused.project_author_generation(), locked_generation);
+        assert!(!refused.can_undo_action() && !refused.can_redo_action());
+        drop(refused);
+
+        state
+            .dispatch_action(action(target.clone()))
+            .expect("native declared-default reset");
+        assert_eq!(state.project_author_generation(), generation + 1);
+        let reset_sequence = state.active_sequence().expect("reset").clone();
+        let inspection = inspect_audio_automation(&reset_sequence, target).expect("reset target");
+        assert_eq!(
+            inspection.curve_contract().schema(),
+            &original_parameter.schema
+        );
+        assert_eq!(inspection.default_value(), declared_default);
+        let reset_curve = inspection.curve().expect("processor owns its unkeyed curve");
+        assert!(reset_curve.keyframes.is_empty());
+        assert_eq!(
+            reset_curve.parameter_id,
+            original_parameter.automation.parameter_id
+        );
+        let mut unrelated = reset_sequence.clone();
+        unrelated
+            .audio_program
+            .track_channels
+            .get_mut(track_id)
+            .expect("track")
+            .strip
+            .pre_fader
+            .processors
+            .iter_mut()
+            .find(|processor| processor.id == *processor_id)
+            .expect("reset instance")
+            .parameters
+            .insert(parameter_id.clone(), original_parameter);
+        assert!(unrelated.author_state_eq_ignoring_revision(&original), "only the addressed parameter changes; plugin state, bindings and other owners stay exact");
+        let after = assert_native_audio_group_signal(&state, target, resolver);
+        assert_ne!(after.as_slice(), before, "reset changes actual native PCM");
+        for pair in after.chunks_exact(2) {
+            let expected = 0.25 * declared_default as f32;
+            assert!((pair[0] - expected).abs() <= 1e-6);
+            assert!((pair[1] + expected).abs() <= 1e-6);
+        }
+        let history = state.authoring_history().expect("history").diagnostics();
+        assert_eq!(history.undo_entries, 1);
+        state
+            .dispatch_action(action(target.clone()))
+            .expect("already-default reset is a no-op");
+        assert!(state
+            .active_sequence()
+            .expect("no-op")
+            .author_state_eq_ignoring_revision(&reset_sequence));
+        assert_eq!(state.project_author_generation(), generation + 1);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
+        assert!(state.undo_timeline().expect("one reset Undo"));
+        assert!(state
+            .active_sequence()
+            .expect("Undo")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(!state.can_undo_action() && state.can_redo_action());
+        assert_eq!(
+            assert_native_audio_group_signal(&state, target, resolver).as_slice(),
+            before
+        );
+        let undone_path = directory.join("原生音频默认重置撤销🙂.mdp");
+        state.save_project_file_as(undone_path.clone()).expect("save reset Undo");
+        assert!(state.can_redo_action(), "saving preserves live reset Redo");
+        assert!(state.redo_timeline().expect("reset Redo after save"));
+        assert!(state
+            .active_sequence()
+            .expect("Redo")
+            .author_state_eq_ignoring_revision(&reset_sequence));
+        let reset_path = directory.join("原生音频默认重置重做🙂.mdp");
+        state.save_project_file_as(reset_path.clone()).expect("save reset Redo");
+        drop(state);
+        for (path, expected_sequence, expected_output) in [
+            (undone_path, &original, before),
+            (reset_path, &reset_sequence, after.as_slice()),
+        ] {
+            let mut reopened = AppState::new();
+            reopened.open_project_file(path).expect("fresh native reset Unicode reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("archive")
+                .author_state_eq_ignoring_revision(expected_sequence));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            assert!(reopened.active_clipboard_kind().is_none());
+            assert_eq!(
+                assert_native_audio_group_signal(&reopened, target, resolver).as_slice(),
+                expected_output
+            );
+            assert_eq!(
+                reopened.asset_library().expect("SQLite").list_assets().expect("assets").len(),
+                1
+            );
         }
     }
 

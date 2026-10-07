@@ -1719,3 +1719,18 @@ A successful request has one Undo entry; zero displacement retains generation
 and history. Native realtime/offline PCM comparison is reused through Undo,
 saved live Redo and fresh Unicode reopen. Execution receipts must name their
 test source separately from any previously qualified product-worker source.
+
+### Native declared-default reset qualification
+
+The owned CLAP/VST3 gain history fixture also exercises ResetToDefault after
+fresh Auto/Continuous curve archives, before and after joint time/value edits.
+A processor always owns its exact curve: reset removes keys and restores the
+schema default in that same curve, without creating a separate static-value owner.
+The existing reference evaluator covers both keyed and unkeyed native PCM.
+
+The fixture verifies missing/locked instance refusal, unchanged plugin state,
+bindings and unrelated author data, one Undo, already-default no-op generation
+and history, saved live Redo and fresh Unicode Undo/Reset archives with empty
+session history. Native execution qualification must name the current worker
+and owned fixture hashes; these tests do not broaden the host's negotiated bus,
+event, editor, vendor or platform capabilities.
