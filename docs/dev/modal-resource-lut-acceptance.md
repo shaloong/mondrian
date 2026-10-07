@@ -2222,3 +2222,44 @@ This qualifies the named Windows workflow and owned SDK fixture. Native audio
 joint time/value output, complete vendor/bus/MIDI/editor contracts, physical
 high-DPI input, macOS, broader i18n and performance matrices remain under the
 active original goal. Subsequent documentation commits do not imply a new binary.
+
+## Native CLAP/VST3 joint time/value history and PCM
+
+Test-only commit `e7c7edb2b05ec302a79269bb09ca9573989ce47c` extends the existing
+native group/clipboard history cases. CLAP and VST3 explicitly executed: 2 passed,
+0 failed, 0 ignored; 122.66s (test-target compilation 2m23s). Both Auto and
+Continuous constraints are exercised for each format.
+
+From a fresh reopened constrained curve, one typed TransformKeyframes action
+moves the final two stable keys by 32/48000 seconds and 0.05 author value units.
+Missing IDs, a collision with the first key and a locked Track reject the whole
+request. Unselected author time and raw value remain unchanged; constraint
+normalization can reshape neighboring handles. Selected IDs and interpolation
+intent are retained. Actual native PCM changes after admission; zero displacement
+retains generation/history and the successful request has exactly one Undo.
+Undo restores the complete sequence and PCM. Saving the undone state retains
+live Redo, and fresh Unicode undone/redone archives have empty history and
+clipboard, identical canonical curves/output, and the actual SQLite media asset.
+
+The shared production audio program renders 257 stereo frames for both realtime
+64/64/129 and offline 37/59/161 block partitions. Every channel/sample compares
+against the canonical exact-time curve multiplied by the probed WAV input,
+within the unchanged 1e-6 limit; the two partitions produce identical PCM.
+These checks run before/after refusal, edit, Undo, Redo and reopen.
+
+The receipt distinguishes clean test source `e7c7edb` from product-worker source
+`a258187`. The qualified product was reused with SHA-256
+`685cd2bcdb644221adbb8966de06d9cc0333021212fbe708b9275ae4cc129b05`.
+The only changed crate file since that worker build is within the existing
+cfg(test) audio_rendering module; its production prefix and all other crate
+sources are unchanged. Product and both owned SDK fixture hashes remained
+unchanged throughout the gate. This is not a claim of rebuilding the worker at
+the test-only revision. Receipt `acceptance-audio-joint-native-history.json`
+retains separate source identities, hashes, exact log and terminal result.
+Full workspace/all-targets/all-features Clippy with warnings denied, fmt and
+whitespace checks passed before the test commit. Shalom Wang is author and
+committer; nothing was pushed.
+
+This completes the named stereo Float32 main-bus reference joint-output
+history slice. It does not establish arbitrary vendor, multi-bus, MIDI, native
+editor, macOS or performance completeness. The original goal remains active.
