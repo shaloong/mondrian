@@ -1,8 +1,10 @@
 //! Bounded out-of-process discovery of installed CLAP descriptors.
 
 use super::clap_worker::{ClapHost, ClapHostShared};
+use super::protocol::{auxiliary_from_wire, auxiliary_to_wire, AuxiliaryBusWire};
 use super::ClapPluginRegistration;
 use crate::{
+    AudioProcessorAuxiliaryInputBusContract, AudioProcessorAuxiliaryInputContract,
     AudioProcessorExecutionContract, AudioProcessorHostError, AudioProcessorTail,
     AudioRenderContract,
 };
@@ -41,6 +43,7 @@ const MAX_RESPONSE_BYTES: u64 = 512 * 1024;
 const MAX_CAPTURED_STATE_BYTES: usize = 64 * 1024;
 const MAX_DESCRIPTORS: usize = 4096;
 const MAX_PARAMETERS: u32 = 1024;
+const MAX_INPUT_PORTS: u32 = 32;
 const MAX_CLAP_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 
 pub(super) fn fingerprint_clap_binary(
@@ -184,6 +187,7 @@ pub(super) struct ProbeResult {
     latency_frames: u32,
     tail: ProbeTail,
     parameters: Vec<ClapParameterDescriptor>,
+    pub(super) auxiliary_buses: Vec<AuxiliaryBusWire>,
     pub(super) captured_state: Option<Vec<u8>>,
 }
 
@@ -274,6 +278,11 @@ pub(super) fn probe_clap_plugin_registration_with_state(
         return Err(invalid("CLAP probe response changed plugin identity"));
     }
     validate_parameters(&probe.parameters)?;
+    if probe.auxiliary_buses.len() >= MAX_INPUT_PORTS as usize {
+        return Err(invalid("CLAP probe returned excessive auxiliary ports"));
+    }
+    let auxiliary_inputs = auxiliary_from_wire(probe.auxiliary_buses);
+    auxiliary_inputs.validate(render_contract.channel_layout)?;
     if probe
         .captured_state
         .as_ref()
@@ -301,6 +310,7 @@ pub(super) fn probe_clap_plugin_registration_with_state(
             binary_sha256: fingerprint,
             execution_contract,
             parameters: probe.parameters,
+            auxiliary_inputs,
         },
         probe.captured_state,
     ))
@@ -469,11 +479,6 @@ pub(super) fn probe_loaded(
     state: Option<&[u8]>,
     capture_default_state: bool,
 ) -> Result<ProbeResult, AudioProcessorHostError> {
-    let expected_type = match channel_layout {
-        AudioChannelLayout::Mono => AudioPortType::MONO,
-        AudioChannelLayout::Stereo => AudioPortType::STEREO,
-        _ => return Err(invalid("CLAP probe channel layout is unsupported")),
-    };
     let max_frames = u32::try_from(max_block_frames)
         .ok()
         .filter(|frames| *frames > 0)
@@ -540,26 +545,7 @@ pub(super) fn probe_loaded(
     } else {
         None
     };
-    let ports = handle
-        .get_extension::<PluginAudioPorts>()
-        .ok_or_else(|| invalid("CLAP plugin does not expose audio ports"))?;
-    for is_input in [true, false] {
-        if ports.count(&handle, is_input) != 1 {
-            return Err(invalid(
-                "CLAP plugin must expose one main input and output port",
-            ));
-        }
-        let mut buffer = AudioPortInfoBuffer::new();
-        let port = ports
-            .get(&handle, 0, is_input, &mut buffer)
-            .ok_or_else(|| invalid("CLAP main port metadata is unavailable"))?;
-        if !port.flags.contains(AudioPortFlags::IS_MAIN)
-            || port.port_type != Some(expected_type)
-            || usize::try_from(port.channel_count).ok() != Some(channel_layout.channel_count())
-        {
-            return Err(invalid("CLAP main port differs from the requested layout"));
-        }
-    }
+    let auxiliary_inputs = list_audio_inputs(&handle, channel_layout)?;
     let latency_frames = handle
         .get_extension::<PluginLatency>()
         .map(|extension| extension.get(&handle))
@@ -595,6 +581,7 @@ pub(super) fn probe_loaded(
         tail,
         parameters,
         captured_state,
+        auxiliary_buses: auxiliary_to_wire(&auxiliary_inputs),
     })
 }
 
@@ -602,6 +589,54 @@ pub(super) fn probe_loaded(
 struct BoundedStateWriter {
     bytes: Vec<u8>,
     exceeded: bool,
+}
+
+/// Read deactivated native ports in ABI order, using stable IDs for author routes.
+pub(super) fn list_audio_inputs(
+    handle: &clack_host::prelude::PluginMainThreadHandle<'_>,
+    channel_layout: AudioChannelLayout,
+) -> Result<AudioProcessorAuxiliaryInputContract, AudioProcessorHostError> {
+    let expected_type = match channel_layout {
+        AudioChannelLayout::Mono => AudioPortType::MONO,
+        AudioChannelLayout::Stereo => AudioPortType::STEREO,
+        _ => return Err(invalid("CLAP audio port layout is unsupported")),
+    };
+    let ports = handle
+        .get_extension::<PluginAudioPorts>()
+        .ok_or_else(|| invalid("CLAP plugin does not expose audio ports"))?;
+    let mut auxiliary_inputs = AudioProcessorAuxiliaryInputContract::default();
+    for is_input in [true, false] {
+        let count = ports.count(handle, is_input);
+        if count == 0 || (is_input && count > MAX_INPUT_PORTS) || (!is_input && count != 1) {
+            return Err(invalid(
+                "CLAP requires bounded input ports and one main output",
+            ));
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for index in 0..count {
+            let mut buffer = AudioPortInfoBuffer::new();
+            let port = ports
+                .get(handle, index, is_input, &mut buffer)
+                .ok_or_else(|| invalid("CLAP audio port metadata is unavailable"))?;
+            if !ids.insert(port.id.get())
+                || port.flags.contains(AudioPortFlags::IS_MAIN) != (index == 0)
+                || port.port_type != Some(expected_type)
+                || usize::try_from(port.channel_count).ok() != Some(channel_layout.channel_count())
+            {
+                return Err(invalid(
+                    "CLAP audio port identity, role, or layout is invalid",
+                ));
+            }
+            if is_input && index != 0 {
+                auxiliary_inputs.buses.push(AudioProcessorAuxiliaryInputBusContract {
+                    bus_key: format!("clap.audio-input.{}", port.id.get()),
+                    channel_layout,
+                });
+            }
+        }
+    }
+    auxiliary_inputs.validate(channel_layout)?;
+    Ok(auxiliary_inputs)
 }
 
 impl Write for BoundedStateWriter {

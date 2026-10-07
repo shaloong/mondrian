@@ -1,8 +1,8 @@
 //! CLAP ABI execution inside the supervised audio worker process.
 
 use super::clap_discovery::{
-    fingerprint_clap_binary, list_parameters, probe_clap_plugin_registration_with_state,
-    validate_parameters,
+    fingerprint_clap_binary, list_audio_inputs, list_parameters,
+    probe_clap_plugin_registration_with_state, validate_parameters,
 };
 use super::{
     probe_clap_plugin_registration, scan_clap_library_descriptors, ClapPluginDescriptor,
@@ -14,9 +14,6 @@ use crate::{
     AudioProcessorAuxiliaryInputContract, AudioProcessorExecutionContract, AudioProcessorHostError,
     AudioProcessorPrepareRequest,
 };
-use clack_extensions::audio_ports::{
-    AudioPortFlags, AudioPortInfoBuffer, AudioPortType, PluginAudioPorts,
-};
 use clack_extensions::latency::PluginLatency;
 use clack_extensions::state::PluginState;
 use clack_extensions::tail::{PluginTail, TailLength};
@@ -26,9 +23,7 @@ use clack_host::prelude::{
     InputChannel, OutputEvents, Pckn, PluginAudioConfiguration, PluginAudioProcessor, PluginEntry,
     PluginInstance, SharedHandler,
 };
-use mondrian_core::{
-    AudioChannelLayout, AudioProcessorInstanceId, AuthoringMap, ExactAutomationCurve,
-};
+use mondrian_core::{AudioProcessorInstanceId, AuthoringMap, ExactAutomationCurve};
 use mondrian_timeline::audio::{
     AudioProcessorDefinitionRef, AudioProcessorInstance, AudioProcessorParameter,
     AudioProcessorParameterUiMetadata,
@@ -114,6 +109,8 @@ pub struct ClapPluginRegistration {
     pub execution_contract: AudioProcessorExecutionContract,
     /// Definition-local parameter IDs and plain-value contracts from the probe.
     pub parameters: Vec<super::ClapParameterDescriptor>,
+    /// Ordered auxiliary inputs captured after restoring the occurrence state.
+    pub auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
 }
 
 /// Parent-side registry that packages an installed CLAP reference for the child.
@@ -473,7 +470,7 @@ impl IsolatedAudioProcessorSpecResolver for ClapAudioProcessorSpecResolver {
             self.helper_executable.clone(),
             payload,
             plugin.execution_contract,
-            AudioProcessorAuxiliaryInputContract::default(),
+            plugin.auxiliary_inputs.clone(),
             parameter_ids,
             request.render_contract(),
         )
@@ -497,9 +494,6 @@ impl IsolatedAudioProcessorWorkerFactory for ClapAudioProcessorWorkerFactory {
         &self,
         request: IsolatedAudioProcessorWorkerPrepareRequest,
     ) -> Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError> {
-        if !request.auxiliary_inputs().buses.is_empty() {
-            return Err(invalid("CLAP auxiliary buses are not yet supported"));
-        }
         let payload: ClapPayload = serde_json::from_slice(request.payload())
             .map_err(|error| invalid(format!("invalid CLAP worker payload: {error}")))?;
         if !payload.library_path.is_absolute() || payload.plugin_id.is_empty() {
@@ -586,11 +580,7 @@ fn prepare_loaded(
             .map_err(|error| unavailable(format!("CLAP state restore failed: {error}")))?;
     }
 
-    let expected_port_type = match request.render_contract().channel_layout {
-        AudioChannelLayout::Mono => AudioPortType::MONO,
-        AudioChannelLayout::Stereo => AudioPortType::STEREO,
-        _ => return Err(invalid("CLAP channel layout is not yet supported")),
-    };
+    shared.service_callbacks(&mut instance)?;
     let channel_count = request.render_contract().channel_count();
     let handle = instance.plugin_handle();
     if list_parameters(&handle)? != expected_parameters {
@@ -598,27 +588,9 @@ fn prepare_loaded(
             "CLAP parameter metadata changed since contract probe",
         ));
     }
-    let ports = handle
-        .get_extension::<PluginAudioPorts>()
-        .ok_or_else(|| invalid("CLAP plugin does not expose audio ports"))?;
-    for is_input in [true, false] {
-        if ports.count(&handle, is_input) != 1 {
-            return Err(invalid(
-                "CLAP plugin must expose exactly one input and output port",
-            ));
-        }
-        let mut buffer = AudioPortInfoBuffer::new();
-        let port = ports
-            .get(&handle, 0, is_input, &mut buffer)
-            .ok_or_else(|| invalid("CLAP main audio port metadata is unavailable"))?;
-        if !port.flags.contains(AudioPortFlags::IS_MAIN)
-            || usize::try_from(port.channel_count).ok() != Some(channel_count)
-            || port.port_type != Some(expected_port_type)
-        {
-            return Err(invalid(
-                "CLAP main audio port layout differs from the render contract",
-            ));
-        }
+    let auxiliary_inputs = list_audio_inputs(&handle, request.render_contract().channel_layout)?;
+    if &auxiliary_inputs != request.auxiliary_inputs() {
+        return Err(invalid("CLAP auxiliary ports changed since contract probe"));
     }
 
     let latency = handle
@@ -681,7 +653,8 @@ fn prepare_loaded(
             ))
         })
         .collect::<Result<Vec<_>, AudioProcessorHostError>>()?;
-    let input = vec![vec![0.0; frames]; channel_count];
+    let input_port_count = 1 + auxiliary_inputs.buses.len();
+    let input = vec![vec![vec![0.0; frames]; channel_count]; input_port_count];
     let output = vec![vec![0.0; frames]; channel_count];
     Ok(Box::new(ClapWorker {
         processor: Some(processor),
@@ -689,7 +662,8 @@ fn prepare_loaded(
         contract: request.plugin_execution_contract(),
         input,
         output,
-        input_ports: AudioPorts::with_capacity(channel_count, 1),
+        auxiliary_inputs,
+        input_ports: AudioPorts::with_capacity(channel_count * input_port_count, input_port_count),
         output_ports: AudioPorts::with_capacity(channel_count, 1),
         parameter_lanes,
         input_events: EventBuffer::with_capacity(event_capacity),
@@ -702,7 +676,8 @@ struct ClapWorker {
     processor: Option<PluginAudioProcessor<ClapHost>>,
     instance: PluginInstance<ClapHost>,
     contract: AudioProcessorExecutionContract,
-    input: Vec<Vec<f32>>,
+    input: Vec<Vec<Vec<f32>>>,
+    auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
     output: Vec<Vec<f32>>,
     input_ports: AudioPorts,
     output_ports: AudioPorts,
@@ -718,7 +693,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
     }
 
     fn auxiliary_input_contract(&self) -> AudioProcessorAuxiliaryInputContract {
-        AudioProcessorAuxiliaryInputContract { buses: Vec::new() }
+        self.auxiliary_inputs.clone()
     }
 
     fn enter_state(&mut self, start_sample: i64) -> Result<(), AudioProcessorHostError> {
@@ -737,10 +712,10 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         mut block: IsolatedAudioProcessorWorkerBlock<'_>,
     ) -> Result<(), AudioProcessorHostError> {
         let frames = block.frames();
-        let channels = self.input.len();
+        let channels = self.output.len();
         if self.last_end != Some(block.start_sample())
             || frames == 0
-            || frames > self.input[0].len()
+            || frames > self.input[0][0].len()
             || block.main_interleaved().len() != frames * channels
         {
             return Err(AudioProcessorHostError::Process(
@@ -784,20 +759,35 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         self.input_events.sort();
         for (frame, samples) in block.main_interleaved().chunks_exact(channels).enumerate() {
             for (channel, sample) in samples.iter().copied().enumerate() {
-                self.input[channel][frame] = sample;
+                self.input[0][channel][frame] = sample;
+            }
+        }
+        for (index, bus) in self.auxiliary_inputs.buses.iter().enumerate() {
+            let samples = block.auxiliary_input(&bus.bus_key).ok_or_else(|| {
+                AudioProcessorHostError::Process("CLAP auxiliary PCM is missing".to_owned())
+            })?;
+            if samples.len() != frames * channels {
+                return Err(AudioProcessorHostError::Process(
+                    "CLAP auxiliary extent changed".to_owned(),
+                ));
+            }
+            for (frame, samples) in samples.chunks_exact(channels).enumerate() {
+                for (channel, sample) in samples.iter().copied().enumerate() {
+                    self.input[index + 1][channel][frame] = sample;
+                }
             }
         }
         for channel in &mut self.output {
             channel[..frames].fill(0.0);
         }
-        let input_audio = self.input_ports.with_input_buffers([AudioPortBuffer {
-            latency: 0,
-            channels: AudioPortBufferType::f32_input_only(
-                self.input
-                    .iter_mut()
-                    .map(|channel| InputChannel::variable(&mut channel[..frames])),
-            ),
-        }]);
+        let input_audio = self.input_ports.with_input_buffers(self.input.iter_mut().map(|port| {
+            AudioPortBuffer {
+                latency: 0,
+                channels: AudioPortBufferType::f32_input_only(
+                    port.iter_mut().map(|channel| InputChannel::variable(&mut channel[..frames])),
+                ),
+            }
+        }));
         let mut output_audio = self.output_ports.with_output_buffers([AudioPortBuffer {
             latency: 0,
             channels: AudioPortBufferType::f32_output_only(
@@ -866,7 +856,8 @@ mod tests {
     use super::*;
     use crate::{AudioProcessingMode, AudioProcessorTail, AudioRenderContract};
     use clack_extensions::audio_ports::{
-        AudioPortInfo, AudioPortInfoWriter, AudioPortType, PluginAudioPortsImpl,
+        AudioPortFlags, AudioPortInfo, AudioPortInfoWriter, AudioPortType, PluginAudioPorts,
+        PluginAudioPortsImpl,
     };
     use clack_extensions::params::{
         ParamDisplayWriter, ParamInfo, ParamInfoFlags, ParamInfoWriter, PluginAudioProcessorParams,
@@ -1166,6 +1157,289 @@ mod tests {
         }
     }
 
+    struct SidechainPlugin<const CASE: u8>;
+    struct SidechainMain<const CASE: u8>;
+    struct SidechainProcessor;
+
+    impl<const CASE: u8> Plugin for SidechainPlugin<CASE> {
+        type AudioProcessor<'a> = SidechainProcessor;
+        type Shared<'a> = ();
+        type MainThread<'a> = SidechainMain<CASE>;
+
+        fn declare_extensions(builder: &mut PluginExtensions<Self>, _shared: Option<&()>) {
+            builder.register::<PluginAudioPorts>();
+        }
+    }
+
+    impl<const CASE: u8> DefaultPluginFactory for SidechainPlugin<CASE> {
+        fn get_descriptor() -> PluginDescriptor {
+            PluginDescriptor::new("org.mondrian.test.sidechain", "Sidechain ABI Fixture")
+        }
+
+        fn new_shared(_host: HostSharedHandle<'_>) -> Result<(), PluginError> {
+            Ok(())
+        }
+
+        fn new_main_thread<'a>(
+            _host: HostMainThreadHandle<'a>,
+            _shared: &'a (),
+        ) -> Result<SidechainMain<CASE>, PluginError> {
+            Ok(SidechainMain)
+        }
+    }
+
+    impl<const CASE: u8> PluginMainThread<'_, ()> for SidechainMain<CASE> {}
+
+    impl<const CASE: u8> PluginAudioPortsImpl for SidechainMain<CASE> {
+        fn count(&self, is_input: bool) -> u32 {
+            if is_input {
+                if CASE == 4 {
+                    33
+                } else {
+                    3
+                }
+            } else {
+                1
+            }
+        }
+
+        fn get(&self, index: u32, is_input: bool, writer: &mut AudioPortInfoWriter) {
+            if index >= self.count(is_input) || (CASE == 5 && index == 2) {
+                return;
+            }
+            let id = match index {
+                0 => 0,
+                1 => 11,
+                _ if CASE == 1 => 11,
+                _ => 7,
+            };
+            writer.set(&AudioPortInfo {
+                id: ClapId::new(id),
+                name: b"same display name",
+                channel_count: if CASE == 3 && index != 0 { 1 } else { 2 },
+                flags: if index == 0 || (CASE == 2 && index == 1) {
+                    AudioPortFlags::IS_MAIN
+                } else {
+                    AudioPortFlags::empty()
+                },
+                port_type: Some(if CASE == 3 && index != 0 {
+                    AudioPortType::MONO
+                } else {
+                    AudioPortType::STEREO
+                }),
+                in_place_pair: None,
+            });
+        }
+    }
+
+    impl<'a, const CASE: u8> clack_plugin::plugin::PluginAudioProcessor<'a, (), SidechainMain<CASE>>
+        for SidechainProcessor
+    {
+        fn activate(
+            _host: HostAudioProcessorHandle<'a>,
+            _main: &SidechainMain<CASE>,
+            _shared: &'a (),
+            config: PluginConfig,
+        ) -> Result<Self, PluginError> {
+            if config.max_frames_count > 4 {
+                return Err(PluginError::Message("fixture block limit"));
+            }
+            Ok(Self)
+        }
+
+        fn process(
+            &mut self,
+            _process: Process,
+            mut audio: Audio,
+            _events: Events,
+        ) -> Result<ProcessStatus, PluginError> {
+            let mut expected = [[0.0; 4]; 2];
+            for (port_index, port) in audio.input_ports().enumerate() {
+                let gain = [2.0, 3.0, 5.0][port_index];
+                let channels =
+                    port.channels()?.into_f32().ok_or(PluginError::Message("f32 input"))?;
+                for (channel_index, samples) in channels.iter().enumerate() {
+                    for (target, sample) in expected[channel_index].iter_mut().zip(samples.iter()) {
+                        *target += sample * gain;
+                    }
+                }
+            }
+            let mut output = audio.output_ports().next().ok_or(PluginError::Message("output"))?;
+            let mut channels =
+                output.channels()?.into_f32().ok_or(PluginError::Message("f32 output"))?;
+            for (channel_index, samples) in channels.iter_mut().enumerate() {
+                for (target, sample) in samples.iter_mut().zip(expected[channel_index]) {
+                    *target = sample;
+                }
+            }
+            Ok(ProcessStatus::Continue)
+        }
+    }
+
+    fn sidechain_request() -> IsolatedAudioProcessorWorkerPrepareRequest {
+        IsolatedAudioProcessorWorkerPrepareRequest {
+            payload: Vec::new(),
+            plugin_execution_contract: contract(),
+            auxiliary_inputs: AudioProcessorAuxiliaryInputContract {
+                buses: [11, 7]
+                    .map(|id| crate::AudioProcessorAuxiliaryInputBusContract {
+                        bus_key: format!("clap.audio-input.{id}"),
+                        channel_layout: AudioChannelLayout::Stereo,
+                    })
+                    .to_vec(),
+            },
+            parameter_ids: Vec::new(),
+            render_contract: AudioRenderContract {
+                sample_rate: 48_000,
+                channel_layout: AudioChannelLayout::Stereo,
+                max_block_frames: 4,
+                processing_mode: AudioProcessingMode::Offline,
+                processor_session_scratch_budget_bytes: 1024 * 1024,
+                public_output_lookahead_budget_frames: 4096,
+                compensation_delay_scratch_budget_bytes: 1024 * 1024,
+            },
+        }
+    }
+
+    #[test]
+    fn clap_sidechain_abi_preserves_port_ids_order_pcm_and_silence() {
+        let entry = PluginEntry::load_from_clack::<SinglePluginEntry<SidechainPlugin<0>>>(
+            c"/test/sidechain",
+        )
+        .expect("sidechain entry");
+        let request = sidechain_request();
+        let render = request.render_contract();
+        let auxiliary = request.auxiliary_inputs().clone();
+        let probe = super::super::clap_discovery::probe_loaded(
+            &entry,
+            "org.mondrian.test.sidechain",
+            48_000,
+            AudioChannelLayout::Stereo,
+            4,
+            None,
+            false,
+        )
+        .expect("sidechain discovery");
+        assert_eq!(
+            super::super::protocol::auxiliary_from_wire(probe.auxiliary_buses),
+            auxiliary
+        );
+        let mut worker = prepare_loaded(
+            request,
+            entry,
+            c"org.mondrian.test.sidechain",
+            None,
+            &[],
+            &[],
+        )
+        .expect("prepare sidechains");
+        assert_eq!(worker.auxiliary_input_contract(), auxiliary);
+        worker.enter_state(12).expect("enter state");
+        let mut main = [0.25, -0.5, 1.0, 0.125];
+        let aux = [1.0, 2.0, 3.0, 4.0, -1.0, -2.0, -3.0, -4.0];
+        worker
+            .process(IsolatedAudioProcessorWorkerBlock::new(
+                12,
+                2,
+                render,
+                &mut main,
+                &auxiliary,
+                &aux,
+                &[],
+                &[],
+            ))
+            .expect("process distinct sidechain PCM");
+        assert_eq!(main, [-1.5, -5.0, -4.0, -7.75]);
+        let mut main = [0.75, -0.25];
+        worker
+            .process(IsolatedAudioProcessorWorkerBlock::new(
+                14,
+                1,
+                render,
+                &mut main,
+                &auxiliary,
+                &[0.0; 4],
+                &[],
+                &[],
+            ))
+            .expect("silent disconnected buses overwrite prior samples");
+        assert_eq!(main, [1.5, -0.5]);
+        let mut main = [0.25, -0.5];
+        assert!(worker
+            .process(IsolatedAudioProcessorWorkerBlock::new(
+                15,
+                1,
+                render,
+                &mut main,
+                &auxiliary,
+                &[],
+                &[],
+                &[],
+            ))
+            .is_err());
+        assert_eq!(main, [0.25, -0.5]);
+    }
+
+    fn refuse_sidechain_ports<const CASE: u8>() {
+        let entry = PluginEntry::load_from_clack::<SinglePluginEntry<SidechainPlugin<CASE>>>(
+            c"/test/sidechain",
+        )
+        .expect("sidechain entry");
+        assert!(super::super::clap_discovery::probe_loaded(
+            &entry,
+            "org.mondrian.test.sidechain",
+            48_000,
+            AudioChannelLayout::Stereo,
+            4,
+            None,
+            false,
+        )
+        .is_err());
+        assert!(prepare_loaded(
+            sidechain_request(),
+            entry,
+            c"org.mondrian.test.sidechain",
+            None,
+            &[],
+            &[]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn clap_sidechain_abi_refuses_duplicate_main_layout_count_and_missing_metadata() {
+        refuse_sidechain_ports::<1>();
+        refuse_sidechain_ports::<2>();
+        refuse_sidechain_ports::<3>();
+        refuse_sidechain_ports::<4>();
+        refuse_sidechain_ports::<5>();
+    }
+
+    #[test]
+    fn clap_sidechain_abi_refuses_changed_order_and_unadmitted_inputs() {
+        for changed in [false, true] {
+            let entry = PluginEntry::load_from_clack::<SinglePluginEntry<SidechainPlugin<0>>>(
+                c"/test/sidechain",
+            )
+            .expect("sidechain entry");
+            let mut request = sidechain_request();
+            if changed {
+                request.auxiliary_inputs.buses.reverse();
+            } else {
+                request.auxiliary_inputs.buses.clear();
+            }
+            assert!(prepare_loaded(
+                request,
+                entry,
+                c"org.mondrian.test.sidechain",
+                None,
+                &[],
+                &[]
+            )
+            .is_err());
+        }
+    }
+
     fn contract() -> AudioProcessorExecutionContract {
         AudioProcessorExecutionContract::new(0, AudioProcessorTail::None, true, true, true, 0)
             .expect("valid CLAP contract")
@@ -1192,6 +1466,7 @@ mod tests {
             library_path: std::env::current_exe().expect("test executable path"),
             binary_sha256: [3; 32],
             execution_contract: contract(),
+            auxiliary_inputs: AudioProcessorAuxiliaryInputContract::default(),
             parameters: vec![
                 descriptor(1, "Output Gain", false, false),
                 descriptor(2, "Private meter", true, false),
@@ -1224,6 +1499,7 @@ mod tests {
             library_path: helper.clone(),
             binary_sha256: [1; 32],
             execution_contract: contract(),
+            auxiliary_inputs: AudioProcessorAuxiliaryInputContract::default(),
             parameters: Vec::new(),
         };
         assert!(ClapAudioProcessorSpecResolver::new(
@@ -1249,6 +1525,7 @@ mod tests {
         use mondrian_core::{AudioProcessorInstanceId, ProgramOutputId};
 
         let helper = std::env::current_exe().expect("test executable path");
+        let auxiliary = sidechain_request().auxiliary_inputs;
         let resolver = ClapAudioProcessorSpecResolver::new(
             helper.clone(),
             [ClapPluginRegistration {
@@ -1256,6 +1533,7 @@ mod tests {
                 library_path: helper,
                 binary_sha256: [7; 32],
                 execution_contract: contract(),
+                auxiliary_inputs: auxiliary.clone(),
                 parameters: Vec::new(),
             }],
         )
@@ -1297,7 +1575,10 @@ mod tests {
             resolve(Some([8; 32])),
             Err(AudioProcessorHostError::Unavailable(message)) if message.contains("binary revision differs")
         ));
-        assert!(resolve(Some([7; 32])).is_ok());
+        assert_eq!(
+            resolve(Some([7; 32])).expect("admitted binary and ports").auxiliary_inputs,
+            auxiliary
+        );
     }
 
     #[test]

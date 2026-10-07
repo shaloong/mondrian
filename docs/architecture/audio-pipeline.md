@@ -1734,3 +1734,26 @@ and history, saved live Redo and fresh Unicode Undo/Reset archives with empty
 session history. Native execution qualification must name the current worker
 and owned fixture hashes; these tests do not broaden the host's negotiated bus,
 event, editor, vendor or platform capabilities.
+
+### CLAP auxiliary native inputs
+
+CLAP discovery and worker admission share one deactivated-port scanner, after
+restoring occurrence state. It requires one main input at index zero and one
+main output, unique native IDs per direction, and at most 32 input ports. The
+current shared processor contract admits mono or stereo auxiliary inputs with
+exactly the main layout. Stable route keys are `clap.audio-input.<native-id>`;
+display names do not determine identity. ABI order is retained in the prepared
+contract and rechecked before activation, so missing or reordered ports fail
+admission instead of redirecting an authored sidechain.
+
+The existing isolated auxiliary contract and shared PCM transport are reused.
+The worker allocates planar buffers and port pointer capacity at prepare time,
+then copies each keyed input independently for every block. Disconnected buses
+receive the shared runtime's explicit silence, with no main-input fallback.
+Source-level ABI fixtures cover two distinguishable auxiliary inputs, silence
+following signal, changed order, duplicate IDs, duplicate main flags, mismatched
+layout, excessive count and unavailable metadata. These checks do not establish
+current packaged-worker, authoring archive, PDC, vendor or macOS qualification;
+VST3 auxiliary execution and mixed layouts remain separate open work.
+
+Port roles and stability follow the [CLAP audio ports contract](https://github.com/free-audio/clap/blob/main/include/clap/ext/audio-ports.h).

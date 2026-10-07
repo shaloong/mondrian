@@ -214,14 +214,20 @@ Current status: the Timeline recognizes CLAP/VST3 definition identities.
 factory; the application dispatches its packaged executable into this worker
 before initializing graphics or media. A parent-side CLAP registry can refer
 to installed definitions without loading native code. The child loads a CLAP
-library, checks descriptor identity, exactly one main Float32 input/output
-port with the requested mono/stereo port type and channel count, latency, and
+library, checks descriptor identity, one main Float32 input/output
+port and bounded auxiliary inputs with the requested mono/stereo port type and channel count, latency, and
 tail, restores supplied
 opaque state through CLAP's state extension before activation, and processes
 interleaved blocks through planar CLAP buffers. It accepts numeric CLAP
 parameter lanes with stable IDs and exact author-time automation; the worker
 rechecks probed metadata and emits sorted sample-accurate CLAP value events.
-It rejects auxiliary buses and incompatible layouts.
+Auxiliary input keys use stable native port IDs; discovery and admission share
+one scanner after restored-state callbacks. The worker feeds distinct planar
+ports through the existing isolated bus contract and shared PCM transport,
+with buffers allocated during preparation. It rejects incompatible layouts,
+duplicate IDs/main roles and changed auxiliary order. Source ABI fixtures
+cover two distinct sidechains and subsequent silence. Packaged-worker and
+authored sidechain history/output qualification remain pending.
 Descriptor discovery executes one installed library in a separate deadline-bound
 child and validates its bounded response. The same child can probe a selected
 definition for exact Mono/Stereo port, latency, and tail facts after restoring
