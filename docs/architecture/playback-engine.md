@@ -2044,6 +2044,18 @@ no-deadline-renewal rule. The post-pump transport tick uses a newly sampled
 monotonic instant and still runs after a pump error, because a fail-closed audio
 event may already have handed authority continuously to Synthetic Clock.
 
+The Headless coordinator keeps an accepted `Degraded` physical presentation
+distinct from `Unavailable`. It remains non-Ready scheduling evidence, permits
+normal successor preparation, and cannot be republished as Ready after its
+ticket is consumed. A decode failure still fails closed. Device-recovery
+observation pumps the paired coordinator rather than independently committing
+an Audio clock between its intervals. The ignored
+`playback_cpal_av_physical_default_device_roundtrip` test uses the same production
+A/V owners while an external runner changes and restores the real CoreAudio
+default. It requires video, real Metal, frozen retired callback evidence, the
+original recovery deadline, full authored raster, and qualified consuming
+closure; a successful device round trip alone does not pass its video contract.
+
 During initial play and active seek recovery, the full video cold-start horizon
 remains the gate for physical Audio activation and Audio Device Clock handoff.
 The coordinator nevertheless keeps the inactive Audio generation filling while

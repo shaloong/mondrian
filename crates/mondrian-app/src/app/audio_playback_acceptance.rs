@@ -150,6 +150,7 @@ pub(crate) struct ProfessionalVideoCoordinatorObservation {
     pub(crate) max_consecutive_stale: u64,
     pub(crate) stale_ready: u64,
     pub(crate) stale_queued_ready: u64,
+    pub(crate) stale_presented_degraded: u64,
     pub(crate) stale_in_flight: u64,
     pub(crate) stale_loading: u64,
     pub(crate) stale_backpressured: u64,
@@ -161,6 +162,7 @@ impl ProfessionalVideoCoordinatorObservation {
     fn classified_stale(self) -> u64 {
         self.stale_ready
             .saturating_add(self.stale_queued_ready)
+            .saturating_add(self.stale_presented_degraded)
             .saturating_add(self.stale_in_flight)
             .saturating_add(self.stale_loading)
             .saturating_add(self.stale_backpressured)

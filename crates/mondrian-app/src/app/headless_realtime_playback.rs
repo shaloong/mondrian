@@ -105,6 +105,7 @@ pub(crate) struct HeadlessStoppedPicturePreparation {
 pub(crate) enum HeadlessGpuCandidateStatus {
     Ready,
     QueuedReady,
+    PresentedDegraded,
     InFlight,
     Loading,
     Backpressured,
@@ -305,6 +306,7 @@ pub(crate) fn headless_candidate_may_prepare_successor(status: HeadlessGpuCandid
         status,
         HeadlessGpuCandidateStatus::Ready
             | HeadlessGpuCandidateStatus::QueuedReady
+            | HeadlessGpuCandidateStatus::PresentedDegraded
             | HeadlessGpuCandidateStatus::InFlight
     )
 }
@@ -327,6 +329,9 @@ pub(crate) fn should_attempt_headless_gpu_candidate(
         HeadlessGpuCandidateStatus::QueuedReady | HeadlessGpuCandidateStatus::InFlight => true,
         HeadlessGpuCandidateStatus::Loading => !binding_covers_current || preview_progress,
         HeadlessGpuCandidateStatus::Backpressured | HeadlessGpuCandidateStatus::Unavailable => true,
+        HeadlessGpuCandidateStatus::PresentedDegraded => {
+            !binding_covers_current || current_intent.pending_demand.is_some()
+        }
         HeadlessGpuCandidateStatus::DroppedLate => current_intent.pending_demand.is_some(),
     }
 }
@@ -531,6 +536,7 @@ impl HeadlessRealtimeCoordinatorTiming {
             max_consecutive_stale: self.max_consecutive_stale,
             stale_ready: self.stale_candidate_status.ready,
             stale_queued_ready: self.stale_candidate_status.queued_ready,
+            stale_presented_degraded: self.stale_candidate_status.presented_degraded,
             stale_in_flight: self.stale_candidate_status.in_flight,
             stale_loading: self.stale_candidate_status.loading,
             stale_backpressured: self.stale_candidate_status.backpressured,
@@ -544,6 +550,7 @@ impl HeadlessRealtimeCoordinatorTiming {
 struct HeadlessRealtimeCandidateStatusCounts {
     ready: u64,
     queued_ready: u64,
+    presented_degraded: u64,
     in_flight: u64,
     loading: u64,
     backpressured: u64,
@@ -556,6 +563,7 @@ impl HeadlessRealtimeCandidateStatusCounts {
         let counter = match status {
             HeadlessGpuCandidateStatus::Ready => &mut self.ready,
             HeadlessGpuCandidateStatus::QueuedReady => &mut self.queued_ready,
+            HeadlessGpuCandidateStatus::PresentedDegraded => &mut self.presented_degraded,
             HeadlessGpuCandidateStatus::InFlight => &mut self.in_flight,
             HeadlessGpuCandidateStatus::Loading => &mut self.loading,
             HeadlessGpuCandidateStatus::Backpressured => &mut self.backpressured,
@@ -2189,7 +2197,10 @@ fn resolved_headless_realtime_terminal_sample(
     terminal_status: HeadlessGpuCandidateStatus,
 ) -> Option<HeadlessPreviewSample> {
     (retained_output_available
-        && terminal_status == HeadlessGpuCandidateStatus::DroppedLate
+        && matches!(
+            terminal_status,
+            HeadlessGpuCandidateStatus::DroppedLate | HeadlessGpuCandidateStatus::PresentedDegraded
+        )
         && headless_demand_resolved_without_ready(target, current))
     .then_some(HeadlessPreviewSample {
         current_gpu_ready: false,
@@ -2288,12 +2299,14 @@ fn headless_terminal_delivery_status(
 ) -> HeadlessGpuCandidateStatus {
     match kind {
         mondrian_playback::FrameDeliveryKind::Late => HeadlessGpuCandidateStatus::DroppedLate,
+        mondrian_playback::FrameDeliveryKind::Degraded => {
+            HeadlessGpuCandidateStatus::PresentedDegraded
+        }
         mondrian_playback::FrameDeliveryKind::StaleAvailable
         | mondrian_playback::FrameDeliveryKind::Blocked
         | mondrian_playback::FrameDeliveryKind::Canceled
         | mondrian_playback::FrameDeliveryKind::Failed
-        | mondrian_playback::FrameDeliveryKind::Ready
-        | mondrian_playback::FrameDeliveryKind::Degraded => HeadlessGpuCandidateStatus::Unavailable,
+        | mondrian_playback::FrameDeliveryKind::Ready => HeadlessGpuCandidateStatus::Unavailable,
     }
 }
 
@@ -3591,6 +3604,29 @@ mod tests {
                 HeadlessGpuCandidateStatus::QueuedReady,
             ] {
                 let status = headless_published_candidate_status(output, Some(receipt));
+                if quality == FramePresentationQuality::Degraded {
+                    assert_eq!(status, HeadlessGpuCandidateStatus::PresentedDegraded);
+                    assert_eq!(
+                        resolved_headless_realtime_terminal_sample(
+                            intent,
+                            HeadlessGpuCandidateIntent { pending_demand: None, ..intent },
+                            true,
+                            status,
+                        ),
+                        Some(HeadlessPreviewSample {
+                            current_gpu_ready: false,
+                            stale_output_available: true,
+                            unavailable: false,
+                        }),
+                        "a presented degraded frame must remain non-ready without becoming a decode failure",
+                    );
+                    assert!(!should_attempt_headless_gpu_candidate(
+                        status,
+                        binding,
+                        HeadlessGpuCandidateIntent { pending_demand: None, ..intent },
+                        PlaybackPreviewPumpOutcome::default(),
+                    ));
+                }
                 assert_eq!(
                     headless_candidate_is_ready_for_sample(status, binding, intent, true),
                     quality == FramePresentationQuality::Ready,

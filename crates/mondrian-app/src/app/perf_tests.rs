@@ -4888,7 +4888,6 @@ fn audio_bounded_source_external_render_smoke() -> anyhow::Result<()> {
 #[test]
 #[ignore = "development production CPAL + headless Viewer smoke; requires real external audio and an output device"]
 fn playback_cpal_av_external_smoke() -> anyhow::Result<()> {
-    let _guard = perf_lock().lock().expect("perf lock poisoned");
     let Some(media_path) =
         std::env::var_os("MONDRIAN_AUDIO_EXTERNAL_MEDIA_PATH").map(PathBuf::from)
     else {
@@ -4897,8 +4896,88 @@ fn playback_cpal_av_external_smoke() -> anyhow::Result<()> {
         );
         return Ok(());
     };
+    run_cpal_av_external_smoke(
+        media_path,
+        "playback_cpal_av_external",
+        false,
+        |state, realtime, gpu_summary, stream_generation| {
+            #[cfg(feature = "validation")]
+            {
+                let initial_audio = state.audio_playback_snapshot();
+                let requested_at = Instant::now();
+                state.request_controlled_audio_output_recycle(stream_generation)?;
+                let recovery = wait_for_production_av_recovery(
+                    realtime,
+                    state,
+                    gpu_summary,
+                    initial_audio,
+                    requested_at,
+                )?;
+                anyhow::ensure!(
+                    recovery.request_to_loss_us.is_some()
+                        && recovery.request_to_synthetic_us.is_some()
+                        && recovery.request_to_reopen_us.is_some()
+                        && recovery.request_to_recovered_us.is_some(),
+                    "controlled CPAL recycle omitted lifecycle evidence: {recovery:?}",
+                );
+                let evidence = serde_json::json!({
+                    "request_to_loss_us": recovery.request_to_loss_us,
+                    "request_to_synthetic_us": recovery.request_to_synthetic_us,
+                    "request_to_reopen_us": recovery.request_to_reopen_us,
+                    "request_to_recovered_us": recovery.request_to_recovered_us,
+                });
+                eprintln!("MONDRIAN_CPAL_RECOVERY_JSON={evidence}");
+                Ok((
+                    state
+                        .audio_playback_snapshot()
+                        .output
+                        .context("recovered CPAL output disappeared")?
+                        .stream_generation,
+                    evidence,
+                ))
+            }
+            #[cfg(not(feature = "validation"))]
+            {
+                let _ = (state, realtime, gpu_summary);
+                Ok((stream_generation, serde_json::Value::Null))
+            }
+        },
+    )
+}
+
+#[cfg(all(target_os = "macos", feature = "validation"))]
+#[test]
+#[ignore = "requires real video/audio, Metal, and two physical CoreAudio defaults; external runner changes and restores the system default"]
+fn playback_cpal_av_physical_default_device_roundtrip() -> anyhow::Result<()> {
+    let media_path = std::env::var_os("MONDRIAN_AUDIO_EXTERNAL_MEDIA_PATH")
+        .map(PathBuf::from)
+        .context("physical A/V test requires MONDRIAN_AUDIO_EXTERNAL_MEDIA_PATH")?;
+    run_cpal_av_external_smoke(
+        media_path,
+        "playback_cpal_av_physical_default_device_roundtrip",
+        true,
+        physical_cpal_av_default_device_roundtrip,
+    )
+}
+
+fn run_cpal_av_external_smoke(
+    media_path: PathBuf,
+    scenario: &str,
+    require_video: bool,
+    recover: impl FnOnce(
+        &mut AppState,
+        &mut HeadlessRealtimePlaybackSession,
+        &mut HeadlessViewerGpuExecutionSummary,
+        u64,
+    ) -> anyhow::Result<(u64, serde_json::Value)>,
+) -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("perf lock poisoned");
     let media_info = probe_media_info(&media_path)?;
     let video_source = media_info.video_streams.first().cloned();
+    anyhow::ensure!(
+        !require_video || video_source.is_some(),
+        "physical A/V requires video"
+    );
     let audio_stream_duration = media_info
         .primary_audio()
         .and_then(|audio| audio.duration)
@@ -4970,40 +5049,8 @@ fn playback_cpal_av_external_smoke() -> anyhow::Result<()> {
                         Duration::from_secs(30),
                     )?
                 };
-                #[cfg(feature = "validation")]
-                let stream_generation = {
-                    let initial_audio = state.audio_playback_snapshot();
-                    let requested_at = Instant::now();
-                    state.request_controlled_audio_output_recycle(stream_generation)?;
-                    let recovery = wait_for_production_av_recovery(
-                        realtime,
-                        state,
-                        &mut gpu_summary,
-                        initial_audio,
-                        requested_at,
-                    )?;
-                    anyhow::ensure!(
-                        recovery.request_to_loss_us.is_some()
-                            && recovery.request_to_synthetic_us.is_some()
-                            && recovery.request_to_reopen_us.is_some()
-                            && recovery.request_to_recovered_us.is_some(),
-                        "controlled CPAL recycle omitted lifecycle evidence: {recovery:?}",
-                    );
-                    eprintln!(
-                        "MONDRIAN_CPAL_RECOVERY_JSON={}",
-                        serde_json::json!({
-                            "request_to_loss_us": recovery.request_to_loss_us,
-                            "request_to_synthetic_us": recovery.request_to_synthetic_us,
-                            "request_to_reopen_us": recovery.request_to_reopen_us,
-                            "request_to_recovered_us": recovery.request_to_recovered_us,
-                        }),
-                    );
-                    state
-                        .audio_playback_snapshot()
-                        .output
-                        .context("recovered CPAL output disappeared")?
-                        .stream_generation
-                };
+                let (stream_generation, recovery) =
+                    recover(state, realtime, &mut gpu_summary, stream_generation)?;
                 state.begin_playback_evidence_run(
                     mondrian_playback::PlaybackEvidenceConfig::default(),
                 )?;
@@ -5085,7 +5132,8 @@ fn playback_cpal_av_external_smoke() -> anyhow::Result<()> {
                 state.pause()?;
                 let coordinator_timing = realtime.finish_realtime()?;
                 Ok(serde_json::json!({
-                    "scenario": "playback_cpal_av_external",
+                    "scenario": scenario,
+                    "audio_recovery": recovery,
                     "video_source": video_source,
                     "gpu_execution": gpu_summary,
                     "preview_diagnostics": realtime.preview()?.diagnostics(),
@@ -5459,6 +5507,25 @@ fn wait_for_production_av_recovery(
     initial_audio: AudioPlaybackSnapshot,
     requested_at: Instant,
 ) -> anyhow::Result<ProfessionalAudioRecoveryObservation> {
+    wait_for_production_av_recovery_observed(
+        realtime,
+        state,
+        gpu_summary,
+        initial_audio,
+        requested_at,
+        |_, _| Ok(true),
+    )
+}
+
+#[cfg(feature = "validation")]
+fn wait_for_production_av_recovery_observed(
+    realtime: &mut HeadlessRealtimePlaybackSession,
+    state: &mut AppState,
+    gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
+    initial_audio: AudioPlaybackSnapshot,
+    requested_at: Instant,
+    mut observe: impl FnMut(&AppState, AudioPlaybackSnapshot) -> anyhow::Result<bool>,
+) -> anyhow::Result<ProfessionalAudioRecoveryObservation> {
     const HANDOFF_LIMIT: Duration = Duration::from_secs(5);
     const STABILITY: Duration = Duration::from_secs(1);
     let deadline = requested_at
@@ -5474,13 +5541,16 @@ fn wait_for_production_av_recovery(
     let mut stable_recovery: Option<(u64, Instant)> = None;
 
     loop {
-        state.pump_audio_output()?;
+        // The paired coordinator below services Audio and applies its clock.
+        // An extra Audio-only pump here can advance past the driver's retained
+        // video opportunity before that same owner accounts for the boundary.
         let now = Instant::now();
         let elapsed_us = now
             .saturating_duration_since(requested_at)
             .as_micros()
             .min(u128::from(u64::MAX)) as u64;
         let audio = state.audio_playback_snapshot();
+        let device_qualified = observe(state, audio)?;
         let lifecycle = audio.output_lifecycle;
         if request_to_loss_us.is_none() && lifecycle.lost_count > initial_lifecycle.lost_count {
             request_to_loss_us = Some(elapsed_us);
@@ -5498,7 +5568,8 @@ fn wait_for_production_av_recovery(
         {
             request_to_reopen_us = Some(elapsed_us);
         }
-        let qualified_output = (!state.is_playback_priming()
+        let qualified_output = (device_qualified
+            && !state.is_playback_priming()
             && state.playback_clock_master() == Some(mondrian_playback::ClockMaster::AudioDevice)
             && audio.state == mondrian_media::AudioPlaybackState::Active)
             .then_some(audio.output)
@@ -5548,6 +5619,146 @@ fn wait_for_production_av_recovery(
             deadline.saturating_duration_since(Instant::now()),
         )?;
     }
+}
+
+#[cfg(all(target_os = "macos", feature = "validation"))]
+fn physical_cpal_av_default_device_roundtrip(
+    state: &mut AppState,
+    realtime: &mut HeadlessRealtimePlaybackSession,
+    gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
+    initial_generation: u64,
+) -> anyhow::Result<(u64, serde_json::Value)> {
+    anyhow::ensure!(
+        gpu_summary.adapter.as_ref().is_some_and(|adapter| adapter.backend == "Metal"),
+        "physical A/V requires an observed Metal adapter",
+    );
+    let original = state
+        .latest_audio_output_device_evidence()
+        .context("qualified initial CoreAudio device evidence missing")?;
+    let initial_lifecycle = state.audio_playback_snapshot().output_lifecycle;
+    let mut observations = Vec::new();
+    let mut previous_generation = initial_generation;
+    let mut previous_device = original.device_id.clone();
+    for returning in [false, true] {
+        let initial_audio = state.audio_playback_snapshot();
+        let initial_gpu_frames = gpu_summary.presented_unique_frame_completions;
+        let requested_at = Instant::now();
+        if returning {
+            eprintln!("COREAUDIO_DEFAULT_RETURN_READY: restore the original system default output");
+        } else {
+            eprintln!("COREAUDIO_DEFAULT_CHANGE_READY: select a different system default output");
+        }
+        let mut callbacks = HashMap::new();
+        let mut frozen_loss = None;
+        let recovery = wait_for_production_av_recovery_observed(
+            realtime,
+            state,
+            gpu_summary,
+            initial_audio,
+            requested_at,
+            |state, audio| {
+                if let Some(output) = audio.output
+                    && let Some(previous_count) =
+                        callbacks.insert(output.stream_generation, output.callback_count)
+                {
+                    anyhow::ensure!(
+                        output.callback_count >= previous_count,
+                        "physical callback counter regressed: {output:?}",
+                    );
+                }
+                if audio.output_lifecycle.lost_count > initial_audio.output_lifecycle.lost_count {
+                    let loss = audio
+                        .output_lifecycle
+                        .last_loss
+                        .context("missing retired stream receipt")?;
+                    match loss.reason {
+                        mondrian_media::RealtimeAudioOutputLossReason::DefaultDeviceChanged => {}
+                        mondrian_media::RealtimeAudioOutputLossReason::BackendFailure => {
+                            anyhow::ensure!(
+                                loss.final_output.stream_failed,
+                                "native backend failure lacks evidence"
+                            );
+                        }
+                        reason => anyhow::bail!("unexpected physical device loss: {reason:?}"),
+                    }
+                    anyhow::ensure!(
+                        loss.final_output.stream_generation == previous_generation
+                            && !loss.final_output.active,
+                        "old physical stream was not retired: {loss:?}",
+                    );
+                    if let Some(frozen) = frozen_loss {
+                        anyhow::ensure!(loss == frozen, "retired callback evidence changed");
+                    }
+                    frozen_loss = Some(loss);
+                }
+                let device = state.latest_audio_output_device_evidence();
+                Ok(device.is_some_and(|device| {
+                    device.device_id != previous_device
+                        && (device.device_id == original.device_id) == returning
+                }))
+            },
+        )?;
+        let audio = state.audio_playback_snapshot();
+        let output = audio.output.context("recovered physical output missing")?;
+        let device = state
+            .latest_audio_output_device_evidence()
+            .context("recovered physical device missing")?;
+        anyhow::ensure!(
+            frozen_loss.is_some()
+                && recovery.request_to_loss_us.is_some()
+                && recovery.request_to_reopen_us.is_some(),
+            "physical transition omitted its loss/reopen receipts: {recovery:?}",
+        );
+        anyhow::ensure!(
+            audio.active_interval_underrun_frames == 0,
+            "physical recovery underrun: {audio:?}"
+        );
+        anyhow::ensure!(
+            gpu_summary.presented_unique_frame_completions > initial_gpu_frames,
+            "physical recovery completed no new video frames",
+        );
+        observations.push(serde_json::json!({
+            "returning": returning,
+            "device_id": device.device_id,
+            "device_name": device.device_name,
+            "host": device.host_name,
+            "sample_rate": output.contract.sample_rate,
+            "channels": output.contract.channels(),
+            "stream_generation": output.stream_generation,
+            "audio": format!("{audio:?}"),
+            "retired_stream": format!("{frozen_loss:?}"),
+            "callback_counts_by_generation": callbacks,
+            "request_to_loss_us": recovery.request_to_loss_us,
+            "request_to_synthetic_us": recovery.request_to_synthetic_us,
+            "request_to_reopen_us": recovery.request_to_reopen_us,
+            "request_to_recovered_us": recovery.request_to_recovered_us,
+            "stable_audio_device_us": recovery.final_audio_device_stable_us,
+            "new_unique_gpu_frames": gpu_summary.presented_unique_frame_completions - initial_gpu_frames,
+            "output_extents": gpu_summary.output_extents,
+            "coordinator_timing": realtime.realtime_timing(),
+            "playback_evidence": state.playback_evidence_report(),
+            "preview_diagnostics": realtime.realtime_preview_diagnostics()?,
+            "gpu_execution": gpu_summary,
+        }));
+        previous_generation = output.stream_generation;
+        previous_device = device.device_id;
+    }
+    let lifecycle = state.audio_playback_snapshot().output_lifecycle;
+    anyhow::ensure!(
+        lifecycle.lost_count == initial_lifecycle.lost_count + 2
+            && lifecycle.default_device_change_count + lifecycle.backend_loss_count
+                == initial_lifecycle.default_device_change_count
+                    + initial_lifecycle.backend_loss_count
+                    + 2
+            && lifecycle.controlled_recycle_count == initial_lifecycle.controlled_recycle_count
+            && lifecycle.device_selection_change_count
+                == initial_lifecycle.device_selection_change_count
+            && lifecycle.deactivation_failed_count == initial_lifecycle.deactivation_failed_count,
+        "unexpected physical A/V lifecycle: {lifecycle:?}",
+    );
+    let evidence = serde_json::json!({"physical_default_roundtrip": observations});
+    eprintln!("MONDRIAN_PHYSICAL_CPAL_AV_RECOVERY_JSON={evidence}");
+    Ok((previous_generation, evidence))
 }
 
 fn build_professional_cpal_av_state(
