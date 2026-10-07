@@ -1273,6 +1273,156 @@ mod tests {
         compute_program_color_scopes_rgba8_with_scale, compute_program_color_scopes_rgba_f32,
     };
 
+    #[tokio::test]
+    #[ignore = "physical GPU short diagnostic, not a realtime or commercial qualification"]
+    async fn physical_scopes_4k_short_diagnostic() {
+        use sha2::Digest;
+
+        let context = GpuContext::new().await.expect("physical scopes GPU");
+        let adapter = context.adapter.get_info();
+        #[cfg(target_os = "macos")]
+        assert_eq!(adapter.backend, wgpu::Backend::Metal);
+        let features = context.device.features()
+            | crate::profile::gpu_frame_timestamp_query_device_features(context.adapter.features());
+        let (device, queue) = context
+            .adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("physical-scopes-diagnostic"),
+                required_features: features,
+                ..Default::default()
+            })
+            .await
+            .expect("physical timestamp device");
+        const WIDTH: u32 = 3840;
+        const HEIGHT: u32 = 2160;
+        let input = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("physical-scopes-fixture"),
+            size: wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = input.create_view(&Default::default());
+        let mut runtime = GpuProgramScopesRuntime::default();
+        let mut timer = crate::profile::GpuTimestampPassIntervalTimer::new(&device, &queue, 8)
+            .expect("real pass timestamps");
+        for fixture in ["flat", "gradient", "entropy"] {
+            let pixels: Vec<[f32; 4]> = (0..WIDTH * HEIGHT)
+                .map(|index| {
+                    let x = index % WIDTH;
+                    let y = index / WIDTH;
+                    match fixture {
+                        "flat" => [0.25, 0.5, 0.75, 1.0],
+                        "gradient" => {
+                            let value = (x + y) as f32 / (WIDTH + HEIGHT - 2) as f32;
+                            [value, value, value, 1.0]
+                        }
+                        _ => [
+                            ((x * 73 + y * 41) % 257) as f32 / 256.0,
+                            ((x * 151 + y * 97) % 257) as f32 / 256.0,
+                            ((x * 31 + y * 119) % 257) as f32 / 256.0,
+                            1.0,
+                        ],
+                    }
+                })
+                .collect();
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &input,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&pixels),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(WIDTH * 16),
+                    rows_per_image: Some(HEIGHT),
+                },
+                input.size(),
+            );
+            drop(pixels);
+            for mode in [WaveformMode::Luma, WaveformMode::RgbParade] {
+                let request = GpuProgramScopesRequest::new(ColorSpace::Rec709, mode, 256, 512)
+                    .expect("unchanged exact scope density");
+                let mut samples = Vec::new();
+                let mut last = None;
+                for index in 0..36 {
+                    let mut encoder = device.create_command_encoder(&Default::default());
+                    let (record, receipt) = timer
+                        .record(&mut encoder, |measured| {
+                            runtime
+                                .record(&device, &queue, measured, &view, WIDTH, HEIGHT, request)
+                                .expect("production scopes recording")
+                        })
+                        .expect("complete timestamp coverage");
+                    let submission = queue.submit([encoder.finish()]);
+                    let sample = timer
+                        .read_sample_after_submission(&device, submission, receipt)
+                        .expect("exact GPU completion");
+                    if index >= 4 {
+                        samples.push(sample.elapsed_us);
+                    }
+                    last = Some(record);
+                }
+                let record = last.expect("completed scope frame");
+                let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("physical-scopes-count-readback"),
+                    size: record.buffer_layout.byte_size(),
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                let mut encoder = device.create_command_encoder(&Default::default());
+                encoder.copy_buffer_to_buffer(
+                    record.counts(),
+                    0,
+                    &readback,
+                    0,
+                    record.buffer_layout.byte_size(),
+                );
+                queue.submit([encoder.finish()]);
+                let bytes = map_test_readback(&device, &readback);
+                let counts: &[u32] = bytemuck::cast_slice(&bytes);
+                let histogram = record.buffer_layout.histogram_offset as usize;
+                for channel in 0..4 {
+                    assert_eq!(
+                        counts[histogram + channel * 256..histogram + (channel + 1) * 256]
+                            .iter()
+                            .map(|value| u64::from(*value))
+                            .sum::<u64>(),
+                        u64::from(WIDTH) * u64::from(HEIGHT),
+                    );
+                }
+                assert_eq!(
+                    &counts[record.buffer_layout.invalid_pixel_count_offset as usize..],
+                    &[0, 0]
+                );
+                let mut sorted = samples.clone();
+                sorted.sort_unstable();
+                eprintln!(
+                    "SCOPES_DIAGNOSTIC_JSON={}",
+                    serde_json::json!({
+                        "classification":"DiagnosticOnly", "adapter":format!("{adapter:?}"),
+                        "fixture":fixture, "input":[WIDTH,HEIGHT], "mode":format!("{mode:?}"),
+                        "bins":256,"waveform_width":512,"format":"Rgba32Float",
+                        "warmup":4,"samples_us":samples,"p50_us":sorted[15],
+                        "p95_us":sorted[30],"p99_us":sorted[31],
+                        "counts_sha256":format!("{:x}",sha2::Sha256::digest(&bytes)),
+                        "used_subgroups":record.used_subgroups,
+                        "limitations":"Isolated production scopes, explicit fixture upload and diagnostic count readback; no Window/VideoToolbox realtime qualification. Conservation alone is not an independent bin oracle; separate CPU-reference tests are required."
+                    })
+                );
+            }
+        }
+    }
+
     #[test]
     fn buffer_layout_is_compact_and_non_overlapping() {
         let request =

@@ -4393,6 +4393,20 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         {
                             log_frame_pressure(pressure);
                         }
+                        if mondrian_renderer::profile::profiling_enabled()
+                            && matches!(
+                                frame_result,
+                                crate::app_ui::rendering::AppUiFrameResult::Presented { .. }
+                            )
+                        {
+                            tracing::info!(
+                                target: "mondrian_app::gpu_profile",
+                                width = session.config.width,
+                                height = session.config.height,
+                                metrics = ?frame_result.metrics(),
+                                "Window UI production submission metrics"
+                            );
+                        }
                         trace_color_output_runtime(
                             session.viewer_gpu_execution.color_output_diagnostics(),
                             &session.display_output_contract,
