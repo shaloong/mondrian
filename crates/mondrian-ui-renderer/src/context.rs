@@ -245,6 +245,8 @@ pub struct UiRenderer {
     external_textures: HashMap<String, ExternalTextureRegistration>,
     presentation: UiSurfacePresentation,
     surface_carrier: Option<UiSurfaceCarrier>,
+    #[cfg(test)]
+    diagnostic_query_set: Option<wgpu::QuerySet>,
     msaa_target: Option<MsaaTarget>,
 }
 
@@ -479,6 +481,8 @@ impl UiRenderer {
             external_textures: HashMap::new(),
             presentation,
             surface_carrier: UiSurfaceCarrier::new(device, presentation),
+            #[cfg(test)]
+            diagnostic_query_set: None,
             msaa_target: None,
         }
     }
@@ -1010,7 +1014,22 @@ impl UiRenderer {
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: {
+                    #[cfg(test)]
+                    {
+                        self.diagnostic_query_set.as_ref().map(|query_set| {
+                            wgpu::RenderPassTimestampWrites {
+                                query_set,
+                                beginning_of_pass_write_index: Some(0),
+                                end_of_pass_write_index: Some(1),
+                            }
+                        })
+                    }
+                    #[cfg(not(test))]
+                    {
+                        None
+                    }
+                },
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -2456,7 +2475,129 @@ mod tests {
 
     static OFFSCREEN_GPU_TEST_OWNER: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
+    #[test]
+    #[ignore = "short physical Metal UI carrier diagnostic; no Window qualification"]
+    fn physical_surface_code_carrier_short_diagnostic() {
+        let mut h = OffscreenHarness::with_surface(
+            1652,
+            930,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            wgpu::SurfaceColorSpace::Srgb,
+        )
+        .expect("physical production-sized SDR carrier");
+        assert_eq!(h.adapter_info.backend, wgpu::Backend::Metal);
+        assert_eq!(h.adapter_info.device_type, wgpu::DeviceType::IntegratedGpu);
+        assert!(h.device.features().contains(wgpu::Features::TIMESTAMP_QUERY));
+        let texture = h.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ui_carrier_diagnostic_source"),
+            size: wgpu::Extent3d {
+                width: h.size.0,
+                height: h.size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let pixels: Vec<u8> = (0..h.size.0 * h.size.1)
+            .flat_map(|i| {
+                [
+                    i as u8,
+                    i.wrapping_mul(73).wrapping_add(91) as u8,
+                    i.wrapping_mul(157).wrapping_add(17) as u8,
+                    i as u8,
+                ]
+            })
+            .collect();
+        h.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(h.size.0 * 4),
+                rows_per_image: Some(h.size.1),
+            },
+            texture.size(),
+        );
+        let source_view = texture.create_view(&Default::default());
+        let key = ExternalTextureKey::new("carrier.diagnostic").unwrap();
+        h.renderer
+            .register_external_texture_view(
+                &h.device,
+                key.clone(),
+                &source_view,
+                ExternalTextureTransfer::SurfaceCodeValues,
+            )
+            .unwrap();
+        let mut draw = DrawEncoder::new();
+        let bounds = Rect::new(0.0, 0.0, h.size.0 as f32, h.size.1 as f32);
+        draw.draw_rect(bounds, Color { r: 0.03, g: 0.15, b: 0.7, a: 1.0 }, 0.0);
+        draw.draw_external_texture(key, bounds, Rect::new(0.0, 0.0, 1.0, 1.0), Color::WHITE);
+        let commands = draw.finish();
+        let view = h.texture.create_view(&Default::default());
+        let query_set = h.device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("ui_carrier_diagnostic_timestamps"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 2,
+        });
+        h.renderer.diagnostic_query_set = Some(query_set.clone());
+        let resolve = h.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ui_carrier_diagnostic_resolve"),
+            size: 16,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback = h.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ui_carrier_diagnostic_readback"),
+            size: 16,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut samples = Vec::new();
+        for round in 0..68 {
+            let stats = h
+                .renderer
+                .render_resolved_commands(&h.device, &h.queue, &view, &commands, h.size);
+            assert_eq!(stats.submitted_surface_code_value_batches, 1);
+            // Metal stage counters must be resolved after actual measured
+            // work completion. Retain all resources across both real waits.
+            h.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let mut encoder = h.device.create_command_encoder(&Default::default());
+            encoder.resolve_query_set(&query_set, 0..2, &resolve, 0);
+            encoder.copy_buffer_to_buffer(&resolve, 0, &readback, 0, Some(16));
+            h.queue.submit([encoder.finish()]);
+            let (sent, received) = std::sync::mpsc::channel();
+            readback.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+                sent.send(result).unwrap();
+            });
+            h.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            received.recv().unwrap().unwrap();
+            let mapped = readback.slice(..).get_mapped_range().unwrap();
+            let counters: &[u64] = bytemuck::cast_slice(&mapped);
+            let elapsed = counters[1].checked_sub(counters[0]).expect("monotonic GPU counters");
+            assert!(elapsed > 0, "physical pass must execute");
+            if round >= 4 {
+                samples.push(elapsed as f64 * f64::from(h.queue.get_timestamp_period()) / 1000.0);
+            }
+            drop(mapped);
+            readback.unmap();
+        }
+        eprintln!(
+            "CARRIER_BASELINE_DIAGNOSTIC: adapter={:?} size={:?} msaa={} gpu_pass_us={:?}; DiagnosticOnly, synthetic source upload, counter readback, no complete Window workload",
+            h.adapter_info, h.size, UI_SAMPLE_COUNT, samples,
+        );
+    }
+
     struct OffscreenHarness {
+        adapter_info: wgpu::AdapterInfo,
         device: wgpu::Device,
         queue: wgpu::Queue,
         renderer: UiRenderer,
@@ -2532,8 +2673,11 @@ mod tests {
                 }))
                 .ok()?;
             let (device, queue) =
-                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-                    .ok()?;
+                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                    required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+                    ..Default::default()
+                }))
+                .ok()?;
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("ui_offscreen_test_target"),
                 size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -2553,6 +2697,7 @@ mod tests {
             };
 
             Some(Self {
+                adapter_info: adapter.get_info(),
                 device,
                 queue,
                 renderer,

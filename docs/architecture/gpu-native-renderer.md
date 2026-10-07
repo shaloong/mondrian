@@ -1862,6 +1862,14 @@ does not allocate or prepare new GPU resources. Missing timestamp support,
 partial samples, a weakened workload, warm-path creation, a readback/upload,
 or a deadline miss fails closed under `sealed-required` policy.
 
+The ignored UI `physical_surface_code_carrier_short_diagnostic` measures the
+existing 4x-MSAA SDR carrier pass with real Metal timestamps. Its synthetic
+RGBA8 raster, upload and counter readback isolate the Viewer image's UI blend;
+they do not reproduce the full Window widgets, native surface, VideoToolbox
+decode or shared-queue contention. Query resolution follows actual measured
+work completion. All instrumentation is test-only; the production carrier and
+color interpretation are unchanged.
+
 The professional Viewer texture grant is Renderer-owned so the App and the
 hardware gate cannot qualify different resource policies. Its 4 GiB idle and
 active byte limits are demand ceilings, not eager allocations; memory-pressure
