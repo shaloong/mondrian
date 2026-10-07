@@ -780,3 +780,9 @@ without losing the live session's Redo, opens a fresh Unicode .mdp with no histo
 and compares complete canonical properties and native compiled-graph pixels.
 It then repeats save/reopen for the redone state, using the real SQLite library.
 This qualifies editor-owned curve edits; SDK-originated author edits remain pending.
+The owned native group-history acceptance also defines a joint time/value mode:
+one canonical TransformMany request must retain stable IDs, reject a colliding
+candidate without either axis changing, and preserve native query/output evidence
+through Undo, saved live Redo and fresh reopen. The SDK probe independently
+rejects partial axis snapshots and checks derivatives and integrals; qualification
+requires an explicit ignored test against rebuilt product and fixture binaries.

@@ -1406,6 +1406,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires current product and SessionProbe mode curve_group_transform_authoring"]
+    fn native_effect_group_transform_undo_save_reopen_preserves_queries_and_output() {
+        qualify_native_effect_group_history(NativeCurveGroupEdit::Transform);
+    }
+
+    #[test]
     #[ignore = "requires current product and SessionProbe mode curve_group_interpolation_authoring"]
     fn native_effect_group_interpolation_undo_save_reopen_preserves_queries_and_output() {
         qualify_native_effect_group_history(NativeCurveGroupEdit::Interpolation);
@@ -1415,6 +1421,7 @@ mod tests {
     enum NativeCurveGroupEdit {
         Time,
         Value,
+        Transform,
         Interpolation,
     }
 
@@ -1423,15 +1430,23 @@ mod tests {
             match self {
                 Self::Time => "curve_group_authoring",
                 Self::Value => "curve_group_value_authoring",
+                Self::Transform => "curve_group_transform_authoring",
                 Self::Interpolation => "curve_group_interpolation_authoring",
             }
         }
     }
 
     fn qualify_native_effect_group_history(edit: NativeCurveGroupEdit) {
-        let value_edit = matches!(edit, NativeCurveGroupEdit::Value);
+        let value_edit = matches!(
+            edit,
+            NativeCurveGroupEdit::Value | NativeCurveGroupEdit::Transform
+        );
         let interpolation_edit = matches!(edit, NativeCurveGroupEdit::Interpolation);
-        let time_edit = matches!(edit, NativeCurveGroupEdit::Time);
+        let time_edit = matches!(
+            edit,
+            NativeCurveGroupEdit::Time | NativeCurveGroupEdit::Transform
+        );
+        let transform_edit = matches!(edit, NativeCurveGroupEdit::Transform);
         use super::super::ui_actions::{
             visual_effect_edit_numeric_curve_action, ClipCurveEditPayload,
             VisualEffectEditNumericCurvePayload,
@@ -1554,6 +1569,11 @@ mod tests {
                     } else if !first.temporal_flags.continuous {
                         assert!((sample - 1.75).abs() < 1e-12, "original linear source");
                     }
+                } else if transform_edit && gain == 2.5 {
+                    assert!(
+                        (sample - 1.5).abs() > 1e-6,
+                        "joint time/value edit must affect off-key native output"
+                    );
                 } else if value_edit && gain == 3.5 {
                     assert!(
                         sample > 1.5,
@@ -1619,6 +1639,14 @@ mod tests {
                             vec![ids[1], KeyframeId::new()]
                         },
                         interpolation: mode,
+                    }
+                } else if transform_edit {
+                    ClipCurveEditPayload::TransformMany {
+                        keyframe_ids: ids[1..].to_vec(),
+                        time_delta: TimelineTime::new(if valid { 1 } else { -1 }, 4)
+                            .expect("joint group delta"),
+                        value_delta: 0.5,
+                        steps: 1,
                     }
                 } else if value_edit {
                     ClipCurveEditPayload::OffsetValuesMany {
@@ -1686,7 +1714,9 @@ mod tests {
                     );
                 }
             }
-            let edited_gain = if value_edit {
+            let edited_gain = if transform_edit {
+                2.5
+            } else if value_edit {
                 3.5
             } else if interpolation_edit {
                 3.0

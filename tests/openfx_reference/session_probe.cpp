@@ -672,15 +672,17 @@ bool authorCurveQueries(const void* handle) {
       std::abs(integral - 12.0*(1.0 + endpoint)) > 1e-12) { return false; }
   return true;
 }
-enum class GroupAuthorEdit { Time, Value, Interpolation };
+enum class GroupAuthorEdit { Time, Value, Transform, Interpolation };
 
 bool isGroupAuthorMode(const std::string& selected) {
   return selected == "curve_group_authoring" || selected == "curve_group_value_authoring" ||
+         selected == "curve_group_transform_authoring" ||
          selected == "curve_group_interpolation_authoring";
 }
 
 bool groupAuthorCurveQueries(const void* handle, GroupAuthorEdit edit) {
-  const bool valueEdit = edit == GroupAuthorEdit::Value;
+  const bool valueEdit = edit == GroupAuthorEdit::Value || edit == GroupAuthorEdit::Transform;
+  const bool timeEdit = edit == GroupAuthorEdit::Time || edit == GroupAuthorEdit::Transform;
   const bool interpolationEdit = edit == GroupAuthorEdit::Interpolation;
   OfxParamSetHandle params = nullptr;
   OfxParamHandle scale = nullptr;
@@ -691,7 +693,7 @@ bool groupAuthorCurveQueries(const void* handle, GroupAuthorEdit edit) {
       gParamHost->paramGetNumKeys(scale, &count) != kOfxStatOK || count != 3 ||
       gParamHost->paramGetKeyTime(scale, 1, &middle) != kOfxStatOK ||
       gParamHost->paramGetKeyTime(scale, 2, &end) != kOfxStatOK ||
-      !((middle == 6.0 && end == 12.0) || (edit == GroupAuthorEdit::Time && middle == 12.0 && end == 18.0)) ||
+      !((middle == 6.0 && end == 12.0) || (timeEdit && middle == 12.0 && end == 18.0)) ||
       gParamHost->paramGetValue(scale, &current) != kOfxStatOK || current != 1.0) { return false; }
   double offset = 0.0;
   if (valueEdit) {
@@ -700,6 +702,9 @@ bool groupAuthorCurveQueries(const void* handle, GroupAuthorEdit edit) {
         (middleValue != 2.0 && middleValue != 2.5)) { return false; }
     offset = middleValue - 2.0;
   }
+  // Joint edits publish both axes together. Reject a partially translated snapshot.
+  if (edit == GroupAuthorEdit::Transform &&
+      ((middle == 6.0 && offset != 0.0) || (middle == 12.0 && offset != 0.5))) { return false; }
   const double times[] = {0.0, middle, end};
   for (unsigned index = 0; index < 3; ++index) {
     double time = -999, value = -999;
@@ -780,6 +785,7 @@ OfxStatus probe(const char* action, const void* handle,
        operation == kOfxImageEffectActionRender || operation == kOfxActionDestroyInstance) &&
       !groupAuthorCurveQueries(handle,
           selected == "curve_group_value_authoring" ? GroupAuthorEdit::Value :
+          selected == "curve_group_transform_authoring" ? GroupAuthorEdit::Transform :
           selected == "curve_group_interpolation_authoring" ? GroupAuthorEdit::Interpolation :
           GroupAuthorEdit::Time)) { return kOfxStatFailed; }
   if (selected == "curve_lifecycle" &&

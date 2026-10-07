@@ -312,3 +312,15 @@ undone state retaining live Redo, and Unicode archives reopened in fresh session
 with empty history and identical shared-graph native pixels. Time/value sibling
 probes must still pass after fixture changes. This fixture mode describes the
 intended acceptance; it is not itself a receipt of a successful run.
+
+### Joint time/value history probe
+
+`curve_group_transform_authoring` admits only the original 0/6/12-frame,
+1/2/3-value snapshot or the jointly translated 0/12/18-frame, 1/2.5/3.5-value
+snapshot. A partial axis update fails the SDK fixture. The existing independent
+finite-difference derivative and split Simpson integral checks apply unchanged.
+The App test `native_effect_group_transform_undo_save_reopen_preserves_queries_and_output`
+uses one canonical TransformMany request for Auto and Continuous constraints,
+checks collision refusal without value mutation, and verifies native pixels,
+one Undo, saved live Redo and fresh Unicode reopen. Explicitly rebuild product
+and fixture and execute this ignored test before claiming qualification.
