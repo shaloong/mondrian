@@ -198,23 +198,52 @@ impl VideoScopesSurface {
     }
 
     fn toolbar_rect(&self) -> Rect {
-        Rect::new(
-            self.bounds.x,
-            self.bounds.y,
-            self.bounds.width,
-            TOOLBAR_HEIGHT,
-        )
+        let height = self
+            .toolbar_controls()
+            .iter()
+            .map(|(_, rect)| rect.y + rect.height - self.bounds.y)
+            .fold(0.0, f32::max);
+        Rect::new(self.bounds.x, self.bounds.y, self.bounds.width, height)
+    }
+
+    fn toolbar_controls(&self) -> Vec<(ScopeControl, Rect)> {
+        if self.bounds.width <= 0.0 {
+            return Vec::new();
+        }
+        let font_size = mondrian_ui_theme::current_theme().typography.small.font_size;
+        let mut controls = Vec::with_capacity(SCOPE_CONTROLS.len());
+        let mut x = 0.0;
+        let mut y = 0.0;
+        let mut row_height = 0.0;
+        for control in SCOPE_CONTROLS {
+            let label = self.control_label(control);
+            let (label_width, _) = crate::text_metrics::measure_single_line(label, font_size);
+            let width = (label_width.ceil() + 8.0).min(self.bounds.width);
+            let (_, label_height) =
+                crate::text_metrics::measure_text_box(label, font_size, (width - 8.0).max(1.0));
+            let height = TOOLBAR_HEIGHT.max(label_height.ceil() + 12.0);
+            if x > 0.0 && x + width > self.bounds.width {
+                x = 0.0;
+                y += row_height;
+                row_height = 0.0;
+            }
+            controls.push((
+                control,
+                Rect::new(self.bounds.x + x, self.bounds.y + y, width, height),
+            ));
+            x += width;
+            row_height = row_height.max(height);
+        }
+        controls
     }
 
     fn control_at(&self, point: Point) -> Option<ScopeControl> {
-        let toolbar = self.toolbar_rect();
-        if !toolbar.contains(point) || toolbar.width <= 0.0 {
+        if !self.bounds.contains(point) {
             return None;
         }
-        let index = (((point.x - toolbar.x) / toolbar.width) * SCOPE_CONTROLS.len() as f32)
-            .floor()
-            .clamp(0.0, (SCOPE_CONTROLS.len() - 1) as f32) as usize;
-        Some(SCOPE_CONTROLS[index])
+        self.toolbar_controls()
+            .into_iter()
+            .find_map(|(control, rect)| rect.contains(point).then_some(control))
     }
 
     fn changed_settings(&self, control: ScopeControl) -> VideoScopesSettings {
@@ -269,11 +298,17 @@ impl VideoScopesSurface {
     }
 
     fn scope_rects(&self, gap: f32) -> Vec<(ScopeKind, Rect)> {
+        let toolbar_height = self.toolbar_rect().height;
+        let width = self.bounds.width - gap * 2.0;
+        let height = self.bounds.height - toolbar_height - gap * 2.0;
+        if width <= 0.0 || height <= 0.0 {
+            return Vec::new();
+        }
         let content = Rect::new(
             self.bounds.x + gap,
-            self.bounds.y + TOOLBAR_HEIGHT + gap,
-            (self.bounds.width - gap * 2.0).max(1.0),
-            (self.bounds.height - TOOLBAR_HEIGHT - gap * 2.0).max(1.0),
+            self.bounds.y + toolbar_height + gap,
+            width,
+            height,
         );
         if self.settings.layout == VideoScopesLayout::Waveform {
             return vec![(ScopeKind::Waveform, content)];
@@ -285,7 +320,10 @@ impl VideoScopesSurface {
             return vec![(ScopeKind::Vectorscope, content)];
         }
         if self.settings.layout == VideoScopesLayout::Grid {
-            let width = ((content.width - gap * 2.0) / 3.0).max(1.0);
+            if content.width <= gap * 2.0 {
+                return Vec::new();
+            }
+            let width = (content.width - gap * 2.0) / 3.0;
             return [
                 ScopeKind::Waveform,
                 ScopeKind::Histogram,
@@ -306,9 +344,12 @@ impl VideoScopesSurface {
             })
             .collect();
         }
-        let waveform_height = (content.height * 0.6 - gap * 0.5).max(1.0);
-        let lower_height = (content.height - waveform_height - gap).max(1.0);
-        let lower_width = ((content.width - gap) * 0.5).max(1.0);
+        if content.height <= gap || content.width <= gap {
+            return Vec::new();
+        }
+        let waveform_height = (content.height - gap) * 0.6;
+        let lower_height = content.height - waveform_height - gap;
+        let lower_width = (content.width - gap) * 0.5;
         let waveform = Rect::new(content.x, content.y, content.width, waveform_height);
         let histogram = Rect::new(
             content.x,
@@ -319,7 +360,7 @@ impl VideoScopesSurface {
         let vectorscope = Rect::new(
             content.x + lower_width + gap,
             histogram.y,
-            (content.width - lower_width - gap).max(1.0),
+            content.width - lower_width - gap,
             lower_height,
         );
         vec![
@@ -528,15 +569,7 @@ impl Widget for VideoScopesSurface {
     fn paint(&self, ctx: &mut PaintContext<'_>) {
         let gap = ctx.theme.spacing.sm;
         ctx.encoder.draw_rect(self.bounds, ctx.theme.colors.card, 0.0);
-        let toolbar = self.toolbar_rect();
-        let control_width = toolbar.width / SCOPE_CONTROLS.len() as f32;
-        for (index, control) in SCOPE_CONTROLS.into_iter().enumerate() {
-            let rect = Rect::new(
-                toolbar.x + index as f32 * control_width,
-                toolbar.y,
-                control_width,
-                toolbar.height,
-            );
+        for (control, rect) in self.toolbar_controls() {
             if self.pressed_control == Some(control) {
                 ctx.encoder.draw_rect(
                     rect,
@@ -567,9 +600,8 @@ impl Widget for VideoScopesSurface {
                 };
                 ctx.encoder.draw_external_texture(key, *rect, uv, Color::WHITE);
             }
-        } else {
+        } else if let Some((_, first)) = rects.first() {
             let style = &ctx.theme.typography.small;
-            let first = rects.first().map(|(_, rect)| *rect).unwrap_or(self.bounds);
             ctx.encoder.draw_text_box(
                 "等待 Scopes tap",
                 style.font_size,
@@ -705,7 +737,16 @@ mod tests {
         let dispatched = RefCell::new(Vec::new());
         let dispatch = |action| dispatched.borrow_mut().push(action);
         let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
-        let scale_control = Point::new(100.0, TOOLBAR_HEIGHT * 0.5);
+        let scale_rect = surface
+            .toolbar_controls()
+            .into_iter()
+            .find(|(control, _)| *control == ScopeControl::Scale)
+            .expect("scale control")
+            .1;
+        let scale_control = Point::new(
+            scale_rect.x + scale_rect.width * 0.5,
+            scale_rect.y + scale_rect.height * 0.5,
+        );
 
         assert_eq!(
             surface.event(
@@ -759,6 +800,133 @@ mod tests {
         for label in labels {
             let control = surface.control_at(label.position).expect("toolbar click target");
             assert_eq!(label.text, surface.control_label(control));
+        }
+    }
+
+    #[test]
+    fn narrow_toolbar_preserves_complete_labels_and_analysis_region() {
+        let theme = mondrian_ui_theme::current_theme();
+        let demanding = VideoScopesSettings {
+            waveform_mode: WaveformMode::RgbParade,
+            scale: ProgramScopeScale::Nits10000,
+            tap: ProgramScopesTap::MonitorOutput,
+            layout: VideoScopesLayout::Vectorscope,
+            monitoring: SignalMonitoringSettings {
+                false_color: true,
+                zebra: true,
+                gamut_alarm: true,
+                ..SignalMonitoringSettings::default()
+            },
+            ..VideoScopesSettings::default()
+        };
+        for width in [320.0, 450.0] {
+            for settings in [VideoScopesSettings::default(), demanding] {
+                let mut surface =
+                    VideoScopesSurface::new().with_settings(settings, ColorSpace::Rec709);
+                surface.layout(Rect::new(10.0, 20.0, width, 300.0));
+                let mut encoder = crate::test_utils::RecordingEncoder::default();
+                surface.paint(&mut PaintContext {
+                    pixels_per_point: 1.0,
+                    encoder: &mut encoder,
+                    theme: &theme,
+                    clip_rect: surface.bounds,
+                });
+                for label in encoder.texts.iter().take(SCOPE_CONTROLS.len()) {
+                    let (text_width, text_height) = crate::text_metrics::measure_single_line(
+                        &label.text,
+                        theme.typography.small.font_size,
+                    );
+                    assert!(
+                        text_width <= label.max_width.expect("label text box"),
+                        "{width}-point panel wraps {} inside a too-small control",
+                        label.text
+                    );
+                    let control = surface.control_at(label.position).expect("label target");
+                    assert_eq!(surface.control_label(control), label.text);
+                    assert_eq!(
+                        surface.control_at(Point::new(
+                            label.position.x + text_width - 0.5,
+                            label.position.y + text_height * 0.5,
+                        )),
+                        Some(control),
+                        "the entire label must belong to its painted control"
+                    );
+                    assert!(
+                        label.position.y + text_height
+                            <= surface.toolbar_rect().y + surface.toolbar_rect().height
+                    );
+                }
+                for (_, rect) in surface.scope_rects(theme.spacing.sm) {
+                    assert!(rect.y >= surface.toolbar_rect().y + surface.toolbar_rect().height);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wrapped_toolbar_dispatches_the_last_visible_control() {
+        let observed = Rc::new(RefCell::new(None));
+        let callback_observed = Rc::clone(&observed);
+        let mut surface = VideoScopesSurface::new().on_settings_changed(move |settings| {
+            *callback_observed.borrow_mut() = Some(settings);
+            Action::Play
+        });
+        surface.layout(Rect::new(10.0, 20.0, 320.0, 300.0));
+        let (_, rect) = surface.toolbar_controls().last().copied().expect("layout control");
+        assert!(rect.y >= surface.bounds.y + TOOLBAR_HEIGHT);
+        let position = Point::new(rect.x + rect.width * 0.5, rect.y + rect.height * 0.5);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let dispatch = |_| {};
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        for event in [
+            UiEvent::MouseDown {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseUp {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            assert_eq!(surface.event(&event, &mut ctx), EventResult::Handled);
+        }
+        let changed = observed.borrow().expect("wrapped control callback");
+        assert_eq!(changed.layout, VideoScopesLayout::Grid);
+        assert_eq!(
+            changed.analysis_identity(),
+            surface.settings.analysis_identity()
+        );
+    }
+
+    #[test]
+    fn toolbar_exhausting_panel_height_does_not_paint_analysis_over_controls() {
+        for textures in [None, VideoScopesTextureSet::new("hist", "wave", "vector")] {
+            let mut surface = VideoScopesSurface::new();
+            surface.set_textures(textures);
+            surface.layout(Rect::new(10.0, 20.0, 320.0, TOOLBAR_HEIGHT));
+            let theme = mondrian_ui_theme::current_theme();
+            assert!(surface.scope_rects(theme.spacing.sm).is_empty());
+            assert_eq!(
+                surface.control_at(Point::new(
+                    20.0,
+                    surface.bounds.y + surface.bounds.height + 1.0
+                )),
+                None
+            );
+            let mut encoder = crate::test_utils::RecordingEncoder::default();
+            surface.paint(&mut PaintContext {
+                pixels_per_point: 1.0,
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect: surface.bounds,
+            });
+            assert_eq!(encoder.texts.len(), SCOPE_CONTROLS.len());
+            assert_eq!(encoder.rects.as_slice(), &[surface.bounds]);
+            assert!(encoder.lines.is_empty());
         }
     }
 
