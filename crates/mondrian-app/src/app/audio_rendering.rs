@@ -748,6 +748,244 @@ mod tests {
         qualify_native_audio_group_history(instance, &resolver);
     }
 
+    #[test]
+    #[ignore = "requires current product and owned CLAP sidechain DLL"]
+    fn native_clap_sidechain_routing_undo_save_reopen_preserves_output() {
+        use super::super::product_action::{AudioProductAction, ProductAction};
+        use mondrian_audio::{
+            DiscoveredClapAudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
+        };
+        use mondrian_timeline::audio::{AudioChannelStripOutputPort, AudioRouteSource};
+        use mondrian_timeline::{AudioRoutingEdit, AudioRoutingEditRequest};
+        let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+            .map(std::path::PathBuf::from)
+            .expect("current product");
+        let plugin = std::env::var_os("MONDRIAN_CLAP_SIDECHAIN_TEST_PLUGIN")
+            .map(std::path::PathBuf::from)
+            .expect("owned sidechain DLL");
+        let installed = DiscoveredClapAudioProcessorSpecResolver::discover(helper, [plugin])
+            .expect("discover native sidechain");
+        let mut opaque = vec![0_u8];
+        opaque.extend(0.5_f32.to_le_bytes());
+        let instance = installed
+            .create_instance(
+                "org.mondrian.fixture.sidechain",
+                reference_render_contract(),
+                Some(opaque),
+            )
+            .expect("capture stateful native definition");
+        let processor_id = instance.id;
+        let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
+        let (root, library, mut sequence) = native_gain_media_fixture();
+        let asset_id = sequence.audio_tracks[0].clips[0].media_asset_id().expect("media asset");
+        let detector = sequence.add_audio_track();
+        sequence
+            .add_media_audio_clip(
+                detector,
+                mondrian_timeline::Clip::new(
+                    asset_id,
+                    mondrian_core::TimelineTime::ZERO,
+                    mondrian_core::TimelineTime::ONE,
+                )
+                .expect("detector clip"),
+                AudioSourceComponentId::primary(),
+            )
+            .expect("authored detector source");
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&detector)
+            .expect("detector strip")
+            .strip
+            .fader_db = -6.020_599_913_279_624;
+        sequence.audio_program.routes.retain(|route| !matches!(route.source, AudioRouteSource::Track { track_id, .. } if track_id == detector));
+        sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
+        let source = AudioRouteSource::Track {
+            track_id: detector,
+            port: AudioChannelStripOutputPort::PostMute,
+        };
+        let action = |processor_id| {
+            ProductAction::Audio(AudioProductAction::EditRouting(AudioRoutingEditRequest {
+                edit: AudioRoutingEdit::CreateProcessorSidechain {
+                    source,
+                    processor_id,
+                    bus_key: "clap.audio-input.11".to_owned(),
+                },
+            }))
+            .into_external_action()
+        };
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence.clone()));
+        state.test_set_asset_library(Some(library));
+        let before = assert_native_sidechain_delivery(&state, &resolver, 0.25);
+        let generation = state.project_author_generation();
+        let history = state.authoring_history().expect("history").diagnostics();
+        state
+            .dispatch_action(action(mondrian_core::AudioProcessorInstanceId::new()))
+            .expect_err("missing processor refuses route transaction");
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
+        assert!(state
+            .active_sequence()
+            .expect("unchanged")
+            .author_state_eq_ignoring_revision(&sequence));
+        let mut locked = sequence.clone();
+        locked
+            .audio_tracks
+            .iter_mut()
+            .find(|track| track.id == detector)
+            .expect("detector")
+            .is_locked = true;
+        let mut refused = AppState::new();
+        refused.test_set_sequence(Some(locked.clone()));
+        let locked_generation = refused.project_author_generation();
+        refused
+            .dispatch_action(action(processor_id))
+            .expect_err("locked detector refuses route");
+        assert!(refused
+            .active_sequence()
+            .expect("locked")
+            .author_state_eq_ignoring_revision(&locked));
+        assert_eq!(refused.project_author_generation(), locked_generation);
+        assert!(!refused.can_undo_action() && !refused.can_redo_action());
+        drop(refused);
+        state
+            .dispatch_action(action(processor_id))
+            .expect("atomic native sidechain routing");
+        assert_eq!(state.project_author_generation(), generation + 1);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics().undo_entries,
+            1
+        );
+        let edited = state.active_sequence().expect("edited").clone();
+        assert_eq!(edited.audio_program.sidechain_routes.len(), 1);
+        let after = assert_native_sidechain_delivery(&state, &resolver, 0.4375);
+        assert_ne!(before, after);
+        assert!(state.undo_timeline().expect("one route Undo"));
+        assert!(state
+            .active_sequence()
+            .expect("Undo")
+            .author_state_eq_ignoring_revision(&sequence));
+        assert_eq!(
+            assert_native_sidechain_delivery(&state, &resolver, 0.25),
+            before
+        );
+        assert!(!state.can_undo_action() && state.can_redo_action());
+        let undone_path = root.path().join("原生侧链撤销🙂.mdp");
+        state.save_project_file_as(undone_path.clone()).expect("save Undo archive");
+        assert!(state.can_redo_action(), "saving retains live Redo");
+        assert!(state.redo_timeline().expect("route Redo"));
+        assert!(state
+            .active_sequence()
+            .expect("Redo")
+            .author_state_eq_ignoring_revision(&edited));
+        assert_eq!(
+            assert_native_sidechain_delivery(&state, &resolver, 0.4375),
+            after
+        );
+        let edited_path = root.path().join("原生侧链重做🙂.mdp");
+        state.save_project_file_as(edited_path.clone()).expect("save routed archive");
+        drop(state);
+        for (path, authored, expected, output) in [
+            (undone_path, &sequence, 0.25, before),
+            (edited_path, &edited, 0.4375, after),
+        ] {
+            let mut reopened = AppState::new();
+            reopened.open_project_file(path).expect("fresh Unicode sidechain reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("reopened")
+                .author_state_eq_ignoring_revision(authored));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            assert!(reopened.active_clipboard_kind().is_none());
+            assert_eq!(
+                reopened.asset_library().expect("SQLite").list_assets().expect("assets").len(),
+                1
+            );
+            assert_eq!(
+                assert_native_sidechain_delivery(&reopened, &resolver, expected),
+                output
+            );
+        }
+    }
+
+    fn assert_native_sidechain_delivery(
+        state: &AppState,
+        processor_resolver: &dyn AudioProcessorResolver,
+        expected: f32,
+    ) -> Vec<f32> {
+        let sequence = state.active_sequence().expect("author sequence");
+        let library = state.asset_library_handle().expect("source library");
+        let mut reference = None;
+        for (mode, partitions) in [
+            (AudioProcessingMode::Realtime, [64, 64, 129]),
+            (AudioProcessingMode::Offline, [37, 59, 161]),
+        ] {
+            let media = PlaybackMediaResolver {
+                library: library.clone(),
+                source_cache: Arc::new(AudioSourceCache::new(48_000)),
+            };
+            let runtime = AudioProgramRuntime::build_with_compile_request_processor_resolver_and_resource_grant(
+                sequence, &[], &media, processor_resolver,
+                AudioRenderContract { processing_mode: mode, ..reference_render_contract() },
+                AudioCompileRequest { output_id: sequence.audio_program.outputs[0].id, audition: AudioAuditionOverlay::default() },
+                test_runtime_grant(),
+            ).expect("prepare shared native routing and PDC");
+            assert_eq!(
+                runtime.public_output_lookahead_frames(),
+                3,
+                "native latency remains in shared public output compensation"
+            );
+            let mut delivery =
+                AudioProgramDeliveryRuntime::prepare_standard(runtime, AudioChannelLayout::Stereo)
+                    .expect("public stereo delivery");
+            delivery
+                .enter_state(AudioContinuityEpoch::new(1), 0)
+                .expect("native delivery continuity");
+            let cancellation = ExecutionCancellationToken::new();
+            let mut output = Vec::new();
+            let mut start_sample = 0;
+            for frames in partitions {
+                let mut samples = vec![0.0; frames * 2];
+                delivery
+                    .render_into_cancellable(
+                        AudioRenderRequest { start_sample, frames },
+                        &mut samples,
+                        &cancellation,
+                    )
+                    .expect("native public PCM");
+                output.extend(samples);
+                start_sample += frames as i64;
+            }
+            assert_eq!(output.len(), 514);
+            for (frame, pair) in output.chunks_exact(2).enumerate() {
+                assert!(
+                    (pair[0] - expected).abs() <= 1e-6,
+                    "{mode:?} frame{frame} left{} != {expected}",
+                    pair[0]
+                );
+                assert!(
+                    (pair[1] + expected).abs() <= 1e-6,
+                    "{mode:?} frame{frame} right{} != {}",
+                    pair[1],
+                    -expected
+                );
+            }
+            if let Some(reference) = &reference {
+                assert_eq!(
+                    &output, reference,
+                    "public realtime/offline partition invariance"
+                );
+            } else {
+                reference = Some(output);
+            }
+        }
+        reference.expect("native output")
+    }
+
     fn qualify_native_audio_group_history(
         instance: mondrian_timeline::audio::AudioProcessorInstance,
         resolver: &dyn AudioProcessorResolver,

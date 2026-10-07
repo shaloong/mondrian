@@ -1757,3 +1757,20 @@ current packaged-worker, authoring archive, PDC, vendor or macOS qualification;
 VST3 auxiliary execution and mixed layouts remain separate open work.
 
 Port roles and stability follow the [CLAP audio ports contract](https://github.com/free-audio/clap/blob/main/include/clap/ext/audio-ports.h).
+
+The separate owned CLAP sidechain DLL has an independent weighted PCM signal,
+three-frame latency/tail and opaque-state-controlled native port configuration.
+The ignored installed-fixture matrix uses current packaged discovery and worker
+execution in both processing modes, two block partitions, restored reordered or
+removed inputs, delay reset and explicit silence. An intentionally stale prepared
+bus order after state replacement must fail child admission. This fixture is
+separate from existing gain fixtures and does not encode the host's routing logic.
+Execution receipts must identify the source, current product and fixture hashes.
+
+The App's native sidechain history fixture routes a detector-only track to one
+native input while another remains disconnected. It uses real WAV decoding and
+the shared public delivery runtime to check three-frame latency compensation,
+realtime/offline partition-invariant PCM, missing/locked transaction refusal,
+one Undo, saved live Redo, and fresh Unicode routed/undone archives with one
+SQLite asset and no inherited session history. This remains a named reference
+matrix; it does not establish general vendor or platform qualification.

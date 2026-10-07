@@ -919,3 +919,12 @@ for virtual items and records the nearest semantic parent. These metadata IDs do
 not become WidgetTree input/focus/capture targets. Controls remain the sole input
 owner; projections must derive from their existing model and cannot dispatch
 editor actions. Native accessibility adapters consume this contract separately.
+
+Native audio auxiliary qualification enters through the existing ProductAction
+routing request and authoring session. The App's independent CLAP sidechain DLL
+fixture observes real decoded WAV PCM through AudioProgramDeliveryRuntime, with
+shared latency compensation and realtime/offline contracts. Sidechain history,
+lock/missing-owner refusal, live Redo after save and fresh project archives use
+the canonical Sequence and SQLite library; the fixture creates no alternate
+routing, persistence or Undo implementation. Native receipts identify the exact
+worker and fixture binaries separately from source-only regressions.

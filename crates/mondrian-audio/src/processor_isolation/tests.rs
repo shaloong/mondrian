@@ -183,6 +183,236 @@ fn installed_clap_sample_gain_preserves_event_ranges() {
     }
 }
 
+#[test]
+#[ignore = "requires current product and owned CLAP sidechain native fixture"]
+fn installed_clap_sidechain_preserves_native_buses_state_delay_and_partitions() {
+    let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+        .map(PathBuf::from)
+        .expect("current packaged worker");
+    let plugin = std::env::var_os("MONDRIAN_CLAP_SIDECHAIN_TEST_PLUGIN")
+        .map(PathBuf::from)
+        .expect("owned sidechain fixture");
+    let catalog = DiscoveredClapAudioProcessorSpecResolver::discover(helper, [plugin])
+        .expect("discover native sidechain DLL");
+    assert_eq!(catalog.descriptors().len(), 1);
+    assert_eq!(
+        catalog.descriptors()[0].plugin_id,
+        "org.mondrian.fixture.sidechain"
+    );
+    for mode in [AudioProcessingMode::Realtime, AudioProcessingMode::Offline] {
+        for port_mode in 0..=2 {
+            let render = AudioRenderContract { processing_mode: mode, ..test_render_contract() };
+            let mut state = vec![port_mode];
+            state.extend(0.5_f32.to_le_bytes());
+            let instance = catalog
+                .create_instance(
+                    "org.mondrian.fixture.sidechain",
+                    render,
+                    Some(state.clone()),
+                )
+                .expect("capture restored native port configuration");
+            assert!(instance.parameters.is_empty());
+            assert_eq!(
+                instance.opaque_state.as_ref().map(AsRef::as_ref),
+                Some(state.as_slice())
+            );
+            let spec = catalog
+                .resolve(AudioProcessorPrepareRequest::new(
+                    AudioProcessorOccurrence {
+                        instance_id: instance.id,
+                        owner: AudioProcessorOccurrenceOwner::Output(ProgramOutputId::new()),
+                        insertion: AudioProcessorInsertionPoint::PreFader,
+                    },
+                    &instance.definition,
+                    &instance.parameters,
+                    instance.opaque_state.as_ref().map(AsRef::as_ref),
+                    render,
+                ))
+                .expect("resolve restored port metadata");
+            let expected_ids: &[u32] = match port_mode {
+                0 => &[11, 7],
+                1 => &[7, 11],
+                _ => &[11],
+            };
+            assert_eq!(
+                spec.auxiliary_inputs
+                    .buses
+                    .iter()
+                    .map(|bus| bus.bus_key.as_str())
+                    .collect::<Vec<_>>(),
+                expected_ids
+                    .iter()
+                    .map(|id| format!("clap.audio-input.{id}"))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                spec.plugin_execution_contract.algorithmic_latency_frames(),
+                3
+            );
+            assert_eq!(
+                spec.plugin_execution_contract.tail(),
+                AudioProcessorTail::Finite(3)
+            );
+            for partitions in [&[4, 4, 4, 2][..], &[3, 2, 1, 4, 4][..]] {
+                let factory = IsolatedAudioProcessorFactory::prepare(spec.clone())
+                    .expect("prepare native sidechain worker");
+                let mut processor = factory.create().expect("create isolated instance");
+                processor.enter_state(100).expect("enter native continuity");
+                let mut output = Vec::new();
+                let mut offset = 0;
+                for &frames in partitions {
+                    let mut io = NativeSidechainAudioIo {
+                        main: fixture_sidechain_samples(0, offset, frames),
+                        inputs: expected_ids
+                            .iter()
+                            .map(|id| {
+                                (
+                                    format!("clap.audio-input.{id}"),
+                                    fixture_sidechain_samples(*id, offset, frames),
+                                )
+                            })
+                            .collect(),
+                    };
+                    let start = 100 + offset as i64;
+                    let context = AudioProcessorProcessContext::new(
+                        AudioRenderRequest { start_sample: start, frames },
+                        AudioSampleRate::new(48_000).expect("sample rate"),
+                        AudioChannelLayout::Stereo,
+                        mode,
+                        AudioKernelBackend::ScalarReference,
+                    );
+                    processor
+                        .process(
+                            context,
+                            &mut io,
+                            AudioParameterEventBatch::new(start, frames, &[], &[], &[]),
+                        )
+                        .expect("process independent native auxiliary PCM");
+                    output.extend(io.main);
+                    offset += frames;
+                }
+                for (frame, actual) in output.chunks_exact(2).enumerate() {
+                    for (channel, &value) in actual.iter().enumerate() {
+                        let expected = if frame < 3 {
+                            0.0
+                        } else {
+                            let sample = frame - 3;
+                            let main = fixture_sidechain_samples(0, sample, 1)[channel];
+                            let first = fixture_sidechain_samples(11, sample, 1)[channel];
+                            let second = if port_mode == 2 {
+                                0.0
+                            } else {
+                                fixture_sidechain_samples(7, sample, 1)[channel]
+                            };
+                            (2.0 * main + 3.0 * first + 5.0 * second) * 0.5
+                        };
+                        assert!((value - expected).abs() <= 1e-6,
+                            "{mode:?}, ports{port_mode}, partitions{partitions:?}, frame{frame}, channel{channel}: {value} != {expected}");
+                    }
+                }
+                processor.enter_state(0).expect("reset native delay");
+                let mut io = NativeSidechainAudioIo {
+                    main: vec![0.25; 8],
+                    inputs: expected_ids
+                        .iter()
+                        .map(|id| (format!("clap.audio-input.{id}"), vec![0.0; 8]))
+                        .collect(),
+                };
+                let context = AudioProcessorProcessContext::new(
+                    AudioRenderRequest { start_sample: 0, frames: 4 },
+                    AudioSampleRate::new(48_000).expect("sample rate"),
+                    AudioChannelLayout::Stereo,
+                    mode,
+                    AudioKernelBackend::ScalarReference,
+                );
+                processor
+                    .process(
+                        context,
+                        &mut io,
+                        AudioParameterEventBatch::new(0, 4, &[], &[], &[]),
+                    )
+                    .expect("silent auxiliary input following active native signal");
+                assert_eq!(io.main, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.25]);
+            }
+            if port_mode == 0 {
+                let mut stale = spec.clone();
+                let mut payload: serde_json::Value =
+                    serde_json::from_slice(&stale.preparation_payload).expect("worker payload");
+                let mut changed_state = vec![1_u8];
+                changed_state.extend(0.5_f32.to_le_bytes());
+                payload["state"] = serde_json::json!(changed_state);
+                stale.preparation_payload =
+                    serde_json::to_vec(&payload).expect("changed-state payload");
+                assert!(
+                    IsolatedAudioProcessorFactory::prepare(stale).is_err(),
+                    "changed native order must refuse stale admission"
+                );
+            }
+        }
+    }
+}
+
+fn fixture_sidechain_samples(id: u32, start: usize, frames: usize) -> Vec<f32> {
+    (start..start + frames)
+        .flat_map(|sample| {
+            if sample >= 11 {
+                [0.0; 2]
+            } else {
+                let gain = match id {
+                    0 => 0.01,
+                    11 => 0.02,
+                    _ => -0.03,
+                };
+                let value = (sample + 1) as f32 * gain;
+                [value, -value * 0.5]
+            }
+        })
+        .collect()
+}
+
+struct NativeSidechainAudioIo {
+    main: Vec<f32>,
+    inputs: Vec<(String, Vec<f32>)>,
+}
+
+impl AudioProcessorAudioIo for NativeSidechainAudioIo {
+    fn main_layout(&self) -> AudioChannelLayout {
+        AudioChannelLayout::Stereo
+    }
+    fn frames(&self) -> usize {
+        self.main.len() / 2
+    }
+    fn main_interleaved(&mut self) -> &mut [f32] {
+        &mut self.main
+    }
+    fn auxiliary_input(&self, bus_key: &str) -> Option<AudioProcessorInputBus<'_>> {
+        let (key, samples) = self.inputs.iter().find(|(key, _)| key == bus_key)?;
+        Some(AudioProcessorInputBus {
+            bus_key: key,
+            channel_layout: AudioChannelLayout::Stereo,
+            frames: samples.len() / 2,
+            interleaved: samples,
+        })
+    }
+    fn main_and_auxiliary_input(
+        &mut self,
+        bus_key: &str,
+    ) -> Option<AudioProcessorMainAndInputBuses<'_>> {
+        let (key, samples) = self.inputs.iter().find(|(key, _)| key == bus_key)?;
+        Some(AudioProcessorMainAndInputBuses {
+            main_layout: AudioChannelLayout::Stereo,
+            frames: self.main.len() / 2,
+            main_interleaved: &mut self.main,
+            auxiliary: AudioProcessorInputBus {
+                bus_key: key,
+                channel_layout: AudioChannelLayout::Stereo,
+                frames: samples.len() / 2,
+                interleaved: samples,
+            },
+        })
+    }
+}
+
 fn assert_installed_clap_gain(
     plugin_env: &str,
     plugin_id: &str,
