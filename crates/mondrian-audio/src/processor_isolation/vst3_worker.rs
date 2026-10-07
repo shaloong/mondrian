@@ -6,8 +6,9 @@ use super::{
     IsolatedAudioProcessorWorkerPrepareRequest, IsolatedAudioProcessorWorkerSpec,
 };
 use crate::{
-    AudioProcessingMode, AudioProcessorAuxiliaryInputContract, AudioProcessorExecutionContract,
-    AudioProcessorHostError, AudioProcessorPrepareRequest, AudioProcessorTail,
+    AudioProcessingMode, AudioProcessorAuxiliaryInputBusContract,
+    AudioProcessorAuxiliaryInputContract, AudioProcessorExecutionContract, AudioProcessorHostError,
+    AudioProcessorPrepareRequest, AudioProcessorTail,
 };
 use mondrian_core::automation::{
     ParameterInterpolation, ParameterInvalidValuePolicy, ParameterNumericContract, ParameterSchema,
@@ -22,7 +23,10 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use vst3_host::audio::AudioBuffers;
+use vst3_host::audio::{
+    AudioBusLayout, AudioBusRole, BusArrangements, BusAudioBuffers, BusDirection, MediaType,
+    NativeAudioBusInfoSet, SpeakerArrangement,
+};
 use vst3_host::plugin::{Plugin, ProcessMode};
 use vst3_host::Vst3Host;
 
@@ -107,6 +111,8 @@ pub struct Vst3PluginRegistration {
     pub binary_sha256: [u8; 32],
     /// Exact execution contract probed for the target render configuration.
     pub execution_contract: AudioProcessorExecutionContract,
+    /// Ordered auxiliary input ports admitted after restoring the selected native state.
+    pub auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
     /// Complete parameter metadata, including non-editable parameters.
     pub parameters: Vec<Vst3ParameterDescriptor>,
 }
@@ -163,6 +169,7 @@ impl IsolatedAudioProcessorSpecResolver for Vst3AudioProcessorSpecResolver {
                 "VST3 authored identity differs from the selected installation",
             ));
         }
+        plugin.auxiliary_inputs.validate(request.render_contract().channel_layout)?;
         let mut parameter_ids = Vec::with_capacity(request.parameters().len());
         let mut vst3_ids = Vec::with_capacity(request.parameters().len());
         for (id, parameter) in request.parameters() {
@@ -197,7 +204,7 @@ impl IsolatedAudioProcessorSpecResolver for Vst3AudioProcessorSpecResolver {
             self.helper_executable.clone(),
             payload,
             plugin.execution_contract,
-            AudioProcessorAuxiliaryInputContract::default(),
+            plugin.auxiliary_inputs.clone(),
             parameter_ids,
             request.render_contract(),
         )?
@@ -230,9 +237,6 @@ impl IsolatedAudioProcessorWorkerFactory for Vst3AudioProcessorWorkerFactory {
         &self,
         request: IsolatedAudioProcessorWorkerPrepareRequest,
     ) -> Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError> {
-        if !request.auxiliary_inputs().buses.is_empty() {
-            return Err(invalid("VST3 auxiliary buses are not admitted"));
-        }
         let payload: Vst3Payload = serde_json::from_slice(request.payload())
             .map_err(|error| invalid(format!("invalid VST3 worker payload: {error}")))?;
         let registration = Vst3PluginRegistration {
@@ -241,6 +245,7 @@ impl IsolatedAudioProcessorWorkerFactory for Vst3AudioProcessorWorkerFactory {
             binary_path: payload.binary_path.clone(),
             binary_sha256: payload.binary_sha256,
             execution_contract: request.plugin_execution_contract(),
+            auxiliary_inputs: request.auxiliary_inputs().clone(),
             parameters: payload.parameters.clone(),
         };
         validate_registration(&registration)?;
@@ -300,7 +305,10 @@ impl IsolatedAudioProcessorWorkerFactory for Vst3AudioProcessorWorkerFactory {
         plugin
             .set_process_mode(mode)
             .map_err(|error| invalid(format!("VST3 processing mode is unsupported: {error}")))?;
-        validate_loaded(&plugin, &registration, channels)?;
+        validate_loaded(&mut plugin, &registration, render.channel_layout)?;
+        let buffers = plugin
+            .create_bus_audio_buffers(render.max_block_frames)
+            .map_err(|error| invalid(format!("VST3 bus buffer preparation failed: {error}")))?;
         plugin
             .start_processing()
             .map_err(|error| unavailable(format!("VST3 processing start failed: {error}")))?;
@@ -310,12 +318,8 @@ impl IsolatedAudioProcessorWorkerFactory for Vst3AudioProcessorWorkerFactory {
             payload,
             contract: request.plugin_execution_contract(),
             render,
-            buffers: AudioBuffers::new(
-                channels,
-                channels,
-                render.max_block_frames,
-                f64::from(render.sample_rate),
-            ),
+            buffers,
+            auxiliary_inputs: registration.auxiliary_inputs,
             last_end: None,
         }))
     }
@@ -327,7 +331,8 @@ struct Vst3Worker {
     payload: Vst3Payload,
     contract: AudioProcessorExecutionContract,
     render: crate::AudioRenderContract,
-    buffers: AudioBuffers,
+    buffers: BusAudioBuffers,
+    auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
     last_end: Option<i64>,
 }
 
@@ -337,7 +342,7 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
     }
 
     fn auxiliary_input_contract(&self) -> AudioProcessorAuxiliaryInputContract {
-        AudioProcessorAuxiliaryInputContract::default()
+        self.auxiliary_inputs.clone()
     }
 
     fn enter_state(&mut self, start_sample: i64) -> Result<(), AudioProcessorHostError> {
@@ -381,16 +386,17 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
             AudioProcessorHostError::StateEntry(format!("VST3 state-entry mode failed: {error}"))
         })?;
         validate_loaded(
-            &fresh,
+            &mut fresh,
             &Vst3PluginRegistration {
                 class_id: self.payload.class_id.clone(),
                 vendor: self.payload.vendor.clone(),
                 binary_path: self.payload.binary_path.clone(),
                 binary_sha256: self.payload.binary_sha256,
                 execution_contract: self.contract,
+                auxiliary_inputs: self.auxiliary_inputs.clone(),
                 parameters: self.payload.parameters.clone(),
             },
-            self.render.channel_count(),
+            self.render.channel_layout,
         )?;
         fresh.start_processing().map_err(|error| {
             AudioProcessorHostError::StateEntry(format!("VST3 state-entry start failed: {error}"))
@@ -473,29 +479,43 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
                     })?;
             }
         }
-        for channel in &mut self.buffers.inputs {
-            channel.resize(frames, 0.0);
+        for bus in self.buffers.inputs.iter_mut().chain(&mut self.buffers.outputs) {
+            for channel in &mut bus.channels {
+                channel.resize(frames, 0.0);
+                channel.fill(0.0);
+            }
         }
-        for channel in &mut self.buffers.outputs {
-            channel.resize(frames, 0.0);
-            channel.fill(0.0);
+        for (index, bus) in self.auxiliary_inputs.buses.iter().enumerate() {
+            let samples = block.auxiliary_input(&bus.bus_key).ok_or_else(|| {
+                AudioProcessorHostError::Process("VST3 auxiliary PCM is missing".to_owned())
+            })?;
+            if samples.len() != frames * channels {
+                return Err(AudioProcessorHostError::Process(
+                    "VST3 auxiliary extent changed".to_owned(),
+                ));
+            }
+            for (frame, values) in samples.chunks_exact(channels).enumerate() {
+                for (channel, sample) in values.iter().copied().enumerate() {
+                    self.buffers.inputs[index + 1].channels[channel][frame] = sample;
+                }
+            }
         }
         for (frame, samples) in block.main_interleaved().chunks_exact(channels).enumerate() {
             for (channel, sample) in samples.iter().copied().enumerate() {
-                self.buffers.inputs[channel][frame] = sample;
+                self.buffers.inputs[0].channels[channel][frame] = sample;
             }
         }
         self.buffers.block_size = frames;
         self.plugin
             .as_mut()
             .ok_or_else(|| AudioProcessorHostError::Process("VST3 processor is closed".to_owned()))?
-            .process_audio(&mut self.buffers)
+            .process_bus_audio(&mut self.buffers)
             .map_err(|error| {
                 AudioProcessorHostError::Process(format!("VST3 processing failed: {error}"))
             })?;
         for (frame, samples) in block.main_interleaved().chunks_exact_mut(channels).enumerate() {
             for (channel, sample) in samples.iter_mut().enumerate() {
-                *sample = self.buffers.outputs[channel][frame];
+                *sample = self.buffers.outputs[0].channels[channel][frame];
             }
         }
         self.last_end = Some(
@@ -508,9 +528,9 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
 }
 
 fn validate_loaded(
-    plugin: &Plugin,
+    plugin: &mut Plugin,
     registration: &Vst3PluginRegistration,
-    channels: usize,
+    channel_layout: AudioChannelLayout,
 ) -> Result<(), AudioProcessorHostError> {
     if plugin.info().uid != registration.class_id
         || registration
@@ -520,19 +540,8 @@ fn validate_loaded(
     {
         return Err(invalid("VST3 class identity changed after preparation"));
     }
-    let layout = plugin
-        .audio_bus_layout()
-        .map_err(|error| invalid(format!("VST3 bus query failed: {error}")))?;
-    if layout.inputs.len() != 1
-        || layout.outputs.len() != 1
-        || !layout.inputs[0].active
-        || !layout.outputs[0].active
-        || layout.inputs[0].channel_count != channels
-        || layout.outputs[0].channel_count != channels
-    {
-        return Err(invalid(
-            "VST3 requires exactly one active matching main input and output bus",
-        ));
+    if prepare_audio_inputs(plugin, channel_layout)? != registration.auxiliary_inputs {
+        return Err(invalid("VST3 auxiliary bus contract changed since probe"));
     }
     let tail = match plugin.tail_samples() {
         0 => AudioProcessorTail::None,
@@ -552,6 +561,111 @@ fn validate_loaded(
         ));
     }
     Ok(())
+}
+
+/// Read roles from the actual restored component and activate admitted audio ports.
+pub(super) fn prepare_audio_inputs(
+    plugin: &mut Plugin,
+    channel_layout: AudioChannelLayout,
+) -> Result<AudioProcessorAuxiliaryInputContract, AudioProcessorHostError> {
+    let metadata = plugin
+        .native_audio_bus_info()
+        .map_err(|error| invalid(format!("VST3 native bus query failed: {error}")))?;
+    let layout = plugin
+        .audio_bus_layout()
+        .map_err(|error| invalid(format!("VST3 prepared bus query failed: {error}")))?;
+    let arrangements = plugin
+        .bus_arrangements()
+        .map_err(|error| invalid(format!("VST3 speaker arrangement query failed: {error}")))?;
+    let expected = audio_inputs_from_metadata(&metadata, &layout, &arrangements, channel_layout)?;
+    for (direction, buses) in [
+        (BusDirection::Input, &layout.inputs),
+        (BusDirection::Output, &layout.outputs),
+    ] {
+        for (index, bus) in buses.iter().enumerate() {
+            if !bus.active {
+                plugin.set_bus_active(MediaType::Audio, direction, index as i32, true).map_err(
+                    |error| invalid(format!("VST3 audio bus activation failed: {error}")),
+                )?;
+            }
+        }
+    }
+    let active = plugin
+        .audio_bus_layout()
+        .map_err(|error| invalid(format!("VST3 activated bus query failed: {error}")))?;
+    let current_metadata = plugin
+        .native_audio_bus_info()
+        .map_err(|error| invalid(format!("VST3 activated metadata query failed: {error}")))?;
+    let current_arrangements = plugin
+        .bus_arrangements()
+        .map_err(|error| invalid(format!("VST3 activated arrangement query failed: {error}")))?;
+    if active.inputs.iter().chain(&active.outputs).any(|bus| !bus.active)
+        || audio_inputs_from_metadata(
+            &current_metadata,
+            &active,
+            &current_arrangements,
+            channel_layout,
+        )? != expected
+    {
+        return Err(invalid("VST3 bus contract changed during activation"));
+    }
+    Ok(expected)
+}
+
+fn audio_inputs_from_metadata(
+    metadata: &NativeAudioBusInfoSet,
+    layout: &AudioBusLayout,
+    arrangements: &BusArrangements,
+    channel_layout: AudioChannelLayout,
+) -> Result<AudioProcessorAuxiliaryInputContract, AudioProcessorHostError> {
+    let speaker_layout = match channel_layout {
+        AudioChannelLayout::Mono => SpeakerArrangement::MONO,
+        AudioChannelLayout::Stereo => SpeakerArrangement::STEREO,
+        _ => return Err(invalid("VST3 audio channel layout is unsupported")),
+    };
+    if metadata.inputs.is_empty()
+        || metadata.inputs.len() > 32
+        || metadata.outputs.len() != 1
+        || layout.inputs.len() != metadata.inputs.len()
+        || layout.outputs.len() != metadata.outputs.len()
+        || arrangements.inputs.len() != metadata.inputs.len()
+        || arrangements.outputs.len() != metadata.outputs.len()
+    {
+        return Err(invalid("VST3 requires bounded inputs and one main output"));
+    }
+    for (native, prepared, speakers) in [
+        (&metadata.inputs, &layout.inputs, &arrangements.inputs),
+        (&metadata.outputs, &layout.outputs, &arrangements.outputs),
+    ] {
+        for (index, ((bus, prepared), arrangement)) in
+            native.iter().zip(prepared).zip(speakers).enumerate()
+        {
+            let role = if index == 0 {
+                AudioBusRole::Main
+            } else {
+                AudioBusRole::Auxiliary
+            };
+            if bus.role != role
+                || bus.channel_count != channel_layout.channel_count()
+                || prepared.channel_count != bus.channel_count
+                || *arrangement != speaker_layout
+            {
+                return Err(invalid(
+                    "VST3 native bus role, channel count or speaker arrangement is invalid",
+                ));
+            }
+        }
+    }
+    let result = AudioProcessorAuxiliaryInputContract {
+        buses: (1..metadata.inputs.len())
+            .map(|index| AudioProcessorAuxiliaryInputBusContract {
+                bus_key: format!("vst3.audio-input.{index}"),
+                channel_layout,
+            })
+            .collect(),
+    };
+    result.validate(channel_layout)?;
+    Ok(result)
 }
 
 pub(super) fn parameter_descriptors(
@@ -589,6 +703,18 @@ fn validate_registration(
     {
         return Err(invalid(
             "VST3 class, binary, or execution contract is invalid",
+        ));
+    }
+    if registration.auxiliary_inputs.buses.len() > 31
+        || registration
+            .auxiliary_inputs
+            .buses
+            .iter()
+            .enumerate()
+            .any(|(index, bus)| bus.bus_key != format!("vst3.audio-input.{}", index + 1))
+    {
+        return Err(invalid(
+            "VST3 auxiliary bus indices must retain native order",
         ));
     }
     let mut ids = BTreeSet::new();
@@ -651,4 +777,120 @@ fn invalid(detail: impl Into<String>) -> AudioProcessorHostError {
 
 fn unavailable(detail: impl Into<String>) -> AudioProcessorHostError {
     AudioProcessorHostError::Unavailable(detail.into())
+}
+
+#[cfg(test)]
+mod bus_contract_tests {
+    use super::*;
+    use vst3_host::audio::{AudioBusConfig, NativeAudioBusInfo};
+
+    fn metadata() -> (NativeAudioBusInfoSet, AudioBusLayout, BusArrangements) {
+        let main = NativeAudioBusInfo {
+            role: AudioBusRole::Main,
+            name: "Input".into(),
+            channel_count: 2,
+            default_active: true,
+        };
+        let aux = NativeAudioBusInfo {
+            role: AudioBusRole::Auxiliary,
+            name: "Input".into(),
+            channel_count: 2,
+            default_active: false,
+        };
+        (
+            NativeAudioBusInfoSet {
+                inputs: vec![main.clone(), aux.clone(), aux],
+                outputs: vec![main],
+            },
+            AudioBusLayout {
+                inputs: vec![
+                    AudioBusConfig { channel_count: 2, active: true },
+                    AudioBusConfig { channel_count: 2, active: false },
+                    AudioBusConfig { channel_count: 2, active: false },
+                ],
+                outputs: vec![AudioBusConfig { channel_count: 2, active: true }],
+            },
+            BusArrangements {
+                inputs: vec![SpeakerArrangement::STEREO; 3],
+                outputs: vec![SpeakerArrangement::STEREO],
+            },
+        )
+    }
+
+    #[test]
+    fn vst3_auxiliary_contract_uses_native_roles_indices_and_exact_speakers() {
+        let (mut native, mut layout, mut arrangements) = metadata();
+        let expected =
+            audio_inputs_from_metadata(&native, &layout, &arrangements, AudioChannelLayout::Stereo)
+                .expect("native sidechains");
+        assert_eq!(
+            expected.buses.iter().map(|bus| bus.bus_key.as_str()).collect::<Vec<_>>(),
+            ["vst3.audio-input.1", "vst3.audio-input.2"]
+        );
+        native.inputs[1].name = "Localized renamed duplicate".into();
+        layout.inputs[1].active = true;
+        assert_eq!(
+            audio_inputs_from_metadata(&native, &layout, &arrangements, AudioChannelLayout::Stereo)
+                .expect("display and activation are not bus identity"),
+            expected
+        );
+        native.inputs[1].role = AudioBusRole::Main;
+        assert!(audio_inputs_from_metadata(
+            &native,
+            &layout,
+            &arrangements,
+            AudioChannelLayout::Stereo
+        )
+        .is_err());
+        native.inputs[1].role = AudioBusRole::Auxiliary;
+        arrangements.inputs[1] = SpeakerArrangement::STEREO_SURROUND;
+        assert!(
+            audio_inputs_from_metadata(&native, &layout, &arrangements, AudioChannelLayout::Stereo)
+                .is_err(),
+            "two channels do not imply L/R stereo"
+        );
+        arrangements.inputs[1] = SpeakerArrangement::STEREO;
+        native.outputs[0].role = AudioBusRole::Auxiliary;
+        assert!(audio_inputs_from_metadata(
+            &native,
+            &layout,
+            &arrangements,
+            AudioChannelLayout::Stereo
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn vst3_auxiliary_contract_rejects_missing_mismatched_and_unbounded_metadata() {
+        let (native, layout, arrangements) = metadata();
+        let assert_invalid = |native: &NativeAudioBusInfoSet,
+                              layout: &AudioBusLayout,
+                              arrangements: &BusArrangements| {
+            assert!(audio_inputs_from_metadata(
+                native,
+                layout,
+                arrangements,
+                AudioChannelLayout::Stereo
+            )
+            .is_err());
+        };
+        let mut changed = native.clone();
+        changed.inputs.clear();
+        assert_invalid(&changed, &layout, &arrangements);
+        changed = native.clone();
+        changed.inputs[1].channel_count = 1;
+        assert_invalid(&changed, &layout, &arrangements);
+        changed = native.clone();
+        changed.inputs.resize(33, native.inputs[1].clone());
+        assert_invalid(&changed, &layout, &arrangements);
+        let mut prepared = layout.clone();
+        prepared.inputs[1].channel_count = 1;
+        assert_invalid(&native, &prepared, &arrangements);
+        prepared = layout.clone();
+        prepared.inputs.pop();
+        assert_invalid(&native, &prepared, &arrangements);
+        let mut speakers = arrangements.clone();
+        speakers.outputs.clear();
+        assert_invalid(&native, &layout, &speakers);
+    }
 }

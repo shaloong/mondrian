@@ -807,3 +807,24 @@ through the main-thread handle after activation, and tail through the prepared
 processor handle. Probe and worker share this lifecycle ordering. Activated
 latency/tail mismatch causes stop, release and deactivation before rejection;
 no native instance with stale scheduling facts is admitted.
+
+
+### VST3 actual-instance audio bus preparation
+
+The audio adapter now admits bounded native auxiliary input slots with the same
+Mono/Stereo layout as the main bus, through the existing typed contract and worker
+protocol. Actual roles and exact speaker arrangements are queried after restoring
+the selected class state, rechecked after activation and at state reentry. The
+worker uses the existing upstream per-bus prepared processing API; it neither
+flattens sidechain audio into main channels nor adds another plugin host.
+
+The exact previously pinned MIT host is retained locally under
+`vendor/vst3-host`, with original author/license/provenance,
+a separate upstream-format configuration, a four-file metadata query extension
+and removal of existing trailing whitespace in three loader files.
+A version upgrade alone cannot expose the required loaded-instance declarations.
+The SDK role/activation contract is documented in
+[IComponent](https://github.com/steinbergmedia/vst3_pluginterfaces/blob/master/vst/ivstcomponent.h).
+Current source audio regressions passed; native packaged sidechain, broader
+layouts, MIDI/editor/vendor/platform and performance qualification remain open.
+Earlier ae3c78f/3b44084 product and Golden receipts retain their named source scope.

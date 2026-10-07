@@ -1,6 +1,9 @@
 //! Deadline-bound inspection of a user-selected VST3 binary.
 
-use super::vst3_worker::{fingerprint, parameter_descriptors, MAX_STATE_BYTES};
+use super::protocol::{auxiliary_from_wire, auxiliary_to_wire, AuxiliaryBusWire};
+use super::vst3_worker::{
+    fingerprint, parameter_descriptors, prepare_audio_inputs, MAX_STATE_BYTES,
+};
 use super::{Vst3ParameterDescriptor, Vst3PluginRegistration};
 use crate::{
     AudioProcessingMode, AudioProcessorExecutionContract, AudioProcessorHostError,
@@ -76,6 +79,7 @@ enum DiscoveryResponse {
         parameters: Vec<Vst3ParameterDescriptor>,
         current_values: Vec<(u32, f64)>,
         captured_state: Option<Vec<u8>>,
+        auxiliary_buses: Vec<AuxiliaryBusWire>,
     },
 }
 
@@ -175,6 +179,7 @@ pub(super) fn probe_vst3_plugin_registration_with_state(
         parameters,
         current_values,
         captured_state,
+        auxiliary_buses,
     } = response
     else {
         return Err(invalid("VST3 probe returned the wrong response type"));
@@ -205,12 +210,15 @@ pub(super) fn probe_vst3_plugin_registration_with_state(
         render.processing_mode == AudioProcessingMode::Offline,
         0,
     )?;
+    let auxiliary_inputs = auxiliary_from_wire(auxiliary_buses);
+    auxiliary_inputs.validate(render.channel_layout)?;
     let registration = Vst3PluginRegistration {
         class_id: actual_id,
         vendor,
         binary_path: path,
         binary_sha256: before,
         execution_contract: contract,
+        auxiliary_inputs,
         parameters,
     };
     Ok(Vst3Probe { registration, current_values, captured_state })
@@ -338,20 +346,7 @@ fn probe_loaded(
             ProcessMode::Realtime
         })
         .map_err(|error| invalid(format!("VST3 probe mode is unsupported: {error}")))?;
-    let buses = plugin
-        .audio_bus_layout()
-        .map_err(|error| invalid(format!("VST3 probe bus query failed: {error}")))?;
-    if buses.inputs.len() != 1
-        || buses.outputs.len() != 1
-        || !buses.inputs[0].active
-        || !buses.outputs[0].active
-        || buses.inputs[0].channel_count != channels
-        || buses.outputs[0].channel_count != channels
-    {
-        return Err(invalid(
-            "VST3 probe requires one active matching main input/output bus",
-        ));
-    }
+    let auxiliary_inputs = prepare_audio_inputs(&mut plugin, layout)?;
     let parameters = parameter_descriptors(&plugin)?;
     let current_values = plugin
         .get_parameters()
@@ -378,6 +373,7 @@ fn probe_loaded(
         parameters,
         current_values,
         captured_state,
+        auxiliary_buses: auxiliary_to_wire(&auxiliary_inputs),
     })
 }
 

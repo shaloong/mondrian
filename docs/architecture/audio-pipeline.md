@@ -4,8 +4,10 @@ The VST3 adapter uses a selected-plugin catalog, a deadline-bound metadata
 child, and a distinct supervised audio-worker mode. Its authoring schema keeps
 continuous parameter values normalized to `0..=1`; stepped parameters use
 integer indices `0..=step_count` and hold interpolation, then normalize at the
-ABI boundary. Discovery and worker both reject unsupported auxiliary/multiple
-main buses, mode changes, metadata drift, and latency/tail drift. Worker
+ABI boundary. Discovery and worker both reject unsupported multiple main buses, layouts,
+mode changes, metadata drift, and latency/tail drift. Same-main-layout auxiliary
+inputs now preserve native bus slots through discovery and preparation; the
+current packaged/native sidechain qualification is still pending. Worker
 continuity entry releases the previous class and reloads the exact class from
 the saved opaque state, while sample-offset points enter the VST3 process queue.
 A reference Gain DLL built from the permissively licensed `vst3-rs` example
@@ -1790,3 +1792,51 @@ owned native sidechain DLL also guards activation with per-instance shared state
 while retaining its independent3-frame delay/tail and prepared DSP buffers.
 This enforces the [CLAP latency lifecycle](https://github.com/free-audio/clap/blob/main/include/clap/ext/latency.h)
 without adding work to audio callbacks or another latency interpretation.
+
+
+## VST3 native auxiliary audio-bus contract
+
+`Vst3PluginRegistration` carries the existing ordered
+`AudioProcessorAuxiliaryInputContract`, and discovery transports it through the
+existing `AuxiliaryBusWire` representation. A selected class is restored and its
+processing mode applied before querying actual native bus declarations. Neither
+channel count nor a separate default-instance discovery query determines bus role.
+
+The vendored exact `vst3-host` 49fc189 dependency adds owning-thread,
+non-processing `Plugin::native_audio_bus_info()` in its existing component seam.
+It reads bounded `IComponent::getBusCount/getBusInfo` declarations, retaining
+native roles, names, channel counts and default flags in bus-index order.
+Preparation verifies one native main input at index0, one main output, at most31
+auxiliary inputs, and exact matching Mono or L/R Stereo speaker arrangements.
+Inactive admitted audio buses are activated using the existing host API and all
+metadata/layouts are rechecked. Bus keys are `vst3.audio-input.<native-index>`;
+names may duplicate or change without becoming author identity. Any activation,
+shape, role or arrangement failure refuses preparation. Mixed layouts remain
+separate execution work.
+
+The supervised worker prepares `BusAudioBuffers` once, retains every native slot,
+and supplies main and keyed auxiliary PCM separately. Processing reuses capacity
+for partitions up to the admitted maximum; disconnected buses receive explicit
+silence from the shared runtime, and missing or wrongly sized PCM refuses the
+block. State reentry restores the same class/state, reactivates/rechecks buses and
+uses the same admitted contract. No second mixer, PDC owner, author transaction,
+plugin process or automation evaluator is introduced.
+
+Two source regressions independently reject duplicate main roles, surround
+arrangements with the same channel count, missing/changed prepared metadata and
+unbounded inputs; audio library111 passed/0 failed/14 ignored. These are source
+contracts, not a current native sidechain, performance or vendor qualification.
+A new owned native fixture must exercise actual activation, per-bus processing,
+state changes, reset and routed Undo/save/reopen/public PCM before that claim.
+
+Dependency provenance and the preserved MIT license are in
+`vendor/vst3-host/MONDRIAN-PATCHES.md` and `LICENSE`.
+Four upstream Rust files contain the documented metadata extension; three
+loader files only lose existing trailing whitespace. All other 26 Rust files
+retain their upstream contents. Optional
+upstream features are preserved but not enabled in Mondrian. The vendor package
+has its own workspace boundary and is excluded from the product workspace.
+`cargo metadata` confirms it is not a product member; product all-feature gates
+do not activate upstream GUI/device tooling. The original libc0.2.186 and all
+other registry versions are retained; only the host package source identity
+changes in Cargo.lock.
