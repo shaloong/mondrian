@@ -2389,3 +2389,55 @@ identities and executed test logs. Previous receipts retain their own source
 versions. This qualifies the named Windows source/product/reference slices;
 physical keyboard, screen-reader, macOS, broader vendor/bus/MIDI/editor and
 performance matrices remain under the active original goal.
+
+## Clean native audio reset and current candidate qualification
+
+Clean source `0adaea304c6d6f672ef61c43c0ea4a9f668971fa` was qualified on
+2026-10-08 (local time). The product rebuild finished in 9m06s. The owned CLAP
+and stateful VST3 gain tests both passed, zero failed/ignored, in 172.77s. They
+exercise Auto/Continuous group interpolation, clipboard, joint time/value edits
+and declared-default reset before and after fresh joint-edit archives. Reset
+keeps the processor-owned exact curve, removes all keys and restores the schema
+default; its canonical evaluator also covers that unkeyed state.
+
+The reset matrix verifies missing/locked refusal, unchanged schema, parameter
+identity, unrelated author data and plugin state/bindings, exactly one Undo,
+already-default no-op generations/history, saved Undo retaining live Redo and
+fresh Unicode Undo/Reset archives with empty session history and the same SQLite
+asset. Actual PCM for 257 stereo Float32 frames uses the existing realtime 64/64/129
+and offline 37/59/161 partitions, with unchanged 1e-6 bounds and equal partitioned
+outputs. Static reset output additionally matches the declared native default.
+This qualifies the owned single-main-bus gain references, not auxiliary buses,
+MIDI, plugin editors, third-party vendors or macOS.
+
+Product SHA-256:
+`e50a5a8b51376eb4274a8ce0501b3a78273b8a6249e15c26ca8469cb6f4d71ff`.
+CLAP fixture SHA-256:
+`cb2fa1b4956cedbda4bbaa4b24efa2d16924820c7c7fceb4e4881633f21fd687`.
+VST3 fixture SHA-256:
+`523e714760f9bc47805b3ede7c7fc4399aef7d1bdeef1dcc3832b6da50d9907f`.
+
+The complete Golden gate passed 3/3, all seven stages in every run. Source start
+and end were the same clean 0adaea3, baseline eligible, with dirty diagnostics
+disabled. All processes naturally exited 0, without forced termination, in
+122126/119637/139449ms. Golden executable SHA-256:
+`6ef58b666b027191b357fd128347f4603caa50de9804ae89dacd05f32bc966aa`.
+Aggregate report:
+`target/validation/nle-backlog-complete/20261007T160907Z-complete-golden-9e3612fa/complete-golden-consecutive-report.json`.
+Receipt `acceptance-audio-reset-current-clean.json` preserves native product and
+fixture hashes, exact source, executed counts and logs. Prior 9f/a258 receipts
+retain their own source identities and have not been overwritten.
+
+Before the clean rebuild, diagnostic tests against the explicitly older 9f worker
+passed 2/2 in 172.32s; this did not count as current-source qualification. Initial
+private-schema access was a compile-only test error, corrected to the public
+schema() interface. No runtime path, canonical evaluator, numerical tolerance
+or assertion was weakened. Strict workspace/all-targets/all-features Clippy
+-D warnings, fmt and diff passed before the test commit.
+
+The ROADMAP now leaves current three-platform CI, 4K/CPAL device matrices and
+complete workspace qualification pending rather than inheriting historical
+2026-08 green claims. The current branch is unpushed; native audio/Golden and
+prior focused regressions do not prove these broader gates. Original full goal
+remains active, including actual native auxiliary-bus/sidechain implementation
+and the broader plugin/platform/performance/workflow matrices.
