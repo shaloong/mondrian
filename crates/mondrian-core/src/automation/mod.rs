@@ -2983,79 +2983,111 @@ impl AnimatedProperty {
         delta: f64,
         steps: i8,
     ) -> Result<()> {
-        self.validate()?;
-        self.admit_channels(|candidate| {
-            let identities = candidate.complete_keyframe_selection(ids)?;
-            let contract = candidate
-                .descriptor
-                .schema
-                .numeric
-                .as_ref()
-                .and_then(|contracts| contracts.get(channel_index))
-                .copied()
-                .ok_or_else(|| {
-                    parameter_value_error(
-                        &candidate.descriptor.path,
-                        "numeric channel contract is absent",
-                    )
-                })?;
-            let channel = candidate.channels.get_mut(channel_index).ok_or_else(|| {
-                parameter_value_error(&candidate.descriptor.path, "numeric channel is absent")
-            })?;
-            let (indices, values): (Vec<_>, Vec<_>) = channel
-                .keyframes
-                .iter()
-                .enumerate()
-                .filter(|(_, key)| identities.contains(&key.id))
-                .map(|(index, key)| {
-                    (
-                        index,
-                        match key.value {
-                            AnimationChannelValue::Integer(value) => PropertyValue::Int(value),
-                            AnimationChannelValue::Number(value) => PropertyValue::Double(value),
-                        },
-                    )
-                })
-                .unzip();
-            let shifted = contract.offset_scalars(&values, delta, steps).ok_or_else(|| {
-                parameter_value_error(
-                    &candidate.descriptor.path,
-                    "numeric group increment is invalid",
-                )
-            })?;
-            if values == shifted {
-                return Ok(());
-            }
-            for (index, value) in indices.into_iter().zip(shifted) {
-                channel.keyframes[index].value = match value {
-                    PropertyValue::Int(value) => AnimationChannelValue::Integer(value),
-                    PropertyValue::Double(value) => AnimationChannelValue::Number(value),
-                    _ => {
-                        return Err(parameter_value_error(
-                            &candidate.descriptor.path,
-                            "numeric group changed its value type",
-                        ))
-                    }
-                };
-            }
-            candidate.normalize_channels()
-        })
+        self.transform_selected_keyframes(
+            ids,
+            TimelineTime::ZERO,
+            Some((channel_index, delta, steps)),
+        )
     }
 
     /// Translate a nonempty unique set of complete stable keys by an exact delta.
     /// All channels move together and validate the final topology before publication.
     /// Typed scalar values are never evaluated or reconstructed through a float projection.
     pub fn shift_keyframes(&mut self, ids: &[KeyframeId], delta: TimelineTime) -> Result<()> {
+        self.transform_selected_keyframes(ids, delta, None)
+    }
+
+    /// Translate complete keys in every channel and offset one numeric channel atomically.
+    /// The value contract derives one bounded common displacement from canonical scalars.
+    /// Exact times, typed values, IDs and tangent intent survive one final normalization.
+    pub fn transform_keyframes(
+        &mut self,
+        ids: &[KeyframeId],
+        channel_index: usize,
+        time_delta: TimelineTime,
+        value_delta: f64,
+        steps: i8,
+    ) -> Result<()> {
+        self.transform_selected_keyframes(
+            ids,
+            time_delta,
+            Some((channel_index, value_delta, steps)),
+        )
+    }
+
+    fn transform_selected_keyframes(
+        &mut self,
+        ids: &[KeyframeId],
+        time_delta: TimelineTime,
+        value_edit: Option<(usize, f64, i8)>,
+    ) -> Result<()> {
         self.validate()?;
         self.admit_channels(|candidate| {
             let identities = candidate.complete_keyframe_selection(ids)?;
-            if delta.is_zero() {
+            let mut value_changed = false;
+            if let Some((channel_index, delta, steps)) = value_edit {
+                let contract = candidate
+                    .descriptor
+                    .schema
+                    .numeric
+                    .as_ref()
+                    .and_then(|contracts| contracts.get(channel_index))
+                    .copied()
+                    .ok_or_else(|| {
+                        parameter_value_error(
+                            &candidate.descriptor.path,
+                            "numeric channel contract is absent",
+                        )
+                    })?;
+                let channel = candidate.channels.get_mut(channel_index).ok_or_else(|| {
+                    parameter_value_error(&candidate.descriptor.path, "numeric channel is absent")
+                })?;
+                let (indices, values): (Vec<_>, Vec<_>) = channel
+                    .keyframes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, key)| identities.contains(&key.id))
+                    .map(|(index, key)| {
+                        (
+                            index,
+                            match key.value {
+                                AnimationChannelValue::Integer(value) => PropertyValue::Int(value),
+                                AnimationChannelValue::Number(value) => {
+                                    PropertyValue::Double(value)
+                                }
+                            },
+                        )
+                    })
+                    .unzip();
+                let shifted = contract.offset_scalars(&values, delta, steps).ok_or_else(|| {
+                    parameter_value_error(
+                        &candidate.descriptor.path,
+                        "numeric group increment is invalid",
+                    )
+                })?;
+                value_changed = values != shifted;
+                if value_changed {
+                    for (index, value) in indices.into_iter().zip(shifted) {
+                        channel.keyframes[index].value = match value {
+                            PropertyValue::Int(value) => AnimationChannelValue::Integer(value),
+                            PropertyValue::Double(value) => AnimationChannelValue::Number(value),
+                            _ => {
+                                return Err(parameter_value_error(
+                                    &candidate.descriptor.path,
+                                    "numeric group changed its value type",
+                                ))
+                            }
+                        };
+                    }
+                }
+            }
+            if time_delta.is_zero() && !value_changed {
                 return Ok(());
             }
             for channel in &mut candidate.channels {
                 for key in &mut channel.keyframes {
                     if identities.contains(&key.id) {
-                        key.time = key.time.checked_add(delta)?;
+                        key.time = key.time.checked_add(time_delta)?;
                     }
                 }
                 channel.keyframes.sort_by_key(|key| key.time);
@@ -3760,6 +3792,23 @@ impl AnimatedProperty {
                 self.ensure_path(&path)?;
                 self.shift_keyframes(&keyframe_ids, delta)
             }
+            PropertyMutation::TransformKeyframes {
+                path,
+                channel_index,
+                keyframe_ids,
+                time_delta,
+                value_delta,
+                steps,
+            } => {
+                self.ensure_path(&path)?;
+                self.transform_keyframes(
+                    &keyframe_ids,
+                    channel_index,
+                    time_delta,
+                    value_delta,
+                    steps,
+                )
+            }
             PropertyMutation::OffsetKeyframeValues {
                 path,
                 channel_index,
@@ -4329,6 +4378,20 @@ impl PropertyBag {
             PropertyMutation::ShiftKeyframes { path, keyframe_ids, delta } => {
                 self.require_property_mut(&path)?.shift_keyframes(&keyframe_ids, delta)
             }
+            PropertyMutation::TransformKeyframes {
+                path,
+                channel_index,
+                keyframe_ids,
+                time_delta,
+                value_delta,
+                steps,
+            } => self.require_property_mut(&path)?.transform_keyframes(
+                &keyframe_ids,
+                channel_index,
+                time_delta,
+                value_delta,
+                steps,
+            ),
             PropertyMutation::OffsetKeyframeValues {
                 path,
                 channel_index,
@@ -4455,6 +4518,21 @@ pub enum PropertyMutation {
         /// Signed exact owner-time translation.
         delta: TimelineTime,
     },
+    /// Translate complete keys and offset one channel as one admitted mutation.
+    TransformKeyframes {
+        /// Address of the owning property.
+        path: String,
+        /// Declared numeric channel to offset; every channel shares the time translation.
+        channel_index: usize,
+        /// Nonempty unique complete key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Signed exact owner-time translation.
+        time_delta: TimelineTime,
+        /// Finite common increment in author value units.
+        value_delta: f64,
+        /// Signed value increment count.
+        steps: i8,
+    },
     /// Offset one channel of complete stable keys by a common bounded displacement.
     OffsetKeyframeValues {
         /// Address of the owning property.
@@ -4546,6 +4624,7 @@ impl PropertyMutation {
             | Self::RemoveKeyframe { path, .. }
             | Self::RemoveKeyframes { path, .. }
             | Self::ShiftKeyframes { path, .. }
+            | Self::TransformKeyframes { path, .. }
             | Self::OffsetKeyframeValues { path, .. }
             | Self::MoveKeyframe { path, .. }
             | Self::UpdateKeyframesInterpolation { path, .. }
@@ -4589,6 +4668,21 @@ impl PropertyMutation {
             ShiftKeyframes { path, keyframe_ids, delta } => {
                 ShiftKeyframes { path: f(path), keyframe_ids, delta }
             }
+            TransformKeyframes {
+                path,
+                channel_index,
+                keyframe_ids,
+                time_delta,
+                value_delta,
+                steps,
+            } => TransformKeyframes {
+                path: f(path),
+                channel_index,
+                keyframe_ids,
+                time_delta,
+                value_delta,
+                steps,
+            },
             OffsetKeyframeValues { path, channel_index, keyframe_ids, delta, steps } => {
                 OffsetKeyframeValues {
                     path: f(path),
@@ -5263,6 +5357,167 @@ impl crate::AuthoringFootprint for PropertyBag {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn combined_complete_key_transform_moves_all_channels_and_preserves_other_values() {
+        let contract =
+            ParameterNumericContract::closed(0.0, 1.0, None, ParameterInvalidValuePolicy::Reject)
+                .expect("range");
+        for mode in [
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let descriptor = PropertyDescriptor::new(
+                "test.transform",
+                "Vector",
+                PropertyValue::DoubleVec2([0.0, 0.0]),
+            )
+            .with_animatable(true)
+            .with_numeric_contract(ParameterUnit::Unitless, contract);
+            let mut property = AnimatedProperty::from_descriptor(descriptor);
+            property.set_animation_enabled(true);
+            for (n, values) in [(0, [0.25, 0.2]), (1, [0.75, 0.5]), (2, [0.5, 0.4])] {
+                property
+                    .set_exact_keyframe(Keyframe::linear(
+                        TimelineTime::new(n, 3).expect("time"),
+                        PropertyValue::DoubleVec2(values),
+                    ))
+                    .expect("seed");
+            }
+            let ids =
+                property.channels()[0].keyframes().iter().map(|key| key.id).collect::<Vec<_>>();
+            property.update_keyframes_interpolation(&ids, mode).expect("mode");
+            let original = property.clone();
+            for (selection, channel, time, value) in [
+                (vec![], 0, TimelineTime::ZERO, 0.0),
+                (vec![ids[0], ids[0]], 0, TimelineTime::ZERO, 0.0),
+                (vec![ids[0], KeyframeId::new()], 0, TimelineTime::ZERO, 0.0),
+                (ids.clone(), 9, TimelineTime::ONE_THIRD, 0.125),
+                (ids[..2].to_vec(), 0, TimelineTime::ONE_THIRD, 0.125),
+                (ids.clone(), 0, TimelineTime::ONE_THIRD, f64::NAN),
+                (
+                    ids.clone(),
+                    0,
+                    TimelineTime::new(i64::MAX, 1).expect("huge"),
+                    0.125,
+                ),
+            ] {
+                assert!(property.transform_keyframes(&selection, channel, time, value, 1).is_err());
+                assert_eq!(
+                    property, original,
+                    "joint edit is all or nothing across every channel"
+                );
+            }
+            let translation = TimelineTime::new(1, 7).expect("shift");
+            property
+                .transform_keyframes(&ids, 0, translation, 0.125, 1)
+                .expect("joint edit");
+            property.validate().expect("final topology and constraints");
+            for n in -3..=30 {
+                let time = TimelineTime::new(n, 31).expect("query");
+                let PropertyValue::DoubleVec2(before) = original.evaluate(time) else {
+                    panic!("vector")
+                };
+                let PropertyValue::DoubleVec2(after) =
+                    property.evaluate(time.checked_add(translation).expect("shifted query"))
+                else {
+                    panic!("vector")
+                };
+                assert!((after[0] - before[0] - 0.125).abs() < 1e-12);
+                assert!((after[1] - before[1]).abs() < 1e-12);
+            }
+            for (channel, source) in property.channels().iter().zip(original.channels()) {
+                for (key, source) in channel.keyframes().iter().zip(source.keyframes()) {
+                    assert_eq!(key.id, source.id);
+                    assert_eq!(
+                        key.time.checked_sub(source.time).expect("offset"),
+                        translation
+                    );
+                    assert_eq!(key.temporal_flags, source.temporal_flags);
+                    assert_eq!(key.interp_in, source.interp_in);
+                    assert_eq!(key.interp_out, source.interp_out);
+                }
+            }
+            let mut via_mutation = original.clone();
+            let mutation = PropertyMutation::TransformKeyframes {
+                path: "test.transform".into(),
+                channel_index: 0,
+                keyframe_ids: ids,
+                time_delta: translation,
+                value_delta: 0.125,
+                steps: 1,
+            };
+            assert_eq!(mutation.path(), "test.transform");
+            let mut bag = PropertyBag::default();
+            bag.upsert(original.clone());
+            bag.define(PropertyDescriptor::new(
+                "unrelated",
+                "Other",
+                PropertyValue::Int(42),
+            ));
+            let unrelated = bag.property("unrelated").expect("other").clone();
+            let nested = mutation.clone().map_path(|path| format!("nested.{path}"));
+            assert_eq!(nested.path(), "nested.test.transform");
+            bag.apply_mutation(
+                nested.map_path(|path| path.trim_start_matches("nested.").to_owned()),
+            )
+            .expect("owner bag dispatch");
+            assert_eq!(bag.property("test.transform"), Some(&property));
+            assert_eq!(bag.property("unrelated"), Some(&unrelated));
+            via_mutation.apply_mutation(mutation).expect("shared mutation dispatch");
+            assert_eq!(via_mutation, property);
+            let restored: AnimatedProperty =
+                serde_json::from_slice(&serde_json::to_vec(&property).expect("encode"))
+                    .expect("decode");
+            assert_eq!(restored, property);
+        }
+    }
+
+    #[test]
+    fn combined_integer_key_transform_retains_values_above_float_integer_precision() {
+        let start = (1_i64 << 53) + 1;
+        let descriptor = PropertyDescriptor::new(
+            "test.integer.transform",
+            "Integer",
+            PropertyValue::Int(start),
+        )
+        .with_animatable(true)
+        .with_numeric_contract(
+            ParameterUnit::Unitless,
+            ParameterNumericContract::closed(
+                0.0,
+                i64::MAX as f64,
+                Some(1.0),
+                ParameterInvalidValuePolicy::Reject,
+            )
+            .expect("range"),
+        );
+        let mut property = AnimatedProperty::from_descriptor(descriptor);
+        property.set_animation_enabled(true);
+        for (n, value) in [(0, start), (1, start + 2)] {
+            property
+                .set_exact_keyframe(Keyframe::from_preset(
+                    TimelineTime::new(n, 3).expect("time"),
+                    PropertyValue::Int(value),
+                    InterpolationType::Hold,
+                ))
+                .expect("seed exact integer");
+        }
+        let ids = property.channels()[0].keyframes().iter().map(|key| key.id).collect::<Vec<_>>();
+        let delta = TimelineTime::new(1, 7).expect("shift");
+        property.transform_keyframes(&ids, 0, delta, 1.0, 3).expect("exact joint edit");
+        for (n, id) in ids.iter().enumerate() {
+            let key = property.keyframe_by_id(*id).expect("same complete key");
+            assert_eq!(key.value, PropertyValue::Int(start + n as i64 * 2 + 3));
+            assert_eq!(
+                key.time,
+                TimelineTime::new(n as i64, 3)
+                    .expect("origin")
+                    .checked_add(delta)
+                    .expect("shifted")
+            );
+        }
+    }
+
     #[test]
     fn selected_key_value_offset_preserves_exact_author_keys_and_constraints() {
         for mode in [

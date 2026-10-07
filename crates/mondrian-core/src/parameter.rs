@@ -500,34 +500,7 @@ impl ExactAutomationCurve {
         ids: &[KeyframeId],
         delta: TimelineTime,
     ) -> Result<(), AutomationError> {
-        self.validate()?;
-        if ids.is_empty() {
-            return Err(AutomationError::EmptyKeySelection);
-        }
-        let identities = ids.iter().copied().collect::<HashSet<_>>();
-        if identities.len() != ids.len() {
-            return Err(AutomationError::DuplicateKeyframeIdentity);
-        }
-        if self.keyframes.iter().filter(|key| identities.contains(&key.id)).count() != ids.len() {
-            return Err(AutomationError::UnknownKeyframe);
-        }
-        if delta.is_zero() {
-            return Ok(());
-        }
-        let mut candidate = self.clone();
-        for key in &mut candidate.keyframes {
-            if identities.contains(&key.id) {
-                key.time = key.time.checked_add(delta)?;
-            }
-        }
-        candidate.keyframes.sort_by_key(|key| key.time);
-        if candidate.keyframes.windows(2).any(|pair| pair[0].time == pair[1].time) {
-            return Err(AutomationError::NonIncreasingTime);
-        }
-        candidate.normalize_constrained_tangents()?;
-        candidate.validate()?;
-        *self = candidate;
-        Ok(())
+        self.transform_selected_keyframes(ids, delta, None)
     }
 
     /// Offset stable keys with one common definition-bounded displacement.
@@ -539,6 +512,29 @@ impl ExactAutomationCurve {
         contract: crate::ParameterNumericContract,
         delta: f64,
         steps: i8,
+    ) -> Result<(), AutomationError> {
+        self.transform_selected_keyframes(ids, TimelineTime::ZERO, Some((contract, delta, steps)))
+    }
+
+    /// Translate exact times and offset values of the complete selection atomically.
+    /// One shared bounded value displacement retains spacing at definition limits.
+    /// Only the final topology normalizes constrained tangents; failures publish nothing.
+    pub fn transform_keyframes(
+        &mut self,
+        ids: &[KeyframeId],
+        time_delta: TimelineTime,
+        contract: crate::ParameterNumericContract,
+        value_delta: f64,
+        steps: i8,
+    ) -> Result<(), AutomationError> {
+        self.transform_selected_keyframes(ids, time_delta, Some((contract, value_delta, steps)))
+    }
+
+    fn transform_selected_keyframes(
+        &mut self,
+        ids: &[KeyframeId],
+        time_delta: TimelineTime,
+        value_edit: Option<(crate::ParameterNumericContract, f64, i8)>,
     ) -> Result<(), AutomationError> {
         self.validate()?;
         if ids.is_empty() {
@@ -558,10 +554,14 @@ impl ExactAutomationCurve {
         if indices.len() != ids.len() {
             return Err(AutomationError::UnknownKeyframe);
         }
-        let shifted = contract
-            .offset_scalars(&values, delta, steps)
-            .ok_or(AutomationError::InvalidValueIncrement)?;
-        if shifted == values {
+        let shifted = if let Some((contract, delta, steps)) = value_edit {
+            contract
+                .offset_scalars(&values, delta, steps)
+                .ok_or(AutomationError::InvalidValueIncrement)?
+        } else {
+            values.clone()
+        };
+        if time_delta.is_zero() && shifted == values {
             return Ok(());
         }
         let mut candidate = self.clone();
@@ -569,7 +569,13 @@ impl ExactAutomationCurve {
             let crate::PropertyValue::Double(value) = value else {
                 return Err(AutomationError::InvalidValueIncrement);
             };
-            candidate.keyframes[index].value = value;
+            let key = &mut candidate.keyframes[index];
+            key.time = key.time.checked_add(time_delta)?;
+            key.value = value;
+        }
+        candidate.keyframes.sort_by_key(|key| key.time);
+        if candidate.keyframes.windows(2).any(|pair| pair[0].time == pair[1].time) {
+            return Err(AutomationError::NonIncreasingTime);
         }
         candidate.normalize_constrained_tangents()?;
         candidate.validate()?;
@@ -1515,6 +1521,116 @@ fn bezier_value(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn combined_keyframe_time_translation_keeps_raw_values_when_group_value_bound_is_zero() {
+        let contract = crate::ParameterNumericContract::closed(
+            0.0,
+            f64::MAX,
+            None,
+            crate::ParameterInvalidValuePolicy::Reject,
+        )
+        .expect("range");
+        let mut curve =
+            ExactAutomationCurve::new(ParameterId::new_static("test.raw.transform"), 0.0)
+                .expect("curve");
+        curve
+            .set_keyframe(ExactAutomationKeyframe::linear(TimelineTime::ZERO, -0.0))
+            .expect("zero");
+        curve
+            .set_keyframe(ExactAutomationKeyframe::linear(TimelineTime::ONE, f64::MAX))
+            .expect("bound");
+        let ids = curve.keyframes.iter().map(|key| key.id).collect::<Vec<_>>();
+        curve
+            .transform_keyframes(&ids, TimelineTime::ONE_THIRD, contract, f64::MAX, 5)
+            .expect("time moves while shared value displacement is zero");
+        assert_eq!(curve.keyframes[0].value.to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(curve.keyframes[1].value.to_bits(), f64::MAX.to_bits());
+        assert_eq!(curve.keyframes[0].time, TimelineTime::ONE_THIRD);
+        assert_eq!(
+            curve.keyframes[1].time,
+            TimelineTime::new(4, 3).expect("end")
+        );
+    }
+
+    #[test]
+    fn combined_keyframe_transform_preserves_constrained_signal_and_refuses_partial_publication() {
+        use crate::{ParameterInvalidValuePolicy, ParameterNumericContract};
+        let contract =
+            ParameterNumericContract::closed(0.0, 1.0, None, ParameterInvalidValuePolicy::Reject)
+                .expect("contract");
+        for mode in [
+            InterpolationType::Bezier,
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let mut curve =
+                ExactAutomationCurve::new(ParameterId::new_static("test.transform"), 0.0)
+                    .expect("curve");
+            for (n, value) in [(0, 0.25), (1, 0.75), (2, 0.5)] {
+                curve
+                    .set_keyframe(ExactAutomationKeyframe::linear(
+                        TimelineTime::new(n, 3).expect("time"),
+                        value,
+                    ))
+                    .expect("seed");
+            }
+            let ids = curve.keyframes.iter().map(|key| key.id).collect::<Vec<_>>();
+            curve.set_keyframes_interpolation(&ids, mode).expect("mode");
+            let original = curve.clone();
+            for (selection, time, value) in [
+                (vec![], TimelineTime::ZERO, 0.0),
+                (vec![ids[0], ids[0]], TimelineTime::ZERO, 0.0),
+                (vec![ids[0], KeyframeId::new()], TimelineTime::ZERO, 0.0),
+                (ids[..2].to_vec(), TimelineTime::ONE_THIRD, 0.125),
+                (ids.clone(), TimelineTime::ONE_THIRD, f64::NAN),
+                (
+                    ids.clone(),
+                    TimelineTime::new(i64::MAX, 1).expect("huge"),
+                    0.125,
+                ),
+            ] {
+                assert!(curve.transform_keyframes(&selection, time, contract, value, 1).is_err());
+                assert_eq!(
+                    curve, original,
+                    "neither axis can publish after failed group admission"
+                );
+            }
+            curve
+                .transform_keyframes(&ids, TimelineTime::ZERO, contract, 0.0, 1)
+                .expect("no-op");
+            assert_eq!(curve, original);
+            let translation = TimelineTime::new(1, 7).expect("translation");
+            curve
+                .transform_keyframes(&ids, translation, contract, 0.125, 1)
+                .expect("joint edit");
+            curve.validate().expect("final constraints");
+            for (key, source) in curve.keyframes.iter().zip(&original.keyframes) {
+                assert_eq!(key.id, source.id);
+                assert_eq!(
+                    key.time.checked_sub(source.time).expect("offset"),
+                    translation
+                );
+                assert_eq!(key.value, source.value + 0.125);
+                assert_eq!(key.tangent_mode, source.tangent_mode);
+                assert_eq!(key.interpolation_to_next, source.interpolation_to_next);
+                assert_eq!(key.in_handle, source.in_handle);
+                assert_eq!(key.out_handle, source.out_handle);
+            }
+            for n in -3..=30 {
+                let time = TimelineTime::new(n, 31).expect("query");
+                let expected = original.evaluate(time).expect("original output") + 0.125;
+                let actual = curve
+                    .evaluate(time.checked_add(translation).expect("shifted query"))
+                    .expect("transformed output");
+                assert!((actual - expected).abs() < 1e-12, "{mode:?} sample {n}");
+            }
+            let restored: ExactAutomationCurve =
+                serde_json::from_slice(&serde_json::to_vec(&curve).expect("encode"))
+                    .expect("decode");
+            assert_eq!(restored, curve);
+        }
+    }
+
     #[test]
     fn clipboard_capture_retains_raw_values_order_and_complete_constraints() {
         let mut curve =

@@ -882,3 +882,20 @@ replaces keys at the supplied exact times on a detached candidate, normalizes
 constraints once against final neighbors and validates before publication.
 Invalid groups cannot partially replace destination keys. This is the numeric
 foundation for focused audio clipboard integration; App wiring remains separate.
+
+### Atomic complete-key time and value transforms
+
+Core exposes one combined transform for ExactAutomationCurve and AnimatedProperty.
+It validates the complete stable selection, derives a common definition-bounded
+value displacement from canonical scalars and translates exact author times on
+a detached candidate. Final ordering, collisions and constrained tangents are
+admitted once before publication. A failure on either axis cannot publish the
+other axis. Time-only and value-only entry points share this same implementation.
+
+AnimatedProperty moves complete keys in every channel and offsets only the
+explicit numeric channel. Integer values retain integer arithmetic, floating
+no-op displacement retains raw signed-zero bits, and manual controls remain
+relative to the keys. PropertyMutation::TransformKeyframes uses the same contract
+through property/bag dispatch and nested owner path mapping. This is the atomic
+foundation for group pointer gestures; App/UI authoring and input acceptance
+remain separate work and are not implied by the Core qualification.

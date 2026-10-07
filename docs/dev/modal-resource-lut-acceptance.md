@@ -1990,3 +1990,23 @@ goal remains active, including group pointer/marquee/reset and the wider plugin,
 platform, performance and product interaction matrices. No push performed.
 
 Current App test binary SHA256: `999993A5A46ADFE40C7B155F2FEAE2BCC9D399B78A121009F5E73A6D868EF5DC`.
+
+## Combined complete-key transform foundation
+
+Continuation from `47fa03a` adds Core's atomic exact-time plus bounded-value group
+transform and a single PropertyMutation dispatch. Existing single-axis operations
+reuse the same admission; no author compatibility path or second evaluator is
+introduced. Four new cases verify constrained output against independent original
+curve evaluation, metadata/control retention, joint refusal on invalid selection,
+collision/nonfinite/overflow, multi-channel time translation, untouched component
+values, integer precision above 2^53, raw signed-zero retention at common limits,
+and nested property/bag dispatch. The initial unavailable Hold test constructor
+was a compile-only fixture error, corrected to `from_preset(Hold)`.
+
+Full Core qualification: 476 library tests passed, zero failed, one ignored
+(6.04s); 26 public integration tests and one replay-tool test also passed.
+Zero-test helper/doc targets add no executed-case evidence. Strict full workspace
+Clippy with all targets/features and `-D warnings` passed (4m56s); format and diff
+checks passed. This is foundation acceptance. App/UI group pointer handling,
+marquee/reset, gesture history/reopen and current native encoded output are still
+required; no new App runtime or native product qualification is implied.
