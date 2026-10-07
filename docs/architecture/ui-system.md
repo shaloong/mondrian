@@ -4012,3 +4012,18 @@ The native window-role fixture uses an explicit temporary preference path. Its
 actual Windows cycle checks fixed Startup/resizable Workspace, remembered normal
 size/maximization, stable Window/Surface/Device authority and bounded resource
 shutdown independently of the user's machine preference and plugin selections.
+
+### Inspection survives author-lease invalidation
+
+A forced curve replacement after owner lock or intervening author edits retains
+only inspection state matched by the existing panel and exact owner view key.
+Stable key IDs, viewport and focus can survive an outstanding author gesture;
+transient point geometry and gesture callbacks cannot. Non-key point selection
+is transferable only from an inactive view with identical geometry. Changing
+the inspection owner still discards the old widget identity.
+
+Reusing the inspection widget ID also carries an obligation to release the old
+pointer capture on the next routed event. The replacement has no author gesture
+to finish or mutate. This keeps focus usable for read-only Copy while terminating
+the stale drag through the existing capture protocol. Active viewport pans and
+menus remain excluded from view snapshots.

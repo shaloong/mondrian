@@ -1950,3 +1950,43 @@ The prior clean production/native receipts remain tied to their named revisions;
 this does not assert a new packaged product build. Wider owner-domain, group
 pointer/marquee/reset, plugin/platform/performance and full-goal matrices remain
 open. No push was performed.
+
+## Read-only owner replacement and menu acceptance
+
+Continuation from `8161656`: real Host input reproduced two product failures.
+After locking a Track during an audio curve drag, late release lost inspection
+focus (0 passed / 1 failed / 0 ignored, 2.83s). Preserving inspection identity
+then exposed retained old pointer capture (0/1/0, 2.18s). The shared CurveEditor
+view snapshot now preserves stable inspection state for the same owner while
+excluding author drafts, geometry and callbacks. A deferred capture termination
+obligation releases the discarded drag on the next routed event. Another owner
+still cannot inherit inspection identity.
+
+Actual locked audio late-release/Copy/Cut/Paste qualification passed 1/0/0 in
+2.49s. All CurveEditor module regressions passed 89/0/0 in 3.73s. Real root Edit
+menu tests passed 7/0/0 in 15.57s, including locked visual Copy by menu click,
+refused Cut/Paste without Clip fallback, and local Shift+F10/Enter Copy. An
+initial local-menu fixture sent Escape after the root menu had already closed,
+clearing the curve selection by design; correcting that input sequence preserved
+all selection and author-state assertions. This fixture mistake is not a product
+menu failure.
+
+Full App library qualification passed 2608/0/68 ignored in 372.25s. It explicitly
+includes numeric and structured curve owner invalidation, modal Tab containment
+and focus restoration, pending resource modal Tab after disabled Apply, stale
+resource inspection refusal and real Cube resource Undo/save/reopen pixels.
+Ignored native and performance cases are not included in that pass count.
+
+Final strict workspace/all-target/all-feature Clippy with `-D warnings` passed
+in 2m19s, followed by formatting and diff checks. Explicit ignored native resource
+qualification passed 5/0/0 in 8.24s: actual Host helper completion admission,
+native path resource cancellation/Undo/save/reopen/output pixels, bounded helper
+failures and supervised child cancellation/timeout/retry reaping. These use the
+current test source with the unchanged named `3d26dfc` product helper (SHA256
+`A94F1B5BADC3DD559C054725360E3123E6BDE1700C0BFDA6664A2269B6F6FF1E`).
+This continuation does not rebuild the packaged product or rerun encoded Golden
+exports. Those prior receipts keep their explicit source scope. The full original
+goal remains active, including group pointer/marquee/reset and the wider plugin,
+platform, performance and product interaction matrices. No push performed.
+
+Current App test binary SHA256: `999993A5A46ADFE40C7B155F2FEAE2BCC9D399B78A121009F5E73A6D868EF5DC`.

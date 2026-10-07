@@ -5694,6 +5694,48 @@ mod tests {
             history
         );
         assert!(router.captured().is_none());
+        if boundary == 4 {
+            use mondrian_ui_core::types::KeyCode;
+            let refreshed_id =
+                panel_curve_with_point_count(host.active_root(), PanelKind::Mixer, false, 3)
+                    .expect("locked target remains inspectable");
+            assert_eq!(router.focused(), Some(refreshed_id));
+            let generation = host.app_state().project_author_generation();
+            for key in [KeyCode::A, KeyCode::C, KeyCode::X, KeyCode::V] {
+                router.route(
+                    UiEvent::KeyDown { key, modifiers: Modifiers::ctrl() },
+                    &mut WidgetTreeView::new(host.active_root_mut()),
+                    &dispatch,
+                );
+                host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            }
+            assert_eq!(
+                host.app_state().active_clipboard_kind(),
+                Some(crate::app::AppClipboardKind::AudioAutomation),
+                "late owner lock must retain focused Copy without admitting Cut or Paste"
+            );
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("locked owner")
+                .author_state_eq_ignoring_revision(&after));
+            assert_eq!(host.app_state().project_author_generation(), generation);
+            assert_eq!(
+                host.app_state().authoring_history().expect("history").diagnostics(),
+                history
+            );
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let editor = tree
+                .get(refreshed_id)
+                .expect("readonly curve")
+                .as_any()
+                .expect("type")
+                .downcast_ref::<mondrian_ui_widgets::CurveEditor>()
+                .expect("editor");
+            assert!(editor.can_focus() && !editor.is_editable());
+            assert_eq!(editor.selected_keyframe_ids(), vec![keyframe_id]);
+            assert!(!editor.has_active_pointer_interaction());
+        }
     }
 
     #[test]
@@ -6376,6 +6418,7 @@ mod tests {
         CutShortcut,
         CutCustomShortcut,
         CopyPaste,
+        ReadOnlyCopy,
         Cancel,
         EmptyCut,
     }
@@ -6420,6 +6463,11 @@ mod tests {
         assert_root_curve_menu_operation(RootCurveMenuOperation::EmptyCut);
     }
 
+    #[test]
+    fn root_edit_menu_locked_curve_copies_and_refuses_cut_paste_without_clip_fallback() {
+        assert_root_curve_menu_operation(RootCurveMenuOperation::ReadOnlyCopy);
+    }
+
     fn assert_root_curve_menu_operation(operation: RootCurveMenuOperation) {
         use mondrian_core::automation::{Keyframe, PropertyMutation};
         use mondrian_core::{PropertyHost, TimeScale};
@@ -6447,6 +6495,9 @@ mod tests {
                 keyframe: Keyframe::linear(time, mondrian_core::PropertyValue::Float(value)),
             })
             .expect("seed key");
+        }
+        if operation == RootCurveMenuOperation::ReadOnlyCopy {
+            sequence.video_tracks[0].is_locked = true;
         }
         state.selection.selected_clips =
             vec![crate::app::SelectedClipRef { track_id, clip_id, is_video_track: true }];
@@ -6566,6 +6617,7 @@ mod tests {
                 + spacing.menu_popup_padding
                 + spacing.menu_item_height * 3.5,
         );
+        let copy_point = Point::new(cut_point.x, cut_point.y + spacing.menu_item_height);
         drop(theme);
         let click = |position| {
             [
@@ -6597,6 +6649,12 @@ mod tests {
             }
             RootCurveMenuOperation::Cancel | RootCurveMenuOperation::CancelAfterFileHover => {
                 events.push(UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() })
+            }
+            RootCurveMenuOperation::ReadOnlyCopy => {
+                events.extend(click(copy_point));
+                events.extend(click(menu_point));
+                events.push(UiEvent::KeyDown { key: KeyCode::X, modifiers: Modifiers::ctrl() });
+                events.push(UiEvent::KeyDown { key: KeyCode::V, modifiers: Modifiers::ctrl() });
             }
             RootCurveMenuOperation::CopyPaste => {
                 events.push(UiEvent::KeyDown { key: KeyCode::C, modifiers: Modifiers::ctrl() });
@@ -6678,6 +6736,68 @@ mod tests {
                 expected,
                 "cancel retains the original local selection"
             );
+            return;
+        }
+        if operation == RootCurveMenuOperation::ReadOnlyCopy {
+            assert_eq!(keys.len(), 3);
+            assert!(sequence.author_state_eq_ignoring_revision(&original));
+            assert_eq!(host.app_state().project_author_generation(), generation);
+            assert_eq!(
+                host.app_state().active_clipboard_kind(),
+                Some(crate::app::AppClipboardKind::AnimationKeyframes)
+            );
+            assert_eq!(
+                host.app_state()
+                    .authoring_history()
+                    .expect("history")
+                    .diagnostics()
+                    .undo_entries,
+                history_before
+            );
+            for event in [
+                UiEvent::KeyDown { key: KeyCode::F10, modifiers: Modifiers::shift() },
+                UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            ] {
+                assert_eq!(
+                    router.route(
+                        event,
+                        &mut WidgetTreeView::new(host.active_root_mut()),
+                        &dispatch
+                    ),
+                    EventResult::Handled,
+                    "local menu has only Copy available"
+                );
+                host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            }
+            assert_eq!(router.focused(), Some(curve_id));
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("local menu")
+                .author_state_eq_ignoring_revision(&original));
+            assert_eq!(host.app_state().project_author_generation(), generation);
+            assert_eq!(
+                host.app_state()
+                    .authoring_history()
+                    .expect("history")
+                    .diagnostics()
+                    .undo_entries,
+                history_before
+            );
+            assert_eq!(
+                host.app_state().active_clipboard_kind(),
+                Some(crate::app::AppClipboardKind::AnimationKeyframes)
+            );
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let editor = tree
+                .get(curve_id)
+                .expect("locked curve")
+                .as_any()
+                .expect("type")
+                .downcast_ref::<mondrian_ui_widgets::CurveEditor>()
+                .expect("editor");
+            assert!(editor.can_focus() && !editor.is_editable());
+            assert_eq!(editor.selected_keyframe_ids().len(), 3);
             return;
         }
         if operation == RootCurveMenuOperation::CopyPaste {
@@ -7429,10 +7549,31 @@ mod tests {
             host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
             let after = host.app_state().active_sequence().expect("intervening").clone();
             let history = host.app_state().authoring_history().expect("history").diagnostics();
-            assert!(
-                WidgetTreeView::new(host.active_root_mut()).get(curve_id).is_none(),
-                "invalid author lease must discard the captured curve before transient deferral"
-            );
+            {
+                let tree = WidgetTreeView::new(host.active_root_mut());
+                if invalidation == 0 {
+                    assert!(
+                        tree.get(curve_id).is_none(),
+                        "different inspection owner cannot retain focus"
+                    );
+                } else {
+                    let editor = tree
+                        .get(curve_id)
+                        .expect("same inspection owner")
+                        .as_any()
+                        .expect("type")
+                        .downcast_ref::<mondrian_ui_widgets::CurveEditor>()
+                        .expect("curve");
+                    assert!(
+                        !editor.has_active_pointer_interaction(),
+                        "invalid author lease must discard the draft before transient deferral"
+                    );
+                    assert_eq!(router.focused(), Some(curve_id));
+                    if invalidation == 1 {
+                        assert!(editor.can_focus() && !editor.is_editable());
+                    }
+                }
+            }
             for event in [
                 UiEvent::MouseMove {
                     position: Point::new(point.x + 22.0, point.y - 22.0),

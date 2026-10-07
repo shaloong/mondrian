@@ -358,11 +358,12 @@ struct CurvePointMetadata {
 
 type CurveBoundaryOrigin = [Option<(usize, CurvePoint, CurvePointMetadata)>; 2];
 
-/// Inactive curve selection and focus, scoped to an explicit owner view key.
+/// Curve inspection selection and focus, scoped to an explicit owner view key.
 /// This snapshot contains no pointer capture, author draft or callbacks.
 #[derive(Debug, Clone)]
 pub struct CurveEditorViewState {
     viewport: CurveViewport,
+    release_previous_capture: bool,
     view_key: String,
     id: WidgetId,
     points: Option<Vec<CurvePoint>>,
@@ -1138,17 +1139,22 @@ impl CurveEditor {
         self
     }
 
-    /// Capture inactive selection and focus; live drafts are never transferable.
+    /// Capture inspection selection and focus without transferring an author draft.
+    /// During an author gesture only stable key identities can survive replacement;
+    /// transient geometry, pointer capture and callbacks stay with the old widget.
+    /// An outstanding viewport pan or menu must finish before its view transfers.
     pub fn view_state(&self) -> Option<CurveEditorViewState> {
-        if self.has_active_pointer_interaction()
-            || self.gesture.is_some()
-            || self.context_menu.is_some()
-        {
+        if self.panning.is_some() || self.context_menu.is_some() {
             return None;
         }
-        let selected = self.selected.and_then(|index| self.point_target(index));
+        let author_draft = self.has_active_pointer_interaction() || self.gesture.is_some();
+        let selected = self
+            .selected
+            .and_then(|index| self.point_target(index))
+            .filter(|target| !author_draft || matches!(target, CurvePointTarget::Keyframe(_)));
         Some(CurveEditorViewState {
             viewport: self.viewport,
+            release_previous_capture: author_draft || self.pending_capture_release,
             view_key: self.view_key.clone()?,
             id: self.id,
             points: selected
@@ -1176,6 +1182,8 @@ impl CurveEditor {
         }
         self.viewport = state.viewport;
         self.id = state.id;
+        // Reusing inspection identity must terminate capture held by the old draft.
+        self.pending_capture_release |= state.release_previous_capture;
         let projection_changed = self.selection_projection != state.selection_projection;
         self.selected = if projection_changed {
             None
@@ -3203,8 +3211,10 @@ mod tests {
         ];
         let events = std::rc::Rc::new(RefCell::new(Vec::new()));
         let emitted = events.clone();
+        let key_id = mondrian_core::KeyframeId::new();
         let mut editor = CurveEditor::with_author_points(points.clone(), axis)
-            .with_keyframe_ids(vec![None, Some(mondrian_core::KeyframeId::new()), None])
+            .with_view_key(Some("stable-owner".into()))
+            .with_keyframe_ids(vec![None, Some(key_id), None])
             .on_gesture(move |event| {
                 emitted.borrow_mut().push(event);
                 None
@@ -3214,6 +3224,7 @@ mod tests {
         let mut shortcuts = DummyShortcut;
         let mut tooltip = DummyTooltip;
         let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &|_| {});
+        editor.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         let point = editor.to_screen(points[1]);
         editor.event(
             &UiEvent::MouseDown {
@@ -3231,6 +3242,25 @@ mod tests {
             &mut ctx,
         );
         assert_ne!(editor.points(), points);
+        let inspection = editor.view_state().expect("stable inspection during author draft");
+        let mut replacement = CurveEditor::with_author_points(points.clone(), axis)
+            .with_view_key(Some("stable-owner".into()))
+            .with_keyframe_ids(vec![None, Some(key_id), None])
+            .editable(false);
+        assert!(replacement.restore_view_state(&inspection));
+        assert_eq!(replacement.id(), editor.id());
+        assert_eq!(replacement.points(), points);
+        assert_eq!(replacement.selected_keyframe_ids(), vec![key_id]);
+        assert!(replacement.focused && !replacement.is_editable());
+        assert!(!replacement.has_active_pointer_interaction() && replacement.gesture.is_none());
+        assert!(replacement.pending_capture_release);
+        replacement.event(
+            &UiEvent::MouseMove { position: point, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert!(!replacement.pending_capture_release);
+        assert_eq!(replacement.points(), points);
+        assert_eq!(replacement.selected_keyframe_ids(), vec![key_id]);
         editor.set_editable(false);
         editor.event(
             &UiEvent::MouseUp {
