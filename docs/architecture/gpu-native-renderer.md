@@ -1752,7 +1752,9 @@ The native Window owner enables actual-pass timing only when
 `MONDRIAN_RENDER_PROFILE` is enabled. Its ring has eight query slots and at
 most 64 measured passes per frame. Exhaustion discards timing coverage without
 changing the recorded workload. Submission and sample logs bind query identity
-to the owning device generation; reopen does not reuse that identity. Counter
+to the owning device generation; reopen does not reuse that identity. The ring
+follows that same generation across Startup/Workspace window replacement;
+preparing a replacement window shell does not create a second query ring. Counter
 readback remains owned by the existing generation retirement envelope. After
 the initial queue barrier, the device progress owner continues nonblocking
 polling until deferred counter callbacks and the other retirement resources

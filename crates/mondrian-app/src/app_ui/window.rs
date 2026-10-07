@@ -9040,6 +9040,7 @@ impl AppUiPreparedWindowSession {
         host: &AppUiHost,
         viewer_gpu_startup: Option<&mut crate::app::viewer_gpu_startup::ViewerGpuStartupOwner>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let owns_new_device_generation = viewer_gpu_startup.is_some();
         let surface_generation_id = AppUiSurfaceGenerationId::next()?;
         apply_window_corner_preference(&window, window_corner_preference_for_role(role));
 
@@ -9199,7 +9200,7 @@ impl AppUiPreparedWindowSession {
             renderer_device: device.clone(),
             renderer_queue: queue.clone(),
             viewer_gpu_execution: ViewerGpuDeviceGenerationMember::empty(),
-            viewer_gpu_profile: if role == AppUiWindowRole::Workspace
+            viewer_gpu_profile: if owns_new_device_generation
                 && mondrian_renderer::profile::profiling_enabled()
             {
                 mondrian_renderer::profile::GpuTimestampQueryRing::new_for_passes(
@@ -9582,6 +9583,8 @@ fn replace_window_session(
         &mut next_session.viewer_gpu_device_progress,
         &mut session.viewer_gpu_execution,
         &mut next_session.viewer_gpu_execution,
+        &mut session.viewer_gpu_profile,
+        &mut next_session.viewer_gpu_profile,
         &mut session.viewer_gpu_submissions,
         &mut next_session.viewer_gpu_submissions,
         &mut session.viewer_gpu_deferred_cleanup,
@@ -9617,11 +9620,14 @@ fn replace_window_session(
     Ok(())
 }
 
-fn handoff_window_viewer_gpu_device_generation<P, E, O, C>(
+#[allow(clippy::too_many_arguments)]
+fn handoff_window_viewer_gpu_device_generation<P, E, Q, O, C>(
     retiring_progress: &mut P,
     replacement_progress: &mut P,
     retiring_execution: &mut E,
     replacement_execution: &mut E,
+    retiring_profile: &mut Q,
+    replacement_profile: &mut Q,
     retiring_submissions: &mut ViewerGpuSubmissionLifecycle<O, C>,
     replacement_submissions: &mut ViewerGpuSubmissionLifecycle<O, C>,
     retiring_cleanup: &mut WindowViewerGpuDeferredCleanup,
@@ -9634,6 +9640,7 @@ fn handoff_window_viewer_gpu_device_generation<P, E, O, C>(
     // resources allocated by the retiring execution runtime.
     std::mem::swap(retiring_progress, replacement_progress);
     std::mem::swap(retiring_execution, replacement_execution);
+    std::mem::swap(retiring_profile, replacement_profile);
     std::mem::swap(retiring_submissions, replacement_submissions);
     std::mem::swap(retiring_cleanup, replacement_cleanup);
 }
@@ -10204,6 +10211,8 @@ mod tests {
         let mut replacement_progress = "unused-replacement-worker".to_owned();
         let mut retiring_execution = "retained-frame-resource-runtime".to_owned();
         let mut replacement_execution = "unused-replacement-runtime".to_owned();
+        let mut retiring_profile = Some("in-flight-device-query-ring");
+        let mut replacement_profile = None;
         let mut retiring_submissions = ViewerGpuSubmissionLifecycle::<String, u64>::new();
         let mut replacement_submissions = ViewerGpuSubmissionLifecycle::<String, u64>::new();
         let mut retiring_cleanup = WindowViewerGpuDeferredCleanup::Reset;
@@ -10226,6 +10235,8 @@ mod tests {
             &mut replacement_progress,
             &mut retiring_execution,
             &mut replacement_execution,
+            &mut retiring_profile,
+            &mut replacement_profile,
             &mut retiring_submissions,
             &mut replacement_submissions,
             &mut retiring_cleanup,
@@ -10234,6 +10245,8 @@ mod tests {
 
         assert_eq!(replacement_progress, "active-device-generation");
         assert_eq!(replacement_execution, "retained-frame-resource-runtime");
+        assert_eq!(replacement_profile, Some("in-flight-device-query-ring"));
+        assert_eq!(retiring_profile, None);
         assert_eq!(replacement_cleanup, WindowViewerGpuDeferredCleanup::Reset);
         assert!(matches!(
             retiring_submissions.poll(now),
