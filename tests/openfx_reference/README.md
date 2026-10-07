@@ -324,3 +324,20 @@ uses one canonical TransformMany request for Auto and Continuous constraints,
 checks collision refusal without value mutation, and verifies native pixels,
 one Undo, saved live Redo and fresh Unicode reopen. Explicitly rebuild product
 and fixture and execute this ignored test before claiming qualification.
+
+### Declared-default reset history probe
+
+`curve_reset_authoring` accepts the original constrained three-key snapshot or
+an unkeyed declared scale default of 1. SDK queries verify zero keys, unchanged
+out-of-range key-time outputs, failed-search index -1 in all three directions,
+constant off-frame values, zero derivative and exact integral. Curve SDK writes
+remain rejected; a reset constant accepts unchanged instance-local initialization
+without authoring the Project. Native output samples frame 3, so reset must
+change actual pixels.
+The App test `native_effect_parameter_reset_undo_save_reopen_preserves_queries_and_output`
+uses the existing parameter write action for Auto and Continuous, rejects locked
+and stale targets and redundant reset, restores complete controls/IDs with one
+Undo, saves the undone state retaining live Redo, and reopens both Unicode
+archives in fresh sessions. Rebuild product and fixture and explicitly execute
+the ignored test before claiming qualification; the four group sibling probes
+must remain green.

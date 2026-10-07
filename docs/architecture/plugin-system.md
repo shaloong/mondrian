@@ -786,3 +786,10 @@ candidate without either axis changing, and preserve native query/output evidenc
 through Undo, saved live Redo and fresh reopen. The SDK probe independently
 rejects partial axis snapshots and checks derivatives and integrals; qualification
 requires an explicit ignored test against rebuilt product and fixture binaries.
+
+The same owned history probe defines declared-default parameter reset through
+the editor parameter write contract. It checks constant SDK value/calculus and
+empty key enumeration after reset, constrained curve restoration with one Undo,
+and shared-graph native pixels through saved live Redo and fresh Unicode reopen.
+No second reset interpretation is implemented in the host. Qualification requires
+rebuilt native binaries and explicit execution of the ignored probe.

@@ -672,25 +672,42 @@ bool authorCurveQueries(const void* handle) {
       std::abs(integral - 12.0*(1.0 + endpoint)) > 1e-12) { return false; }
   return true;
 }
-enum class GroupAuthorEdit { Time, Value, Transform, Interpolation };
+enum class AuthorHistoryEdit { Time, Value, Transform, Interpolation, Reset };
 
-bool isGroupAuthorMode(const std::string& selected) {
+bool isAuthorHistoryMode(const std::string& selected) {
   return selected == "curve_group_authoring" || selected == "curve_group_value_authoring" ||
          selected == "curve_group_transform_authoring" ||
-         selected == "curve_group_interpolation_authoring";
+         selected == "curve_group_interpolation_authoring" || selected == "curve_reset_authoring";
 }
 
-bool groupAuthorCurveQueries(const void* handle, GroupAuthorEdit edit) {
-  const bool valueEdit = edit == GroupAuthorEdit::Value || edit == GroupAuthorEdit::Transform;
-  const bool timeEdit = edit == GroupAuthorEdit::Time || edit == GroupAuthorEdit::Transform;
-  const bool interpolationEdit = edit == GroupAuthorEdit::Interpolation;
+bool authorHistoryCurveQueries(const void* handle, AuthorHistoryEdit edit) {
+  const bool valueEdit = edit == AuthorHistoryEdit::Value || edit == AuthorHistoryEdit::Transform;
+  const bool timeEdit = edit == AuthorHistoryEdit::Time || edit == AuthorHistoryEdit::Transform;
+  const bool interpolationEdit = edit == AuthorHistoryEdit::Interpolation;
   OfxParamSetHandle params = nullptr;
   OfxParamHandle scale = nullptr;
   unsigned count = 999;
   double current = -999, middle = -999, end = -999;
   if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
       gParamHost->paramGetHandle(params, "scale", &scale, nullptr) != kOfxStatOK ||
-      gParamHost->paramGetNumKeys(scale, &count) != kOfxStatOK || count != 3 ||
+      gParamHost->paramGetNumKeys(scale, &count) != kOfxStatOK) { return false; }
+  if (edit == AuthorHistoryEdit::Reset && count == 0) {
+    double value = -999, derivative = -999, integral = -999, keyTime = -999;
+    int keyIndex = -999;
+    if (gParamHost->paramGetValue(scale, &value) != kOfxStatOK || value != 1.0 ||
+        gParamHost->paramGetKeyTime(scale, 0, &keyTime) != kOfxStatErrBadIndex || keyTime != -999 ||
+        gParamHost->paramGetDerivative(scale, 3.0, &derivative) != kOfxStatOK || derivative != 0.0 ||
+        gParamHost->paramGetIntegral(scale, 0.0, 18.0, &integral) != kOfxStatOK || integral != 18.0) { return false; }
+    for (int direction : {-1, 0, 1}) {
+      keyIndex = -999;
+      if (gParamHost->paramGetKeyIndex(scale, 3.0, direction, &keyIndex) != kOfxStatFailed || keyIndex != -1) { return false; }
+    }
+    for (double time : {-3.0, 0.0, 3.0, 6.0, 12.0, 18.0, 24.0}) {
+      if (gParamHost->paramGetValueAtTime(scale, time, &value) != kOfxStatOK || value != 1.0) { return false; }
+    }
+    return true;
+  }
+  if (count != 3 ||
       gParamHost->paramGetKeyTime(scale, 1, &middle) != kOfxStatOK ||
       gParamHost->paramGetKeyTime(scale, 2, &end) != kOfxStatOK ||
       !((middle == 6.0 && end == 12.0) || (timeEdit && middle == 12.0 && end == 18.0)) ||
@@ -703,7 +720,7 @@ bool groupAuthorCurveQueries(const void* handle, GroupAuthorEdit edit) {
     offset = middleValue - 2.0;
   }
   // Joint edits publish both axes together. Reject a partially translated snapshot.
-  if (edit == GroupAuthorEdit::Transform &&
+  if (edit == AuthorHistoryEdit::Transform &&
       ((middle == 6.0 && offset != 0.0) || (middle == 12.0 && offset != 0.5))) { return false; }
   const double times[] = {0.0, middle, end};
   for (unsigned index = 0; index < 3; ++index) {
@@ -749,7 +766,7 @@ bool lifecycleOutput(const void* handle, OfxPropertySetHandle in) {
   double gain = -999;
   if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
       gParamHost->paramGetHandle(params, "scale", &scale, nullptr) != kOfxStatOK ||
-      gParamHost->paramGetValueAtTime(scale, isGroupAuthorMode(mode()) ? 3.0 : mode() == "curve_lifecycle" && (phase == 6 || phase == 7) ? 0.0 : 24.0, &gain) != kOfxStatOK) { return false; }
+      gParamHost->paramGetValueAtTime(scale, isAuthorHistoryMode(mode()) ? 3.0 : mode() == "curve_lifecycle" && (phase == 6 || phase == 7) ? 0.0 : 24.0, &gain) != kOfxStatOK) { return false; }
   OfxImageClipHandle clip = nullptr;
   OfxPropertySetHandle image = nullptr;
   double time = 0;
@@ -779,15 +796,16 @@ OfxStatus probe(const char* action, const void* handle,
        operation == kOfxActionInstanceChanged || operation == kOfxActionEndInstanceChanged ||
        operation == kOfxImageEffectActionRender || operation == kOfxActionDestroyInstance) &&
       !authorCurveQueries(handle)) { return kOfxStatFailed; }
-  if (isGroupAuthorMode(selected) &&
+  if (isAuthorHistoryMode(selected) &&
       (operation == kOfxActionCreateInstance || operation == kOfxActionBeginInstanceChanged ||
        operation == kOfxActionInstanceChanged || operation == kOfxActionEndInstanceChanged ||
        operation == kOfxImageEffectActionRender || operation == kOfxActionDestroyInstance) &&
-      !groupAuthorCurveQueries(handle,
-          selected == "curve_group_value_authoring" ? GroupAuthorEdit::Value :
-          selected == "curve_group_transform_authoring" ? GroupAuthorEdit::Transform :
-          selected == "curve_group_interpolation_authoring" ? GroupAuthorEdit::Interpolation :
-          GroupAuthorEdit::Time)) { return kOfxStatFailed; }
+      !authorHistoryCurveQueries(handle,
+          selected == "curve_group_value_authoring" ? AuthorHistoryEdit::Value :
+          selected == "curve_group_transform_authoring" ? AuthorHistoryEdit::Transform :
+          selected == "curve_group_interpolation_authoring" ? AuthorHistoryEdit::Interpolation :
+          selected == "curve_reset_authoring" ? AuthorHistoryEdit::Reset :
+          AuthorHistoryEdit::Time)) { return kOfxStatFailed; }
   if (selected == "curve_lifecycle" &&
       (operation == kOfxActionCreateInstance || operation == kOfxActionBeginInstanceChanged ||
        operation == kOfxActionInstanceChanged || operation == kOfxActionEndInstanceChanged ||
@@ -886,8 +904,16 @@ OfxStatus probe(const char* action, const void* handle,
         gParamHost->paramGetHandle(params, "scale", &scalar, nullptr) != kOfxStatOK ||
         gParamHost->paramGetHandle(params, "scaleComponents", &toggle, nullptr) != kOfxStatOK ||
         gParamHost->paramGetValue(scalar, &scale) != kOfxStatOK ||
-        gParamHost->paramGetValue(toggle, &enabled) != kOfxStatOK ||
-        gParamHost->paramSetValue(scalar, scale) != ((selected == "canonical_curves" || selected == "curve_lifecycle" || selected == "curve_authoring" || isGroupAuthorMode(selected)) ? kOfxStatErrUnsupported : kOfxStatOK) ||
+        gParamHost->paramGetValue(toggle, &enabled) != kOfxStatOK) { return kOfxStatFailed; }
+    unsigned keyCount = 999;
+    if (selected == "curve_reset_authoring" &&
+        gParamHost->paramGetNumKeys(scalar, &keyCount) != kOfxStatOK) { return kOfxStatFailed; }
+    // Canonical curves reject SDK author writes. A reset constant retains the
+    // existing instance-local initialization contract; it does not edit Project.
+    const bool authorCurve = (selected == "canonical_curves" || selected == "curve_lifecycle" ||
+                              selected == "curve_authoring" || isAuthorHistoryMode(selected)) &&
+                             !(selected == "curve_reset_authoring" && keyCount == 0);
+    if (gParamHost->paramSetValue(scalar, scale) != (authorCurve ? kOfxStatErrUnsupported : kOfxStatOK) ||
         gParamHost->paramSetValue(toggle, enabled) != kOfxStatOK) { return kOfxStatFailed; }
     if (selected == "choice" || selected.find("strchoice") == 0) {
       OfxParamHandle parameter = nullptr, integer = nullptr;
@@ -918,7 +944,7 @@ OfxStatus probe(const char* action, const void* handle,
        operation == kOfxActionInstanceChanged || operation == kOfxImageEffectActionRender ||
        operation == kOfxActionDestroyInstance) && !canonicalCurves(handle)) { return kOfxStatFailed; }
   const OfxStatus result = pluginMain(action, handle, in, out);
-  if ((selected == "curve_lifecycle" || selected == "curve_authoring" || isGroupAuthorMode(selected)) && result == kOfxStatOK &&
+  if ((selected == "curve_lifecycle" || selected == "curve_authoring" || isAuthorHistoryMode(selected)) && result == kOfxStatOK &&
       operation == kOfxImageEffectActionRender && !lifecycleOutput(handle, in)) { return kOfxStatFailed; }
   if ((selected == "compound" || selected == "compound_author" || selected == "compound_constant_animatable" || selected == "compound_frame_sample" || selected == "canonical_curves") && result == kOfxStatOK &&
       operation == kOfxImageEffectActionDescribeInContext && !defineCompounds(handle)) {
