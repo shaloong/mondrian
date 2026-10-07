@@ -1774,3 +1774,19 @@ realtime/offline partition-invariant PCM, missing/locked transaction refusal,
 one Undo, saved live Redo, and fresh Unicode routed/undone archives with one
 SQLite asset and no inherited session history. This remains a named reference
 matrix; it does not establish general vendor or platform qualification.
+
+### CLAP activation-time latency
+
+Port metadata is inspected while deactivated, but native latency is queried on
+the main thread only after activation, as required by the CLAP latency extension.
+Probe returns that activated value; the worker independently activates and checks
+latency and tail against the prepared contract. Either mismatch stops/releases
+the processor and deactivates the instance before admission fails. Shared audio
+scheduling and PDC continue to consume the single execution contract.
+
+A source ABI fixture returns an invalid latency before activation and3 afterward.
+It verifies probe/admission and deactivation after stale latency refusal. The
+owned native sidechain DLL also guards activation with per-instance shared state,
+while retaining its independent3-frame delay/tail and prepared DSP buffers.
+This enforces the [CLAP latency lifecycle](https://github.com/free-audio/clap/blob/main/include/clap/ext/latency.h)
+without adding work to audio callbacks or another latency interpretation.

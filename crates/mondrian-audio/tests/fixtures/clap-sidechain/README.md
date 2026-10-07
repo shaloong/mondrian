@@ -9,7 +9,9 @@ three sample frames. Native input IDs11 and7 deliberately differ from index and
 share the same display name. State is five bytes: one mode followed by a finite
 little-endian f32 gain in [0,1]. Mode0 orders inputs11,7; mode1 reverses them;
 mode2 removes input7. Ports change only while deactivated during state load.
-Reset clears the delay. The plugin advertises latency3 and finite tail3.
+Reset clears the delay. The plugin advertises latency3 and finite tail3 while
+activated; its latency callback returns an invalid sentinel before activation
+to expose illegal host lifecycle queries.
 Process buffers are allocated at activation, and every callback overwrites them.
 
 ```powershell

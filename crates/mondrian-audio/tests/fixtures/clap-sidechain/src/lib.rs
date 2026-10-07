@@ -8,13 +8,13 @@ use clack_extensions::tail::{PluginTail, PluginTailImpl, TailLength};
 use clack_plugin::prelude::*;
 use clack_plugin::stream::{InputStream, OutputStream};
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 /// Independent native sidechain signal oracle.
 pub struct SidechainFixture;
 
 impl Plugin for SidechainFixture {
-    type AudioProcessor<'a> = Processor;
+    type AudioProcessor<'a> = Processor<'a>;
     type Shared<'a> = Shared;
     type MainThread<'a> = Main<'a>;
 
@@ -34,6 +34,7 @@ impl DefaultPluginFactory for SidechainFixture {
 
     fn new_shared(_host: HostSharedHandle<'_>) -> Result<Shared, PluginError> {
         Ok(Shared {
+            active: AtomicBool::new(false),
             mode: AtomicU8::new(0),
             gain: AtomicU32::new(1.0_f32.to_bits()),
         })
@@ -49,6 +50,7 @@ impl DefaultPluginFactory for SidechainFixture {
 
 /// State restored before native port inspection and activation.
 pub struct Shared {
+    active: AtomicBool,
     mode: AtomicU8,
     gain: AtomicU32,
 }
@@ -80,7 +82,11 @@ impl PluginStateImpl for Main<'_> {
 
 impl PluginLatencyImpl for Main<'_> {
     fn get(&self) -> u32 {
-        3
+        if self.0.active.load(Ordering::Relaxed) {
+            3
+        } else {
+            u32::MAX
+        }
     }
 }
 
@@ -124,7 +130,8 @@ impl PluginAudioPortsImpl for Main<'_> {
 }
 
 /// Prepared native PCM buffers and three-frame delay.
-pub struct Processor {
+pub struct Processor<'a> {
+    active: &'a AtomicBool,
     mix: Vec<[f32; 2]>,
     delay: [[f32; 2]; 3],
     cursor: usize,
@@ -132,13 +139,13 @@ pub struct Processor {
     gain: f32,
 }
 
-impl PluginTailImpl for Processor {
+impl PluginTailImpl for Processor<'_> {
     fn get(&self) -> TailLength {
         TailLength::Finite(3)
     }
 }
 
-impl<'a> PluginAudioProcessor<'a, Shared, Main<'a>> for Processor {
+impl<'a> PluginAudioProcessor<'a, Shared, Main<'a>> for Processor<'a> {
     fn activate(
         _host: HostAudioProcessorHandle<'a>,
         _main: &Main<'a>,
@@ -148,13 +155,19 @@ impl<'a> PluginAudioProcessor<'a, Shared, Main<'a>> for Processor {
         if config.max_frames_count == 0 || config.max_frames_count > 65_536 {
             return Err(PluginError::Message("fixture block extent"));
         }
+        shared.active.store(true, Ordering::Relaxed);
         Ok(Self {
+            active: &shared.active,
             mix: vec![[0.0; 2]; config.max_frames_count as usize],
             delay: [[0.0; 2]; 3],
             cursor: 0,
             mode: shared.mode.load(Ordering::Relaxed),
             gain: f32::from_bits(shared.gain.load(Ordering::Relaxed)),
         })
+    }
+
+    fn deactivate(self, _main: &Main<'a>) {
+        self.active.store(false, Ordering::Relaxed);
     }
 
     fn reset(&mut self) {

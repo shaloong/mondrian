@@ -799,3 +799,9 @@ empty key enumeration after reset, constrained curve restoration with one Undo,
 and shared-graph native pixels through saved live Redo and fresh Unicode reopen.
 No second reset interpretation is implemented in the host. Qualification requires
 rebuilt native binaries and explicit execution of the ignored probe.
+
+CLAP audio ports are scanned while deactivated. Latency, unlike ports, is queried
+through the main-thread handle after activation, and tail through the prepared
+processor handle. Probe and worker share this lifecycle ordering. Activated
+latency/tail mismatch causes stop, release and deactivation before rejection;
+no native instance with stale scheduling facts is admitted.

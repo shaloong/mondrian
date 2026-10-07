@@ -2441,3 +2441,36 @@ complete workspace qualification pending rather than inheriting historical
 prior focused regressions do not prove these broader gates. Original full goal
 remains active, including actual native auxiliary-bus/sidechain implementation
 and the broader plugin/platform/performance/workflow matrices.
+
+### Clean CLAP auxiliary reference at 84f7445
+
+Clean source `84f74457a7f7e2629499a73d9a9e802fbb1da93f` built the current
+packaged worker and ran the owned sidechain DLL. Pipeline66666 exited0 with
+source/binaries stable before and after. Product build took11m06s. Worker SHA256:
+`A92A04AC3E04B63DA2A8B1995642089DB8A92A730F316210BBD76AEE75166018`.
+Sidechain DLL SHA256:
+`5826809748D5298DBD40F5300EEBFAE8CFF46C1F7B5D2377BC9F78F5E175C397`.
+Existing gain fixture retained
+`CB2FA1B4956CEDBDA4BBAA4B24EFA2D16924820C7C7FCEB4E4881633F21FD687`.
+
+The actual App routing/PDC/Undo/save/reopen test passed1/0/0ignored in10.90s.
+The installed native bus/state/partition/reset test passed1/0/0ignored in5.39s.
+The existing main-bus sample-event regression passed1/0/0ignored in0.81s.
+The App fixture supplies decoded WAV main and detector-only audio to native
+input11, leaves input7 disconnected, observes lookahead3, and compares257 stereo
+public frames across realtime/offline partitions. One route transaction changes
+PCM from±0.25 to±0.4375; missing/locked owners refuse, one Undo restores output,
+save retains live Redo, and fresh Unicode archives have one SQLite asset and
+empty history/clipboard with matching authored state and native PCM.
+
+The independent DLL matrix also covers two distinguishable inputs with native
+IDs11/7, restored reversed/removed ports, actual3-frame delay/tail, reset/silence,
+and stale restored-state ordering refusal. This reference uses a constant
+latency callback. Subsequent SDK inspection found preactivation latency queries
+in the host, which violate the CLAP lifecycle even though this fixture passed.
+These results therefore establish the named signal/history reference and do not
+prove latency lifecycle conformance. The activated-latency correction and stricter
+fixture require a new current-worker receipt. No new Golden, vendor, mixed-layout,
+MIDI/editor, macOS, performance or remote-CI qualification is inferred here.
+
+Receipt: `.scratch/curve-viewport/acceptance-clap-sidechain-current-native.json`.

@@ -184,7 +184,7 @@ struct DiscoveryResponse {
 #[derive(Serialize, Deserialize)]
 pub(super) struct ProbeResult {
     plugin_id: String,
-    latency_frames: u32,
+    pub(super) latency_frames: u32,
     tail: ProbeTail,
     parameters: Vec<ClapParameterDescriptor>,
     pub(super) auxiliary_buses: Vec<AuxiliaryBusWire>,
@@ -546,10 +546,6 @@ pub(super) fn probe_loaded(
         None
     };
     let auxiliary_inputs = list_audio_inputs(&handle, channel_layout)?;
-    let latency_frames = handle
-        .get_extension::<PluginLatency>()
-        .map(|extension| extension.get(&handle))
-        .unwrap_or(0);
     let configuration = PluginAudioConfiguration {
         sample_rate: f64::from(sample_rate),
         min_frames_count: 1,
@@ -559,6 +555,11 @@ pub(super) fn probe_loaded(
         .activate(|_, _| (), configuration)
         .map_err(|error| unavailable(format!("CLAP probe activation failed: {error}")))?
         .into();
+    let handle = instance.plugin_handle();
+    let latency_frames = handle
+        .get_extension::<PluginLatency>()
+        .map(|extension| extension.get(&handle))
+        .unwrap_or(0);
     let tail = processor
         .plugin_handle()
         .get_extension::<PluginTail>()

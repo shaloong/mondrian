@@ -593,15 +593,6 @@ fn prepare_loaded(
         return Err(invalid("CLAP auxiliary ports changed since contract probe"));
     }
 
-    let latency = handle
-        .get_extension::<PluginLatency>()
-        .map(|extension| extension.get(&handle) as usize)
-        .unwrap_or(0);
-    if latency != request.plugin_execution_contract().algorithmic_latency_frames() {
-        return Err(invalid(
-            "CLAP latency differs from the admitted execution contract",
-        ));
-    }
     let render = request.render_contract();
     let configuration = PluginAudioConfiguration {
         sample_rate: f64::from(render.sample_rate),
@@ -613,6 +604,11 @@ fn prepare_loaded(
         .activate(|_, _| (), configuration)
         .map_err(|error| unavailable(format!("CLAP activation failed: {error}")))?
         .into();
+    let handle = instance.plugin_handle();
+    let latency = handle
+        .get_extension::<PluginLatency>()
+        .map(|extension| extension.get(&handle) as usize)
+        .unwrap_or(0);
     let tail = processor
         .plugin_handle()
         .get_extension::<PluginTail>()
@@ -623,12 +619,18 @@ fn prepare_loaded(
         TailLength::Finite(frames) => crate::AudioProcessorTail::Finite(frames as usize),
         TailLength::Infinite => crate::AudioProcessorTail::Infinite,
     };
-    if admitted_tail != request.plugin_execution_contract().tail() {
+    if latency != request.plugin_execution_contract().algorithmic_latency_frames()
+        || admitted_tail != request.plugin_execution_contract().tail()
+    {
         processor.ensure_processing_stopped();
         drop(processor);
         let _ = instance.try_deactivate();
         return Err(invalid(
-            "CLAP tail differs from the admitted execution contract",
+            if latency != request.plugin_execution_contract().algorithmic_latency_frames() {
+                "CLAP latency differs from the admitted execution contract"
+            } else {
+                "CLAP tail differs from the admitted execution contract"
+            },
         ));
     }
     let frames = render.max_block_frames;
@@ -1158,16 +1160,26 @@ mod tests {
     }
 
     struct SidechainPlugin<const CASE: u8>;
-    struct SidechainMain<const CASE: u8>;
-    struct SidechainProcessor;
+    struct SidechainShared(AtomicBool);
+    struct SidechainMain<'a, const CASE: u8>(&'a SidechainShared);
+    struct SidechainProcessor<'a>(&'a SidechainShared);
+    static LATENCY_DEACTIVATIONS: AtomicUsize = AtomicUsize::new(0);
+
+    impl PluginShared<'_> for SidechainShared {}
 
     impl<const CASE: u8> Plugin for SidechainPlugin<CASE> {
-        type AudioProcessor<'a> = SidechainProcessor;
-        type Shared<'a> = ();
-        type MainThread<'a> = SidechainMain<CASE>;
+        type AudioProcessor<'a> = SidechainProcessor<'a>;
+        type Shared<'a> = SidechainShared;
+        type MainThread<'a> = SidechainMain<'a, CASE>;
 
-        fn declare_extensions(builder: &mut PluginExtensions<Self>, _shared: Option<&()>) {
+        fn declare_extensions(
+            builder: &mut PluginExtensions<Self>,
+            _shared: Option<&SidechainShared>,
+        ) {
             builder.register::<PluginAudioPorts>();
+            if CASE == 6 {
+                builder.register::<PluginLatency>();
+            }
         }
     }
 
@@ -1176,21 +1188,31 @@ mod tests {
             PluginDescriptor::new("org.mondrian.test.sidechain", "Sidechain ABI Fixture")
         }
 
-        fn new_shared(_host: HostSharedHandle<'_>) -> Result<(), PluginError> {
-            Ok(())
+        fn new_shared(_host: HostSharedHandle<'_>) -> Result<SidechainShared, PluginError> {
+            Ok(SidechainShared(AtomicBool::new(false)))
         }
 
         fn new_main_thread<'a>(
             _host: HostMainThreadHandle<'a>,
-            _shared: &'a (),
-        ) -> Result<SidechainMain<CASE>, PluginError> {
-            Ok(SidechainMain)
+            shared: &'a SidechainShared,
+        ) -> Result<SidechainMain<'a, CASE>, PluginError> {
+            Ok(SidechainMain(shared))
         }
     }
 
-    impl<const CASE: u8> PluginMainThread<'_, ()> for SidechainMain<CASE> {}
+    impl<'a, const CASE: u8> PluginMainThread<'a, SidechainShared> for SidechainMain<'a, CASE> {}
 
-    impl<const CASE: u8> PluginAudioPortsImpl for SidechainMain<CASE> {
+    impl<const CASE: u8> clack_extensions::latency::PluginLatencyImpl for SidechainMain<'_, CASE> {
+        fn get(&self) -> u32 {
+            if self.0 .0.load(Ordering::Relaxed) {
+                3
+            } else {
+                u32::MAX
+            }
+        }
+    }
+
+    impl<const CASE: u8> PluginAudioPortsImpl for SidechainMain<'_, CASE> {
         fn count(&self, is_input: bool) -> u32 {
             if is_input {
                 if CASE == 4 {
@@ -1232,19 +1254,21 @@ mod tests {
         }
     }
 
-    impl<'a, const CASE: u8> clack_plugin::plugin::PluginAudioProcessor<'a, (), SidechainMain<CASE>>
-        for SidechainProcessor
+    impl<'a, const CASE: u8>
+        clack_plugin::plugin::PluginAudioProcessor<'a, SidechainShared, SidechainMain<'a, CASE>>
+        for SidechainProcessor<'a>
     {
         fn activate(
             _host: HostAudioProcessorHandle<'a>,
-            _main: &SidechainMain<CASE>,
-            _shared: &'a (),
+            _main: &SidechainMain<'a, CASE>,
+            shared: &'a SidechainShared,
             config: PluginConfig,
         ) -> Result<Self, PluginError> {
             if config.max_frames_count > 4 {
                 return Err(PluginError::Message("fixture block limit"));
             }
-            Ok(Self)
+            shared.0.store(true, Ordering::Relaxed);
+            Ok(Self(shared))
         }
 
         fn process(
@@ -1274,6 +1298,12 @@ mod tests {
             }
             Ok(ProcessStatus::Continue)
         }
+        fn deactivate(self, _main: &SidechainMain<'a, CASE>) {
+            self.0 .0.store(false, Ordering::Relaxed);
+            if CASE == 6 {
+                LATENCY_DEACTIVATIONS.fetch_add(1, TestOrdering::SeqCst);
+            }
+        }
     }
 
     fn sidechain_request() -> IsolatedAudioProcessorWorkerPrepareRequest {
@@ -1299,6 +1329,59 @@ mod tests {
                 compensation_delay_scratch_budget_bytes: 1024 * 1024,
             },
         }
+    }
+
+    #[test]
+    fn clap_activation_latency_probe_admission_and_cleanup_follow_sdk_lifecycle() {
+        let before = LATENCY_DEACTIVATIONS.load(TestOrdering::SeqCst);
+        let entry = PluginEntry::load_from_clack::<SinglePluginEntry<SidechainPlugin<6>>>(
+            c"/test/activation-latency",
+        )
+        .expect("activation-dependent latency fixture");
+        let probe = super::super::clap_discovery::probe_loaded(
+            &entry,
+            "org.mondrian.test.sidechain",
+            48_000,
+            AudioChannelLayout::Stereo,
+            4,
+            None,
+            false,
+        )
+        .expect("probe activated latency");
+        assert_eq!(
+            probe.latency_frames, 3,
+            "latency must be queried while activated"
+        );
+        assert_eq!(LATENCY_DEACTIVATIONS.load(TestOrdering::SeqCst), before + 1);
+        let mut request = sidechain_request();
+        request.plugin_execution_contract =
+            AudioProcessorExecutionContract::new(3, AudioProcessorTail::None, true, true, true, 0)
+                .expect("activated latency contract");
+        let worker = prepare_loaded(
+            request,
+            entry,
+            c"org.mondrian.test.sidechain",
+            None,
+            &[],
+            &[],
+        )
+        .expect("admit actual activated latency");
+        assert_eq!(worker.execution_contract().algorithmic_latency_frames(), 3);
+        drop(worker);
+        assert_eq!(LATENCY_DEACTIVATIONS.load(TestOrdering::SeqCst), before + 2);
+        let entry = PluginEntry::load_from_clack::<SinglePluginEntry<SidechainPlugin<6>>>(
+            c"/test/activation-latency",
+        )
+        .expect("fresh lifecycle fixture");
+        assert!(
+            matches!(prepare_loaded(sidechain_request(), entry, c"org.mondrian.test.sidechain", None, &[], &[]),
+            Err(AudioProcessorHostError::InvalidContract(detail)) if detail.contains("latency"))
+        );
+        assert_eq!(
+            LATENCY_DEACTIVATIONS.load(TestOrdering::SeqCst),
+            before + 3,
+            "stale latency refusal deactivates the prepared instance"
+        );
     }
 
     #[test]
