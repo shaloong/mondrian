@@ -162,6 +162,11 @@ impl GpuSignalMonitorRuntime {
         }
     }
 
+    /// Abandon an unsubmitted output without making its texture reusable.
+    pub(crate) fn discard_frame_resources(&mut self) {
+        self.output = None;
+    }
+
     pub(crate) fn stage_frame_resources_for_ordered_turnover(&mut self) {
         if let Some(output) = self.output.take() {
             self.resource_pool.release_for_ordered_turnover(output);

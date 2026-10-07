@@ -54,6 +54,150 @@ fn gradient_layer() -> ViewerGpuExecutionLayer {
     }))
 }
 
+#[tokio::test]
+async fn scope_backpressure_discards_failed_candidate_textures_and_preserves_leased_counts() {
+    let Some(context) = context().await else {
+        return;
+    };
+    let boundary = RenderOutputColorBoundary::display(
+        ColorSpace::Rec709,
+        false,
+        ColorEngine::mondrian_standard(),
+    );
+    let adaptation = RenderMonitorAdaptation::new(
+        ColorSpace::Rec709,
+        ColorSpace::Rec709,
+        ColorEngine::mondrian_standard(),
+    )
+    .expect("matching monitor");
+    let mut runtime =
+        ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+            .expect("production Viewer");
+    let layers = [gradient_layer()];
+    let sequence_id = SequenceId::new();
+    let request = |timeline_frame| ViewerGpuExecutionRequest {
+        sequence_id,
+        timeline_frame,
+        width: 64,
+        height: 32,
+        working_color_space: WorkingColorSpace::LinearRec709,
+        layers: &layers,
+        heterogeneous_inputs: Vec::new(),
+        program_output_boundary: &boundary,
+        monitor_adaptation: &adaptation,
+        source_rect: ViewerSourceRect::FULL,
+        output_width: 16,
+        output_height: 8,
+        output_precision: ViewerGpuOutputPrecision::Encoded8,
+        display_calibration: None,
+        program_scopes: Some(
+            GpuProgramScopesRequest::new(ColorSpace::Rec709, WaveformMode::Luma, 256, 512)
+                .expect("exact scope contract"),
+        ),
+        signal_monitoring: None,
+    };
+    let mut retained = Vec::new();
+    for frame in 0..6 {
+        let mut encoder = context.device.create_command_encoder(&Default::default());
+        let mut record = runtime
+            .record(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                request(frame),
+            )
+            .expect("retain all original scope resource sets");
+        let submission = context.queue.submit([encoder.finish()]);
+        let _submitted = record.assert_adapter_submission(submission.clone());
+        context
+            .device
+            .poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None })
+            .expect("actual original GPU completion");
+        retained.push(record.program_scopes.take().expect("leased scopes"));
+    }
+    let original_counts = read_counts(&context, &retained[0]);
+    let original_uniforms = runtime.compositor_uniform_arena_diagnostics();
+    let mut partial_frame_entries = Vec::new();
+    let mut abandoned_pool_releases = None;
+    for frame in 6..10 {
+        let mut encoder = context.device.create_command_encoder(&Default::default());
+        let error = runtime
+            .record(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                request(frame),
+            )
+            .err()
+            .expect("retained original capacity must reject this candidate");
+        assert!(
+            matches!(error, ViewerGpuExecutionError::ProgramScopes(error)
+            if matches!(*error, GpuProgramScopesError::RetainedFrameCapacity))
+        );
+        // A failed caller must abandon its partial commands, not submit them.
+        drop(encoder);
+        partial_frame_entries.push(runtime.color_output_diagnostics().frame_table_entries);
+        let releases = runtime.resource_pool_diagnostics().releases;
+        if let Some(previous) = abandoned_pool_releases {
+            assert_eq!(
+                releases, previous,
+                "failed textures must not enter the reusable pool"
+            );
+        }
+        abandoned_pool_releases = Some(releases);
+        assert_eq!(
+            runtime.compositor_uniform_arena_diagnostics().high_watermark_slots,
+            original_uniforms.high_watermark_slots,
+            "failed frames must not accumulate uniform slots"
+        );
+    }
+    eprintln!("failed candidate texture entries: {partial_frame_entries:?}");
+    assert_eq!(partial_frame_entries, [0; 4]);
+    assert_eq!(runtime.program_scopes_diagnostics().frames_recorded, 6);
+    assert_eq!(read_counts(&context, &retained[0]), original_counts);
+    drop(retained);
+    let mut encoder = context.device.create_command_encoder(&Default::default());
+    let mut record = runtime
+        .record(&context.device, &context.queue, &mut encoder, request(10))
+        .expect("the original grant recovers after its actual leases end");
+    let submission = context.queue.submit([encoder.finish()]);
+    let _submitted = record.assert_adapter_submission(submission.clone());
+    context
+        .device
+        .poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None })
+        .expect("actual retry GPU completion");
+    assert_eq!(
+        read_counts(&context, record.program_scopes.as_ref().unwrap()),
+        original_counts
+    );
+    assert_eq!(runtime.program_scopes_diagnostics().buffer_allocations, 6);
+    assert_eq!(runtime.program_scopes_diagnostics().pipeline_creations, 1);
+}
+
+fn read_counts(context: &GpuContext, scopes: &GpuProgramScopesRecord) -> Vec<u32> {
+    let size = u64::from(scopes.buffer_layout.counter_count) * 4;
+    let buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("leased-scope-counts"),
+        size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = context.device.create_command_encoder(&Default::default());
+    encoder.copy_buffer_to_buffer(scopes.counts(), 0, &buffer, 0, size);
+    context.queue.submit([encoder.finish()]);
+    let (send, recv) = std::sync::mpsc::channel();
+    let slice = buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        send.send(result).unwrap()
+    });
+    context
+        .device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("count readback completion");
+    recv.recv().unwrap().expect("mapped original counts");
+    bytemuck::cast_slice::<u8, u32>(&slice.get_mapped_range().unwrap()).to_vec()
+}
+
 fn counts(
     context: &GpuContext,
     canvas: (u32, u32),

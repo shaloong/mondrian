@@ -604,6 +604,13 @@ impl GpuViewerSpatialRuntime {
         }
     }
 
+    /// Abandon unsubmitted frame textures without making them reusable.
+    pub(crate) fn discard_frame_resources(&mut self) {
+        self.prefilters.clear();
+        self.horizontal = None;
+        self.output = None;
+    }
+
     pub(crate) fn stage_frame_resources_for_ordered_turnover(&mut self) {
         for resource in self.prefilters.drain(..) {
             self.resource_pool.release_for_ordered_turnover(resource);

@@ -852,6 +852,8 @@ impl ViewerGpuExecutionRuntime {
     /// The returned handle remains owned by this runtime until the next frame
     /// clear/reset or an exact call to [`Self::take_presentation_output`].
     /// Presentation registration and publication are Adapter work.
+    /// On error, the caller must discard the partially recorded encoder before
+    /// recording another candidate; those commands must never be submitted.
     pub fn record(
         &mut self,
         device: &wgpu::Device,
@@ -863,6 +865,7 @@ impl ViewerGpuExecutionRuntime {
     }
 
     /// Record one Viewer frame with optional ordered hardware profiling markers.
+    /// Errors require abandoning the encoder as documented by [`Self::record`].
     pub fn record_with_stage_marker(
         &mut self,
         device: &wgpu::Device,
@@ -942,6 +945,19 @@ impl ViewerGpuExecutionRuntime {
             self.cpu_yuv_upload.finish_candidate(encoder);
         } else {
             self.cpu_yuv_upload.discard_candidate();
+            // No submission proof exists for this candidate. Drop its texture
+            // handles rather than returning them to the reusable pool. Recorded
+            // commands and any independently submitted native import retain
+            // their backend resources through their own GPU lifetimes.
+            self.color_output
+                .runtime_mut()
+                .expect("cache admitted before recording")
+                .frame_table_mut()
+                .clear();
+            self.spatial.discard_frame_resources();
+            self.display_calibration.discard_frame_resources();
+            self.signal_monitor.discard_frame_resources();
+            self.working_compositor.clear_frame_resources();
         }
         let receipt =
             self.native_video_import.end_viewer_candidate(candidate_token, result.is_ok());

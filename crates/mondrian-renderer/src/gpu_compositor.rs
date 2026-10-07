@@ -1223,7 +1223,7 @@ pub struct GpuCompositorUniformArenaDiagnostics {
     pub high_watermark_slots: u32,
     /// Peak reusable uniform-buffer pages required by one frame lifetime.
     pub high_watermark_pages: u32,
-    /// Frame-lifetime resets after ordered submission.
+    /// Frame-lifetime resets after ordered submission or abandonment.
     pub frame_resets: u64,
 }
 
@@ -1687,7 +1687,8 @@ impl GpuFrameCompositor {
         })
     }
 
-    /// Reset frame-local uniform slots after the caller has ordered submission.
+    /// Reset frame-local uniform slots after ordered submission or abandonment.
+    /// An abandoned encoder must be discarded before another frame is recorded.
     pub fn clear_frame_resources(&self) {
         let mut arena = self.uniform_arena.lock();
         arena.next_slot = 0;

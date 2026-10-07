@@ -300,9 +300,10 @@ impl CpuYuvUploadRuntime {
         }
     }
 
-    /// Drop transfer buffers whose recorded copies will not be submitted.
+    /// Abandon unsubmitted copies and rewind their frame-local plane slots.
+    /// The caller must discard the encoder before recording another candidate.
     pub(crate) fn discard_candidate(&self) {
-        self.state.lock().recorded_uploads.clear();
+        self.begin_frame();
     }
 
     /// Retire every idle upload texture during critical trim or device reset.
@@ -2377,7 +2378,9 @@ mod tests {
             if index == 2 {
                 runtime.clear();
             }
-            runtime.begin_frame();
+            if index == 0 {
+                runtime.begin_frame();
+            }
             while !runtime.prepare(&frame).expect("prepare") {
                 assert!(
                     std::time::Instant::now() < deadline,
