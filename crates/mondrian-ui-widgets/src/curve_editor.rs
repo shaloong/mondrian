@@ -225,6 +225,15 @@ pub enum CurvePointTarget {
 /// Point, selection or tangent author intent, carrying stable source identities.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CurveEdit {
+    /// Transform the frozen selected key group relative to the pointer grab origin.
+    TransformMany {
+        /// Complete stable identities captured at pointer grab.
+        keyframe_ids: Vec<mondrian_core::KeyframeId>,
+        /// Exact common translation on the owner's frame grid.
+        time_delta: mondrian_core::TimelineTime,
+        /// Common displacement in author value units, independent of projected keys.
+        value_delta: f64,
+    },
     /// Offset an authored scalar key using its canonical typed value.
     NudgeValue {
         /// Stable owning key identity.
@@ -349,6 +358,21 @@ struct TangentDrag {
     pointer_origin: Point,
 }
 
+struct CurveGroupDrag {
+    keyframe_ids: Vec<mondrian_core::KeyframeId>,
+    pointer_origin: Point,
+    points: Vec<CurvePoint>,
+    metadata: Vec<CurvePointMetadata>,
+    plot: Rect,
+    time_span: f64,
+    value_radius: f64,
+    duration: mondrian_core::TimelineTime,
+    frame_step: mondrian_core::TimelineTime,
+    lock_time: bool,
+    lock_value: bool,
+    last_delta: Option<(mondrian_core::TimelineTime, f64)>,
+}
+
 #[derive(Clone)]
 struct CurvePointMetadata {
     target: CurvePointTarget,
@@ -414,6 +438,7 @@ pub struct CurveEditor {
     tangent_drag: Option<TangentDrag>,
     tangent_origin: Option<Vec<CurveTangent>>,
     dragging: Option<CurvePointDrag>,
+    group_drag: Option<CurveGroupDrag>,
     drag_value_origin: Option<(Vec<CurvePoint>, Vec<CurvePointMetadata>)>,
     drag_boundary_origin: Option<CurveBoundaryOrigin>,
     grid_columns: usize,
@@ -507,6 +532,7 @@ impl CurveEditor {
             tangent_drag: None,
             tangent_origin: None,
             dragging: None,
+            group_drag: None,
             drag_value_origin: None,
             drag_boundary_origin: None,
             grid_columns: 4,
@@ -1717,6 +1743,106 @@ impl CurveEditor {
         }
     }
 
+    fn begin_group_drag(&mut self, pointer_origin: Point, ctx: &mut EventContext) -> bool {
+        if self.preview_projection.is_none()
+            || self.on_gesture.is_none()
+            || self.on_value_edit.is_some()
+            || !self.selection_time_movement
+            || !self.selection_value_movement
+        {
+            return false;
+        }
+        let (Some(range), Some(frame_step)) = (self.time_axis, self.frame_time_step) else {
+            return false;
+        };
+        if range.duration <= mondrian_core::TimelineTime::ZERO
+            || frame_step <= mondrian_core::TimelineTime::ZERO
+        {
+            return false;
+        }
+        let keyframe_ids = self.selected_keyframe_ids();
+        if keyframe_ids.len() < 2 || keyframe_ids.len() != self.selected_keys.len() {
+            return false;
+        }
+        let policies = keyframe_ids
+            .iter()
+            .map(|id| self.point_metadata[self.keyframe_indices[id]].policy)
+            .collect::<Vec<_>>();
+        self.group_drag = Some(CurveGroupDrag {
+            keyframe_ids,
+            pointer_origin,
+            points: self.points.clone(),
+            metadata: self.point_metadata.clone(),
+            plot: self.plot_rect(),
+            time_span: self.viewport.time_span,
+            value_radius: self.viewport.value_radius,
+            duration: range.duration,
+            frame_step,
+            lock_time: policies.iter().any(|policy| policy.lock_x),
+            lock_value: policies.iter().any(|policy| policy.lock_y),
+            last_delta: None,
+        });
+        self.drag_display_origin = Some(self.display_points.clone());
+        self.tangent_origin = Some(self.tangents.clone());
+        let id = mondrian_core::AuthoringGestureId::new();
+        self.gesture = Some(id);
+        self.dispatch_gesture(CurveGestureEvent::Begin(id), ctx);
+        ctx.request_pointer_capture(self.id);
+        ctx.set_cursor(mondrian_ui_core::widget::CursorRequest::Grabbing);
+        true
+    }
+
+    fn move_group_from_input(&mut self, position: Point, ctx: &mut EventContext) {
+        let Some(group) = &self.group_drag else {
+            return;
+        };
+        if group.plot.width <= 0.0 || group.plot.height <= 0.0 {
+            return;
+        }
+        let frames = if group.lock_time {
+            0.0
+        } else {
+            (f64::from(position.x - group.pointer_origin.x) / f64::from(group.plot.width)
+                * group.time_span
+                * group.duration.to_f64()
+                / group.frame_step.to_f64())
+            .round()
+        };
+        let value_delta = if group.lock_value {
+            0.0
+        } else {
+            -f64::from(position.y - group.pointer_origin.y) / f64::from(group.plot.height)
+                * 2.0
+                * group.value_radius
+        };
+        if !frames.is_finite()
+            || frames < i64::MIN as f64
+            || frames >= i64::MAX as f64
+            || !value_delta.is_finite()
+        {
+            return;
+        }
+        let Ok(scale) = mondrian_core::TimeScale::new(frames as i64, 1) else {
+            return;
+        };
+        let Ok(time_delta) = group.frame_step.checked_scale(scale) else {
+            return;
+        };
+        if group.last_delta == Some((time_delta, value_delta)) {
+            return;
+        }
+        let edit = CurveEdit::TransformMany {
+            keyframe_ids: group.keyframe_ids.clone(),
+            time_delta,
+            value_delta,
+        };
+        if self.dispatch_edit(edit, ctx)
+            && let Some(group) = self.group_drag.as_mut()
+        {
+            group.last_delta = Some((time_delta, value_delta));
+        }
+    }
+
     fn drag_author_edit(&self, drag: CurvePointDrag) -> CurveEdit {
         let point = self.points[drag.index];
         if drag.inserted || matches!(drag.target_origin, CurvePointTarget::VirtualBoundary(_)) {
@@ -1734,6 +1860,12 @@ impl CurveEditor {
     }
 
     fn commit_drag_edit(&mut self, ctx: &mut EventContext) {
+        if let Some(group) = self.group_drag.take() {
+            let unchanged =
+                group.last_delta.is_none_or(|(time, value)| time.is_zero() && value == 0.0);
+            self.end_gesture(unchanged, ctx);
+            return;
+        }
         if let Some(drag) = self.tangent_drag.take() {
             if self.on_gesture.is_none()
                 && let Some(tangent) = self
@@ -1798,6 +1930,16 @@ impl CurveEditor {
     }
 
     fn cancel_drag_state(&mut self) -> bool {
+        if let Some(group) = self.group_drag.take() {
+            let changed = self.points != group.points;
+            let primary = self.selected_keyframe();
+            self.points = group.points;
+            self.point_metadata = group.metadata;
+            self.rebuild_keyframe_indices();
+            self.selected_keys = group.keyframe_ids.into_iter().collect();
+            self.selected = primary.and_then(|id| self.keyframe_indices.get(&id).copied());
+            return changed;
+        }
         if self.tangent_drag.take().is_some() {
             if let Some(origin) = &self.tangent_origin {
                 self.tangents = origin.clone();
@@ -2430,6 +2572,7 @@ impl Widget for CurveEditor {
             self.focused = false;
             self.focus_visible = false;
             self.dragging = None;
+            self.group_drag = None;
             self.tangent_drag = None;
             self.panning = None;
             return EventResult::Ignored;
@@ -2557,6 +2700,9 @@ impl Widget for CurveEditor {
             UiEvent::MouseDown { position, button: MouseButton::Left, modifiers }
                 if self.bounds.contains(*position) =>
             {
+                if self.group_drag.is_some() {
+                    return EventResult::Handled;
+                }
                 self.focus_visible = false;
                 ctx.tooltip.hide();
                 if (self.selection_deletion
@@ -2602,6 +2748,15 @@ impl Widget for CurveEditor {
                 }
                 self.selected_tangent = None;
                 if let Some(index) = self.hit_point(*position) {
+                    if let CurvePointTarget::Keyframe(id) = self.point_metadata[index].target
+                        && self.selected_keys.len() > 1
+                        && self.selected_keys.contains(&id)
+                    {
+                        self.selected = Some(index);
+                        self.begin_group_drag(*position, ctx);
+                        ctx.request_repaint();
+                        return EventResult::Handled;
+                    }
                     self.select(Some(index));
                     self.begin_drag(index, false, *position, ctx);
                     ctx.request_pointer_capture(self.id);
@@ -2625,6 +2780,10 @@ impl Widget for CurveEditor {
                 EventResult::Handled
             }
             UiEvent::MouseMove { position, .. } => {
+                if self.group_drag.is_some() {
+                    self.move_group_from_input(*position, ctx);
+                    return EventResult::Handled;
+                }
                 if let Some(drag) = self.tangent_drag {
                     let plot = self.plot_rect();
                     let point = CurvePoint {
@@ -2686,7 +2845,9 @@ impl Widget for CurveEditor {
                 EventResult::Ignored
             }
             UiEvent::MouseUp { button: MouseButton::Left, .. }
-                if self.dragging.is_some() || self.tangent_drag.is_some() =>
+                if self.dragging.is_some()
+                    || self.tangent_drag.is_some()
+                    || self.group_drag.is_some() =>
             {
                 self.commit_drag_edit(ctx);
                 ctx.release_pointer_capture(self.id);
@@ -2706,7 +2867,9 @@ impl Widget for CurveEditor {
                 EventResult::Handled
             }
             UiEvent::FocusLost => {
-                let was_dragging = self.dragging.is_some() || self.tangent_drag.is_some();
+                let was_dragging = self.dragging.is_some()
+                    || self.tangent_drag.is_some()
+                    || self.group_drag.is_some();
                 self.commit_drag_edit(ctx);
                 self.focused = false;
                 self.focus_visible = false;
@@ -2754,8 +2917,12 @@ impl Widget for CurveEditor {
             {
                 EventResult::Handled
             }
-            UiEvent::KeyDown { key: KeyCode::Escape, .. } if self.selected.is_some() => {
-                let was_dragging = self.dragging.is_some() || self.tangent_drag.is_some();
+            UiEvent::KeyDown { key: KeyCode::Escape, .. }
+                if self.selected.is_some() || self.group_drag.is_some() =>
+            {
+                let was_dragging = self.dragging.is_some()
+                    || self.tangent_drag.is_some()
+                    || self.group_drag.is_some();
                 let changed = self.cancel_drag_state();
                 self.end_gesture(true, ctx);
                 if !was_dragging {
@@ -2938,7 +3105,10 @@ impl Widget for CurveEditor {
     }
 
     fn has_active_pointer_interaction(&self) -> bool {
-        self.dragging.is_some() || self.tangent_drag.is_some() || self.panning.is_some()
+        self.dragging.is_some()
+            || self.tangent_drag.is_some()
+            || self.panning.is_some()
+            || self.group_drag.is_some()
     }
 
     fn edit_command_available(
@@ -4079,6 +4249,9 @@ mod tests {
 
     fn curve_edit_action(edit: CurveEdit) -> Action {
         let name = match edit {
+            CurveEdit::TransformMany { keyframe_ids, time_delta, value_delta } => {
+                format!("transform-many:{keyframe_ids:?}:{time_delta}:{value_delta}")
+            }
             CurveEdit::NudgeValue { keyframe_id, delta, steps } => {
                 format!("value:{keyframe_id}:{delta}:{steps}")
             }
@@ -7277,6 +7450,18 @@ mod tests {
             CurvePoint::new(1.0, 0.3),
         ])
         .with_keyframe_ids(ids.into_iter().map(Some).collect())
+        .with_selection_time_movement()
+        .with_selection_value_movement()
+        .with_time_axis(
+            mondrian_core::TimelineTimeRange::new(
+                mondrian_core::TimelineTime::ZERO,
+                mondrian_core::TimelineTime::ONE,
+            )
+            .expect("owner range"),
+        )
+        .with_frame_time_step(mondrian_core::TimelineTime::ONE)
+        .with_preview_projection(|_| None)
+        .on_gesture(|_| None::<Action>)
         .on_clipboard(move |command, keys| {
             copied_requests.borrow_mut().push((command, keys.to_vec()));
             Some(match command {

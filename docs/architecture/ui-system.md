@@ -4027,3 +4027,41 @@ pointer capture on the next routed event. The replacement has no author gesture
 to finish or mutate. This keeps focus usable for read-only Copy while terminating
 the stale drag through the existing capture protocol. Active viewport pans and
 menus remain excluded from view snapshots.
+
+### Stable group pointer transforms
+
+A grab on an already selected authored key retains the complete stable key set.
+The widget captures the pointer and viewport origin and emits one joint exact
+owner-time and author-value displacement, rather than moving keys independently.
+Each preview and author draft is derived from the existing gesture origin. The
+owner admits the complete detached candidate before preview state is published;
+a refused motion retains the previous admitted draft. The existing author session
+seals one history entry, or restores the original state on cancellation. The
+widget's cancellation geometry is transient inspection state, not a second
+source of authored keys or curve evaluation.
+
+Numeric visual and audio adapters lower the same TransformMany UI intent into
+closed domain edits. Core prepares final topology and tangent constraints once.
+Shared selected-key locks apply to the whole displacement. Owner interval checks
+remain separate from viewport scaling, and readonly inspection cannot begin a
+transform. Clipboard commands are consumed during the active captured draft.
+
+### Retaining group identity after commit
+
+Successful numeric group transforms publish the complete stable selection through
+the existing App selection authority. ClipCurveEditPayload's retention and
+removal policies use exhaustive variant matches; adding a new edit cannot silently
+fall back to single-key selection. The UI's temporal ordering and the App's
+normalized identity ordering represent the same set. Undo and forced owner
+projection retain inspection by stable identity rather than pointer coordinates.
+
+Changed admitted curve drags follow the established terminal policy: Escape
+cancels and restores author/preview state, while FocusLost completes the last
+admitted candidate as one Undo. Net-zero group drags produce no history entry.
+Capture and gesture ownership terminate in either case. Invalidated author leases
+are canceled through the existing author session before view replacement.
+
+Audio live projection includes exact coordinates for all known authored key IDs,
+including those moved outside the visible interval. Painting still clips the
+current viewport. This prevents a moved key remaining as a stale edge point and
+does not extend the Component author bounds or invent another curve evaluator.

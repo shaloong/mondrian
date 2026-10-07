@@ -76,6 +76,17 @@ pub enum AudioAutomationTarget {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AudioAutomationEdit {
+    /// Transform a complete stable group with one final definition admission.
+    TransformKeyframes {
+        /// Nonempty unique complete key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Signed exact owner-time translation.
+        time_delta: TimelineTime,
+        /// Finite common displacement in author value units.
+        value_delta: f64,
+        /// Signed value increment count.
+        steps: i8,
+    },
     /// Paste one complete exact group with a single final constraint normalization.
     PasteKeyframes {
         /// Complete fresh-identity keys in the addressed owner's time domain.
@@ -867,6 +878,22 @@ fn edit_curve(
     schema: &ParameterSchema,
 ) -> Result<(), AudioAutomationEditError> {
     match edit {
+        AudioAutomationEdit::TransformKeyframes {
+            keyframe_ids,
+            time_delta,
+            value_delta,
+            steps,
+        } => {
+            let contract = schema
+                .numeric
+                .as_ref()
+                .and_then(|contracts| contracts.first())
+                .copied()
+                .ok_or_else(|| invalid_automation("numeric channel contract is absent"))?;
+            curve
+                .transform_keyframes(keyframe_ids, *time_delta, contract, *value_delta, *steps)
+                .map_err(invalid_automation)?;
+        }
         AudioAutomationEdit::PasteKeyframes { keyframes } => {
             curve.paste_keyframes(keyframes).map_err(invalid_automation)?;
         }

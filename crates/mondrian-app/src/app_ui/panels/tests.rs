@@ -12582,15 +12582,88 @@ fn selected_audio_key_time_keyboard_preserves_owner_domain_and_saved_redo() {
                 &dispatch,
             );
         }
-        assert!(
-            actions.borrow().is_empty(),
-            "viewport boundary refusal is whole-set"
-        );
-        assert_eq!(state.project_author_generation(), generation);
-        assert_eq!(
-            state.authoring_history().expect("history").diagnostics(),
-            history
-        );
+        if scope {
+            assert_eq!(
+                actions.borrow().len(),
+                1,
+                "Scope movement beyond the viewport is one group intent"
+            );
+            state
+                .dispatch_action(actions.borrow_mut().remove(0))
+                .expect("shared owner author admission");
+            let outside =
+                inspect_audio_automation(state.active_sequence().expect("outside view"), &target)
+                    .expect("shared owner");
+            let shift =
+                frame.checked_scale(TimeScale::new(5, 1).expect("five frames")).expect("shift");
+            for (before, after) in after
+                .curve()
+                .expect("previous curve")
+                .keyframes
+                .iter()
+                .zip(&outside.curve().expect("outside curve").keyframes)
+            {
+                assert_eq!(after.id, before.id);
+                assert_eq!(
+                    after.time,
+                    before.time.checked_add(shift).expect("exact shared time")
+                );
+                assert_eq!(after.value, before.value);
+                assert_eq!(after.tangent_mode, before.tangent_mode);
+                let editor = widget
+                    .as_any()
+                    .and_then(|any| any.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+                    .expect("actual shared curve widget");
+                let point = editor
+                    .points()
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, point)| {
+                        (editor.point_target(index)
+                            == Some(mondrian_ui_widgets::CurvePointTarget::Keyframe(after.id)))
+                        .then_some(*point)
+                    })
+                    .expect("moving selected keys retains stable projected identities");
+                let elapsed =
+                    after.time.checked_sub(model.viewport.range.start).expect("owner offset");
+                assert_eq!(
+                    point,
+                    mondrian_ui_widgets::CurvePoint {
+                        x: (elapsed.to_f64() / model.viewport.range.duration.to_f64()) as f32,
+                        y: after.value,
+                    },
+                    "out-of-view key projection must follow canonical owner time"
+                );
+            }
+            assert!(
+                outside.curve().expect("curve").keyframes.last().expect("last key").time
+                    > model.viewport.range.end().expect("visible end")
+            );
+            assert_eq!(state.project_author_generation(), generation + 1);
+            assert_eq!(
+                state
+                    .authoring_history()
+                    .expect("one additional group")
+                    .diagnostics()
+                    .undo_entries,
+                history.undo_entries + 1
+            );
+            assert!(state.undo_timeline().expect("Undo shared extension"));
+            assert!(state
+                .active_sequence()
+                .expect("previous group")
+                .author_state_eq_ignoring_revision(&moved));
+        } else {
+            assert!(
+                actions.borrow().is_empty(),
+                "Component boundary refusal is whole-set"
+            );
+            assert_eq!(state.project_author_generation(), generation);
+            assert_eq!(
+                state.authoring_history().expect("history").diagnostics(),
+                history
+            );
+        }
         assert!(state.undo_timeline().expect("one Undo"));
         assert!(state
             .active_sequence()

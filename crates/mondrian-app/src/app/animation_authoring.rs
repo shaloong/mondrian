@@ -28,6 +28,18 @@ pub struct ClipCurveAuthorPoint {
 /// One stable-identity curve edit requested by a product Adapter.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClipNumericCurveEdit {
+    /// Transform complete stable keys from one gesture origin in a single candidate.
+    TransformMany {
+        /// Nonempty unique complete key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Signed exact owner-time translation.
+        time_delta: TimelineTime,
+        /// Finite common displacement in author value units.
+        value_delta: f64,
+        /// Signed value increment count.
+        steps: i8,
+    },
+
     /// Offset complete stable keys with one common numeric displacement.
     OffsetValuesMany {
         /// Nonempty unique complete key identities.
@@ -553,6 +565,24 @@ fn validate_numeric_curve_property(
     Ok(())
 }
 
+fn validate_curve_group_times(
+    property: &mondrian_core::automation::AnimatedProperty,
+    ids: &[KeyframeId],
+    range: mondrian_core::TimelineTimeRange,
+) -> Result<()> {
+    let end = range.end()?;
+    let identities = ids.iter().copied().collect::<std::collections::HashSet<_>>();
+    if property.channels()[0]
+        .keyframes()
+        .iter()
+        .filter(|key| identities.contains(&key.id))
+        .any(|key| key.time < range.start || key.time > end)
+    {
+        return Err(curve_error("transformed key is outside the owner interval"));
+    }
+    Ok(())
+}
+
 fn prepare_property_curve_edit(
     path: &str,
     property: &mondrian_core::automation::AnimatedProperty,
@@ -562,6 +592,26 @@ fn prepare_property_curve_edit(
 ) -> Result<PreparedCurveEdit> {
     validate_numeric_curve_property(property, address)?;
     match edit {
+        ClipNumericCurveEdit::TransformMany { keyframe_ids, time_delta, value_delta, steps } => {
+            let keyframe_id = keyframe_ids
+                .first()
+                .copied()
+                .ok_or_else(|| curve_error("key selection is empty"))?;
+            let mut candidate = property.clone();
+            candidate.transform_keyframes(&keyframe_ids, 0, time_delta, value_delta, steps)?;
+            validate_curve_group_times(&candidate, &keyframe_ids, range)?;
+            Ok(PreparedCurveEdit {
+                mutations: vec![PropertyMutation::TransformKeyframes {
+                    path: path.to_owned(),
+                    channel_index: 0,
+                    keyframe_ids,
+                    time_delta,
+                    value_delta,
+                    steps,
+                }],
+                keyframe_id,
+            })
+        }
         ClipNumericCurveEdit::OffsetValuesMany { keyframe_ids, delta, steps } => {
             let keyframe_id = keyframe_ids
                 .first()
@@ -587,16 +637,7 @@ fn prepare_property_curve_edit(
                 .ok_or_else(|| curve_error("key selection is empty"))?;
             let mut candidate = property.clone();
             candidate.shift_keyframes(&keyframe_ids, delta)?;
-            let end = range.end()?;
-            let identities = keyframe_ids.iter().copied().collect::<std::collections::HashSet<_>>();
-            if candidate.channels()[0]
-                .keyframes()
-                .iter()
-                .filter(|key| identities.contains(&key.id))
-                .any(|key| key.time < range.start || key.time > end)
-            {
-                return Err(curve_error("shifted key is outside the owner interval"));
-            }
+            validate_curve_group_times(&candidate, &keyframe_ids, range)?;
             Ok(PreparedCurveEdit {
                 mutations: vec![PropertyMutation::ShiftKeyframes {
                     path: path.to_owned(),

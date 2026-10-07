@@ -2604,6 +2604,18 @@ pub use super::animation_authoring::ClipCurveAuthorPoint;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClipCurveEditPayload {
+    /// Transform complete stable keys from one gesture origin in a single candidate.
+    TransformMany {
+        /// Nonempty unique complete key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Signed exact owner-time translation.
+        time_delta: TimelineTime,
+        /// Finite common displacement in author value units.
+        value_delta: f64,
+        /// Signed value increment count.
+        steps: i8,
+    },
+
     /// Offset complete stable keys with one common numeric displacement.
     OffsetValuesMany {
         /// Nonempty unique complete key identities.
@@ -2687,10 +2699,16 @@ impl ClipCurveEditPayload {
     /// Complete group retained after a successful non-deleting batch edit.
     pub(crate) fn retained_group_keyframe_ids(&self) -> Option<&[KeyframeId]> {
         match self {
-            Self::OffsetValuesMany { keyframe_ids, .. }
+            Self::TransformMany { keyframe_ids, .. }
+            | Self::OffsetValuesMany { keyframe_ids, .. }
             | Self::ShiftMany { keyframe_ids, .. }
             | Self::SetInterpolations { keyframe_ids, .. } => Some(keyframe_ids),
-            _ => None,
+            Self::RemoveMany { .. }
+            | Self::EditHandle { .. }
+            | Self::Move { .. }
+            | Self::Upsert { .. }
+            | Self::Remove { .. }
+            | Self::SetInterpolation { .. } => None,
         }
     }
 
@@ -2699,7 +2717,14 @@ impl ClipCurveEditPayload {
         match self {
             Self::Remove { keyframe_id } => Some(std::slice::from_ref(keyframe_id)),
             Self::RemoveMany { keyframe_ids, .. } => Some(keyframe_ids),
-            _ => None,
+            Self::TransformMany { .. }
+            | Self::OffsetValuesMany { .. }
+            | Self::ShiftMany { .. }
+            | Self::EditHandle { .. }
+            | Self::Move { .. }
+            | Self::Upsert { .. }
+            | Self::SetInterpolations { .. }
+            | Self::SetInterpolation { .. } => None,
         }
     }
 }

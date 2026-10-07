@@ -6468,6 +6468,442 @@ mod tests {
         assert_root_curve_menu_operation(RootCurveMenuOperation::ReadOnlyCopy);
     }
 
+    #[test]
+    fn inspector_group_pointer_grab_retains_the_complete_stable_selection() {
+        assert_inspector_group_pointer_transform(mondrian_core::InterpolationType::Linear);
+    }
+
+    #[test]
+    fn inspector_auto_group_pointer_transform_preserves_history_and_reopen() {
+        assert_inspector_group_pointer_transform(mondrian_core::InterpolationType::AutoBezier);
+    }
+
+    #[test]
+    fn inspector_continuous_group_pointer_transform_preserves_history_and_reopen() {
+        assert_inspector_group_pointer_transform(
+            mondrian_core::InterpolationType::ContinuousBezier,
+        );
+    }
+
+    fn assert_inspector_group_pointer_transform(interpolation: mondrian_core::InterpolationType) {
+        use mondrian_core::automation::{Keyframe, PropertyMutation};
+        use mondrian_core::{PropertyHost, TimeScale};
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1600.0);
+        let mut state = workspace_app_state_with_timed_solid();
+        let sequence = state.active_sequence_mut_uncommitted().expect("fixture");
+        let track_id = sequence.video_tracks[0].id;
+        let clip = &mut sequence.video_tracks[0].clips[0];
+        let clip_id = clip.id;
+        let duration = clip.duration;
+        let mut ids = Vec::new();
+        for (numerator, value) in [(1, 0.25), (2, 0.5), (4, 0.75)] {
+            let key = Keyframe::from_preset(
+                duration
+                    .checked_scale(TimeScale::new(numerator, 5).expect("ratio"))
+                    .expect("time"),
+                mondrian_core::PropertyValue::Float(value),
+                interpolation,
+            );
+            ids.push(key.id);
+            clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: mondrian_timeline::clip::Transform2D::OPACITY_PATH.into(),
+                keyframe: key,
+            })
+            .expect("seed");
+        }
+        state.selection.selected_clips =
+            vec![crate::app::SelectedClipRef { track_id, clip_id, is_video_track: true }];
+        let original = state.active_sequence().expect("origin").clone();
+        let generation = state.project_author_generation();
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("group-pointer-owner"),
+        );
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let curve_id =
+            panel_curve_with_point_count(host.active_root(), PanelKind::Inspector, false, 5)
+                .expect("three author keys with two virtual boundaries");
+        let positions = {
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let editor = tree
+                .get(curve_id)
+                .expect("curve")
+                .as_any()
+                .expect("type")
+                .downcast_ref::<mondrian_ui_widgets::CurveEditor>()
+                .expect("editor");
+            [
+                editor.point_position(editor.points()[1]),
+                editor.point_position(editor.points()[2]),
+            ]
+        };
+        let history = host.app_state().authoring_history().expect("history").diagnostics();
+        let pending = PendingUiActions::default();
+        let dispatch = |action| pending.push(action);
+        let mut router = EventRouter::new(host.active_root().id());
+        for position in positions {
+            for event in [
+                UiEvent::MouseDown {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::shift(),
+                },
+                UiEvent::MouseUp {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::shift(),
+                },
+            ] {
+                router.route(
+                    event,
+                    &mut WidgetTreeView::new(host.active_root_mut()),
+                    &dispatch,
+                );
+                host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            }
+        }
+        {
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let editor = tree
+                .get(curve_id)
+                .expect("selected curve")
+                .as_any()
+                .expect("type")
+                .downcast_ref::<mondrian_ui_widgets::CurveEditor>()
+                .expect("editor");
+            assert_eq!(editor.selected_keyframe_ids(), ids[..2]);
+        }
+        router.route(
+            UiEvent::MouseDown {
+                position: positions[0],
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &dispatch,
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        let tree = WidgetTreeView::new(host.active_root_mut());
+        let editor = tree
+            .get(curve_id)
+            .expect("grabbed curve")
+            .as_any()
+            .expect("type")
+            .downcast_ref::<mondrian_ui_widgets::CurveEditor>()
+            .expect("editor");
+        assert_eq!(
+            editor.selected_keyframe_ids(),
+            ids[..2],
+            "grabbing an already-selected key must retain the complete movement group"
+        );
+        assert_eq!(router.focused(), Some(curve_id));
+        assert_eq!(router.captured(), Some(curve_id));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("grab only")
+            .author_state_eq_ignoring_revision(&original));
+        assert_eq!(host.app_state().project_author_generation(), generation);
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            history
+        );
+        fn keys(
+            sequence: &mondrian_timeline::Sequence,
+            clip_id: mondrian_core::ClipId,
+        ) -> Vec<Keyframe<mondrian_core::automation::AnimationChannelValue>> {
+            sequence
+                .find_clip(clip_id)
+                .expect("owning Clip")
+                .intrinsic_parameter_bag()
+                .property(mondrian_timeline::clip::Transform2D::OPACITY_PATH)
+                .expect("opacity")
+                .channel(0)
+                .expect("channel")
+                .keyframes()
+                .to_vec()
+        }
+        let source = keys(&original, clip_id);
+        let mut first_delta: Option<(f64, f64)> = None;
+        let end_point = Point::new(positions[0].x + 24.0, positions[0].y - 24.0);
+        for multiplier in [1.0, 2.0, 2.0] {
+            router.route(
+                UiEvent::MouseMove {
+                    position: Point::new(
+                        positions[0].x + 12.0 * multiplier,
+                        positions[0].y - 12.0 * multiplier,
+                    ),
+                    modifiers: Modifiers::none(),
+                },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &dispatch,
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            let current = keys(
+                host.app_state().active_sequence().expect("live group"),
+                clip_id,
+            );
+            let time_delta = current[0].time.checked_sub(source[0].time).expect("translation");
+            let value_delta = current[0].value.projection() - source[0].value.projection();
+            assert!(time_delta > TimelineTime::ZERO && value_delta > 0.0);
+            assert_eq!(
+                current[1].time.checked_sub(source[1].time).expect("second translation"),
+                time_delta
+            );
+            assert!(
+                (current[1].value.projection() - source[1].value.projection() - value_delta).abs()
+                    < 1e-6
+            );
+            assert_eq!(current[2].id, source[2].id);
+            assert_eq!(current[2].time, source[2].time);
+            assert_eq!(current[2].value, source[2].value);
+            assert_eq!(current[2].temporal_flags, source[2].temporal_flags);
+            if interpolation == mondrian_core::InterpolationType::Linear {
+                assert_eq!(
+                    current[2], source[2],
+                    "unselected linear key remains untouched"
+                );
+            }
+            let draft_history =
+                host.app_state().authoring_history().expect("draft history").diagnostics();
+            assert_eq!(draft_history.pending_entries, 1);
+            assert_eq!(draft_history.undo_entries, history.undo_entries + 1);
+            assert_eq!(draft_history.retained_bytes, history.retained_bytes);
+            assert!(draft_history.pending_retained_bytes <= draft_history.budget.max_pending_bytes);
+            assert_eq!(
+                draft_history.branch_discarded_entries,
+                history.branch_discarded_entries
+            );
+            if let Some((first_time, first_value)) = first_delta {
+                assert!(
+                    time_delta.to_f64() <= first_time * 2.2,
+                    "successive moves use the grab origin"
+                );
+                assert!((value_delta - first_value * 2.0).abs() < 1e-6);
+            } else {
+                first_delta = Some((time_delta.to_f64(), value_delta));
+            }
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let editor = tree
+                .get(curve_id)
+                .expect("live curve")
+                .as_any()
+                .expect("type")
+                .downcast_ref::<mondrian_ui_widgets::CurveEditor>()
+                .expect("editor");
+            assert_eq!(editor.selected_keyframe_ids(), ids[..2]);
+        }
+        router.route(
+            UiEvent::MouseUp {
+                position: end_point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &dispatch,
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert!(router.captured().is_none());
+        assert!(host.app_state().active_parameter_gesture.is_none());
+        let accepted = host.app_state().active_sequence().expect("accepted").clone();
+        assert_eq!(
+            host.app_state()
+                .animation_selection
+                .selected_keyframes
+                .iter()
+                .map(|key| key.keyframe_id)
+                .collect::<std::collections::HashSet<_>>(),
+            ids[..2].iter().copied().collect::<std::collections::HashSet<_>>(),
+            "committing the draft retains the complete group in the sole App selection"
+        );
+        assert_eq!(
+            host.app_state()
+                .authoring_history()
+                .expect("one history entry")
+                .diagnostics()
+                .undo_entries,
+            history.undo_entries + 1
+        );
+        pending.push(Action::Undo);
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("Undo group")
+            .author_state_eq_ignoring_revision(&original));
+        let undo_history = host.app_state().authoring_history().expect("live Redo").diagnostics();
+        assert_eq!(undo_history.redo_entries, history.redo_entries + 1);
+        for event in [
+            UiEvent::MouseDown {
+                position: positions[0],
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseMove { position: end_point, modifiers: Modifiers::none() },
+            UiEvent::MouseMove {
+                position: Point::new(positions[0].x + 10000.0, end_point.y),
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            router.route(
+                event,
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &dispatch,
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        }
+        assert!(
+            host.app_state()
+                .active_sequence()
+                .expect("refused motion")
+                .author_state_eq_ignoring_revision(&accepted),
+            "after refusal: {:?}; prior accepted: {:?}; capture: {:?}",
+            keys(
+                host.app_state().active_sequence().expect("current"),
+                clip_id
+            ),
+            keys(&accepted, clip_id),
+            router.captured()
+        );
+        for event in [
+            UiEvent::MouseMove {
+                position: positions[0],
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseUp {
+                position: positions[0],
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            router.route(
+                event,
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &dispatch,
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        }
+        assert!(router.captured().is_none());
+        assert!(host.app_state().active_parameter_gesture.is_none());
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("returned group")
+            .author_state_eq_ignoring_revision(&original));
+        assert_eq!(
+            host.app_state().authoring_history().expect("retained Redo").diagnostics(),
+            undo_history
+        );
+        for termination in [
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::types::KeyCode::Escape,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::FocusLost,
+        ] {
+            for event in [
+                UiEvent::MouseDown {
+                    position: positions[0],
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::MouseMove { position: end_point, modifiers: Modifiers::none() },
+            ] {
+                router.route(
+                    event,
+                    &mut WidgetTreeView::new(host.active_root_mut()),
+                    &dispatch,
+                );
+                host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            }
+            assert!(router.captured().is_some());
+            assert!(host.app_state().active_parameter_gesture.is_some());
+            assert!(!host
+                .app_state()
+                .active_sequence()
+                .expect("active group")
+                .author_state_eq_ignoring_revision(&original));
+            let finishing = matches!(&termination, UiEvent::FocusLost);
+            router.route(
+                termination,
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &dispatch,
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            assert!(router.captured().is_none());
+            assert!(host.app_state().active_parameter_gesture.is_none());
+            if finishing {
+                assert!(host
+                    .app_state()
+                    .active_sequence()
+                    .expect("focus-loss completion")
+                    .author_state_eq_ignoring_revision(&accepted));
+                let finished_history =
+                    host.app_state().authoring_history().expect("finished history").diagnostics();
+                assert_eq!(finished_history.pending_entries, 0);
+                assert_eq!(finished_history.undo_entries, history.undo_entries + 1);
+                assert_eq!(finished_history.redo_entries, 0);
+                pending.push(Action::Undo);
+                host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            }
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("cancelled group")
+                .author_state_eq_ignoring_revision(&original));
+            if !finishing {
+                assert_eq!(
+                    host.app_state()
+                        .authoring_history()
+                        .expect("Escape preserved Redo")
+                        .diagnostics(),
+                    undo_history
+                );
+            }
+        }
+        let save_history =
+            host.app_state().authoring_history().expect("live terminal Redo").diagnostics();
+        assert_eq!(save_history.undo_entries, undo_history.undo_entries);
+        assert_eq!(save_history.redo_entries, undo_history.redo_entries);
+        assert_eq!(save_history.pending_entries, 0);
+        let directory = tempfile::tempdir().expect("archives");
+        let undone_path = directory.path().join("组拖动撤销🙂.mdp");
+        host.app_state
+            .borrow_mut()
+            .save_project_file_as(undone_path.clone())
+            .expect("save Undo");
+        assert_eq!(
+            host.app_state().authoring_history().expect("saved live Redo").diagnostics(),
+            save_history
+        );
+        pending.push(Action::Redo);
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("Redo group")
+            .author_state_eq_ignoring_revision(&accepted));
+        let accepted_path = directory.path().join("组拖动重做🙂.mdp");
+        host.app_state
+            .borrow_mut()
+            .save_project_file_as(accepted_path.clone())
+            .expect("save Redo");
+        drop(host);
+        for (path, expected) in [(undone_path, original), (accepted_path, accepted)] {
+            let mut reopened = AppState::new();
+            reopened.open_project_file(path).expect("fresh Unicode reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("reopened group")
+                .author_state_eq_ignoring_revision(&expected));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        }
+    }
+
     fn assert_root_curve_menu_operation(operation: RootCurveMenuOperation) {
         use mondrian_core::automation::{Keyframe, PropertyMutation};
         use mondrian_core::{PropertyHost, TimeScale};

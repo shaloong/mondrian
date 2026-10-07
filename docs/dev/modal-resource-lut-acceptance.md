@@ -2010,3 +2010,53 @@ Clippy with all targets/features and `-D warnings` passed (4m56s); format and di
 checks passed. This is foundation acceptance. App/UI group pointer handling,
 marquee/reset, gesture history/reopen and current native encoded output are still
 required; no new App runtime or native product qualification is implied.
+
+## Stable group pointer interaction and history
+
+Continuation from `5733f17` connects the atomic Core transform to real visual and
+audio input. The initial actual Host RED collapsed a selected group on grab. A
+later actual RED exposed another loss after commit: the new action was absent
+from the existing selection retention policy. Both paths now reuse the sole
+widget/App selection and author-session contracts. Retention/removal policy
+matches are exhaustive. Preview sources are published only after complete
+candidate admission, including rejected motion followed by origin return.
+
+Four actual input cases passed (9.24s): Linear/Auto/Continuous visual Host groups
+and the Auto/Continuous audio control matrix. They cover frozen stable IDs,
+origin-relative joint time/value motion, repeats, unselected time/value retention,
+collision or owner-bound refusal, return-to-origin cancellation, one pending
+history draft, one sealed Undo, Undo/save with live Redo, cancellation preserving
+Redo, Redo and fresh sequential Unicode archive reopen. A separate audio model
+matrix passed six owner/interpolation combinations: short Component extent uses
+the canonical exact author mapper, while Sequence and Scope time is not bounded
+by their viewport. EN/ZH help describes actual group input.
+
+Fixture corrections are distinguished from product REDs: an inferred float type
+prevented compilation; draft diagnostics legitimately include one prospective
+Undo; App identity ordering is normalized rather than click order. The tests
+retain complete selection, bounded pending history and full restored diagnostics
+assertions. Full App/UI/Timeline/strict Clippy and current encoded product output
+qualification are still running or pending; this paragraph does not claim them.
+
+### Final projection and terminal continuation
+
+The actual Scope keyboard projection RED showed a canonical key at normalized
+owner coordinate 1.2 remaining displayed at 1.0. Audio key projection now emits
+all authored IDs/coordinates; the existing widget updates known keys and clips
+painting to the current interval. The independent coordinate assertion passes.
+FocusLost follows the existing single-key/handle/value contract and finishes a
+changed admitted group once; Escape remains cancellation and preserves prior
+Redo. A new test expectation initially treated FocusLost as cancellation; it was
+corrected against the existing terminal contract without changing production
+FocusLost policy. Tests also require one sealed entry, no pending draft, one Undo
+and saved live Redo after completion.
+
+Broad candidate qualification before the four-line audio projection correction:
+App 2613 passed/0 failed/68 ignored (661.99s), Timeline 241/0/0 (0.78s), UI events
+77/0/0 (0.02s), widgets 1107/0/0 (567.28s), strict workspace/all-targets/all-features
+Clippy 4m18s, format and diff checks passed. Final source qualification:
+actual group inputs 4/0/0 (8.81s), Scope projection/history/reopen 1/0/0 (0.60s),
+all audio-related App cases 148/0/9 ignored (39.28s), strict complete Clippy 2m07s,
+format/diff checks passed. Overlapping cases are not added as unique test counts.
+Actions pin validation passed. Current product/native encoded output remains to
+rebuild and qualify on a clean commit; no inferred native acceptance or push.

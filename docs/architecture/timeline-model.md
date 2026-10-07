@@ -1667,3 +1667,9 @@ batch paste primitive. AudioAutomationCurveContract uses the same definition
 admission for preview and author publication. The existing target resolution,
 owner locks, full AudioProgram validation and no-op outcome remain the sole
 Timeline authoring path. App clipboard payloads never bypass this edit interface.
+
+AudioAutomationEdit::TransformKeyframes combines exact time translation with one
+numeric-contract value displacement for a complete stable key set. The existing
+Timeline curve editor delegates atomic final-topology preparation to Core and
+validates the resulting author state before publication. Preview and execution
+consume the same definition-admitted edit; the UI does not own another evaluator.

@@ -248,6 +248,14 @@ pub(super) fn numeric_curve_edit_from_payload(
     edit: &ClipCurveEditPayload,
 ) -> Result<ClipNumericCurveEdit> {
     match edit {
+        ClipCurveEditPayload::TransformMany { keyframe_ids, time_delta, value_delta, steps } => {
+            Ok(ClipNumericCurveEdit::TransformMany {
+                keyframe_ids: keyframe_ids.clone(),
+                time_delta: *time_delta,
+                value_delta: *value_delta,
+                steps: *steps,
+            })
+        }
         ClipCurveEditPayload::OffsetValuesMany { keyframe_ids, delta, steps } => {
             Ok(ClipNumericCurveEdit::OffsetValuesMany {
                 keyframe_ids: keyframe_ids.clone(),

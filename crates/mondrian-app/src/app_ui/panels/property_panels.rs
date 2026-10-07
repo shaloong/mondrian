@@ -1890,18 +1890,19 @@ pub(super) fn audio_automation_curve_control(
                 None
             }
             CurveGestureEvent::Edit { edit, .. } => {
-                let previous_source = preview_model.source_curve.clone();
+                let mut candidate_model = preview_model.clone();
                 if let Some(origin) = &preview_origin {
-                    preview_model.source_curve = origin.clone();
+                    candidate_model.source_curve = origin.clone();
                 }
                 *preview_action.borrow_mut() = None;
                 let projection = crate::app_ui::audio_automation::preview_audio_curve_edit(
-                    &mut preview_model,
+                    &mut candidate_model,
                     edit,
                 )?;
-                if preview_model.source_curve == previous_source {
+                if candidate_model.source_curve == preview_model.source_curve {
                     return None;
                 }
+                preview_model = candidate_model;
                 let display_points = projection.display_points;
                 *preview_action.borrow_mut() = Some(projection.action);
                 Some(CurvePreview {
@@ -2813,24 +2814,28 @@ fn numeric_curve_editor(
                 None
             }
             CurveGestureEvent::Edit { edit, .. } => {
-                let previous_source = preview_source.clone();
+                let mut candidate_source = preview_source.clone();
                 if matches!(
                     edit,
-                    CurveEdit::Move { .. } | CurveEdit::Insert { .. } | CurveEdit::Handle { .. }
+                    CurveEdit::Move { .. }
+                        | CurveEdit::Insert { .. }
+                        | CurveEdit::Handle { .. }
+                        | CurveEdit::TransformMany { .. }
                 ) && let Some(origin) = &preview_origin
                 {
-                    preview_source = origin.clone();
+                    candidate_source = origin.clone();
                 }
                 *preview_action.borrow_mut() = None;
                 let mut live_model = preview_model.clone();
-                live_model.curve_source = preview_source.clone();
-                let action = on_edit(&live_model, edit.clone());
+                live_model.curve_source = candidate_source.clone();
+                let action = on_edit(&live_model, edit.clone())?;
                 let display_points =
-                    preview_numeric_curve_points(&live_model, &mut preview_source, edit)?;
-                if preview_source == previous_source {
+                    preview_numeric_curve_points(&live_model, &mut candidate_source, edit)?;
+                if candidate_source == preview_source {
                     return None;
                 }
-                *preview_action.borrow_mut() = action;
+                preview_source = candidate_source;
+                *preview_action.borrow_mut() = Some(action);
                 Some(CurvePreview {
                     virtual_boundaries: crate::app_ui::curve_tangents::virtual_boundary_points(
                         preview_source.channels().first()?.keyframes().iter().map(|key| key.time),
@@ -2987,6 +2992,9 @@ fn numeric_curve_edit_payload(
     edit: CurveEdit,
 ) -> Option<ClipCurveEditPayload> {
     let edit = match edit {
+        CurveEdit::TransformMany { keyframe_ids, time_delta, value_delta } => {
+            ClipCurveEditPayload::TransformMany { keyframe_ids, time_delta, value_delta, steps: 1 }
+        }
         CurveEdit::NudgeValue { keyframe_id, delta, steps } => {
             let key = model
                 .curve_source
@@ -5056,6 +5064,256 @@ mod temporal_handle_tests {
                 before.find_clip(selection.clip_id).expect("before").intrinsic_parameter_bag()
             );
             assert!(!state.can_undo_action());
+        }
+    }
+
+    #[test]
+    fn temporal_audio_group_pointer_refusal_return_cancel_and_saved_redo_use_one_history() {
+        use crate::app_ui::audio_automation::{
+            project_audio_automation, sequence_automation_viewport, AudioAutomationTimeContext,
+        };
+        use mondrian_core::ExactAutomationKeyframe;
+        use mondrian_timeline::{
+            apply_audio_automation_edit, inspect_audio_automation, AudioAutomationEdit,
+            AudioAutomationEditRequest, AudioAutomationTarget, AudioChannelStripOwner,
+        };
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        for interpolation in [
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let mut sequence = mondrian_timeline::Sequence::new("Audio pointer group");
+            let target = AudioAutomationTarget::ChannelFader {
+                owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+            };
+            let mut ids = Vec::new();
+            for (numerator, value) in [(1, -24.0), (2, -18.0), (4, -12.0)] {
+                let keyframe = ExactAutomationKeyframe::linear(
+                    TimelineTime::new(numerator, 5).expect("time"),
+                    value,
+                );
+                ids.push(keyframe.id);
+                apply_audio_automation_edit(
+                    &mut sequence,
+                    &AudioAutomationEditRequest {
+                        target: target.clone(),
+                        edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                    },
+                )
+                .expect("seed");
+            }
+            apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::SetInterpolations {
+                        keyframe_ids: ids.clone(),
+                        interpolation,
+                    },
+                },
+            )
+            .expect("constraints");
+            let viewport = sequence_automation_viewport(&sequence).expect("viewport");
+            let context =
+                AudioAutomationTimeContext::at_sequence_time(&sequence, TimelineTime::ZERO);
+            let model = project_audio_automation(&sequence, target.clone(), viewport, context)
+                .expect("model");
+            let original = sequence.clone();
+            let mut state = AppState::new();
+            state.test_set_sequence(Some(sequence));
+            let history = state.authoring_history().expect("history").diagnostics();
+            let localizer =
+                Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs).expect("locale");
+            let mut widget = audio_automation_curve_control(&model, &localizer);
+            widget.layout(Rect::new(0.0, 0.0, 600.0, 220.0));
+            let editor = widget
+                .as_any()
+                .and_then(|any| any.downcast_ref::<CurveEditor>())
+                .expect("editor");
+            let positions = [
+                editor.point_position(editor.points()[1]),
+                editor.point_position(editor.points()[2]),
+            ];
+            let plot = editor.plot_bounds();
+            let mut router = EventRouter::new(widget.id());
+            for position in positions {
+                for event in [
+                    UiEvent::MouseDown {
+                        position,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::shift(),
+                    },
+                    UiEvent::MouseUp {
+                        position,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::shift(),
+                    },
+                ] {
+                    route_temporal(widget.as_mut(), &mut router, &mut state, event);
+                }
+            }
+            let start = positions[0];
+            let accepted_point = Point::new(start.x + plot.width * 0.1, start.y - 5.0);
+            let collision_point = Point::new(start.x + plot.width * 0.4, start.y - 5.0);
+            let source = model.source_curve.clone();
+            let mut accepted = None;
+            for event in [
+                UiEvent::MouseDown {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::MouseMove {
+                    position: accepted_point,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::MouseMove {
+                    position: accepted_point,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::MouseMove {
+                    position: collision_point,
+                    modifiers: Modifiers::none(),
+                },
+            ] {
+                route_temporal(widget.as_mut(), &mut router, &mut state, event);
+                let current = state.active_sequence().expect("draft");
+                let curve = inspect_audio_automation(current, &target)
+                    .expect("curve")
+                    .curve()
+                    .expect("keys")
+                    .clone();
+                if router.captured().is_some() && curve != source {
+                    if let Some(expected) = &accepted {
+                        assert_eq!(
+                            &curve, expected,
+                            "repeat and rejected collision preserve last accepted joint draft"
+                        );
+                    } else {
+                        accepted = Some(curve.clone());
+                    }
+                    let time_delta = curve.keyframes[0]
+                        .time
+                        .checked_sub(source.keyframes[0].time)
+                        .expect("delta");
+                    let value_delta = curve.keyframes[0].value - source.keyframes[0].value;
+                    assert!(time_delta > TimelineTime::ZERO && value_delta > 0.0);
+                    assert_eq!(
+                        curve.keyframes[1]
+                            .time
+                            .checked_sub(source.keyframes[1].time)
+                            .expect("second delta"),
+                        time_delta
+                    );
+                    assert!(
+                        (curve.keyframes[1].value - source.keyframes[1].value - value_delta).abs()
+                            < 1e-9
+                    );
+                    assert_eq!(curve.keyframes[2].time, source.keyframes[2].time);
+                    assert_eq!(curve.keyframes[2].value, source.keyframes[2].value);
+                }
+                let draft_history = state.authoring_history().expect("draft history").diagnostics();
+                let pending_count = usize::from(curve != source);
+                assert_eq!(draft_history.pending_entries, pending_count);
+                assert_eq!(
+                    draft_history.undo_entries,
+                    history.undo_entries + pending_count
+                );
+                assert_eq!(draft_history.retained_bytes, history.retained_bytes);
+                assert!(
+                    draft_history.pending_retained_bytes <= draft_history.budget.max_pending_bytes
+                );
+                assert_eq!(
+                    draft_history.branch_discarded_entries,
+                    history.branch_discarded_entries
+                );
+                assert_eq!(
+                    widget
+                        .as_any()
+                        .and_then(|any| any.downcast_ref::<CurveEditor>())
+                        .expect("selection")
+                        .selected_keyframe_ids(),
+                    ids[..2]
+                );
+            }
+            assert!(accepted.is_some(), "actual group moved");
+            for event in [
+                UiEvent::MouseMove { position: start, modifiers: Modifiers::none() },
+                UiEvent::MouseUp {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+            ] {
+                route_temporal(widget.as_mut(), &mut router, &mut state, event);
+            }
+            assert!(state
+                .active_sequence()
+                .expect("returned source")
+                .author_state_eq_ignoring_revision(&original));
+            assert_eq!(
+                state.authoring_history().expect("no history").diagnostics(),
+                history
+            );
+            assert!(router.captured().is_none());
+            for event in [
+                UiEvent::MouseDown {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::MouseMove {
+                    position: accepted_point,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::MouseUp {
+                    position: accepted_point,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+            ] {
+                route_temporal(widget.as_mut(), &mut router, &mut state, event);
+            }
+            let committed = state.active_sequence().expect("committed").clone();
+            assert_eq!(
+                inspect_audio_automation(&committed, &target).expect("committed target").curve(),
+                accepted.as_ref()
+            );
+            assert_eq!(
+                state.authoring_history().expect("one entry").diagnostics().undo_entries,
+                history.undo_entries + 1
+            );
+            assert!(state.undo_timeline().expect("Undo"));
+            assert!(state
+                .active_sequence()
+                .expect("undone")
+                .author_state_eq_ignoring_revision(&original));
+            let undo_history = state.authoring_history().expect("live Redo").diagnostics();
+            let directory = tempfile::tempdir().expect("archives");
+            let undone_path = directory.path().join("音频组撤销🙂.mdp");
+            state.save_project_file_as(undone_path.clone()).expect("save Undo");
+            assert_eq!(
+                state.authoring_history().expect("saved live Redo").diagnostics(),
+                undo_history
+            );
+            assert!(state.redo_timeline().expect("Redo"));
+            assert!(state
+                .active_sequence()
+                .expect("redone")
+                .author_state_eq_ignoring_revision(&committed));
+            let committed_path = directory.path().join("音频组重做🙂.mdp");
+            state.save_project_file_as(committed_path.clone()).expect("save Redo");
+            drop(widget);
+            drop(state);
+            for (path, expected) in [(undone_path, original), (committed_path, committed)] {
+                let mut reopened = AppState::new();
+                reopened.open_project_file(path).expect("fresh reopen");
+                assert!(reopened
+                    .active_sequence()
+                    .expect("archive author state")
+                    .author_state_eq_ignoring_revision(&expected));
+                assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            }
         }
     }
 

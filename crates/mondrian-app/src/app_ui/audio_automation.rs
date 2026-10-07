@@ -64,6 +64,8 @@ pub(crate) struct AudioAutomationCurveModel {
     pub(crate) current_author_time:
         Result<mondrian_core::DomainTime, mondrian_timeline::AudioAutomationTimeError>,
     pub(crate) frame_time_step: TimelineTime,
+    /// Visible placement extent for Component edits; shared owners have no viewport bound.
+    pub(crate) component_author_range: Option<TimelineTimeRange>,
     pub(crate) source_curve: mondrian_core::ExactAutomationCurve,
     pub(crate) curve_contract: mondrian_timeline::AudioAutomationCurveContract,
     pub(crate) target: AudioAutomationTarget,
@@ -95,13 +97,9 @@ impl AudioAutomationCurveModel {
     }
 
     pub(crate) fn key_points(&self) -> Vec<(mondrian_core::KeyframeId, CurvePoint)> {
-        let Ok(end) = self.viewport.range.end() else {
-            return Vec::new();
-        };
         self.source_curve
             .keyframes
             .iter()
-            .filter(|key| key.time >= self.viewport.range.start && key.time <= end)
             .filter_map(|key| {
                 Some((
                     key.id,
@@ -224,6 +222,29 @@ pub(crate) fn project_audio_automation(
     if inspection.time_domain() != viewport.domain || viewport.range.duration.is_zero() {
         return None;
     }
+    let component_author_range = match &target {
+        AudioAutomationTarget::ComponentVolume { clip_id, .. }
+        | AudioAutomationTarget::ComponentPan { clip_id, .. } => {
+            let clip = sequence.find_clip(*clip_id)?;
+            let resolve = |time| {
+                mondrian_timeline::audio_automation_author_time(
+                    sequence,
+                    &target,
+                    mondrian_core::DomainTime::new(
+                        AuthoringTimeDomain::Sequence(sequence.id),
+                        time,
+                    ),
+                    time_context.scope_occurrence,
+                )
+                .ok()
+                .map(|time| time.time)
+            };
+            let start = resolve(clip.position)?;
+            let end = resolve(clip.position.checked_add(clip.duration).ok()?)?;
+            Some(TimelineTimeRange::new(start, end.checked_sub(start).ok()?).ok()?)
+        }
+        _ => None,
+    };
     let contract = inspection.value_contract();
     let allowed = inspection.allowed_interpolations();
     let insert_interpolation = match allowed.first()? {
@@ -316,6 +337,7 @@ pub(crate) fn project_audio_automation(
             sequence.time_base(),
         ))
         .ok()?,
+        component_author_range,
         source_curve: match inspection.curve() {
             Some(curve) => curve.clone(),
             None => mondrian_core::ExactAutomationCurve::new(
@@ -434,14 +456,19 @@ pub(crate) fn prepare_audio_curve_edit(
 ) -> Option<PreparedAudioCurveEdit> {
     let intent = lower_audio_curve_edit(model, edit)?;
     let curve = model.curve_contract.preview_edit(&model.source_curve, &intent).ok()?;
-    if let AudioAutomationEdit::ShiftKeyframes { keyframe_ids, .. } = &intent {
-        let end = model.viewport.range.end().ok()?;
+    if let (
+        AudioAutomationEdit::ShiftKeyframes { keyframe_ids, .. }
+        | AudioAutomationEdit::TransformKeyframes { keyframe_ids, .. },
+        Some(range),
+    ) = (&intent, model.component_author_range)
+    {
+        let end = range.end().ok()?;
         let identities = keyframe_ids.iter().copied().collect::<std::collections::HashSet<_>>();
         if curve
             .keyframes
             .iter()
             .filter(|key| identities.contains(&key.id))
-            .any(|key| key.time < model.viewport.range.start || key.time > end)
+            .any(|key| key.time < range.start || key.time > end)
         {
             return None;
         }
@@ -463,6 +490,14 @@ fn lower_audio_curve_edit(
         return None;
     }
     let edit = match edit {
+        CurveEdit::TransformMany { keyframe_ids, time_delta, value_delta } => {
+            AudioAutomationEdit::TransformKeyframes {
+                keyframe_ids,
+                time_delta,
+                value_delta,
+                steps: 1,
+            }
+        }
         CurveEdit::NudgeValue { keyframe_id, delta, steps } => {
             let mut key =
                 model.source_curve.keyframes.iter().find(|key| key.id == keyframe_id)?.clone();
@@ -1437,6 +1472,149 @@ mod tests {
                     "vertical drag must preserve exact author time"
                 );
                 assert_ne!(moved.value, value);
+            }
+        }
+    }
+
+    #[test]
+    fn joint_audio_group_transform_uses_component_extent_not_shared_owner_viewport() {
+        use mondrian_core::{AssetId, AudioSourceComponentId};
+        use mondrian_timeline::{apply_audio_automation_edit, AudioChannelStripOwner, Clip};
+        for owner in 0..3 {
+            for interpolation in [
+                InterpolationType::AutoBezier,
+                InterpolationType::ContinuousBezier,
+            ] {
+                let mut sequence = Sequence::new("Joint audio bounds");
+                let track_id = sequence.audio_tracks[0].id;
+                let duration = TimelineTime::new(1, 2).expect("short Clip");
+                let clip = Clip::new(
+                    AssetId::new(),
+                    TimelineTime::new(10, 1).expect("placement"),
+                    duration,
+                )
+                .expect("clip");
+                sequence
+                    .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+                    .expect("audio occurrence");
+                let clip = &mut sequence.audio_tracks[0].clips[0];
+                let component = &mut clip.audio_components[0];
+                component.local_time_in = TimelineTime::new(2, 1).expect("component origin");
+                component.processing.scope_in = TimelineTime::new(7, 1).expect("scope origin");
+                let target = match owner {
+                    0 => AudioAutomationTarget::ChannelFader {
+                        owner: AudioChannelStripOwner::Track { track_id },
+                    },
+                    1 => AudioAutomationTarget::ComponentVolume {
+                        track_id,
+                        clip_id: clip.id,
+                        edit_id: component.id,
+                    },
+                    _ => AudioAutomationTarget::ProcessingScopeInputGain {
+                        scope_id: component.processing.scope_id,
+                    },
+                };
+                let origin = match owner {
+                    0 => TimelineTime::ZERO,
+                    1 => component.local_time_in,
+                    _ => component.processing.scope_in,
+                };
+                let viewport = AudioAutomationViewport {
+                    domain: match owner {
+                        0 => AuthoringTimeDomain::Sequence(sequence.id),
+                        1 => AuthoringTimeDomain::AudioComponentEdit(component.id),
+                        _ => {
+                            AuthoringTimeDomain::AudioProcessingScope(component.processing.scope_id)
+                        }
+                    },
+                    range: TimelineTimeRange::new(origin, TimelineTime::ONE)
+                        .expect("one-second view"),
+                };
+                let mut ids = Vec::new();
+                for (offset, value) in [(1, -24.0), (2, -18.0), (4, -12.0)] {
+                    let keyframe = ExactAutomationKeyframe::linear(
+                        origin
+                            .checked_add(TimelineTime::new(offset, 10).expect("offset"))
+                            .expect("time"),
+                        value,
+                    );
+                    ids.push(keyframe.id);
+                    apply_audio_automation_edit(
+                        &mut sequence,
+                        &AudioAutomationEditRequest {
+                            target: target.clone(),
+                            edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                        },
+                    )
+                    .expect("seed");
+                }
+                apply_audio_automation_edit(
+                    &mut sequence,
+                    &AudioAutomationEditRequest {
+                        target: target.clone(),
+                        edit: AudioAutomationEdit::SetInterpolations {
+                            keyframe_ids: ids.clone(),
+                            interpolation,
+                        },
+                    },
+                )
+                .expect("constrained source");
+                let model = project_audio_automation(
+                    &sequence,
+                    target.clone(),
+                    viewport,
+                    AudioAutomationTimeContext::at_sequence_time(&sequence, sequence.playhead),
+                )
+                .expect("model");
+                let original = model.clone();
+                let make_edit = |time_delta| CurveEdit::TransformMany {
+                    keyframe_ids: ids[..2].to_vec(),
+                    time_delta,
+                    value_delta: 1.25,
+                };
+                let accepted = prepare_audio_curve_edit(
+                    &model,
+                    make_edit(TimelineTime::new(1, 20).expect("small offset")),
+                )
+                .expect("complete joint candidate");
+                let Some(ProductAction::Audio(AudioProductAction::EditAutomation(request))) =
+                    ProductAction::decode_external(&accepted.action).expect("decode")
+                else {
+                    panic!("audio action");
+                };
+                let mut changed = sequence.clone();
+                apply_audio_automation_edit(&mut changed, &request).expect("canonical admission");
+                assert_eq!(
+                    inspect_audio_automation(&changed, &target).expect("target").curve(),
+                    Some(&accepted.curve)
+                );
+                let large_delta = TimelineTime::new(11, 10).expect("outside displayed viewport");
+                let moved = prepare_audio_curve_edit(&model, make_edit(large_delta));
+                if owner == 1 {
+                    assert!(moved.is_none(), "short Component cannot use the padded one-second viewport as author extent");
+                    assert_eq!(
+                        model.component_author_range.expect("component extent").duration,
+                        duration
+                    );
+                } else {
+                    assert!(
+                        moved.is_some(),
+                        "shared author curves are not bounded by visible time"
+                    );
+                    assert!(model.component_author_range.is_none());
+                }
+                assert_eq!(
+                    model, original,
+                    "candidate preparation never mutates inspection state"
+                );
+                let collision = prepare_audio_curve_edit(
+                    &model,
+                    make_edit(TimelineTime::new(1, 5).expect("collision")),
+                );
+                assert!(
+                    collision.is_none(),
+                    "complete transform refuses collision with the unselected key"
+                );
             }
         }
     }

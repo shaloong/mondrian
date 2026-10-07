@@ -1700,3 +1700,12 @@ pasted Auto/Continuous groups, stale Cut refusal, one Undo, saved live Redo and
 sequential fresh Unicode reopen with sample-accurate realtime/offline PCM. Fresh
 reopen releases the original Session first, preserving exclusive project leases.
 Wider Component/Scope/route/rack admission and native contracts remain to qualify.
+
+### Joint audio key-set transforms
+
+AudioAutomationEdit::TransformKeyframes carries a complete stable key set, one
+exact time delta and one definition-bounded value delta. The same curve contract
+prepares UI candidates and canonical edits. ExactAutomationCurve admits the joint
+candidate and normalizes Auto/Continuous controls against final topology once;
+there are no intermediate axis-specific publications. Pointer requests use the
+existing origin-relative parameter gesture so repeated moves do not accumulate.

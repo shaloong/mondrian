@@ -471,18 +471,21 @@ impl AppState {
             ParameterGestureEdit::ClipCurve(edit) => matches!(
                 edit.edit,
                 ClipCurveEditPayload::Move { .. }
+                    | ClipCurveEditPayload::TransformMany { .. }
                     | ClipCurveEditPayload::EditHandle { .. }
                     | ClipCurveEditPayload::Upsert { keyframe_id: Some(_), .. }
             ),
             ParameterGestureEdit::EffectCurve(edit) => matches!(
                 edit.edit,
                 ClipCurveEditPayload::Move { .. }
+                    | ClipCurveEditPayload::TransformMany { .. }
                     | ClipCurveEditPayload::EditHandle { .. }
                     | ClipCurveEditPayload::Upsert { keyframe_id: Some(_), .. }
             ),
             ParameterGestureEdit::AudioCurve(edit) => matches!(
                 edit.edit,
                 mondrian_timeline::AudioAutomationEdit::EditHandle { .. }
+                    | mondrian_timeline::AudioAutomationEdit::TransformKeyframes { .. }
                     | mondrian_timeline::AudioAutomationEdit::UpsertKeyframe { .. }
             ),
             _ => false,
