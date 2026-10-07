@@ -4674,7 +4674,10 @@ fn run_preview_media_resolution_scale_decode_stability_probe(
                 resolve_playback_hardware_decode_admission(&gpu_adapter.native_import_support());
             decode_admission.request = PreviewHardwareDecodeRequest::Auto;
             preview_service.set_playback_hardware_decode_admission(decode_admission);
-            let mut gpu_summary = HeadlessViewerGpuExecutionSummary::default();
+            let mut gpu_summary = HeadlessViewerGpuExecutionSummary {
+                adapter: Some(gpu_adapter.adapter_info().clone()),
+                ..HeadlessViewerGpuExecutionSummary::default()
+            };
             let sequence_id = state
                 .active_sequence_id()
                 .context("resolution-scale probe has no active Sequence")?;
@@ -4943,7 +4946,10 @@ fn playback_cpal_av_external_smoke() -> anyhow::Result<()> {
                     realtime.preview()?,
                     &root_dir.join("cpal-smoke-render-cache"),
                 )?;
-                let mut gpu_summary = HeadlessViewerGpuExecutionSummary::default();
+                let mut gpu_summary = HeadlessViewerGpuExecutionSummary {
+                    adapter: Some(realtime.gpu()?.adapter_info().clone()),
+                    ..HeadlessViewerGpuExecutionSummary::default()
+                };
                 state.seek(0)?;
                 {
                     let (preview_service, gpu_adapter) = realtime.bound_resources()?;
