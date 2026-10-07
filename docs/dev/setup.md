@@ -2,13 +2,16 @@
 
 ## Rust
 
-Use Rust 1.97.1 or newer, matching workspace `rust-version`. The workspace uses
-Rust edition 2024 and Cargo resolver 3; crate manifests inherit both policies
-from the workspace rather than selecting editions independently.
+Use the toolchain pinned by [rust-toolchain.toml](../../rust-toolchain.toml)
+(currently Rust 1.97.1). Workspace crates inherit the minimum Rust version,
+edition 2024, and repository metadata; Cargo uses resolver 3.
+
+Install rustup, then run these commands from the repository. They install the
+pinned toolchain and show the active selection without changing your global default:
 
 ```bash
-rustup update
-rustup default stable
+rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy,llvm-tools-preview,rust-analyzer
+rustup show active-toolchain
 ```
 
 ## Native Dependencies
@@ -59,7 +62,19 @@ sudo apt-get install -y --no-install-recommends \
 the eyedropper (`xcap`) uses the XDG portal D-Bus API and XCB on Linux; they
 are functional dependencies, not optional conveniences.
 
-On macOS, use `brew install ffmpeg pkg-config`.
+On macOS, use the same FFmpeg major as CI and expose its keg-only prefix:
+
+```bash
+brew install ffmpeg@8 pkg-config
+ffmpeg_prefix="$(brew --prefix ffmpeg@8)"
+export PATH="$ffmpeg_prefix/bin:$PATH"
+export PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+pkg-config --modversion libavcodec # Must report major 62 (FFmpeg 8).
+```
+
+On Windows, follow [Windows development](windows-development.md) and activate
+`scripts/enter-windows-development.ps1` in each PowerShell 7 terminal. It selects
+MSVC, libclang, pkg-config and the matching FFmpeg libraries/tools together.
 
 ## Optional Tools
 

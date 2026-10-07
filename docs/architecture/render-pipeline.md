@@ -2596,7 +2596,7 @@ contracts are:
   `RenderInputTransform`. Does not carry tone mapping.
 - **Preview display/view transform**: viewer presentation resolved by
   `RenderOutputColorBoundary::from_intent(...)` with `target: Display`.
-  受 monitor/surface/display policy 影响。
+  depends on monitor, surface and display policy.
 - **Export delivery view transform**: encoded delivery output resolved by the
   same constructor with `target: Export`. A named intent becomes an internal
   `RenderColorTransform::delivery_view(...)`, which dispatches through the

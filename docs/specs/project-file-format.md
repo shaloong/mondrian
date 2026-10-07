@@ -33,6 +33,8 @@ library/index.db
 - `color_environment: ProjectColorEnvironment`
 - `new_sequence_defaults: SequenceSettings`
 - `sequences: SequenceCollection`
+- `gallery: ProjectGallery`, authored portable comparison stills (an omitted
+  Gallery in an otherwise valid current-schema document defaults to empty)
 - `proxy_mode_assets: AuthoringSet<AssetId>` in memory, serialized exactly as
   the canonical ordered `BTreeSet<AssetId>` JSON array
 
@@ -44,8 +46,8 @@ could otherwise select one by name. Project JSON and Library entries are
 written with ZIP64 size fields from the start; readers must therefore support
 ZIP64 even when a particular Project remains below 4 GiB.
 
-The current independent versions are archive v1, document schema v26, and
-library schema v6. Document schema v26 is the sole accepted Alpha author
+The current independent versions are archive v1, document schema v27, and
+library schema v6. Document schema v27 is the sole accepted Alpha author
 contract. It requires closed Project/Sequence/Clip structures, including one
 mandatory tagged `source_time_map`; its constant variant contains
 `source_origin`, exact signed `scale`, and mandatory `sampling_boundary`, and
@@ -59,6 +61,14 @@ this closed
 algebra rather than adding parallel mutable range fields. Older and future
 document versions and unknown author fields fail closed because no
 compatibility migration is promised yet.
+
+Gallery stills are author data, so their PNG rasters, working-linear statistics,
+source time/Sequence identity, presentation fingerprint, and Grade Version
+bindings travel inside `project.json`. They are separate from rebuildable Preview
+caches. The current decoder defaults an omitted Gallery to empty; a supplied
+Gallery must pass identity, count, raster size/format and statistics validation.
+See [Project Model](../architecture/project-model.md) and the authoritative
+[Gallery types](../../crates/mondrian-core/src/gallery.rs).
 
 ## Required Evolution Rules
 

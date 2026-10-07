@@ -54,7 +54,7 @@ report for every started phase and reconciles the same manifest, runtime image,
 machine plan, object closure, and observed mapping set. Every native termination,
 accounting, deadline, or cleanup failure remains a failed raw report.
 
-`tests/native_bootstrap.rs` exercises real fresh-process handshake/cleanup, refused
+`crates/mondrian-validation-launcher/tests/native_bootstrap.rs` exercises real fresh-process handshake/cleanup, refused
 bootstrap, and a root process exiting with a deliberately surviving descendant.
 Unit tests cover DACL replacement/injection rejection, oversized/truncated pipe
 frames, expired original deadlines, and full-file overlay/hash mismatches.

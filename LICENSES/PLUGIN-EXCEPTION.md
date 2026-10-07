@@ -1,5 +1,4 @@
-# Mondrian Plugin Additional Permission v1.0
-# Mondrian 插件附加许可 v1.0
+# Mondrian Plugin Additional Permission v1.0 / Mondrian 插件附加许可 v1.0
 
 Shaloong · contact@shaloong.com
 

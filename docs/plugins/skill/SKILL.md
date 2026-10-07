@@ -64,7 +64,8 @@ crates/mondrian-plugin-<name>/
 [package]
 name = "mondrian-plugin-<name>"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 mondrian-core = { path = "../mondrian-core" }
@@ -77,14 +78,15 @@ serde_json = "1"
 **lib.rs template:**
 
 ```rust
-use mondrian_effects::{EffectType, register_effect_definition};
+use mondrian_effects::effect::EffectDefinitionError;
 
-pub fn register() {
-    // Register effect definitions here
+pub fn register() -> Result<(), EffectDefinitionError> {
+    // Register effect definitions here, propagating registration errors with `?`.
+    Ok(())
 }
 ```
 
-**Wire into the app:** In `crates/mondrian-app`, add the plugin crate as a dependency and call `mondrian_plugin_<name>::register();` during app initialization.
+**Wire into the app:** In `crates/mondrian-app`, add the plugin crate as a dependency and call `mondrian_plugin_<name>::register()?;` during app initialization.
 
 ## Step 3: Implement the effect
 
@@ -160,8 +162,9 @@ Use when the effect branches from the current output, processes the branch, then
 })
 ```
 
-`radius_id` / `opacity_id` 必须由 `plugin_type.parameter_id(...)` 创建，并分别绑定到
-`PropertyDescriptor::with_parameter_id(...)` 后再由 `move` 闭包捕获。
+Create `radius_id` / `opacity_id` with `plugin_type.parameter_id(...)`, bind each
+using `PropertyDescriptor::with_parameter_id(...)`, then capture them in the
+`move` closure.
 
 Available `BlendMode` variants include `Normal`, `Screen`, `Multiply`, `Overlay`,
 `LinearDodge`, and `Subtract`; consult `mondrian_core::BlendMode` for the complete set.

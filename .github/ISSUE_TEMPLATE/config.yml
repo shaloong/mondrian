@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security issue privately
+    url: https://github.com/shaloong/mondrian/blob/develop/.github/SECURITY.md
+    about: Use the private channels in the policy; do not disclose a vulnerability in a public issue.
+  - name: Support and contribution guide
+    url: https://github.com/shaloong/mondrian/blob/develop/SUPPORT.md
+    about: Find development guidance, support channels, and private conduct reporting.

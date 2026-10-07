@@ -33,7 +33,7 @@ pub enum EffectPluginRuntimeFailurePolicy {
 ```
 
 - `KeepDefinitionAvailable`：记录实例失败但允许修复后重试；当前求值仍返回错误。
-- `DisableDefinition`：任一运行时失败后，整个定义在当前进程变为 unavailable。
+- `DisableDefinition`：任一运行时失败后，当前注册代的定义在进程内变为 unavailable；重新注册的新代具有独立隔离状态。
 
 ## EffectPluginLibraryPolicy
 

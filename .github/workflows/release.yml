@@ -19,10 +19,13 @@ on:
         default: ""
         type: string
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   BIN_NAME: mondrian
-  # Pin the immutable vcpkg registry release so CI and Release resolve the
+  # Use the same vcpkg version tag so CI and Release resolve the
   # same native dependency graph instead of inheriting the registry HEAD.
   VCPKG_REF: "2026.07.29"
   # Keep the produced Mach-O deployment contract independent of runner drift.
@@ -47,6 +50,8 @@ jobs:
       commercial_run_url: ${{ steps.commercial.outputs.run_url }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Require successful CI for this exact source SHA
         id: ci
@@ -160,6 +165,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: 安装 Rust
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
@@ -354,7 +361,7 @@ jobs:
 
       - name: 构建 release 二进制
         run: |
-          cargo build --release --target ${{ matrix.target }} -p mondrian-app
+          cargo build --locked --release --target ${{ matrix.target }} -p mondrian-app
 
       - name: 验证二进制文件
         shell: pwsh
@@ -611,6 +618,8 @@ jobs:
         pass: [1, 2, 3]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: 下载唯一候选包
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -654,6 +663,8 @@ jobs:
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: 下载所有制品
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
