@@ -1092,6 +1092,13 @@ downscaling, normalized crop coordinates, and mandatory RGBA32F working input.
 The app/UI integration must provide presentation geometry; it must not
 reinterpret this spatial filter or resample display/device code values.
 
+Two opt-in physical spatial tests execute this production runtime. The pixel
+reference reconstructs coverage-weighted RGB and alpha independently in f64
+on the declared Float32 sample grid and intermediate storage. The short 4K
+diagnostic records actual pass-boundary timestamps, the complete Float32 pixel
+digest, and explicit fixture-upload/readback limitations. It is diagnostic
+evidence only, not the full Window realtime or commercial performance gate.
+
 ## OCIO GPU Integration
 
 `mondrian-renderer::OcioGpuShaderCache` is the renderer-side cache for OCIO GPU
