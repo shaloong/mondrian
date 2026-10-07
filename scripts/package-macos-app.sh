@@ -72,10 +72,35 @@ while IFS= read -r image; do
         ;;
     esac
   done < <(printf '%s\n' "$dependencies" | tail -n +2 | awk '{print $1}')
+  # Every edge is now absolute or explicitly relative to the executable. No
+  # @rpath lookup remains. Bundler rewrites can collapse distinct build-host
+  # RPATHs into duplicates, which dyld rejects before main on current macOS.
+  # Remove the unused search paths instead of retaining ambient loader state.
+  rpaths_changed=false
+  while true; do
+    load_commands=$(otool -l "$image")
+    rpath=$(printf '%s\n' "$load_commands" | awk '
+      $1 == "cmd" { in_rpath = ($2 == "LC_RPATH") }
+      in_rpath && $1 == "path" && !found {
+        sub(/^[[:space:]]*path /, "")
+        sub(/ \(offset [0-9]+\)$/, "")
+        print
+        found = 1
+      }')
+    [[ -n "$rpath" ]] || break
+    install_name_tool -delete_rpath "$rpath" "$image"
+    rpaths_changed=true
+  done
+  if [[ "$rpaths_changed" == true ]]; then
+    codesign --force --preserve-metadata=entitlements,requirements,flags,runtime \
+      --sign - "$image"
+  fi
   codesign --verify --strict "$image"
 done < <(printf '%s\n' "$executable_dir/mondrian" \
   "$executable_dir/ffmpeg" "$executable_dir/ffprobe"; \
   find "$frameworks_dir" -type f -print)
+codesign --force --preserve-metadata=entitlements,requirements,flags,runtime \
+  --sign - "$app_dir"
 codesign --verify --deep --strict "$app_dir"
 
 # A clean environment removes developer PATH and DYLD overrides. Verification
