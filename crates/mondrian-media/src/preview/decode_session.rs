@@ -1021,6 +1021,9 @@ struct PreviewDecodeSession {
     stream_tb: ffmpeg::Rational,
     /// Absolute stream PTS representing media-source-local time zero.
     stream_start_pts: i64,
+    /// The freshly opened demux cursor still owns the source's initial packet
+    /// prefix. Neither codec flush nor cancellation restores this fact.
+    at_demux_origin: bool,
     frame_duration_pts: i64,
     target_width: u32,
     target_height: u32,
@@ -1141,8 +1144,8 @@ pub(super) fn decoded_temporal_candidate_within_selection_distance(
 
 enum PreviewSeekToTarget {
     Complete(PreviewSeekResolution),
-    DirectCanceled,
-    IsolatedCanceled,
+    DirectCanceled(PreviewDecodeCancellationCheckpoint),
+    IsolatedCanceled(PreviewDecodeCancellationCheckpoint),
 }
 
 #[derive(Debug, Clone)]
@@ -2091,6 +2094,7 @@ impl PreviewDecodeSession {
             stream_tb,
             stream_start_pts,
             frame_duration_pts,
+            at_demux_origin: true,
             target_width,
             target_height,
             _hardware_decode_context_state: hardware_decode_context_state,
@@ -2335,7 +2339,13 @@ impl PreviewDecodeSession {
                 })
                 .unwrap_or(false);
 
-        let seek_performed = !(should_continue_forward || reverse_window_covers_target);
+        // A container index is a seek locator, not proof of an independently
+        // decodable packet. Seeking the first PTS can skip the initial key
+        // packet's earlier DTS even when that index claims a keyframe there.
+        // A pristine source already owns the initial packet prefix.
+        let can_decode_origin = self.at_demux_origin && decode_target_pts == self.stream_start_pts;
+        let seek_performed =
+            !(should_continue_forward || reverse_window_covers_target || can_decode_origin);
         let mut seek_resolution = PreviewSeekResolution::default();
         let mut seek_us = 0;
         if seek_performed {
@@ -2348,17 +2358,14 @@ impl PreviewDecodeSession {
             let seek_started_at = Instant::now();
             seek_resolution = match self.seek_to_target(decode_target_pts, policy, should_cancel) {
                 Ok(PreviewSeekToTarget::Complete(resolution)) => resolution,
-                Ok(PreviewSeekToTarget::DirectCanceled) => {
+                Ok(PreviewSeekToTarget::DirectCanceled(checkpoint)) => {
                     return Ok(PreviewDecodeOutcome::Canceled(
-                        self.interrupt_state
-                            .cancellation(PreviewDecodeCancellationCheckpoint::Seek),
+                        self.interrupt_state.cancellation(checkpoint),
                     ));
                 }
-                Ok(PreviewSeekToTarget::IsolatedCanceled) => {
+                Ok(PreviewSeekToTarget::IsolatedCanceled(checkpoint)) => {
                     return Ok(PreviewDecodeOutcome::Canceled(
-                        PreviewDecodeCancellation::isolated_demux_termination(
-                            PreviewDecodeCancellationCheckpoint::Seek,
-                        ),
+                        PreviewDecodeCancellation::isolated_demux_termination(checkpoint),
                     ));
                 }
                 Err(_) if should_cancel() => {
@@ -2691,16 +2698,74 @@ impl PreviewDecodeSession {
             });
         }
 
+        // A first random request has not observed any packet yet. Preserve
+        // evidence from the pristine prefix before a container locator can
+        // skip it. The real key packet's DTS can precede the first indexed PTS.
+        // This reads through the same packet owner and never materializes a
+        // hidden frame or introduces a second decoding path.
+        let mut probe_work_units = 0;
+        if self.at_demux_origin {
+            loop {
+                if policy.forward_decode_budget_exhausted(probe_work_units) {
+                    return Err(MondrianError::DecodeFailed {
+                        asset_id: self.path.display().to_string(),
+                        reason: "initial seek packet probe exhausted the forward-work budget"
+                            .to_owned(),
+                    });
+                }
+                self.at_demux_origin = false;
+                self.interrupt_state
+                    .set_checkpoint(PreviewDecodeCancellationCheckpoint::PacketRead);
+                let source =
+                    self.packet_source.as_mut().ok_or_else(|| MondrianError::DecodeFailed {
+                        asset_id: self.path.display().to_string(),
+                        reason: "retired decoder has no packet source".to_owned(),
+                    })?;
+                let packet = match source.read_next(&self.path, should_cancel)? {
+                    PreviewPacketRead::Packet(packet) => packet,
+                    PreviewPacketRead::End => {
+                        return Err(MondrianError::DecodeFailed {
+                            asset_id: self.path.display().to_string(),
+                            reason: "initial seek packet probe reached EOF before video".to_owned(),
+                        });
+                    }
+                    PreviewPacketRead::DirectCanceled => {
+                        return Ok(PreviewSeekToTarget::DirectCanceled(
+                            PreviewDecodeCancellationCheckpoint::PacketRead,
+                        ));
+                    }
+                    PreviewPacketRead::IsolatedCanceled => {
+                        return Ok(PreviewSeekToTarget::IsolatedCanceled(
+                            PreviewDecodeCancellationCheckpoint::PacketRead,
+                        ));
+                    }
+                };
+                if should_cancel() {
+                    return Ok(PreviewSeekToTarget::DirectCanceled(
+                        PreviewDecodeCancellationCheckpoint::PacketRead,
+                    ));
+                }
+                probe_work_units += 1;
+                if packet.stream() == self.stream_index {
+                    self.seek_index.observe_packet(&packet);
+                    break;
+                }
+            }
+        }
         let seek_anchor_pts = self.seek_index.keyframe_at_or_before(target_pts);
         let (min_ts, seek_target_ts, max_ts, seek_flags, used_anchor_pts) = match policy
             .seek_strategy
         {
             PreviewDecodeSeekStrategy::KeyframeBefore => {
-                // 关键帧安全模式：不限制 backward seek 范围，避免长 GOP 时落到不可独立解码帧。
+                // Container indexes identify decode timestamps, not the target
+                // picture's presentation timestamp. Seek the known key packet
+                // itself; some demuxers otherwise land on a dependent packet
+                // between that root and the requested PTS.
+                let seek_target = seek_anchor_pts.unwrap_or(target_pts);
                 (
                     seek_anchor_pts.unwrap_or(i64::MIN),
-                    target_pts,
-                    target_pts,
+                    seek_target,
+                    seek_target,
                     ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
                     seek_anchor_pts,
                 )
@@ -2742,8 +2807,8 @@ impl PreviewDecodeSession {
                 if let Some(anchor_pts) = used_anchor_pts {
                     (
                         anchor_pts,
-                        target_pts,
-                        target_pts,
+                        anchor_pts,
+                        anchor_pts,
                         ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
                         Some(anchor_pts),
                     )
@@ -2759,6 +2824,8 @@ impl PreviewDecodeSession {
             }
         };
 
+        self.at_demux_origin = false;
+        self.interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::Seek);
         let source = self.packet_source.as_mut().ok_or_else(|| MondrianError::DecodeFailed {
             asset_id: self.path.display().to_string(),
             reason: "retired decoder has no packet source".to_owned(),
@@ -2773,9 +2840,15 @@ impl PreviewDecodeSession {
             should_cancel,
         )?;
         match seek {
-            PreviewPacketSeek::DirectCanceled => return Ok(PreviewSeekToTarget::DirectCanceled),
+            PreviewPacketSeek::DirectCanceled => {
+                return Ok(PreviewSeekToTarget::DirectCanceled(
+                    PreviewDecodeCancellationCheckpoint::Seek,
+                ));
+            }
             PreviewPacketSeek::IsolatedCanceled => {
-                return Ok(PreviewSeekToTarget::IsolatedCanceled)
+                return Ok(PreviewSeekToTarget::IsolatedCanceled(
+                    PreviewDecodeCancellationCheckpoint::Seek,
+                ));
             }
             PreviewPacketSeek::Complete => {}
         }
@@ -2793,6 +2866,7 @@ impl PreviewDecodeSession {
         Ok(PreviewSeekToTarget::Complete(PreviewSeekResolution {
             used_index: used_anchor_pts.is_some(),
             anchor_pts: used_anchor_pts,
+            probe_work_units,
         }))
     }
 
@@ -2830,7 +2904,8 @@ impl PreviewDecodeSession {
             candidates.seed(retained);
         }
         let mut frames_decoded: usize = 0;
-        let mut video_packets_submitted: usize = 0;
+        let mut video_packets_submitted: usize = seek_resolution.probe_work_units;
+        let mut awaiting_seek_root = seek_resolution.anchor_pts.is_some();
         let mut non_reference_discard_until_pts = exact_seek_non_reference_discard_until_pts(
             policy,
             stream_target_pts,
@@ -3045,6 +3120,7 @@ impl PreviewDecodeSession {
 
         loop {
             interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::PacketRead);
+            self.at_demux_origin = false;
             let source =
                 self.packet_source.as_mut().ok_or_else(|| MondrianError::DecodeFailed {
                     asset_id: self.path.display().to_string(),
@@ -3077,38 +3153,48 @@ impl PreviewDecodeSession {
                 break;
             }
 
-            // Container indexes name decode timestamps. A key packet selected
-            // before the requested PTS can nevertheless present after it (for
-            // example an HEVC CRA whose leading pictures require the prior GOP).
-            // Inspect the real packet before accepting that random-access root.
-            // Retreat only through strictly earlier indexed anchors, charging
-            // each probe against the existing forward-work budget.
-            if !policy.keyframe_only
+            // Some demuxers mark byte-location index entries as keyframes
+            // without inspecting the picture. Validate the actual first packet
+            // before admitting the root. A real key packet can also present
+            // after the target (HEVC CRA leading pictures need the prior GOP).
+            // Every retreat is strictly earlier and spends the existing budget.
+            let missing_key_root = awaiting_seek_root && !packet.is_key();
+            let root_presents_after_target = !policy.keyframe_only
                 && frames_decoded == 0
                 && candidates.before().is_none()
                 && packet.is_key()
-                && packet.pts().is_some_and(|pts| pts > stream_target_pts)
-                && let Some(earlier) = packet
-                    .dts()
-                    .or_else(|| packet.pts())
-                    .and_then(|dts| dts.checked_sub(1))
-                    .and_then(|before| self.seek_index.keyframe_at_or_before(before))
-                && seek_resolution.anchor_pts.is_some_and(|anchor| earlier < anchor)
-            {
-                video_packets_submitted = video_packets_submitted.saturating_add(1);
-                match self.seek_to_target(earlier, policy, should_cancel)? {
-                    PreviewSeekToTarget::Complete(resolution) => *seek_resolution = resolution,
-                    PreviewSeekToTarget::DirectCanceled => {
-                        return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+                && packet.pts().is_some_and(|pts| pts > stream_target_pts);
+            if missing_key_root || root_presents_after_target {
+                let earlier = seek_resolution
+                    .anchor_pts
+                    .and_then(|anchor| anchor.checked_sub(1))
+                    .and_then(|before| self.seek_index.keyframe_at_or_before(before));
+                if let Some(earlier) = earlier {
+                    video_packets_submitted = video_packets_submitted.saturating_add(1);
+                    match self.seek_to_target(earlier, policy, should_cancel)? {
+                        PreviewSeekToTarget::Complete(resolution) => *seek_resolution = resolution,
+                        PreviewSeekToTarget::DirectCanceled(_) => {
+                            return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+                        }
+                        PreviewSeekToTarget::IsolatedCanceled(_) => {
+                            return Ok(PreviewDecodeForwardResult::isolated_demux_canceled(
+                                frames_decoded,
+                            ));
+                        }
                     }
-                    PreviewSeekToTarget::IsolatedCanceled => {
-                        return Ok(PreviewDecodeForwardResult::isolated_demux_canceled(
-                            frames_decoded,
-                        ));
-                    }
+                    awaiting_seek_root = true;
+                    continue;
+                } else if missing_key_root {
+                    return Err(MondrianError::DecodeFailed {
+                        asset_id: self.path.display().to_string(),
+                        reason: format!(
+                            "container seek anchor {:?} did not land on a key packet; no earlier decode root is known",
+                            seek_resolution.anchor_pts
+                        ),
+                    });
                 }
-                continue;
             }
+            awaiting_seek_root = false;
 
             if non_reference_discard_until_pts.is_some_and(|switch_pts| {
                 packet

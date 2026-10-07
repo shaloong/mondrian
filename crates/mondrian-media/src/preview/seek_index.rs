@@ -20,6 +20,9 @@ pub(super) struct PreviewSeekResolution {
     pub(super) used_index: bool,
     /// Container decode-order seek coordinate; never a covering-frame PTS proof.
     pub(super) anchor_pts: Option<i64>,
+    /// Packet reads used to establish the pristine prefix before seeking.
+    /// These consume the same bounded work allowance as forward decode.
+    pub(super) probe_work_units: usize,
 }
 
 #[derive(Debug, Default)]

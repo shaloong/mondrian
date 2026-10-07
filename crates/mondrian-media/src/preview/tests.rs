@@ -1674,7 +1674,11 @@ fn rgba_frame_diagnostics_record_seek_index_evidence() {
             observed_packets: 12,
             source: PreviewSeekIndexSource::ProbeBacked,
         },
-        PreviewSeekResolution { used_index: true, anchor_pts: Some(240) },
+        PreviewSeekResolution {
+            used_index: true,
+            anchor_pts: Some(240),
+            probe_work_units: 0,
+        },
     );
 
     assert!(frame.diagnostics.seek_index_available);
@@ -4969,7 +4973,41 @@ fn interlaced_field_rate_decode_preserves_half_picture_coverage() {
         let (bootstrap, observer) =
             PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(demux_worker.clone());
         let mut decoder = bootstrap.build();
-        for field_index in 0..16 {
+        let mut initial_seek = covering_decode_request(
+            &path,
+            TimelineTime::new(2, 50).expect("exact initial seek time"),
+            PreviewDecodeAccessMode::PlaybackCursor,
+            test_source_color().with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709),
+        )
+        .with_fingerprint(fingerprint)
+        .with_field_processing(field_processing);
+        initial_seek.representation = PreviewDecodeRepresentation::CompactCpuYuv;
+        let initial = decoder
+            .decode_cancellable(initial_seek, || false)
+            .expect("fresh session must resolve a nonzero target through real packet evidence");
+        let PreviewDecodeOutcome::CpuYuvFrame(initial) = initial else {
+            panic!("initial interlaced seek must retain compact YUV");
+        };
+        let expected_initial_pts = super::source_sample_to_selection_pts(
+            SourceSampleTarget::covering(TimelineTime::new(2, 50).expect("initial time")),
+            stream_time_base,
+            stream_start_pts,
+            2,
+        )
+        .expect("initial field selection target");
+        assert_eq!(
+            initial
+                .diagnostics
+                .temporal_selection()
+                .expect("initial temporal proof")
+                .selected_pts,
+            expected_initial_pts
+        );
+        decoder.clear();
+        // Return across GOP boundaries after observing the initial decode root.
+        // MPEG-PS locator indexes may label dependent packets as keyframes;
+        // an exact random access must verify the packet, not trust that label.
+        for (request_index, field_index) in (0..16).chain([40, 2, 31, 0, 15]).enumerate() {
             let source_time = TimelineTime::new(field_index, 50).expect("exact 25i field time");
             let next_source_time =
                 TimelineTime::new(field_index + 1, 50).expect("exact next 25i field time");
@@ -5002,6 +5040,17 @@ fn interlaced_field_rate_decode_preserves_half_picture_coverage() {
             let PreviewDecodeOutcome::CpuYuvFrame(frame) = outcome else {
                 panic!("interlaced software decode must retain compact YUV");
             };
+            if request_index == 0 {
+                assert!(
+                    !frame.diagnostics.seek_performed,
+                    "preserve the pristine packet prefix"
+                );
+            } else if request_index == 17 {
+                assert!(
+                    frame.diagnostics.seek_performed,
+                    "the backward request must exercise seek"
+                );
+            }
             let selection = frame.diagnostics.temporal_selection().expect("proven temporal extent");
             assert_eq!(selection.requested_pts, expected_pts);
             assert_eq!(selection.selected_pts, expected_pts);
