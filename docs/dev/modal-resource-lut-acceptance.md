@@ -2632,3 +2632,28 @@ mixed layouts, MIDI/editors, broad vendor support or performance qualification.
 Sidechain GUI controls and the Mixer deletion projection for retained sidechain
 edges still need work. Broader OpenFX, product interaction/i18n and the original
 full professional NLE goal remain active.
+
+## Mixer strong sidechain deletion projection
+
+A subsequent source regression reproduced the Mixer showing zero connections
+when a Bus had two retained auxiliary routes. Native pipeline/Golden b5eb715
+qualification above remains bound to that exact source; it does not qualify this
+later UI revision.
+
+Mixer now consumes Timeline's `inspect_audio_mix_buses` for deletion counts and
+source-lock blockers. Individual Bus author admission shares the same dependency
+implementation. A single main/auxiliary route traversal covers Bus sources and
+pre/post-fader processor targets, includes disabled retained edges and counts an
+edge once per incident Bus. Invalid addresses disable deletion with a localized
+reason. Widgets no longer reproduce their own deletion policy.
+
+Actual Red pipeline 34821 executed one failure: displayed count 0 versus expected
+2. Corrective pipeline 48735 exited 0: Timeline routing regressions **6 passed,
+0 failed, 0 ignored**, Mixer regressions **7 passed, 0 failed, 0 ignored** (1.10s),
+and full workspace/all-target/all-feature Clippy `-D warnings` passed in 4m03s.
+Format and diff checks passed. The new cases cover both Rack stages, Bus source
+and target connections, enabled/disabled routes, empty Buses, source locks,
+invalid addresses, canonical Bus order, localized disabled controls and inspection
+without history. Existing route factories, gain Undo and cycle refusal also pass.
+This source qualification does not create sidechain source/disconnect controls
+or infer a new native/Golden, performance or platform qualification.

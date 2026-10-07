@@ -61,7 +61,7 @@ pub use audio_processor_edit::{
     AudioProcessorRackInspection, AudioProcessorRackPlacement,
 };
 pub use audio_routing_edit::{
-    apply_audio_routing_edit, inspect_audio_mix_bus, inspect_audio_route,
+    apply_audio_routing_edit, inspect_audio_mix_bus, inspect_audio_mix_buses, inspect_audio_route,
     inspect_audio_route_candidates, AudioBusRemovalPolicy, AudioMixBusInspection,
     AudioRouteCandidateInspection, AudioRouteInspection, AudioRoutingAddressError,
     AudioRoutingEdit, AudioRoutingEditBlocker, AudioRoutingEditError, AudioRoutingEditOutcome,

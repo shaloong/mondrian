@@ -717,6 +717,14 @@ callers can test many additions in constant time without copying the Sequence
 or recreating Routing rules. This projection is advisory for interaction;
 commit-time complete Audio Program validation remains authoritative.
 
+`inspect_audio_mix_buses` projects canonical Bus deletion dependencies in one
+main-route and sidechain traversal. Single-Bus inspection and removal admission
+share its implementation. Both pre/post-fader processor targets and Bus sources
+count, including disabled retained routes; an edge incident at both ends counts
+once. The existing source-Track lock policy remains authoritative. Mixer deletion
+controls consume these domain facts rather than reproducing dependency or lock
+rules; invalid dependency addresses disable deletion with an explicit reason.
+
 All audio keyframes use one additional Timeline Interface:
 `AudioAutomationTarget` closes over Component volume/pan, Processing Scope input
 gain, Channel Strip fader, Route gain, and Processor parameter addresses.

@@ -344,33 +344,84 @@ pub fn inspect_audio_mix_bus(
     bus_id: MixBusId,
 ) -> Result<AudioMixBusInspection<'_>, AudioRoutingAddressError> {
     let bus = resolve_bus(sequence, bus_id)?;
-    let mut connected_route_count = 0;
-    let mut disconnect_blocker = None;
-    for route in sequence
-        .audio_program
-        .routes
-        .iter()
-        .filter(|route| route_names_bus(route, bus_id))
-    {
-        connected_route_count += 1;
-        if let Some(track_id) = source_locked_track(sequence, route.source)? {
-            disconnect_blocker = Some(AudioRoutingEditBlocker::LockedTrack(track_id));
-        }
-    }
-    let bus_processor_ids = [&bus.strip.pre_fader, &bus.strip.post_fader]
+    let mut inspections = inspect_mix_bus_dependencies(sequence, std::iter::once(bus))?;
+    inspections.pop().ok_or(AudioRoutingAddressError::UnknownBus(bus_id))
+}
+
+/// Inspect every Mix Bus deletion obligation in canonical Bus order.
+///
+/// Main routes and processor sidechains are traversed once. Enabled and disabled
+/// edges remain strong dependencies; a route naming a Bus at both ends counts
+/// once for that Bus. Single-Bus mutation admission uses the same implementation.
+pub fn inspect_audio_mix_buses(
+    sequence: &Sequence,
+) -> Result<Vec<AudioMixBusInspection<'_>>, AudioRoutingAddressError> {
+    inspect_mix_bus_dependencies(sequence, sequence.audio_program.buses.iter())
+}
+
+fn inspect_mix_bus_dependencies<'a>(
+    sequence: &'a Sequence,
+    buses: impl IntoIterator<Item = &'a AudioMixBus>,
+) -> Result<Vec<AudioMixBusInspection<'a>>, AudioRoutingAddressError> {
+    let mut inspections = buses
         .into_iter()
-        .flat_map(|rack| rack.processors.iter().map(|processor| processor.id))
-        .collect::<HashSet<_>>();
-    for route in sequence.audio_program.sidechain_routes.iter().filter(|route| {
-        matches!(route.source, AudioRouteSource::Bus { bus_id: source, .. } if source == bus_id)
-            || bus_processor_ids.contains(&route.processor_id)
-    }) {
-        connected_route_count += 1;
-        if let Some(track_id) = source_locked_track(sequence, route.source)? {
-            disconnect_blocker = Some(AudioRoutingEditBlocker::LockedTrack(track_id));
+        .map(|bus| AudioMixBusInspection {
+            bus,
+            connected_route_count: 0,
+            disconnect_blocker: None,
+        })
+        .collect::<Vec<_>>();
+    let bus_slots = inspections
+        .iter()
+        .enumerate()
+        .map(|(slot, inspection)| (inspection.bus.id, slot))
+        .collect::<HashMap<_, _>>();
+    let processor_slots = inspections
+        .iter()
+        .enumerate()
+        .flat_map(|(slot, inspection)| {
+            [
+                &inspection.bus.strip.pre_fader,
+                &inspection.bus.strip.post_fader,
+            ]
+            .into_iter()
+            .flat_map(move |rack| rack.processors.iter().map(move |processor| (processor.id, slot)))
+        })
+        .collect::<HashMap<_, _>>();
+    let source_slot = |source| match source {
+        AudioRouteSource::Bus { bus_id, .. } => bus_slots.get(&bus_id).copied(),
+        AudioRouteSource::Track { .. } => None,
+    };
+    let mut record = |source: AudioRouteSource, first: Option<usize>, second: Option<usize>| {
+        if first.is_none() && second.is_none() {
+            return Ok(());
         }
+        let blocker =
+            source_locked_track(sequence, source)?.map(AudioRoutingEditBlocker::LockedTrack);
+        for slot in [first, second.filter(|slot| Some(*slot) != first)].into_iter().flatten() {
+            let inspection = &mut inspections[slot];
+            inspection.connected_route_count += 1;
+            if blocker.is_some() {
+                inspection.disconnect_blocker.clone_from(&blocker);
+            }
+        }
+        Ok::<_, AudioRoutingAddressError>(())
+    };
+    for route in &sequence.audio_program.routes {
+        let destination_slot = match route.destination {
+            AudioRouteDestination::Bus(bus_id) => bus_slots.get(&bus_id).copied(),
+            AudioRouteDestination::Output(_) => None,
+        };
+        record(route.source, source_slot(route.source), destination_slot)?;
     }
-    Ok(AudioMixBusInspection { bus, connected_route_count, disconnect_blocker })
+    for route in &sequence.audio_program.sidechain_routes {
+        record(
+            route.source,
+            source_slot(route.source),
+            processor_slots.get(&route.processor_id).copied(),
+        )?;
+    }
+    Ok(inspections)
 }
 
 /// Validate Routing addresses and prepare bulk Route-addition admission.
@@ -907,6 +958,87 @@ mod tests {
         apply_audio_automation_edit, AudioAutomationEdit, AudioAutomationEditRequest,
         AudioAutomationTarget,
     };
+
+    #[test]
+    fn bulk_bus_dependencies_include_both_racks_disabled_edges_and_source_locks() {
+        use crate::audio::{AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID};
+        let mut sequence = Sequence::new("Bus dependencies");
+        let track_id = sequence.audio_tracks[0].id;
+        sequence.audio_tracks[0].is_locked = true;
+        let pre = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        let post = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        let destination = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        let (pre_id, post_id, destination_id) = (pre.id, post.id, destination.id);
+        let first = MixBusId::new();
+        let second = MixBusId::new();
+        let empty = MixBusId::new();
+        let mut first_strip = AudioChannelStrip::default();
+        first_strip.pre_fader.processors.push(pre);
+        first_strip.post_fader.processors.push(post);
+        let mut second_strip = AudioChannelStrip::default();
+        second_strip.post_fader.processors.push(destination);
+        for (id, strip) in [
+            (first, first_strip),
+            (second, second_strip),
+            (empty, AudioChannelStrip::default()),
+        ] {
+            sequence
+                .audio_program
+                .buses
+                .push(AudioMixBus { id, name: id.to_string(), strip });
+        }
+        let detector = AudioRouteSource::Track {
+            track_id,
+            port: AudioChannelStripOutputPort::PreFader,
+        };
+        let first_source = AudioRouteSource::Bus {
+            bus_id: first,
+            port: AudioChannelStripOutputPort::PostMute,
+        };
+        sequence.audio_program.routes.extend([
+            AudioRoute::new(detector, AudioRouteDestination::Bus(first)),
+            AudioRoute::new(first_source, AudioRouteDestination::Bus(second)),
+        ]);
+        sequence.audio_program.sidechain_routes.extend([
+            AudioProcessorSidechainRoute::new(detector, pre_id, "detector.pre"),
+            AudioProcessorSidechainRoute::new(detector, post_id, "detector.post"),
+        ]);
+        let mut retained =
+            AudioProcessorSidechainRoute::new(first_source, destination_id, "detector.retained");
+        retained.enabled = false;
+        sequence.audio_program.sidechain_routes.push(retained);
+        let inspections = inspect_audio_mix_buses(&sequence).expect("bulk dependencies");
+        for (inspection, (id, count, locked)) in
+            inspections
+                .iter()
+                .zip([(first, 5, true), (second, 2, false), (empty, 0, false)])
+        {
+            assert_eq!(inspection.bus().id, id, "canonical bus order");
+            assert_eq!(inspection.connected_route_count(), count);
+            assert_eq!(inspection.can_disconnect_and_remove(), !locked);
+            assert_eq!(
+                inspection,
+                &inspect_audio_mix_bus(&sequence, id).expect("single inspection")
+            );
+        }
+        let missing = TrackId::new();
+        sequence.audio_program.sidechain_routes[0].source = AudioRouteSource::Track {
+            track_id: missing,
+            port: AudioChannelStripOutputPort::PreFader,
+        };
+        assert_eq!(
+            inspect_audio_mix_buses(&sequence),
+            Err(AudioRoutingAddressError::UnknownTrack(missing))
+        );
+        assert_eq!(
+            inspect_audio_mix_bus(&sequence, first),
+            Err(AudioRoutingAddressError::UnknownTrack(missing))
+        );
+        assert!(
+            inspect_audio_mix_bus(&sequence, empty).is_ok(),
+            "single-bus inspection only admits its incident edges"
+        );
+    }
     use mondrian_core::{ExactAutomationKeyframe, TimelineTime};
 
     fn request(edit: AudioRoutingEdit) -> AudioRoutingEditRequest {

@@ -425,6 +425,14 @@ disabled-edge-inclusive Bus reachability once. Mixer/patchbay Adapters may use
 its constant-time addition query to omit impossible choices, but may not own a
 parallel cycle algorithm or treat the projection as transaction authority.
 
+Mixer Bus deletion uses `inspect_audio_mix_buses` for all connection counts and
+disconnect lock blockers. The same domain implementation admits individual Bus
+removal, visits main and sidechain routes once, includes disabled retained edges
+and both pre/post-fader target processors, and counts a route once per incident
+Bus. The UI no longer maintains its own main-route-only deletion policy. Invalid
+dependency addresses disable deletion with a localized reason. These inspection
+facts do not change the existing author transaction, history or DSP execution.
+
 This main-edge contract covers dry paths, pre/post-fader sends, submixes,
 stems, and multiple parallel paths. A sidechain is a separate typed edge from
 one Track/Bus strip port to `(AudioProcessorInstanceId, bus_key)`. It retains

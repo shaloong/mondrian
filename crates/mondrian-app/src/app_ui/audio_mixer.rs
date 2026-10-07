@@ -15,11 +15,11 @@ use mondrian_timeline::audio::{
     ProgramOutputMainSource, AUDIO_GAIN_DB_MAX, AUDIO_GAIN_DB_MIN,
 };
 use mondrian_timeline::{
-    inspect_audio_channel_strip, inspect_audio_route, inspect_audio_route_candidates,
-    AudioAutomationTarget, AudioBusRemovalPolicy, AudioChannelStripEdit,
-    AudioChannelStripEditBlocker, AudioChannelStripEditRequest, AudioChannelStripRack,
-    AudioProcessorRackAddress, AudioRouteCandidateInspection, AudioRoutingEdit,
-    AudioRoutingEditBlocker, AudioRoutingEditRequest,
+    inspect_audio_channel_strip, inspect_audio_mix_buses, inspect_audio_route,
+    inspect_audio_route_candidates, AudioAutomationTarget, AudioBusRemovalPolicy,
+    AudioChannelStripEdit, AudioChannelStripEditBlocker, AudioChannelStripEditRequest,
+    AudioChannelStripRack, AudioProcessorRackAddress, AudioRouteCandidateInspection,
+    AudioRoutingEdit, AudioRoutingEditBlocker, AudioRoutingEditRequest,
 };
 
 use crate::app::product_action::AudioTrackSoloPayload;
@@ -329,22 +329,39 @@ impl AudioMixerRoutingIndex {
             route_candidates: inspect_audio_route_candidates(sequence).ok(),
             ..Self::default()
         };
-        index.bus_removals.extend(sequence.audio_program.buses.iter().map(|bus| {
-            (
-                bus.id,
-                AudioMixerBusRemovalModel {
-                    bus_id: bus.id,
-                    connected_route_count: 0,
-                    is_editable: true,
-                    edit_disabled_reason: None,
-                },
-            )
-        }));
+        match inspect_audio_mix_buses(sequence) {
+            Ok(inspections) => index.bus_removals.extend(inspections.iter().map(|inspection| {
+                let bus_id = inspection.bus().id;
+                (
+                    bus_id,
+                    AudioMixerBusRemovalModel {
+                        bus_id,
+                        connected_route_count: inspection.connected_route_count(),
+                        is_editable: inspection.can_disconnect_and_remove(),
+                        edit_disabled_reason: inspection
+                            .disconnect_blocker()
+                            .map(|blocker| routing_blocker_label(blocker, localizer)),
+                    },
+                )
+            })),
+            Err(error) => {
+                let reason =
+                    localizer.format_text("audio-mixer-invalid-route", "error", &error.to_string());
+                index.bus_removals.extend(sequence.audio_program.buses.iter().map(|bus| {
+                    (
+                        bus.id,
+                        AudioMixerBusRemovalModel {
+                            bus_id: bus.id,
+                            connected_route_count: 0,
+                            is_editable: false,
+                            edit_disabled_reason: Some(reason.clone()),
+                        },
+                    )
+                }));
+            }
+        }
         for route in &sequence.audio_program.routes {
             let projected = project_route(sequence, route, localizer, time_context);
-            let connected_bus_disabled_reason = (!projected.is_editable)
-                .then(|| projected.edit_disabled_reason.clone())
-                .flatten();
             index
                 .outbound
                 .entry(owner_for_source(route.source))
@@ -354,25 +371,6 @@ impl AudioMixerRoutingIndex {
                 .incoming_counts
                 .entry(owner_for_destination(route.destination))
                 .or_default() += 1;
-
-            let mut connected_buses = Vec::with_capacity(2);
-            if let AudioRouteSource::Bus { bus_id, .. } = route.source {
-                connected_buses.push(bus_id);
-            }
-            if let AudioRouteDestination::Bus(bus_id) = route.destination
-                && !connected_buses.contains(&bus_id)
-            {
-                connected_buses.push(bus_id);
-            }
-            for bus_id in connected_buses {
-                if let Some(removal) = index.bus_removals.get_mut(&bus_id) {
-                    removal.connected_route_count += 1;
-                    if let Some(reason) = connected_bus_disabled_reason.as_ref() {
-                        removal.is_editable = false;
-                        removal.edit_disabled_reason = Some(reason.clone());
-                    }
-                }
-            }
         }
         index
     }
@@ -771,6 +769,80 @@ mod tests {
 
     fn chinese() -> Localizer {
         Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog")
+    }
+
+    #[test]
+    fn sidechain_bus_removal_projection_retains_connections_and_locked_detector() {
+        use mondrian_timeline::audio::{
+            AudioProcessorInstance, AudioProcessorSidechainRoute, BUILTIN_GAIN_DEFINITION_ID,
+        };
+        for enabled in [true, false] {
+            for locked in [false, true] {
+                let mut sequence = Sequence::new("Sidechain deletion");
+                let detector_id = sequence.audio_tracks[0].id;
+                sequence.audio_tracks[0].is_locked = locked;
+                let target = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+                let target_id = target.id;
+                let output = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+                let output_id = output.id;
+                sequence.audio_program.outputs[0].strip.pre_fader.processors.push(output);
+                let bus_id = MixBusId::new();
+                let mut strip = AudioChannelStrip::default();
+                strip.pre_fader.processors.push(target);
+                sequence.audio_program.buses.push(AudioMixBus {
+                    id: bus_id,
+                    name: "Detector submix".into(),
+                    strip,
+                });
+                let mut incoming = AudioProcessorSidechainRoute::new(
+                    AudioRouteSource::Track {
+                        track_id: detector_id,
+                        port: AudioChannelStripOutputPort::PostFaderPreMute,
+                    },
+                    target_id,
+                    "test.detector",
+                );
+                incoming.enabled = enabled;
+                let mut outgoing = AudioProcessorSidechainRoute::new(
+                    AudioRouteSource::Bus {
+                        bus_id,
+                        port: AudioChannelStripOutputPort::PostMute,
+                    },
+                    output_id,
+                    "test.detector",
+                );
+                outgoing.enabled = enabled;
+                sequence.audio_program.sidechain_routes.extend([incoming, outgoing]);
+                let domain = mondrian_timeline::inspect_audio_mix_bus(&sequence, bus_id)
+                    .expect("valid bus dependencies");
+                assert_eq!(domain.connected_route_count(), 2);
+                assert_eq!(domain.can_disconnect_and_remove(), !locked);
+                let mut state = AppState::new();
+                state.test_set_sequence(Some(sequence));
+                let localizer = chinese();
+                let projection = AudioMixerPanelModel::from_app_state(&state, &localizer);
+                let removal = projection
+                    .channels
+                    .iter()
+                    .find(|channel| channel.owner == AudioChannelStripOwner::Bus { bus_id })
+                    .and_then(|channel| channel.bus_removal.as_ref())
+                    .expect("bus removal controls");
+                assert_eq!(
+                    removal.connected_route_count, 2,
+                    "retained auxiliary routes are strong references, including disabled routes"
+                );
+                assert_eq!(removal.is_editable, !locked);
+                assert_eq!(remove_bus_action(removal).is_some(), !locked);
+                assert_eq!(
+                    removal.edit_disabled_reason,
+                    locked.then(|| routing_blocker_label(
+                        &AudioRoutingEditBlocker::LockedTrack(detector_id),
+                        &localizer,
+                    ))
+                );
+                assert!(!state.can_undo_action(), "inspection is not authoring");
+            }
+        }
     }
 
     #[test]
