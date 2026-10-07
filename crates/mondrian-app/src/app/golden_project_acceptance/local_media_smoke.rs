@@ -1255,7 +1255,7 @@ fn place(
         position: FramePosition::new(start, rate),
     }))?;
     let sequence = state.active_sequence().context("Sequence")?;
-    let id = sequence
+    let clip = sequence
         .video_tracks
         .iter()
         .chain(sequence.audio_tracks.iter())
@@ -1264,13 +1264,32 @@ fn place(
         .clips
         .iter()
         .find(|clip| clip.position == position)
-        .context("placed media clip")?
-        .id;
-    state.dispatch_action(timeline_trim_clips_action(TimelineTrimClipsPayload {
-        clip_ids: vec![id],
-        edge: TimelineTrimPayloadEdge::Out,
-        position: FramePosition::new(start + duration_frames, rate),
-    }))?;
+        .context("placed media clip")?;
+    let id = clip.id;
+    let end = FramePosition::new(
+        start.checked_add(duration_frames).context("Clip extent overflow")?,
+        rate,
+    );
+    let end_position = TimelineTime::from_frame_position(end)?;
+    if clip.end_position()? != end_position {
+        state.dispatch_action(timeline_trim_clips_action(TimelineTrimClipsPayload {
+            clip_ids: vec![id],
+            edge: TimelineTrimPayloadEdge::Out,
+            position: end,
+        }))?;
+    }
+    let sequence = state.active_sequence().context("Sequence")?;
+    let clip = sequence
+        .video_tracks
+        .iter()
+        .chain(sequence.audio_tracks.iter())
+        .find(|t| t.id == track)
+        .and_then(|t| t.clips.iter().find(|clip| clip.id == id))
+        .context("authored media clip")?;
+    ensure!(
+        clip.position == position && clip.end_position()? == end_position,
+        "ordinary Clip authoring did not preserve the requested segment boundaries"
+    );
     if force_progressive {
         let changed = state.set_clip_media_interpretation(
             crate::app::selection::SelectedClipRef {
