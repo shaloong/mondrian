@@ -2504,3 +2504,53 @@ VST3 auxiliary inputs, mixed layouts, MIDI/editors, vendors, platform/performanc
 and latest complete-Golden/remote-CI qualification remain separate open work.
 The earlier 0adaea3 Golden and 84f7445 constant-latency receipts retain their
 original source/fixture scope and are not relabeled as current executions.
+
+
+## Current activated-host modal, resource and LUT acceptance
+
+Clean source `3b44084f193fc2974a607077a8a34737defde42c` was qualified on
+2026-10-08 (local time). Pipeline 20341 exited 0. The contract-owned product and
+Golden build passed in 23.315s. Complete Golden passed **3/3**, all seven stages
+per round, distinct project/run identities, natural exit 0 and no forced
+termination. Elapsed process times: 138741 / 125324 / 122041ms. Source start/end
+were clean and identical; baseline eligibility and stable attestation passed.
+The three report hashes were independently checked against the aggregate receipt.
+
+| Supplemental gate | Actual result |
+| --- | --- |
+| Modal Tab/Shift+Tab containment, restoration and priority | 16 passed, 0 failed, 0 ignored; 24.89s |
+| Event-router modal owner removal/replacement and background shortcuts | 1 passed, 0 failed, 0 ignored |
+| Resource drafts, asynchronous transactions, cancellation, Undo/save/reopen and real LUT pixels | 103 passed, 0 failed, 5 native tests ignored; 26.80s |
+| Those five native resource/helper cases, explicitly executed | 5 passed, 0 failed, 0 ignored; 8.93s |
+| Portable media/LUT/OCIO relocation, source removal and tampering | 11 passed, 0 failed, 0 ignored; 8.86s |
+| Real native startup/workspace window role cycle | 1 passed, 0 failed, 0 ignored; 9.66s |
+| CLAP/VST3 constrained curves, reset, Undo/saved Redo/Unicode reopen and native PCM | 2 passed, 0 failed, 0 ignored; 190.48s |
+| Group pointer/refusal/cancellation/return-to-origin/history | 6 passed, 0 failed, 0 ignored; 15.20s |
+
+Resource coverage includes disabled Apply focus traversal, IME and locale draft
+preservation, late responses after edit/cancel/lock/replacement, changed Save As
+path base, exactly one committed history entry and no LUT-created library media.
+Real cube assertions preserve Alpha, zero-Alpha hidden RGB and tiny positive
+Alpha output. Portable tests remove original resources before reopening relocated
+packages and check both Preview and Export pixels. Each Golden color/media stage
+samples five final H.264 pixels; maximum channel error remains **4/255** in all
+three rounds. Its actual encoder transport is `cpu_rawvideo_pipe`; this is a
+quality qualification, not a zero-copy or performance claim.
+
+Product SHA-256 (unchanged from the activated CLAP qualification):
+`135ADF508644BF69904AF438C870F94FDBFAE5B08A9564F3A24034D2C7AE861F`.
+Golden SHA-256:
+`9C6F691D1D458D26EA0745879A119E8CBFDE950A4C6C7710E6FAB80E6EF7203E`.
+OpenFX owned query fixture SHA-256:
+`3BB7A9E4F76562C84F0C913479991CE65127242ED28C2AE6BB6C1905173F2653`.
+Owned CLAP/VST3 gain fixtures retained their earlier recorded hashes throughout.
+
+Aggregate report:
+`E:/dev/mondrian/target/validation/nle-backlog-complete/20261007T183008Z-complete-golden-6cad59ff/complete-golden-consecutive-report.json`.
+Supplemental receipt:
+`.scratch/curve-viewport/acceptance-activation-current-modal-resource-lut.json`.
+Earlier receipts retain their own source identities. No push, remote CI, current
+full-workspace test, physical accessibility/device/macOS or broad vendor/plugin
+qualification is inferred. VST3 auxiliary inputs and mixed layouts, MIDI/editors,
+broader OpenFX contracts, remaining product interaction/i18n/performance matrices
+remain open under the original full NLE goal.

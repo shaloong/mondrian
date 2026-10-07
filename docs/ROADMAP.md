@@ -2,7 +2,7 @@
 
 > 更新日期：2026-10-08
 >
-> 当前状态：M1 Windows Alpha 收口中（具名完整 Golden 基线与最新 CLAP 原生侧链参考已通过；最新完整 Golden、CI、设备和完整工作区测试资格待补）
+> 当前状态：M1 Windows Alpha 收口中（最新具名完整 Golden 与 CLAP 原生侧链参考已通过；CI、设备和完整工作区测试资格待补）
 >
 > 当前主线：完成 M1 当前候选资格收口，再推进 M2 的产品可靠性与交互完整性
 
@@ -56,7 +56,7 @@ M1 的目标是 L1，不要求所有高级组合都可执行。暂未实现的�
 | 里程碑 | 状态 | 结果 |
 | --- | --- | --- |
 | M0 核心契约与架构收敛 | **完成** | 项目、时间、编辑、音频、色彩、执行与验证权威已收敛到唯一生产路径 |
-| M1 Windows Alpha | **收口中** | 核心工作流已有具名基线；0adaea3 完整 Golden 基线已通过；最新 Golden、CI、设备和完整工作区门禁仍待验收 |
+| M1 Windows Alpha | **收口中** | 核心工作流已有具名基线；3b44084 完整 Golden 已通过；CI、设备和完整工作区门禁仍待验收 |
 | M2 Beta | **下一阶段** | 产品交互、恢复、复杂项目、设备矩阵、独立色彩资格和发布工程 |
 | M3 专业能力与互操作 | **后续** | 高级效果、响度、插件、跟踪、交换格式 |
 | M4 多平台实机资格 | **后续** | macOS/Linux 真实设备、打包、签名与长期维护 |
@@ -119,20 +119,23 @@ Golden 连续三轮；源码起止干净且一致，产品哈希全程一致。�
 [验收记录](dev/modal-resource-lut-acceptance.md#clean-native-audio-reset-and-current-candidate-qualification)。
 这份候选尚未推送，不能继承 2026-08 历史版本的三平台 CI、4K／设备或完整工作区
 测试资格。最新原生 CLAP 修订 `ae3c78f` 已通过激活生命周期、辅助输入、PDC、
-Undo／保存重开与逐样本输出参考；其完整 Golden 尚未重跑。见
-[最新侧链验收](dev/modal-resource-lut-acceptance.md#clean-activated-latency-clap-auxiliary-qualification)。
+Undo／保存重开与逐样本输出参考，见
+[侧链验收](dev/modal-resource-lut-acceptance.md#clean-activated-latency-clap-auxiliary-qualification)。
+随后 3b44084 完整 Golden 通过 3/3，模态 Tab、资源事务、LUT 输出／打包搬迁和
+原生音频历史专项通过，见
+[当前完整验收](dev/modal-resource-lut-acceptance.md#current-activated-host-modal-resource-and-lut-acceptance)。
 历史记录继续保留其原始版本；下表分别列出实现状态与实际资格。
 
 | 能力 | Engineering state | 具名资格与待补项 |
 | --- | --- | --- |
-| 项目与恢复 | 实现闭合：durable save/autosave、SQLite snapshot、非阻塞 close、恢复确认和故障注入不覆盖源 | 0adaea3 完整 Golden 已通过 3/3；最新候选待验收 |
-| 素材与代理 | 实现闭合：有界 probe、fingerprint、稳定 AssetId、离线/重连、proxy/original 与 cache revision | 0adaea3 Golden Proxy/Relink 已覆盖 |
-| 编辑 | M1 核心操作、Link、Lift/Extract、T/S、snapping、常速/反向/hold 与 Transition 已接入 | 0adaea3 Golden Editorial/Transport 阶段已通过；专项 Retime 矩阵保留具名历史记录并随候选验收 |
+| 项目与恢复 | 实现闭合：durable save/autosave、SQLite snapshot、非阻塞 close、恢复确认和故障注入不覆盖源 | 3b44084 完整 Golden 已通过 3/3，资源事务／原生重开专项通过 |
+| 素材与代理 | 实现闭合：有界 probe、fingerprint、稳定 AssetId、离线/重连、proxy/original 与 cache revision | 3b44084 Golden Proxy/Relink 已覆盖 |
+| 编辑 | M1 核心操作、Link、Lift/Extract、T/S、snapping、常速/反向/hold 与 Transition 已接入 | 3b44084 Golden Editorial/Transport 阶段已通过；专项 Retime 矩阵保留具名历史记录并随候选验收 |
 | 播放 | 实现闭合：Clock、latest-wins、严格帧覆盖、取消、CPU/native decode 与 Viewer completion | 历史 v7 4K Main10 基线已通过；当前候选专门矩阵待验收 |
-| 音频 | 实现闭合：gain/pan/fade、mute/solo、meter、automation、PDC、limiter、嵌套与共享 Runtime | ae3c78f CLAP 侧链原生参考已通过；Golden 为 0adaea3 基线；历史 CPAL A/V recovery 基线保留，当前设备矩阵待验收 |
-| 视觉 | 作者级 Crop、基础算子、Basic Title、Cross Dissolve 与 Hold/Linear/Bezier 作者语义已接入 | 0adaea3 Golden 视觉阶段已通过；完整 CPU/GPU reference 矩阵保留历史基线，当前专项待验收 |
-| 色彩 | Rec.709/sRGB、PQ、HLG 与 straight Alpha 已有独立 reference；未知解释会阻止或要求 override | 0adaea3 Golden 色彩／媒体阶段已通过；完整独立 reference 矩阵保留历史基线，当前专项待验收；Camera Log 属于 M2 |
-| 导出 | H.264 High/AAC SDR、HEVC Main10、不可变 snapshot、取消、失败清理与完成前 probe 已接入 | 0adaea3 Golden 交付／重开阶段已通过；历史长 Work Area 基线保留，当前专项待验收 |
+| 音频 | 实现闭合：gain/pan/fade、mute/solo、meter、automation、PDC、limiter、嵌套与共享 Runtime | ae3c78f CLAP 侧链原生参考已通过；3b44084 Golden 与 CLAP/VST3 历史／PCM 参考已通过；历史 CPAL A/V recovery 基线保留，当前设备矩阵待验收 |
+| 视觉 | 作者级 Crop、基础算子、Basic Title、Cross Dissolve 与 Hold/Linear/Bezier 作者语义已接入 | 3b44084 Golden 视觉阶段已通过；完整 CPU/GPU reference 矩阵保留历史基线，当前专项待验收 |
+| 色彩 | Rec.709/sRGB、PQ、HLG 与 straight Alpha 已有独立 reference；未知解释会阻止或要求 override | 3b44084 Golden 色彩／媒体阶段已通过；完整独立 reference 矩阵保留历史基线，当前专项待验收；Camera Log 属于 M2 |
+| 导出 | H.264 High/AAC SDR、HEVC Main10、不可变 snapshot、取消、失败清理与完成前 probe 已接入 | 3b44084 Golden 交付／重开阶段已通过；历史长 Work Area 基线保留，当前专项待验收 |
 | 平台与质量 | 三平台生产入口和 Adapter 已进入 CI 配置；本地 workspace 门禁可执行 | 历史三平台 CI 基线保留；当前未推送候选的三平台 CI 与完整工作区测试待验收 |
 
 ### 4.3 退出门槛
@@ -145,7 +148,7 @@ Undo／保存重开与逐样本输出参考；其完整 Golden 尚未重跑。�
 - [ ] 当前候选完成 v7 4K Main10 播放/seek/supersession 和真实 CPAL A/V recovery；历史具名报告只作回归基线。
 - [x] 所有生产结果归类为 `Verified`、`ExplicitlyDegraded` 或 `Blocked/Unresolved`；没有隐式 RGBA8、错误源帧、Video Master 或静默效果旁路。
 - [ ] 当前候选的 Windows/Linux/macOS native CI 通过，平台专属类型不泄漏到共享语义。
-- [ ] 最新候选完整 Golden 连续三轮通过；保留源码、二进制与各阶段报告身份。0adaea3 的 3/3 基线继续保留。
+- [x] 具名 3b44084 完整 Golden 连续三轮通过；保留源码、二进制与各阶段报告身份。后续源码修订须重新验收。
 - [ ] 当前候选完整 workspace fmt/clippy/test 与专门设备门禁收口；已通过的针对性库回归和严格 Clippy 不替代全部矩阵。
 
 ### 4.4 已接受的 Alpha 限制
