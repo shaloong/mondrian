@@ -3890,9 +3890,22 @@ fn playback_video_still_video_retains_separate_sessions_and_clears_both() {
             .decode_cancellable(request, move || std::time::Instant::now() >= deadline)
             .expect("decode within the single original deadline");
         let diagnostics = match &outcome {
-            PreviewDecodeOutcome::Frame(frame) => &frame.diagnostics,
-            PreviewDecodeOutcome::FloatFrame(frame) => &frame.diagnostics,
-            other => panic!("CPU fixture must produce actual pixels: {other:?}"),
+            PreviewDecodeOutcome::Frame(frame) if is_still => {
+                assert_eq!(
+                    frame.rgba().len(),
+                    frame.width as usize * frame.height as usize * 4
+                );
+                &frame.diagnostics
+            }
+            PreviewDecodeOutcome::Unorm16Frame(frame) if !is_still => {
+                assert_eq!(
+                    frame.rgba().len(),
+                    frame.width as usize * frame.height as usize * 4
+                );
+                assert_eq!(frame.diagnostics.decoded_video_sampling.bit_depth, 10);
+                &frame.diagnostics
+            }
+            _ => panic!("CPU fixture must preserve its source precision and produce actual pixels"),
         };
         assert_eq!(
             diagnostics.access_mode,
@@ -4903,9 +4916,14 @@ fn native_reordered_gop_seeks_preserve_exact_covering_intervals() {
         );
         let outcome = decode_preview_frame_cancellable(request, || false)
             .unwrap_or_else(|error| panic!("program frame {frame_index}: {error}"));
-        let PreviewDecodeOutcome::FloatFrame(frame) = outcome else {
-            panic!("Main10 software decode must retain the production float representation");
+        let PreviewDecodeOutcome::Unorm16Frame(frame) = outcome else {
+            panic!("Main10 software decode must retain source-encoded UNORM16 precision");
         };
+        assert_eq!(frame.diagnostics.decoded_video_sampling.bit_depth, 10);
+        assert_eq!(
+            frame.rgba().len(),
+            frame.width as usize * frame.height as usize * 4
+        );
         let selection = frame.diagnostics.temporal_selection().expect("proven temporal extent");
         let requested = frame.diagnostics.requested_pts.expect("requested stream coordinate");
         assert!(
