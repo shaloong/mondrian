@@ -10052,6 +10052,13 @@ mod tests {
         assert!(view.selected_clip().is_none());
         assert_eq!(
             view.event(
+                &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            view.event(
                 &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
                 &mut ctx,
             ),

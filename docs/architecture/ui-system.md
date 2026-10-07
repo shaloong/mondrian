@@ -3945,3 +3945,30 @@ Multiline command availability also preserves read-only semantics: selected text
 can be copied, while Cut and Paste are owned refusals. Both text widgets reuse
 their existing editing commands and local history rather than interpreting menu
 commands through application Clip actions.
+
+### Captured menu sibling coordination
+
+MenuBar and menu-bar Dropdowns identify command chrome through the same Widget
+metadata. Captured command menus permit ancestor coordination only inside command
+chrome; unrelated splitters and window chrome cannot preempt the captured input.
+MenuBar uses the existing before-child seam to switch sibling popups on hover or
+click, with the same helper used by direct events. A captured command menu receives
+keyboard focus through the router's ordinary focus lifecycle. Original curve/text
+ownership remains suspended until execution or cancellation, so sibling switching
+preserves complete selection and one-author-transaction clipboard semantics.
+Dropdowns process focus gained/lost independently of popup visibility; focus loss
+closes the popup and clears its focused affordance for enabled and disabled controls.
+
+Dropdown and ContextMenu share depth-aware keyboard navigation in `menu::popup`.
+Enter/Right opens a submenu; Up/Down/Home/End selects an enabled row at the active
+depth, and Left/Escape returns one level. Activation requires the selected leaf;
+parent rows never recursively execute their first descendant. Empty, disabled or
+invalid paths consume activation without falling through. Unhandled root Left/
+Right bubbles to MenuBar's sibling navigation and preserves the editing owner.
+Explicit pointer submenu entry shares the same depth transition.
+
+Dropdown opening selects and displays the first enabled row. Mouse-opened
+ContextMenu starts with no selection until hover or keyboard navigation chooses
+a row. Mouse hover may clear the selection; Enter/Space with no highlighted row
+is an owned refusal and never falls back to another command. Activation always
+matches the current painted row, independently of how the popup was opened.

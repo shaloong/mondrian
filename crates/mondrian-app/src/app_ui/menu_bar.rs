@@ -504,9 +504,33 @@ impl MenuBar {
         self.close_other_menus(target, ctx);
         self.menus[target].open_menu(ctx);
     }
+
+    fn coordinate_pointer_switch(
+        &mut self,
+        event: &UiEvent,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        let position = match event {
+            UiEvent::MouseMove { position, .. }
+            | UiEvent::MouseDown { position, button: MouseButton::Left, .. } => *position,
+            _ => return EventResult::Ignored,
+        };
+        if let (Some(open), Some(target)) =
+            (self.open_menu_index(), self.trigger_index_at(position))
+            && open != target
+        {
+            self.switch_open_menu_to(target, ctx);
+            return EventResult::Handled;
+        }
+        EventResult::Ignored
+    }
 }
 
 impl Widget for MenuBar {
+    fn is_command_menu(&self) -> bool {
+        true
+    }
+
     fn id(&self) -> WidgetId {
         self.id
     }
@@ -538,29 +562,39 @@ impl Widget for MenuBar {
         }
     }
 
-    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
-        if let UiEvent::MouseMove { position, .. } = event
-            && let (Some(open), Some(target)) =
-                (self.open_menu_index(), self.trigger_index_at(*position))
-            && open != target
-        {
-            self.switch_open_menu_to(target, ctx);
-            return EventResult::Handled;
-        }
+    fn before_child_event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        self.coordinate_pointer_switch(event, ctx)
+    }
 
-        if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event
-            && let (Some(open), Some(target)) =
-                (self.open_menu_index(), self.trigger_index_at(*position))
-            && open != target
-        {
-            self.close_other_menus(target, ctx);
-            return self.menus[target].event(event, ctx);
+    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if self.coordinate_pointer_switch(event, ctx) == EventResult::Handled {
+            return EventResult::Handled;
         }
 
         for menu in &mut self.menus {
             if menu.event(event, ctx) == EventResult::Handled {
                 return EventResult::Handled;
             }
+        }
+        if let UiEvent::KeyDown { key: KeyCode::Left | KeyCode::Right, modifiers } = event
+            && *modifiers == Modifiers::none()
+            && let Some(open) = self.open_menu_index()
+        {
+            let reverse = matches!(event, UiEvent::KeyDown { key: KeyCode::Left, .. });
+            let count = self.menus.len();
+            let next = (1..=count)
+                .map(|step| {
+                    if reverse {
+                        (open + count - step) % count
+                    } else {
+                        (open + step) % count
+                    }
+                })
+                .find(|index| self.menus[*index].can_focus());
+            if let Some(next) = next {
+                self.switch_open_menu_to(next, ctx);
+            }
+            return EventResult::Handled;
         }
         EventResult::Ignored
     }
@@ -1386,6 +1420,57 @@ mod tests {
 
         assert!(!state.can_paste_from_app_clipboard());
         assert!(!menu_item(&menu_items, "编辑", "粘贴").enabled);
+    }
+
+    #[test]
+    fn menu_bar_direct_keyboard_navigation_respects_submenu_before_siblings() {
+        let mut menu = MenuBar::default();
+        menu.menus[0].set_model(
+            "File",
+            vec![MenuItem::submenu(
+                "Import",
+                vec![MenuItem::new("Media", Action::SaveProject)],
+            )],
+        );
+        menu.layout(Rect::new(0.0, 0.0, 900.0, MENU_BAR_HEIGHT));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        menu.menus[0].open_menu(&mut ctx);
+        for key in [KeyCode::Right, KeyCode::Left] {
+            assert_eq!(
+                menu.event(
+                    &UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                    &mut ctx
+                ),
+                EventResult::Handled
+            );
+            assert_eq!(
+                menu.open_menu_index(),
+                Some(0),
+                "entering/leaving a submenu cannot switch the root menu"
+            );
+        }
+        assert_eq!(
+            menu.event(
+                &UiEvent::KeyDown { key: KeyCode::Left, modifiers: Modifiers::none() },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(menu.open_menu_index(), Some(menu.menus.len() - 1));
+        assert!(actions.borrow().is_empty());
+        assert!(ctx.requests.menu_command.is_none());
     }
 
     #[test]

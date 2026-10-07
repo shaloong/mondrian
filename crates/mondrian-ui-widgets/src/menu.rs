@@ -24,8 +24,8 @@ pub(crate) use paint::{
     paint_submenu_arrow,
 };
 pub(crate) use popup::{
-    first_activatable_index as popup_first_activatable_index,
-    next_activatable_index as popup_next_activatable_index, root_hovered_index,
+    first_activatable_index as popup_first_activatable_index, navigate_popup, open_submenu_at,
+    root_hovered_index, PopupKeyOutcome,
 };
 
 use std::cell::Cell;
@@ -400,10 +400,6 @@ impl Dropdown {
         root_hovered_index(self.hover_depth)
     }
 
-    fn next_activatable_index(&self, direction: i32) -> Option<usize> {
-        popup_next_activatable_index(&self.items, self.hovered_index(), direction)
-    }
-
     fn ensure_hover_visible(&mut self) {
         self.scroll_offset = scroll_to_visible(
             self.hovered_index(),
@@ -412,18 +408,6 @@ impl Dropdown {
             self.items.len(),
             self.item_height(),
         );
-    }
-
-    fn activate_hovered(&mut self, ctx: &mut EventContext) -> bool {
-        let Some(index) = self.hovered_index() else {
-            return false;
-        };
-        let Some(activation) = menu_item_activation(&self.items[index]) else {
-            return false;
-        };
-        apply_menu_activation(activation, ctx, self.is_command_menu());
-        self.close(ctx);
-        true
     }
 
     fn open(&mut self, ctx: &mut EventContext) {
@@ -498,21 +482,26 @@ impl Widget for Dropdown {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
-        if !self.enabled {
-            if matches!(event, UiEvent::FocusLost) {
-                self.focused = false;
-                self.focus_visible = false;
-                if self.open {
-                    self.close(ctx);
-                }
-                return EventResult::Handled;
+        if matches!(event, UiEvent::FocusLost) {
+            self.focused = false;
+            self.focus_visible = false;
+            if self.open {
+                self.close(ctx);
             }
+            return EventResult::Handled;
+        }
+        if !self.enabled {
             if self.open {
                 self.close(ctx);
             }
             self.focused = false;
             self.focus_visible = false;
             return EventResult::Ignored;
+        }
+        if let UiEvent::FocusGained { source } = event {
+            self.focused = true;
+            self.focus_visible = source.is_focus_visible();
+            return EventResult::Handled;
         }
         if self.open {
             if self.is_command_menu()
@@ -576,16 +565,35 @@ impl Widget for Dropdown {
                         if let Some(sub_rect) = self.menu_rect_at_depth(depth)
                             && sub_rect.contains(*position)
                         {
-                            let metrics = MenuMetrics::current();
-                            let rel_y = position.y - sub_rect.y - metrics.popup_padding;
-                            let sub_item = (rel_y / self.item_height()).floor().max(0.0) as usize;
-                            if let Some(children) = self.children_at(&self.submenu_chain[..depth])
-                                && let Some(child) = children.get(sub_item)
-                                && let Some(activation) = menu_item_activation(child)
-                            {
-                                apply_menu_activation(activation, ctx, self.is_command_menu());
+                            let selected = self.children_at(&self.submenu_chain[..depth]).and_then(
+                                |children| {
+                                    item_at(
+                                        sub_rect,
+                                        children.len(),
+                                        self.item_height(),
+                                        0.0,
+                                        *position,
+                                    )
+                                },
+                            );
+                            if let Some(index) = selected {
+                                if open_submenu_at(
+                                    &self.items,
+                                    &mut self.submenu_chain,
+                                    &mut self.hover_depth,
+                                    depth,
+                                    index,
+                                ) {
+                                    ctx.request_repaint();
+                                } else if let Some(command) = self
+                                    .children_at(&self.submenu_chain[..depth])
+                                    .and_then(|children| children.get(index))
+                                    .and_then(menu_item_activation)
+                                {
+                                    apply_menu_activation(command, ctx, self.is_command_menu());
+                                    self.close(ctx);
+                                }
                             }
-                            self.close(ctx);
                             return EventResult::Handled;
                         }
                     }
@@ -595,6 +603,14 @@ impl Widget for Dropdown {
                             // Don't close if the clicked item is a submenu
                             if self.items[released].is_submenu() {
                                 self.pressed_index = None;
+                                open_submenu_at(
+                                    &self.items,
+                                    &mut self.submenu_chain,
+                                    &mut self.hover_depth,
+                                    0,
+                                    released,
+                                );
+                                ctx.request_repaint();
                             } else if let Some(activation) =
                                 menu_item_activation(&self.items[released])
                             {
@@ -684,39 +700,30 @@ impl Widget for Dropdown {
                     }
                     return EventResult::Handled;
                 }
-                UiEvent::KeyDown { key: KeyCode::Escape, .. } => {
-                    self.close(ctx);
-                    return EventResult::Handled;
-                }
-                UiEvent::KeyDown { key: KeyCode::Down, modifiers }
-                    if *modifiers == Modifiers::none() =>
+                UiEvent::KeyDown { key, modifiers }
+                    if *modifiers == Modifiers::none() || *key == KeyCode::Escape =>
                 {
-                    self.hover_depth = self.next_activatable_index(1).map(|i| (0, i));
-                    self.ensure_hover_visible();
-                    return EventResult::Handled;
-                }
-                UiEvent::KeyDown { key: KeyCode::Up, modifiers }
-                    if *modifiers == Modifiers::none() =>
-                {
-                    self.hover_depth = self.next_activatable_index(-1).map(|i| (0, i));
-                    self.ensure_hover_visible();
-                    return EventResult::Handled;
-                }
-                UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, modifiers }
-                    if *modifiers == Modifiers::none() =>
-                {
-                    self.activate_hovered(ctx);
+                    match navigate_popup(
+                        &self.items,
+                        &mut self.submenu_chain,
+                        &mut self.hover_depth,
+                        *key,
+                    ) {
+                        PopupKeyOutcome::Unhandled => return EventResult::Ignored,
+                        PopupKeyOutcome::Handled => self.ensure_hover_visible(),
+                        PopupKeyOutcome::Close => self.close(ctx),
+                        PopupKeyOutcome::Activate(command) => {
+                            apply_menu_activation(command, ctx, self.is_command_menu());
+                            self.close(ctx);
+                        }
+                    }
+                    ctx.request_repaint();
                     return EventResult::Handled;
                 }
                 _ => {}
             }
         } else {
             match event {
-                UiEvent::FocusGained { source } => {
-                    self.focused = true;
-                    self.focus_visible = source.is_focus_visible();
-                    return EventResult::Handled;
-                }
                 UiEvent::KeyDown {
                     key: KeyCode::Enter | KeyCode::Space | KeyCode::Down,
                     modifiers,
@@ -1442,6 +1449,89 @@ mod tests {
         );
         assert_eq!(d.scroll_offset, 0.0);
         assert!(!ctx.requests.repaint);
+    }
+
+    #[test]
+    fn dropdown_enter_without_highlight_cannot_run_the_first_command() {
+        let mut menu = Dropdown::new("Edit", vec![MenuItem::new("Cut", Action::Cut)]);
+        menu.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+        menu.open_menu(&mut ctx);
+        menu.event(
+            &UiEvent::MouseMove {
+                position: Point::new(500.0, 500.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(menu.hover_depth.is_none(), "pointer left every menu row");
+        menu.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert!(
+            actions.borrow().is_empty(),
+            "no highlighted row means no selected command"
+        );
+        assert!(menu.is_open(), "refused activation keeps the menu open");
+    }
+
+    #[test]
+    fn dropdown_keyboard_activation_enters_submenu_without_running_first_command() {
+        let mut menu = Dropdown::new(
+            "File",
+            vec![MenuItem::submenu(
+                "New",
+                vec![
+                    MenuItem::new("Video Track", Action::Cut),
+                    MenuItem::new("Disabled", Action::Undo).disabled(),
+                    MenuItem::separator(),
+                    MenuItem::new("Audio Track", Action::Paste),
+                ],
+            )],
+        );
+        menu.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+        menu.open_menu(&mut ctx);
+        assert_eq!(
+            menu.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        assert!(
+            menu.is_open(),
+            "Enter on a submenu opens it; it cannot execute the first child"
+        );
+        assert!(
+            actions.borrow().is_empty(),
+            "submenu navigation cannot dispatch an author command"
+        );
+        menu.event(
+            &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        menu.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert!(!menu.is_open());
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::Paste],
+            "activate the selected child after skipping disabled/separator rows"
+        );
     }
 
     #[test]

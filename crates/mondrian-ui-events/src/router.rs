@@ -15,7 +15,7 @@ use mondrian_ui_core::types::{
 };
 use mondrian_ui_core::widget::{
     CursorRequest, DragRequest, EditCommand, EventContext, EventRequests, EyedropperRequest,
-    ImeRequest, MenuCommand,
+    ImeRequest, MenuCommand, PointerCaptureRequest,
 };
 use mondrian_ui_core::{TreeWalker, Widget, WidgetTree};
 
@@ -316,7 +316,7 @@ impl EventRouter {
                     self.hovered = target;
                 }
                 if let Some(target_id) = target {
-                    if self.capture.is_idle()
+                    if self.allows_ancestor_pointer_event(tree)
                         && self.before_child_event(tree, target_id, &event, dispatch)
                     {
                         return EventResult::Handled;
@@ -455,7 +455,7 @@ impl EventRouter {
                 }
 
                 if let Some(target_id) = target {
-                    if self.capture.is_idle()
+                    if self.allows_ancestor_pointer_event(tree)
                         && !is_keyboard
                         && self.before_child_event(tree, target_id, &event, dispatch)
                     {
@@ -671,6 +671,14 @@ impl EventRouter {
             };
             child = parent;
         }
+    }
+
+    fn allows_ancestor_pointer_event(&self, tree: &dyn WidgetTree) -> bool {
+        self.capture.is_idle()
+            || self
+                .capture
+                .owner()
+                .is_some_and(|owner| tree.get(owner).is_some_and(Widget::is_command_menu))
     }
 
     fn pointer_target(&mut self, tree: &dyn WidgetTree, position: Point) -> Option<WidgetId> {
@@ -995,6 +1003,16 @@ impl EventRouter {
         }
         if let Some(request) = requests.pointer_capture {
             self.capture.apply_request(request);
+            if let PointerCaptureRequest::Capture(owner) = request
+                && tree
+                    .get(owner)
+                    .is_some_and(|widget| widget.is_command_menu() && widget.can_focus())
+                && self
+                    .active_focus_scope
+                    .is_none_or(|scope| self.is_ancestor_or_self(tree, scope, owner))
+            {
+                self.move_focus_to(tree, owner, FocusSource::Pointer, dispatch);
+            }
         }
         match requests.drag {
             Some(DragRequest::Begin(payload)) => {
@@ -1048,10 +1066,16 @@ impl EventRouter {
         event: &UiEvent,
         dispatch: &dyn Fn(Action),
     ) -> bool {
+        let captured_command_menu = self
+            .capture
+            .owner()
+            .is_some_and(|owner| tree.get(owner).is_some_and(Widget::is_command_menu));
         let mut current = tree.parent_id(child_id);
         while let Some(id) = current {
             let parent_id = tree.parent_id(id);
-            if let Some(widget) = tree.get_mut(id) {
+            if let Some(widget) = tree.get_mut(id)
+                && (!captured_command_menu || widget.is_command_menu())
+            {
                 let mut requests = EventRequests::default();
                 let result = {
                     let mut ctx = self.make_event_context(dispatch, &mut requests);
@@ -3435,6 +3459,57 @@ mod tests {
             } else {
                 vec![]
             }
+        }
+    }
+
+    #[test]
+    fn captured_pointer_drafts_and_menus_refuse_unrelated_parent_preemption() {
+        for menu in [false, true] {
+            let log = Rc::new(RefCell::new(Vec::new()));
+            let child = CommandFocusWidget {
+                id: WidgetId::new(),
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                menu,
+                owns: false,
+                enabled: Rc::new(Cell::new(true)),
+                log: Rc::clone(&log),
+            };
+            let child_id = child.id;
+            let parent = ParentPostWidget {
+                id: WidgetId::new(),
+                bounds: Rect::new(0.0, 0.0, 300.0, 100.0),
+                child_id,
+                handle_before: true,
+                log: Rc::clone(&log),
+            };
+            let root = parent.id;
+            let mut tree = TestTree {
+                root,
+                nodes: HashMap::from([
+                    (root, Box::new(parent) as Box<dyn Widget>),
+                    (child_id, Box::new(child)),
+                ]),
+                parents: HashMap::from([(child_id, root)]),
+                children: HashMap::from([(root, vec![child_id])]),
+            };
+            let mut router = EventRouter::new(root);
+            router.capture.set_owner(Some(child_id));
+            router.focus_manager_mut().set_focused_widget(Some(child_id), None);
+            router.route(
+                UiEvent::MouseDown {
+                    position: Point::new(250.0, 50.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut tree,
+                &|_| {},
+            );
+            assert!(
+                !log.borrow().iter().any(|entry| entry == "parent-before"),
+                "captured {menu:?} interaction cannot become unrelated parent chrome input"
+            );
+            assert_eq!(router.captured(), Some(child_id));
+            assert_eq!(router.focused(), Some(child_id));
         }
     }
 

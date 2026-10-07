@@ -2483,6 +2483,13 @@ mod tests {
         assert_eq!(grid.selected_index(), Some(0));
         assert_eq!(
             grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
                 &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
                 &mut ctx,
             ),
@@ -3463,6 +3470,13 @@ mod tests {
         assert!(grid.overlay_hit_test(Point::new(900.0, 900.0)));
         assert_eq!(
             grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
                 &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
                 &mut ctx,
             ),
@@ -3555,6 +3569,13 @@ mod tests {
         assert_eq!(grid.selected_index(), Some(1));
         assert_eq!(
             grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
                 &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
                 &mut ctx,
             ),
@@ -3604,6 +3625,13 @@ mod tests {
             EventResult::Handled
         );
         assert_eq!(grid.selected_index(), Some(0));
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
         assert_eq!(
             grid.event(
                 &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
@@ -3670,6 +3698,13 @@ mod tests {
         assert_eq!(grid.selected_index(), Some(1));
         assert_eq!(
             grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
                 &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
                 &mut ctx,
             ),
@@ -3723,6 +3758,13 @@ mod tests {
         assert_eq!(grid.selected_index(), Some(0));
         assert!(actions.borrow().is_empty());
 
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
         assert_eq!(
             grid.event(
                 &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
@@ -3798,6 +3840,13 @@ mod tests {
 
         assert_eq!(
             grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
                 &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
                 &mut ctx,
             ),
@@ -3866,6 +3915,13 @@ mod tests {
                     button: MouseButton::Right,
                     modifiers: Modifiers::none(),
                 },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
                 &mut ctx,
             ),
             EventResult::Handled

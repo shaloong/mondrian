@@ -2384,6 +2384,13 @@ fn assets_panel_context_menu_dispatches_import_from_grid_overlay() {
     assert!(grid.overlay_hit_test(Point::new(640.0, 480.0)));
     assert_eq!(
         grid.event(
+            &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+            &mut ctx,
+        ),
+        EventResult::Handled
+    );
+    assert_eq!(
+        grid.event(
             &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
             &mut ctx,
         ),
@@ -2818,6 +2825,13 @@ fn assets_panel_multi_selection_context_menu_dispatches_delete_selection() {
                 button: MouseButton::Right,
                 modifiers: Modifiers::none(),
             },
+            &mut ctx,
+        ),
+        EventResult::Handled
+    );
+    assert_eq!(
+        grid.event(
+            &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
             &mut ctx,
         ),
         EventResult::Handled
@@ -3300,54 +3314,84 @@ fn timeline_model_maps_asset_drop_payload_to_stable_track_id() {
 
 #[test]
 fn timeline_panel_context_menu_add_track_emits_typed_timeline_actions() {
-    let model = demo_timeline_model();
-    let actions = RefCell::new(Vec::<Action>::new());
-    let dispatch = |action| actions.borrow_mut().push(action);
-    let mut panel = timeline_panel(&model);
-    panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
+    for kind in [TrackAddKind::Video, TrackAddKind::Audio] {
+        let model = demo_timeline_model();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut panel = timeline_panel(&model);
+        panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
 
-    let mut focus = DummyFocus;
-    let mut shortcut = DummyShortcut;
-    let mut tooltip = DummyTooltip;
-    let mut requests = EventRequests::default();
-    let mut ctx = event_ctx(
-        &mut focus,
-        &mut shortcut,
-        &mut tooltip,
-        &mut requests,
-        &dispatch,
-    );
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
 
-    let result = panel.event(
-        &UiEvent::MouseDown {
-            position: Point::new(500.0, 42.0),
-            button: MouseButton::Right,
-            modifiers: Modifiers::none(),
-        },
-        &mut ctx,
-    );
-
-    assert_eq!(result, EventResult::Handled);
-    assert!(panel.overlay_hit_test(Point::new(900.0, 900.0)));
-    actions.borrow_mut().clear();
-    assert_eq!(
-        panel.event(
-            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+        let result = panel.event(
+            &UiEvent::MouseDown {
+                position: Point::new(500.0, 42.0),
+                button: MouseButton::Right,
+                modifiers: Modifiers::none(),
+            },
             &mut ctx,
-        ),
-        EventResult::Handled
-    );
+        );
 
-    let recorded = actions.borrow();
-    assert_eq!(recorded.len(), 1);
-    let Action::Custom { namespace, name, payload } = &recorded[0] else {
-        panic!("expected custom add-track action");
-    };
-    assert_eq!(namespace, TRACK_NAMESPACE);
-    assert_eq!(name, TRACK_ADD);
-    let payload: TrackAddPayload =
-        serde_json::from_value(payload.clone()).expect("add track payload");
-    assert_eq!(payload.kind, TrackAddKind::Video);
+        assert_eq!(result, EventResult::Handled);
+        assert!(panel.overlay_hit_test(Point::new(900.0, 900.0)));
+        actions.borrow_mut().clear();
+        assert_eq!(
+            panel.event(
+                &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(
+            panel.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert!(
+            actions.borrow().is_empty(),
+            "parent submenu entry is not an AddTrack author action"
+        );
+        if kind == TrackAddKind::Audio {
+            assert_eq!(
+                panel.event(
+                    &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                    &mut ctx
+                ),
+                EventResult::Handled
+            );
+        }
+        assert_eq!(
+            panel.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        let recorded = actions.borrow();
+        assert_eq!(recorded.len(), 1);
+        let Action::Custom { namespace, name, payload } = &recorded[0] else {
+            panic!("expected custom add-track action");
+        };
+        assert_eq!(namespace, TRACK_NAMESPACE);
+        assert_eq!(name, TRACK_ADD);
+        let payload: TrackAddPayload =
+            serde_json::from_value(payload.clone()).expect("add track payload");
+        assert_eq!(payload.kind, kind);
+    }
 }
 
 #[test]

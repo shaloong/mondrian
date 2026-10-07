@@ -1,5 +1,39 @@
 # Modal, resource and LUT acceptance
 
+## Captured menu switching and explicit submenu activation
+
+The 2026-10-07 UI follow-up to `2559c41` reproduced three runtime failures:
+actual Host hover could not switch File to Help; Enter on a submenu executed its
+first descendant; Enter after pointer movement cleared the highlight still
+executed the first command. The retained regressions now pass. MenuBar coordinates
+captured sibling hover/click through the existing ancestor seam, restricted to
+command chrome. Normal focus transitions preserve the original editing owner.
+Dropdown and ContextMenu share depth-aware keyboard navigation and activate only
+the selected leaf. Mouse-opened context menus require explicit selection;
+Enter/Space without a highlight refuses without dispatch. No compatibility
+fallback, second clipboard or alternate author transaction was added.
+
+Actual Host tests cover hover, click, keyboard wrapping and exact About dispatch,
+plus File-to-Edit Cut with one restoring Undo and cancellation retaining selection.
+Shared widget tests cover nested entry, disabled/separator rows, empty/stale paths
+and no-highlight refusal. Asset and timeline integration tests explicitly select
+rows and retain their exact action, target, selection and rename assertions.
+Group interpolation independently passed one-commit and both saved history states.
+
+Final all-feature library gates: App **2601 passed, 0 failed, 68 ignored**
+(360.81 s); UI events **77 passed, 0 failed, 0 ignored** (0.01 s); UI widgets
+**1105 passed, 0 failed, 0 ignored** (297.80 s). Strict workspace, all-target,
+all-feature Clippy with `-D warnings` passed in **2 min 34 s**; fmt and diff checks
+passed. App includes both actual modal Tab cases and the real cube resource
+transaction/Undo/save/reopen case. The only changes after the full App and events
+gates were explicit selection steps in widget tests; production source was frozen.
+
+This follow-up is a UI and authoring-regression qualification. Native plugin and
+encoded LUT output evidence below remains bound to clean `ee310cc`, its recorded
+binaries and three Golden runs. Submenu pointer/viewport edge cases, audio curve
+clipboard, read-only curve interaction, group pointer operations and the broader
+vendor/platform/performance matrices remain open in the active overall goal.
+
 ## Focused visual curve Cut and atomic clipboard publication
 
 The actual Host/EventRouter Ctrl+A then Ctrl+X regression retained the Clip but

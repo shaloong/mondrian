@@ -418,7 +418,6 @@ pub(crate) fn menu_item_activation(item: &MenuItem) -> Option<MenuItemCommand> {
     }
     match &item.kind {
         MenuItemKind::Action => item.has_command().then(|| item.command.clone()),
-        MenuItemKind::Submenu { children } => children.iter().find_map(menu_item_activation),
-        MenuItemKind::Separator => None,
+        MenuItemKind::Submenu { .. } | MenuItemKind::Separator => None,
     }
 }

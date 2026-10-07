@@ -6062,11 +6062,23 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum RootCurveMenuOperation {
         CutClick,
+        CutAfterFileHover,
+        CancelAfterFileHover,
         CutShortcut,
         CutCustomShortcut,
         CopyPaste,
         Cancel,
         EmptyCut,
+    }
+
+    #[test]
+    fn root_menu_router_switch_preserves_original_curve_cut_owner_and_one_undo() {
+        assert_root_curve_menu_operation(RootCurveMenuOperation::CutAfterFileHover);
+    }
+
+    #[test]
+    fn root_menu_router_switch_cancel_preserves_original_curve_selection() {
+        assert_root_curve_menu_operation(RootCurveMenuOperation::CancelAfterFileHover);
     }
 
     #[test]
@@ -6196,30 +6208,43 @@ mod tests {
             .expect("history")
             .diagnostics()
             .undo_entries;
-        fn edit_menu_id(widget: &dyn Widget) -> Option<mondrian_ui_core::WidgetId> {
+        fn command_menu_id(
+            widget: &dyn Widget,
+            names: [&str; 2],
+        ) -> Option<mondrian_ui_core::WidgetId> {
             if widget.accessibility().is_some_and(|node| {
                 node.role == mondrian_ui_core::widget::AccessibilityRole::Menu
-                    && matches!(node.name.as_deref(), Some("编辑") | Some("Edit"))
+                    && node.name.as_deref().is_some_and(|name| names.contains(&name))
             }) {
                 return Some(widget.id());
             }
-            (0..widget.child_count()).find_map(|index| widget.child(index).and_then(edit_menu_id))
+            (0..widget.child_count()).find_map(|index| {
+                widget.child(index).and_then(|child| command_menu_id(child, names))
+            })
         }
         TreeWalker::layout(host.active_root_mut(), bounds);
-        let menu_id = edit_menu_id(host.active_root()).expect("real Edit menu trigger");
+        let menu_id =
+            command_menu_id(host.active_root(), ["编辑", "Edit"]).expect("real Edit menu trigger");
         let menu_bounds = host.root().menu_bar_bounds_for_test();
-        let menu_point = {
+        let trigger_point = |id, host: &mut AppUiHost| {
             let tree = WidgetTreeView::new(host.active_root_mut());
-            let menu = tree.get(menu_id).expect("Edit menu");
+            let menu = tree.get(id).expect("menu");
             (menu_bounds.x.floor() as i32..(menu_bounds.x + menu_bounds.width).ceil() as i32)
                 .map(|x| Point::new(x as f32 + 0.5, menu_bounds.center().y))
                 .find(|point| menu.hit_test(*point))
-                .unwrap_or_else(|| {
-                    panic!(
-                        "laid out semantic Edit trigger within {menu_bounds:?}, node {:?}",
-                        menu.accessibility()
-                    )
-                })
+                .expect("laid out semantic trigger")
+        };
+        let menu_point = trigger_point(menu_id, &mut host);
+        let file_point = if matches!(
+            operation,
+            RootCurveMenuOperation::CutAfterFileHover
+                | RootCurveMenuOperation::CancelAfterFileHover
+        ) {
+            let file_id =
+                command_menu_id(host.active_root(), ["文件", "File"]).expect("File trigger");
+            Some(trigger_point(file_id, &mut host))
+        } else {
+            None
         };
         assert_eq!(router.focused(), Some(curve_id));
         let theme = current_theme();
@@ -6247,16 +6272,21 @@ mod tests {
                 },
             ]
         };
-        let mut events = click(menu_point).to_vec();
+        let mut events = click(file_point.unwrap_or(menu_point)).to_vec();
+        if file_point.is_some() {
+            events.push(UiEvent::MouseMove { position: menu_point, modifiers: Modifiers::none() });
+        }
         match operation {
-            RootCurveMenuOperation::CutClick => events.extend(click(cut_point)),
+            RootCurveMenuOperation::CutClick | RootCurveMenuOperation::CutAfterFileHover => {
+                events.extend(click(cut_point))
+            }
             RootCurveMenuOperation::CutShortcut | RootCurveMenuOperation::EmptyCut => {
                 events.push(UiEvent::KeyDown { key: KeyCode::X, modifiers: Modifiers::ctrl() })
             }
             RootCurveMenuOperation::CutCustomShortcut => {
                 events.push(UiEvent::KeyDown { key: KeyCode::K, modifiers: Modifiers::ctrl() })
             }
-            RootCurveMenuOperation::Cancel => {
+            RootCurveMenuOperation::Cancel | RootCurveMenuOperation::CancelAfterFileHover => {
                 events.push(UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() })
             }
             RootCurveMenuOperation::CopyPaste => {
@@ -6303,7 +6333,9 @@ mod tests {
             .keyframes();
         if matches!(
             operation,
-            RootCurveMenuOperation::Cancel | RootCurveMenuOperation::EmptyCut
+            RootCurveMenuOperation::Cancel
+                | RootCurveMenuOperation::CancelAfterFileHover
+                | RootCurveMenuOperation::EmptyCut
         ) {
             assert!(sequence.author_state_eq_ignoring_revision(&original));
             assert_eq!(host.app_state().project_author_generation(), generation);
@@ -6324,7 +6356,10 @@ mod tests {
                 .expect("downcast")
                 .downcast_ref::<mondrian_ui_widgets::CurveEditor>()
                 .expect("curve");
-            let expected = if operation == RootCurveMenuOperation::Cancel {
+            let expected = if matches!(
+                operation,
+                RootCurveMenuOperation::Cancel | RootCurveMenuOperation::CancelAfterFileHover
+            ) {
                 3
             } else {
                 0
@@ -7635,6 +7670,161 @@ mod tests {
                 .expect("restored")
                 .author_state_eq_ignoring_revision(&original));
         }
+    }
+
+    #[test]
+    fn root_menu_router_hover_switches_to_help_and_activates_only_about() {
+        assert_root_menu_router_switch(RootMenuSwitch::Hover);
+    }
+
+    #[test]
+    fn root_menu_router_click_switches_to_help_and_activates_only_about() {
+        assert_root_menu_router_switch(RootMenuSwitch::Click);
+    }
+
+    #[test]
+    fn root_menu_router_keyboard_wraps_to_help_and_activates_only_about() {
+        assert_root_menu_router_switch(RootMenuSwitch::Keyboard);
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum RootMenuSwitch {
+        Hover,
+        Click,
+        Keyboard,
+    }
+
+    fn assert_root_menu_router_switch(method: RootMenuSwitch) {
+        let click = method == RootMenuSwitch::Click;
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        use mondrian_ui_core::types::KeyCode;
+        use mondrian_ui_core::widget::AccessibilityRole;
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+        let mut host = AppUiHost::new_with_preferences_path(
+            workspace_app_state(),
+            AppUiPreferences::default(),
+            temp_preferences_path("root-menu-hover"),
+        );
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        fn named_menu(widget: &dyn Widget, names: [&str; 2]) -> Option<mondrian_ui_core::WidgetId> {
+            if widget.accessibility().is_some_and(|node| {
+                node.role == AccessibilityRole::Menu
+                    && node.name.as_deref().is_some_and(|name| names.contains(&name))
+            }) {
+                return Some(widget.id());
+            }
+            (0..widget.child_count())
+                .find_map(|i| widget.child(i).and_then(|child| named_menu(child, names)))
+        }
+        let file_id = named_menu(host.active_root(), ["文件", "File"]).expect("File trigger");
+        let help_id = named_menu(host.active_root(), ["帮助", "Help"]).expect("Help trigger");
+        let menu_bounds = host.root().menu_bar_bounds_for_test();
+        let trigger_point = |id, host: &mut AppUiHost| {
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let menu = tree.get(id).expect("menu");
+            (menu_bounds.x.floor() as i32..(menu_bounds.x + menu_bounds.width).ceil() as i32)
+                .map(|x| Point::new(x as f32 + 0.5, menu_bounds.center().y))
+                .find(|point| menu.hit_test(*point))
+                .expect("laid out trigger")
+        };
+        let file_point = trigger_point(file_id, &mut host);
+        let help_point = trigger_point(help_id, &mut host);
+        let mut router = EventRouter::new(host.active_root().id());
+        let actions = std::cell::RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        for event in [
+            UiEvent::MouseDown {
+                position: file_point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseUp {
+                position: file_point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            router.route(
+                event,
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &dispatch,
+            );
+        }
+        assert_eq!(router.captured(), Some(file_id));
+        assert!(actions.borrow().is_empty());
+        assert_eq!(
+            router.route(
+                if method == RootMenuSwitch::Keyboard {
+                    UiEvent::KeyDown { key: KeyCode::Left, modifiers: Modifiers::none() }
+                } else if click {
+                    UiEvent::MouseDown {
+                        position: help_point,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    }
+                } else {
+                    UiEvent::MouseMove { position: help_point, modifiers: Modifiers::none() }
+                },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &dispatch,
+            ),
+            EventResult::Handled
+        );
+        if click {
+            router.route(
+                UiEvent::MouseUp {
+                    position: help_point,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &dispatch,
+            );
+        }
+        {
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let expanded = |id| {
+                tree.get(id)
+                    .expect("menu")
+                    .accessibility()
+                    .expect("menu semantics")
+                    .state
+                    .expanded
+            };
+            assert_eq!(
+                expanded(help_id),
+                Some(true),
+                "real routed hover must open Help"
+            );
+            assert_eq!(
+                expanded(file_id),
+                Some(false),
+                "only the hovered menu may remain open"
+            );
+        }
+        assert_eq!(router.captured(), Some(help_id));
+        assert_eq!(router.focused(), Some(help_id));
+        assert!(
+            WidgetTreeView::new(host.active_root_mut())
+                .get(help_id)
+                .expect("menu")
+                .accessibility()
+                .expect("menu semantics")
+                .state
+                .focused
+        );
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &dispatch,
+        );
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[crate::app::ui_actions::app_shell_about_action()]
+        );
+        assert_eq!(router.captured(), None);
     }
 
     #[test]
