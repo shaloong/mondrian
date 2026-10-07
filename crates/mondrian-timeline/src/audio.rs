@@ -1819,8 +1819,8 @@ fn unique_ids<T: Copy + Ord>(values: impl IntoIterator<Item = T>) -> Option<BTre
     Some(set)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum AudioAuthorRoutingNode {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum AudioAuthorRoutingNode {
     Track(TrackId),
     Bus(MixBusId),
     Output(ProgramOutputId),
@@ -1850,24 +1850,8 @@ fn validate_routing_cycles(
         Ok(())
     }
 
-    let mut outgoing = BTreeMap::<AudioAuthorRoutingNode, BTreeSet<AudioAuthorRoutingNode>>::new();
-    let source_node = |source: AudioRouteSource| match source {
-        AudioRouteSource::Track { track_id, .. } => AudioAuthorRoutingNode::Track(track_id),
-        AudioRouteSource::Bus { bus_id, .. } => AudioAuthorRoutingNode::Bus(bus_id),
-    };
-    for route in &program.routes {
-        let destination = match route.destination {
-            AudioRouteDestination::Bus(bus_id) => AudioAuthorRoutingNode::Bus(bus_id),
-            AudioRouteDestination::Output(output_id) => AudioAuthorRoutingNode::Output(output_id),
-        };
-        outgoing.entry(source_node(route.source)).or_default().insert(destination);
-    }
-    for route in &program.sidechain_routes {
-        let targets = author_processor_target_nodes(program, audio_tracks, route.processor_id);
-        for target in targets {
-            outgoing.entry(source_node(route.source)).or_default().insert(target);
-        }
-    }
+    let graph = author_routing_graph(program, audio_tracks);
+    let outgoing = &graph.outgoing;
     let mut visiting = BTreeSet::new();
     let mut visited = BTreeSet::new();
     let nodes = outgoing
@@ -1876,60 +1860,89 @@ fn validate_routing_cycles(
         .chain(outgoing.values().flatten().copied())
         .collect::<BTreeSet<_>>();
     for node in nodes {
-        visit(node, &outgoing, &mut visiting, &mut visited)?;
+        visit(node, outgoing, &mut visiting, &mut visited)?;
     }
     Ok(())
 }
 
-fn author_processor_target_nodes(
+impl AudioAuthorRoutingNode {
+    pub(crate) fn from_source(source: AudioRouteSource) -> Self {
+        match source {
+            AudioRouteSource::Track { track_id, .. } => Self::Track(track_id),
+            AudioRouteSource::Bus { bus_id, .. } => Self::Bus(bus_id),
+        }
+    }
+}
+
+/// Complete retained graph shared by author validation and menu admission.
+pub(crate) struct AudioAuthorRoutingGraph {
+    pub(crate) outgoing: BTreeMap<AudioAuthorRoutingNode, BTreeSet<AudioAuthorRoutingNode>>,
+    pub(crate) processor_targets:
+        BTreeMap<AudioProcessorInstanceId, BTreeSet<AudioAuthorRoutingNode>>,
+}
+
+pub(crate) fn author_routing_graph(
     program: &AudioProgram,
     audio_tracks: &[Track],
-    processor_id: AudioProcessorInstanceId,
-) -> BTreeSet<AudioAuthorRoutingNode> {
-    let mut targets = BTreeSet::new();
-    for (track_id, channel) in &program.track_channels {
-        if strip_contains_processor(&channel.strip, processor_id) {
-            targets.insert(AudioAuthorRoutingNode::Track(*track_id));
+) -> AudioAuthorRoutingGraph {
+    let mut processor_targets = BTreeMap::<_, BTreeSet<_>>::new();
+    let mut record_rack = |rack: &AudioProcessorRack,
+                           targets: &BTreeSet<AudioAuthorRoutingNode>| {
+        for processor in &rack.processors {
+            processor_targets
+                .entry(processor.id)
+                .or_default()
+                .extend(targets.iter().copied());
         }
+    };
+    for (track_id, channel) in &program.track_channels {
+        let targets = BTreeSet::from([AudioAuthorRoutingNode::Track(*track_id)]);
+        record_rack(&channel.strip.pre_fader, &targets);
+        record_rack(&channel.strip.post_fader, &targets);
     }
     for bus in &program.buses {
-        if strip_contains_processor(&bus.strip, processor_id) {
-            targets.insert(AudioAuthorRoutingNode::Bus(bus.id));
-        }
+        let targets = BTreeSet::from([AudioAuthorRoutingNode::Bus(bus.id)]);
+        record_rack(&bus.strip.pre_fader, &targets);
+        record_rack(&bus.strip.post_fader, &targets);
     }
     for output in &program.outputs {
-        if strip_contains_processor(&output.strip, processor_id) {
-            targets.insert(AudioAuthorRoutingNode::Output(output.id));
+        let targets = BTreeSet::from([AudioAuthorRoutingNode::Output(output.id)]);
+        record_rack(&output.strip.pre_fader, &targets);
+        record_rack(&output.strip.post_fader, &targets);
+    }
+    let mut scope_tracks = BTreeMap::<_, BTreeSet<_>>::new();
+    for track in audio_tracks {
+        for edit in track.clips.iter().flat_map(|clip| &clip.audio_components) {
+            scope_tracks
+                .entry(edit.processing.scope_id)
+                .or_default()
+                .insert(AudioAuthorRoutingNode::Track(track.id));
         }
     }
     for scope in &program.processing_scopes {
-        if rack_contains_processor(&scope.processors, processor_id) {
-            targets.extend(audio_tracks.iter().filter_map(|track| {
-                track
-                    .clips
-                    .iter()
-                    .flat_map(|clip| &clip.audio_components)
-                    .any(|edit| edit.processing.scope_id == scope.id)
-                    .then_some(AudioAuthorRoutingNode::Track(track.id))
-            }));
+        let targets = scope_tracks.get(&scope.id).cloned().unwrap_or_default();
+        record_rack(&scope.processors, &targets);
+    }
+    let mut outgoing = BTreeMap::<AudioAuthorRoutingNode, BTreeSet<AudioAuthorRoutingNode>>::new();
+    for route in &program.routes {
+        let destination = match route.destination {
+            AudioRouteDestination::Bus(bus_id) => AudioAuthorRoutingNode::Bus(bus_id),
+            AudioRouteDestination::Output(output_id) => AudioAuthorRoutingNode::Output(output_id),
+        };
+        outgoing
+            .entry(AudioAuthorRoutingNode::from_source(route.source))
+            .or_default()
+            .insert(destination);
+    }
+    for route in &program.sidechain_routes {
+        if let Some(targets) = processor_targets.get(&route.processor_id) {
+            outgoing
+                .entry(AudioAuthorRoutingNode::from_source(route.source))
+                .or_default()
+                .extend(targets.iter().copied());
         }
     }
-    targets
-}
-
-fn strip_contains_processor(
-    strip: &AudioChannelStrip,
-    processor_id: AudioProcessorInstanceId,
-) -> bool {
-    rack_contains_processor(&strip.pre_fader, processor_id)
-        || rack_contains_processor(&strip.post_fader, processor_id)
-}
-
-fn rack_contains_processor(
-    rack: &AudioProcessorRack,
-    processor_id: AudioProcessorInstanceId,
-) -> bool {
-    rack.processors.iter().any(|processor| processor.id == processor_id)
+    AudioAuthorRoutingGraph { outgoing, processor_targets }
 }
 
 /// Invalid author state. Such state cannot enter an immutable execution snapshot.

@@ -2689,3 +2689,43 @@ stale-result rejection and localized sidechain source/disconnect widgets. The AP
 alone does not qualify that GUI workflow, current native/Golden, vendor names,
 platforms or performance. Earlier b5eb715 native and Golden receipts retain their
 exact source identities; the full NLE goal remains active.
+
+
+## Complete retained routing candidate admission
+
+A genuine regression reproduced a candidate-menu inconsistency: a disabled but
+retained Bus-to-Track processor sidechain made the reverse Track-to-Bus route
+cyclic, yet the menu offered it. Red pipeline 88910 ran one test and failed that
+assertion. The fix shares Timeline's complete retained author graph between
+final cycle validation and candidate inspection, indexing processor ownership
+and Scope Track bindings once. Main routes and sidechains include disabled
+edges. Principal and processor addition queries apply source locks and inspect
+all shared-Scope materializations without per-option Sequence clones.
+
+The first corrected test build (37219) used a nonexistent `PostFader` enum;
+the test was corrected to the actual `PostFaderPreMute` contract. Pipeline 98613
+then passed the whole Timeline library: **245 passed, 0 failed, 0 ignored**, 0.38s;
+full-workspace/all-target/all-feature Clippy `-D warnings` passed in 4m06s, with
+format and diff checks passing. The matrix compares projected admission with
+actual atomic edits for both Rack stages on Tracks/Buses/Outputs, shared and
+unused Scopes, all three source taps, enabled/retained paths, source locks and
+missing identities. Inspection and rejected transactions preserve author state.
+
+Pipeline 73310 executed the Mixer regressions: **8 passed, 0 failed, 0 ignored**,
+0.78s. The new localized-model case hides sidechain feedback for both enabled
+states while retaining valid forward and output destinations; existing gain
+Undo, route factories, locale and deletion-lock regressions also pass. Its
+default-feature test build reported 25 existing warnings, distinct from the
+strict all-feature lint gate; no broad warning-free default build is claimed.
+
+This is source-level candidate admission qualification. Native auxiliary bus
+keys/layouts remain preparation facts, and transactions remain final authority.
+It does not qualify new DSP output, physical GUI interaction, current Golden,
+platforms or performance. Bounded async input observation, native display
+metadata and localized multi-source sidechain controls remain required before
+that user workflow is complete. Existing b5 native/modal/resource/LUT receipts
+retain their exact source and binary identities; the overall goal stays active.
+
+Final source gate 65659 passed full-workspace/all-target/all-feature Clippy
+`-D warnings` in 4m05s, plus format and diff checks after the Mixer regression
+and qualification documentation were added. No remote CI result is inferred.

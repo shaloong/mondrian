@@ -1132,6 +1132,74 @@ mod tests {
     }
 
     #[test]
+    fn route_menu_hides_feedback_through_enabled_and_retained_sidechains() {
+        use mondrian_timeline::audio::{
+            AudioProcessorInstance, AudioProcessorSidechainRoute, BUILTIN_GAIN_DEFINITION_ID,
+        };
+        for enabled in [false, true] {
+            let mut state = AppState::new();
+            let mut sequence = Sequence::new("Sidechain-aware Mixer");
+            let processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+            let processor_id = processor.id;
+            let target = MixBusId::new();
+            let detector = MixBusId::new();
+            let mut strip = AudioChannelStrip::default();
+            strip.post_fader.processors.push(processor);
+            sequence.audio_program.buses.extend([
+                AudioMixBus { id: target, name: "Target".to_owned(), strip },
+                AudioMixBus {
+                    id: detector,
+                    name: "Detector".to_owned(),
+                    strip: AudioChannelStrip::default(),
+                },
+            ]);
+            let mut sidechain = AudioProcessorSidechainRoute::new(
+                AudioRouteSource::Bus {
+                    bus_id: detector,
+                    port: AudioChannelStripOutputPort::PreFader,
+                },
+                processor_id,
+                "detector",
+            );
+            sidechain.enabled = enabled;
+            sequence.audio_program.sidechain_routes.push(sidechain);
+            state.test_set_sequence(Some(sequence));
+            let model = AudioMixerPanelModel::from_app_state(&state, &chinese());
+            let target_channel = model
+                .channels
+                .iter()
+                .find(|channel| channel.owner == AudioChannelStripOwner::Bus { bus_id: target })
+                .expect("Target Bus");
+            assert!(
+                target_channel
+                    .route_create_options
+                    .iter()
+                    .all(|option| option.destination != AudioRouteDestination::Bus(detector)),
+                "Feedback option must be hidden even when sidechain enabled={enabled}"
+            );
+            assert!(
+                target_channel
+                    .route_create_options
+                    .iter()
+                    .any(|option| matches!(option.destination, AudioRouteDestination::Output(_))),
+                "Valid output destination remains accessible"
+            );
+            let detector_channel = model
+                .channels
+                .iter()
+                .find(|channel| channel.owner == AudioChannelStripOwner::Bus { bus_id: detector })
+                .expect("Detector Bus");
+            assert!(
+                detector_channel
+                    .route_create_options
+                    .iter()
+                    .any(|option| option.destination == AudioRouteDestination::Bus(target)),
+                "Parallel forward connection is valid"
+            );
+        }
+    }
+
+    #[test]
     fn route_candidates_hide_cycles_even_when_the_existing_edge_is_disabled() {
         let mut state = AppState::new();
         let mut sequence = Sequence::new("Cycle-aware Mixer");

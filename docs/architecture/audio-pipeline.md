@@ -421,9 +421,15 @@ Program validation, so an instantaneous Bus cycle or invalid endpoint never
 publishes partial state.
 `inspect_audio_route_candidates` is the matching bulk read Interface: it checks
 existing endpoint closure, captures Track-lock admission, and precomputes
-disabled-edge-inclusive Bus reachability once. Mixer/patchbay Adapters may use
-its constant-time addition query to omit impossible choices, but may not own a
-parallel cycle algorithm or treat the projection as transaction authority.
+reachability from the same complete retained author graph as final validation.
+Main and processor sidechain edges include disabled connections; processor
+ownership covers both Rack stages on Track/Bus/Output and every Track binding
+a shared Scope. Scope bindings and processor ownership are indexed once. Mixer
+and patchbay Adapters use principal and processor addition queries to omit
+impossible choices without owning another cycle algorithm or treating this
+projection as transaction authority. Native auxiliary keys/layouts remain
+processor preparation facts. The Mixer regression checks that feedback via a
+retained sidechain disappears while valid parallel and output choices remain.
 
 Mixer Bus deletion uses `inspect_audio_mix_buses` for all connection counts and
 disconnect lock blockers. The same domain implementation admits individual Bus

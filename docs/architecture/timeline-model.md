@@ -1692,3 +1692,21 @@ and static integer processor parameters. Existing target/rack locks, schema
 validation, no-op outcomes and sequence publication apply. Optional automation
 returns to its static field; processor curves retain parameter and instance
 identity. App author transactions provide one Undo and durable snapshot history.
+
+
+### Complete audio routing candidate admission
+
+Timeline builds one retained author graph for both final cycle validation and
+bulk menu admission. Main routes and processor sidechains include disabled
+edges. Processor targets cover pre/post racks on Tracks, Buses and Outputs,
+and every Track materializing a shared processing Scope. The builder indexes
+Scope bindings and processor ownership once, rather than rescanning all racks
+for each sidechain or cloning Sequences for menu options.
+
+`inspect_audio_route_candidates` validates retained endpoint addresses and
+projects source Track locks. Its principal and processor addition queries use
+complete graph reachability; self-edges and feedback through any combination
+of retained routes are unavailable. Unused Scopes retain processor identity
+without inventing a signal occurrence. Native bus keys/layouts remain processor
+preparation facts, and complete author transactions remain the final authority.
+Inspection and refused edits never publish state or history.
