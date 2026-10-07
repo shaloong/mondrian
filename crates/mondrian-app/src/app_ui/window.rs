@@ -731,6 +731,8 @@ enum AppUiWindowRole {
 
 #[derive(Debug)]
 enum AppUiUserEvent {
+    #[cfg(target_os = "macos")]
+    NativeActionAvailable,
     PreviewWorkAvailable,
     ViewerGpuCompletionAvailable,
     ViewerBackendPreparationAvailable,
@@ -2907,6 +2909,8 @@ pub(crate) struct AppUiReusableEventLoop {
 #[cfg(feature = "validation")]
 impl AppUiReusableEventLoop {
     pub(crate) fn new() -> Result<Self, AppUiEventLoopConstructionFailure> {
+        #[cfg(target_os = "macos")]
+        mondrian_platform::prepare_macos_application()?;
         Ok(Self {
             event_loop: winit::event_loop::EventLoop::<AppUiUserEvent>::with_user_event()
                 .build()
@@ -3855,6 +3859,8 @@ fn run_app_ui_with_initial_state(
     >,
     #[cfg(feature = "validation")] validation_return: Option<AppUiValidationReturnSlot>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    mondrian_platform::prepare_macos_application()?;
     let mut event_loop =
         winit::event_loop::EventLoop::<AppUiUserEvent>::with_user_event().build()?;
     run_app_ui_with_initial_state_on_event_loop(
@@ -3972,7 +3978,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
     let mut initial_candidate: Option<AppUiInitialWindowCandidate> = None;
     let mut startup_failure: Option<AppUiPreActiveWindowStartupFailure> = None;
     let mut publication_failure: Option<String> = None;
-    let pending_actions = PendingUiActions::default();
+    let pending_actions = Rc::new(PendingUiActions::default());
 
     let mut host = AppUiHostSessionOwner::new(
         host,
@@ -3981,6 +3987,17 @@ fn run_app_ui_with_initial_state_on_event_loop(
         #[cfg(feature = "validation")]
         validation_shutdown_deadline,
     );
+    #[cfg(target_os = "macos")]
+    let _native_quit_handler = {
+        let pending_actions = Rc::clone(&pending_actions);
+        let event_proxy = preview_work_event_proxy.clone();
+        mondrian_platform::install_macos_quit_handler(move || {
+            pending_actions.push(native_close_request_action());
+            if event_proxy.send_event(AppUiUserEvent::NativeActionAvailable).is_err() {
+                tracing::error!("native quit requested after event-loop admission closed");
+            }
+        })?
+    };
 
     use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
     let event_loop_result = catch_app_ui_event_loop(|| {
@@ -4079,6 +4096,17 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         device,
                         session,
                     );
+                    session.window.request_redraw();
+                }
+            }
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(AppUiUserEvent::NativeActionAvailable) => {
+                // The event only wakes this run's queue. A wake left by a
+                // retired run cannot carry its former action or state authority.
+                if drain_actions_and_sync_window_session(
+                    &mut host, &pending_actions, &platform, elwt,
+                    instance, adapter, device, session,
+                ) {
                     session.window.request_redraw();
                 }
             }
@@ -4992,6 +5020,13 @@ fn run_app_ui_with_initial_state_on_event_loop(
     let shutdown_deadline = product_shutdown_deadline();
     let gpu_shutdown = catch_window_viewer_gpu_shutdown(session, &host, shutdown_deadline);
     let gpu_failure = gpu_shutdown.qualification_failure();
+    if mondrian_renderer::profile::profiling_enabled() {
+        tracing::info!(
+            target: "mondrian_app::gpu_profile",
+            shutdown_json = %serde_json::to_string(&gpu_shutdown).expect("GPU owner shutdown receipt"),
+            "Window consumed GPU generation shutdown receipt"
+        );
+    }
     let ui_failure = match host.shutdown_until(shutdown_deadline, gpu_shutdown) {
         Ok(evidence) if evidence.all_resources_released() => None,
         Ok(evidence) => Some(format!(
@@ -5011,6 +5046,17 @@ fn run_app_ui_with_initial_state_on_event_loop(
     });
     #[cfg(not(feature = "validation"))]
     let outer_record_failure: Option<String> = None;
+    if mondrian_renderer::profile::profiling_enabled() {
+        tracing::info!(
+            target: "mondrian_app::gpu_profile",
+            gpu_qualified = gpu_failure.is_none(),
+            ui_qualified = ui_failure.is_none(),
+            runtime_qualified = runtime_failure.is_none(),
+            outer_receipt_qualified = outer_record_failure.is_none(),
+            event_loop_returned = event_loop_result.is_ok(),
+            "Window consuming shutdown authority results"
+        );
+    }
     tracing::info!("Mondrian app UI stopped");
     drop(tracing_guard);
 

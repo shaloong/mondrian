@@ -1761,6 +1761,16 @@ polling until deferred counter callbacks and the other retirement resources
 prove safe release. Timing errors do not authorize early resource release or
 replace the renderer's result with a fallback.
 
+On macOS, the product establishes its `NSApplication` subclass before winit
+creates the shared application. Public AppKit `terminate:` requests enter the
+current Window run's existing UI action queue as the same guarded Quit action
+used by window close. The event-loop proxy sends only a wake hint; queued hints
+cannot move an old run's actions into a new run. Winit retains its delegate.
+Saving, cancelling, native GPU retirement, App shutdown and background runtime
+closure stay with the existing consuming owners. Opt-in profiling logs those
+owners' final GPU receipt and independent closure results before log flushing;
+normal process exit alone is not their proof.
+
 The standalone scopes and Standard View gates use the same actual-pass
 recorder through `GpuTimestampPassIntervalTimer`. A consuming receipt binds
 the measured command interval to its query allocation. This synchronous gate
