@@ -1642,6 +1642,12 @@ path over the selected retained tap texture; they must not introduce a per-frame
 GPU-to-CPU readback. The production GPU runtime uses exact atomic-u32 counts and
 generates display density textures on-device. Both Scope taps sample the full
 Sequence raster, independent of Viewer zoom, crop and presentation size. When
+Scopes are active, the shared Preview owner preserves the logical root and every
+nested Sequence raster and resolves original full-source representations. Authored
+Preview scale, Playback recovery and proxy selection cannot reduce this analysis
+input. Consumer raster requirements participate in execution identity without
+rewriting the owner-derived Playback snapshot; insufficient resource admission
+remains a structured blocker. When
 that raster differs from presentation, the existing color execution Session
 materializes an additional float Program Output from the complete working
 composite; Monitor Output analysis adapts that same full raster before ICC.

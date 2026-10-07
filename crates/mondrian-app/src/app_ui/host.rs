@@ -294,6 +294,20 @@ impl AppUiHost {
         self.mode == AppUiMode::Workspace && self.root.is_panel_active(panel)
     }
 
+    fn synchronize_preview_raster_requirement(&self) {
+        use crate::app::preview_quality::PreviewRasterRequirement;
+        let requirement = if self.is_panel_active(PanelKind::Scopes)
+            || self.video_scopes_settings().monitoring.is_active()
+        {
+            PreviewRasterRequirement::CanonicalProgram
+        } else {
+            PreviewRasterRequirement::Viewer
+        };
+        if self.preview_service.set_raster_requirement(requirement) {
+            self.preview_dirty.set(true);
+        }
+    }
+
     /// Read-only access to the current app state.
     pub fn app_state(&self) -> Ref<'_, AppState> {
         self.app_state.borrow()
@@ -371,6 +385,7 @@ impl AppUiHost {
 
     /// Build a GPU-output preview candidate for the current app state.
     pub(crate) fn gpu_preview_frame_for_current_state(&self) -> PreviewGpuFrameState {
+        self.synchronize_preview_raster_requirement();
         let state = self.app_state.borrow();
         self.preview_service
             .gpu_preview_frame(state.preview_frame_execution_request(std::time::Instant::now()))
@@ -382,6 +397,7 @@ impl AppUiHost {
         &self,
         frame: Box<PreviewGpuFrame>,
     ) -> Option<Box<PreviewGpuFrame>> {
+        self.synchronize_preview_raster_requirement();
         let state = self.app_state.borrow();
         let snapshot = state.preview_execution_snapshot(std::time::Instant::now());
         self.preview_service.bind_staged_gpu_frame_for_current(frame, &snapshot)
@@ -389,6 +405,7 @@ impl AppUiHost {
 
     /// Build ticketless immediate-successor work from the same Preview Runtime.
     pub(crate) fn gpu_preview_successor_for_current_state(&self) -> PreviewGpuFrameState {
+        self.synchronize_preview_raster_requirement();
         let state = self.app_state.borrow();
         state
             .preview_successor_execution_request(std::time::Instant::now())
@@ -403,6 +420,7 @@ impl AppUiHost {
         &self,
         offset: usize,
     ) -> PreviewGpuFrameState {
+        self.synchronize_preview_raster_requirement();
         let state = self.app_state.borrow();
         state
             .preview_lookahead_execution_request(std::time::Instant::now(), offset)
@@ -930,6 +948,7 @@ impl AppUiHost {
     /// Evaluate and arbitrate the Window CPU/current-output projection before
     /// Widget models can observe it.
     fn refresh_window_preview_state(&self) {
+        self.synchronize_preview_raster_requirement();
         {
             let state = self.app_state.borrow();
             if state.is_playing() && state.pending_playback_frame_demand_identity().is_none() {
@@ -1044,12 +1063,14 @@ impl AppUiHost {
     }
 
     fn observe_playback_video_preroll(&self) -> bool {
+        self.synchronize_preview_raster_requirement();
         observe_preview_preroll(&mut self.app_state.borrow_mut(), &self.preview_service)
     }
 
     /// Re-observe exact media lookahead after the Window Adapter installed the
     /// immediate successor's physical prepared-output lease.
     pub(crate) fn observe_prepared_viewer_gpu_preroll(&self) -> bool {
+        self.synchronize_preview_raster_requirement();
         observe_playback_video_preroll_with_presentation_readiness(
             &mut self.app_state.borrow_mut(),
             &self.preview_service,
@@ -1313,6 +1334,7 @@ impl AppUiHost {
             self.root
                 .set_audio_output_device_catalog(self.audio_device_catalog.state().clone());
         }
+        self.synchronize_preview_raster_requirement();
         let preview_outcome =
             pump_playback_preview(&mut self.app_state.borrow_mut(), &self.preview_service);
         let waveform_changed = self.waveform_service.poll_finished();
@@ -3401,6 +3423,51 @@ mod tests {
             &*host.window_preview_state.borrow(),
             ViewerPreviewState::Stale(_)
         ));
+    }
+
+    #[test]
+    fn scopes_panel_requires_canonical_program_without_changing_playback_quality() {
+        let mut state = workspace_app_state_with_timed_solid();
+        let sequence = state.active_sequence_mut_uncommitted().expect("Sequence");
+        sequence.video_tracks[0].clips[0].is_disabled = false;
+        sequence.settings.resolution = mondrian_core::Resolution { width: 3840, height: 2160 };
+        sequence.settings.preview.resolution_scale = 0.5;
+        state.seek(4).expect("bind still");
+        state.observe_execution_resource_pressure(
+            crate::app::execution_resource_coordination::ExecutionResourcePressure::Critical,
+        );
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("scopes-canonical-program"),
+        );
+        let quality = host.app_state.borrow().playback_preview_resolution_scale();
+        assert_eq!(quality, mondrian_playback::PreviewResolutionScale::Quarter);
+        for (analysis_active, expected) in [
+            (false, (480, 270)),
+            (true, (3840, 2160)),
+            (false, (480, 270)),
+        ] {
+            if host.is_panel_active(PanelKind::Scopes) != analysis_active {
+                host.root
+                    .try_handle_shell_action(
+                        Action::TogglePanel(PanelKind::Scopes),
+                        &NoopPlatformService,
+                        None,
+                    )
+                    .expect("toggle analysis panel");
+            }
+            assert_eq!(host.is_panel_active(PanelKind::Scopes), analysis_active);
+            let PreviewGpuFrameState::Ready(frame) = host.gpu_preview_frame_for_current_state()
+            else {
+                panic!("solid panel frame must resolve");
+            };
+            assert_eq!((frame.width, frame.height), expected);
+            assert_eq!(
+                host.app_state.borrow().playback_preview_resolution_scale(),
+                quality
+            );
+        }
     }
 
     #[test]

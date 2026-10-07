@@ -64,8 +64,10 @@ pub(crate) struct FrameEvaluationKey {
     /// Output extent in logical pixels.
     pub(crate) width: u32,
     pub(crate) height: u32,
-    /// Runtime-only spatial quality selected by recovery/resource policy.
+    /// Source representation selected for this consumer from runtime quality.
     pub(crate) runtime_scale: PreviewResolutionScale,
+    /// Nested canvases and proxy eligibility also differ at equal root extents.
+    pub(crate) raster_requirement: crate::app::preview_quality::PreviewRasterRequirement,
     /// Display color space that shapes the monitor adaptation boundary.
     pub(crate) display_color_space: ColorSpace,
     /// Display output contract identity, when one is attached.

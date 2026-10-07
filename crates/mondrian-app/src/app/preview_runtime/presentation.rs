@@ -51,7 +51,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             ));
         };
         let frame = transport.current_frame().max(0);
-        let (width, height) = preview_dimensions_for_snapshot(snapshot, sequence);
+        let (width, height) =
+            preview_dimensions_for_snapshot(snapshot, sequence, self.raster_requirement.get());
         let display_snapshot = self.display_snapshot.borrow();
         let display_color_space = match preview_display_color_space(
             sequence,
@@ -93,6 +94,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 height,
                 display_color_space,
                 self.display_snapshot_identity.get(),
+                self.raster_requirement.get(),
             ));
         if carrier == PreviewPresentationCarrier::ExternalGpu
             && !transport.is_playing()
@@ -122,7 +124,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             frame,
             width,
             height,
-            runtime_scale: transport.runtime_scale(),
+            runtime_scale: self.execution_scale(snapshot),
+            raster_requirement: self.raster_requirement.get(),
             display_color_space,
             display_contract_identity: self.display_snapshot_identity.get(),
         };

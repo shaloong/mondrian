@@ -262,7 +262,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 Resolution { width, height },
                 snapshot.transport().runtime_scale(),
                 color_context,
-            ),
+            )
+            .with_raster_requirement(self.raster_requirement.get()),
             PreviewTimelineSourceAdapters::new(&mut media_frame, &mut title_frame),
             PreviewTimelineExecutionBinding::new(
                 &self.visual_programs,

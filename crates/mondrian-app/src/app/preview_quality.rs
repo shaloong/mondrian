@@ -7,6 +7,40 @@ use mondrian_core::Resolution;
 use mondrian_media::PreviewRepresentationQuality;
 use mondrian_playback::PreviewResolutionScale;
 
+/// Raster contract of the consumer sharing the production Preview owner.
+/// Analysis consumes the canonical Program, independent of Viewer recovery.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreviewRasterRequirement {
+    #[default]
+    Viewer,
+    CanonicalProgram,
+}
+
+impl PreviewRasterRequirement {
+    pub(crate) fn execution_resolution(
+        self,
+        logical: Resolution,
+        authored_scale: f32,
+        runtime_scale: PreviewResolutionScale,
+    ) -> Resolution {
+        match self {
+            Self::Viewer => preview_execution_resolution(logical, authored_scale, runtime_scale),
+            Self::CanonicalProgram => logical,
+        }
+    }
+
+    /// Execution representation, without rewriting Playback's sampled facts.
+    pub(crate) const fn execution_scale(
+        self,
+        runtime_scale: PreviewResolutionScale,
+    ) -> PreviewResolutionScale {
+        match self {
+            Self::Viewer => runtime_scale,
+            Self::CanonicalProgram => PreviewResolutionScale::Full,
+        }
+    }
+}
+
 /// Normalize an authored preview resolution scale for execution.
 pub(crate) fn normalize_preview_resolution_scale(scale: f32) -> f32 {
     if scale.is_finite() {

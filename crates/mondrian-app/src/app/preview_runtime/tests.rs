@@ -567,6 +567,7 @@ fn evaluation_working_set_invalidates_only_the_exact_media_sample() {
         width: 640,
         height: 360,
         runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        raster_requirement: PreviewRasterRequirement::Viewer,
         display_color_space: ColorSpace::Srgb,
         display_contract_identity: None,
     };
@@ -649,6 +650,7 @@ fn completed_gpu_evaluation_release_is_exact_and_preserves_other_owners() {
         width: 320,
         height: 180,
         runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        raster_requirement: PreviewRasterRequirement::Viewer,
         display_color_space: ColorSpace::Srgb,
         display_contract_identity: None,
     };
@@ -823,6 +825,7 @@ fn completed_cpu_evaluation_releases_prefetch_headroom_without_clearing_store() 
         width: 1,
         height: 1,
         runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        raster_requirement: PreviewRasterRequirement::Viewer,
         display_color_space: ColorSpace::Srgb,
         display_contract_identity: None,
     };
@@ -918,6 +921,7 @@ fn evaluation_working_set_retires_native_decoder_resource_owners() {
         width: 320,
         height: 180,
         runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        raster_requirement: PreviewRasterRequirement::Viewer,
         display_color_space: ColorSpace::Srgb,
         display_contract_identity: None,
     };
@@ -1377,7 +1381,8 @@ fn schedule_media_prefetches_for_state<O: Clone>(
     // Production planning lowers geometry from the snapshot's runtime scale;
     // tests must feed the same scale-aware route so planned keys can match
     // key constructions built from the same snapshot.
-    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let (width, height) =
+        preview_dimensions_for_snapshot(&snapshot, sequence, PreviewRasterRequirement::Viewer);
     runtime.schedule_media_prefetches(&snapshot, state, sequence, frame, width, height);
 }
 
@@ -1400,6 +1405,7 @@ fn viewer_preview_generation_key_for_state(
         height,
         display_color_space,
         display_contract_identity,
+        PreviewRasterRequirement::Viewer,
     )
 }
 
@@ -5174,7 +5180,8 @@ fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residen
         .expect("next frame media");
     assert_eq!(media.asset_id, asset_id);
     let snapshot = state.preview_execution_snapshot(Instant::now());
-    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let (width, height) =
+        preview_dimensions_for_snapshot(&snapshot, sequence, PreviewRasterRequirement::Viewer);
     let input_color = sequence
         .settings
         .root_program_color_context(state.project_color_environment())
@@ -5751,7 +5758,8 @@ fn media_preview_key_for_simple_sequence_frame_at_scale<O: Clone>(
 ) -> MediaPreviewKey {
     let sequence = state.active_sequence().expect("media sequence");
     let snapshot = state.preview_execution_snapshot(Instant::now());
-    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let (width, height) =
+        preview_dimensions_for_snapshot(&snapshot, sequence, PreviewRasterRequirement::Viewer);
     let prepared = PreparedVisualProgram::prepare(sequence).expect("prepared visual program");
     let evaluation = evaluate_prepared_visual_program(
         &prepared,
@@ -5999,7 +6007,8 @@ fn assert_cold_activation_cursor_coverage(hold_old_sample: bool) {
         .frame_store
         .replace(test_cpu_frame_store(2 * window + 2, 640 * 1024 * 1024, 6));
     let snapshot = state.preview_execution_snapshot(Instant::now());
-    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let (width, height) =
+        preview_dimensions_for_snapshot(&snapshot, sequence, PreviewRasterRequirement::Viewer);
     let resolution = Resolution { width, height };
     let near = future_media_prefix_keys_for_state(&service, &state, current, window, resolution);
     let activation = future_media_prefix_keys_for_state(&service, &state, 47, 1, resolution);
@@ -6206,7 +6215,8 @@ fn blocked_immediate_closure_does_not_admit_farther_cold_source() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let sequence = state.active_sequence().expect("sequence");
     let snapshot = state.preview_execution_snapshot(Instant::now());
-    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let (width, height) =
+        preview_dimensions_for_snapshot(&snapshot, sequence, PreviewRasterRequirement::Viewer);
     let resolution = Resolution { width, height };
     let immediate_keys = future_media_prefix_keys_for_state(&service, &state, 0, 1, resolution);
     assert_eq!(
@@ -6393,7 +6403,8 @@ fn resident_persistent_layer_keeps_cold_source_on_the_opposite_session_owner() {
     synchronize_visual_program_for_state(&service, &state);
     let sequence = state.active_sequence().expect("sequence");
     let snapshot = state.preview_execution_snapshot(Instant::now());
-    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let (width, height) =
+        preview_dimensions_for_snapshot(&snapshot, sequence, PreviewRasterRequirement::Viewer);
     let resolution = Resolution { width, height };
     let current_keys = future_media_prefix_keys_for_state(&service, &state, -1, 1, resolution);
     let held_key = current_keys.iter().find(|key| key.asset_id == ids[1]).expect("held key");
@@ -6526,7 +6537,8 @@ fn cold_source_coverage_reaches_a_fixed_point_without_advancing_transport() {
     synchronize_visual_program_for_state(&service, &state);
     let sequence = state.active_sequence().expect("sequence");
     let snapshot = state.preview_execution_snapshot(Instant::now());
-    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let (width, height) =
+        preview_dimensions_for_snapshot(&snapshot, sequence, PreviewRasterRequirement::Viewer);
     let resolution = Resolution { width, height };
     let near = future_media_prefix_keys_for_state(&service, &state, 0, 6, resolution);
     let activation = future_media_prefix_keys_for_state(&service, &state, 119, 1, resolution);
@@ -6736,7 +6748,8 @@ fn assert_cold_source_preparation(
     service.record_startup_preroll_decode(opened, 0);
     let sequence = state.active_sequence().expect("sequence");
     let snapshot = state.preview_execution_snapshot(Instant::now());
-    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let (width, height) =
+        preview_dimensions_for_snapshot(&snapshot, sequence, PreviewRasterRequirement::Viewer);
     let resolution = Resolution { width, height };
     let near = future_media_prefix_keys_for_state(&service, &state, 48, 3, resolution);
     let far = future_media_prefix_keys_for_state(&service, &state, 95, 1, resolution);
@@ -7147,7 +7160,8 @@ fn cold_source_preparation_requires_only_the_remaining_old_source_intervals() {
             service.scheduler.cancel(&key);
         }
         let snapshot = state.preview_execution_snapshot(Instant::now());
-        let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+        let (width, height) =
+            preview_dimensions_for_snapshot(&snapshot, sequence, PreviewRasterRequirement::Viewer);
         let resolution = Resolution { width, height };
         let near = future_media_prefix_keys_for_state(&service, &state, 94, 1, resolution);
         let far = future_media_prefix_keys_for_state(&service, &state, 95, 1, resolution);
@@ -11051,7 +11065,8 @@ fn empty_root_timeline_is_a_transparent_presentation_and_breaks_stale_reuse() {
     let sequence = state.active_sequence().expect("sequence");
     let sequence_id = sequence.id;
     let snapshot = state.preview_execution_snapshot(Instant::now());
-    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let (width, height) =
+        preview_dimensions_for_snapshot(&snapshot, sequence, PreviewRasterRequirement::Viewer);
     assert!(service.stale_frame_for_sequence(sequence, width, height).is_some());
 
     let sequence = state.active_sequence_mut_uncommitted().expect("sequence");
@@ -12737,7 +12752,8 @@ fn stale_viewer_frame_is_scoped_to_sequence_and_dimensions() {
     let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     let sequence = state.active_sequence().expect("sequence");
     let snapshot = state.preview_execution_snapshot(Instant::now());
-    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let (width, height) =
+        preview_dimensions_for_snapshot(&snapshot, sequence, PreviewRasterRequirement::Viewer);
 
     let ready = ready_frame(service.viewer_preview_for_state(&state));
     let same_scope = service
@@ -12789,6 +12805,7 @@ fn stalled_playback_current_expiration_releases_pending_and_queued_work() {
         width: 320,
         height: 180,
         runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        raster_requirement: PreviewRasterRequirement::Viewer,
         display_color_space: ColorSpace::Srgb,
         display_contract_identity: None,
     };
@@ -13093,6 +13110,7 @@ fn settled_execution_pressure_owner_retries_its_current_candidate_exactly_once()
         width: 320,
         height: 180,
         runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        raster_requirement: PreviewRasterRequirement::Viewer,
         display_color_space: ColorSpace::Srgb,
         display_contract_identity: None,
     };
@@ -13841,6 +13859,7 @@ fn preview_service_poll_drops_successful_playback_completion_after_deadline() {
         width: 320,
         height: 180,
         runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        raster_requirement: PreviewRasterRequirement::Viewer,
         display_color_space: ColorSpace::Srgb,
         display_contract_identity: None,
     };
@@ -14541,6 +14560,7 @@ fn speculative_residency_rejection_does_not_poison_current_generation() {
             width: 320,
             height: 180,
             runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+            raster_requirement: PreviewRasterRequirement::Viewer,
             display_color_space: ColorSpace::Srgb,
             display_contract_identity: None,
         };
@@ -14699,6 +14719,7 @@ fn canceled_current_scrub_requests_follow_up_render_for_settled_frame() {
         width: 320,
         height: 180,
         runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        raster_requirement: PreviewRasterRequirement::Viewer,
         display_color_space: ColorSpace::Srgb,
         display_contract_identity: None,
     };
@@ -14763,7 +14784,8 @@ fn failed_current_media_preview_cache_does_not_leave_viewer_loading() {
     let service = WindowPreviewAdapter::new();
     let sequence = state.active_sequence().expect("sequence");
     let snapshot = state.preview_execution_snapshot(Instant::now());
-    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let (width, height) =
+        preview_dimensions_for_snapshot(&snapshot, sequence, PreviewRasterRequirement::Viewer);
     let input_color = sequence
         .settings
         .root_program_color_context(state.project_color_environment())
@@ -14878,7 +14900,8 @@ fn ticketless_successor_cannot_recursively_schedule_the_future_media_window() {
         .authoring()
         .and_then(PreviewAuthoringSnapshot::active_sequence)
         .expect("sequence");
-    let (width, height) = preview_dimensions_for_snapshot(snapshot, sequence);
+    let (width, height) =
+        preview_dimensions_for_snapshot(snapshot, sequence, PreviewRasterRequirement::Viewer);
     let before = service.diagnostics().future_media_window;
 
     service.schedule_media_prefetches(snapshot, &state, sequence, 1, width, height);
@@ -15138,6 +15161,7 @@ fn settled_existing_media_owner_retries_its_current_candidate_exactly_once() {
         width: 320,
         height: 180,
         runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        raster_requirement: PreviewRasterRequirement::Viewer,
         display_color_space: ColorSpace::Srgb,
         display_contract_identity: None,
     };
@@ -15391,7 +15415,8 @@ fn media_preview_cache_identity_changes_with_range_override() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let sequence = state.active_sequence().expect("sequence");
     let snapshot = state.preview_execution_snapshot(Instant::now());
-    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let (width, height) =
+        preview_dimensions_for_snapshot(&snapshot, sequence, PreviewRasterRequirement::Viewer);
     let input_color = sequence
         .settings
         .root_program_color_context(state.project_color_environment())
@@ -15456,7 +15481,8 @@ fn playing_cached_media_preview_defers_sync_raster_composite() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let sequence = state.active_sequence().expect("sequence");
     let snapshot = state.preview_execution_snapshot(Instant::now());
-    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let (width, height) =
+        preview_dimensions_for_snapshot(&snapshot, sequence, PreviewRasterRequirement::Viewer);
     let input_color = sequence
         .settings
         .root_program_color_context(state.project_color_environment())
@@ -18291,6 +18317,7 @@ fn completed_ticketless_successor_media_wakes_its_exact_evaluation() {
         width: 320,
         height: 180,
         runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        raster_requirement: PreviewRasterRequirement::Viewer,
         display_color_space: ColorSpace::Srgb,
         display_contract_identity: None,
     };
@@ -18350,6 +18377,7 @@ fn transport_retirement_removes_waits_for_canceled_queued_producers() {
         width: 320,
         height: 180,
         runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        raster_requirement: PreviewRasterRequirement::Viewer,
         display_color_space: ColorSpace::Srgb,
         display_contract_identity: None,
     };
@@ -18405,6 +18433,7 @@ fn retired_transport_releases_cpu_evaluation_guards_without_clearing_store() {
         width: 1,
         height: 1,
         runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        raster_requirement: PreviewRasterRequirement::Viewer,
         display_color_space: ColorSpace::Srgb,
         display_contract_identity: None,
     };
@@ -18622,7 +18651,8 @@ fn obsolete_queue_publication_releases_its_completed_input_evaluation() {
     let key = media_preview_key_for_simple_sequence_frame(&service, &state, 0);
     let sequence = state.active_sequence().expect("fixture Sequence");
     let snapshot = state.preview_execution_snapshot(Instant::now());
-    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let (width, height) =
+        preview_dimensions_for_snapshot(&snapshot, sequence, PreviewRasterRequirement::Viewer);
     let working = sequence
         .settings
         .root_program_color_context(state.project_color_environment())
@@ -18736,4 +18766,164 @@ fn obsolete_queue_publication_releases_its_completed_input_evaluation() {
     );
     assert!(resident, "retirement must not clear Frame Store");
     assert_eq!(pending.expect("frame1 demand preserved").target_frame, 1);
+}
+
+#[test]
+fn canonical_program_raster_survives_authored_scale_and_critical_pressure() {
+    use crate::app::execution_resource_coordination::ExecutionResourcePressure;
+    let mut state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
+    pin_standard_execution_resources(&mut state);
+    let sequence = state.active_sequence_mut_uncommitted().expect("Sequence");
+    sequence.settings.resolution = Resolution { width: 3840, height: 2160 };
+    sequence.settings.preview.resolution_scale = 0.5;
+    state.observe_execution_resource_pressure(ExecutionResourcePressure::Critical);
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    assert_eq!(
+        snapshot.transport().runtime_scale(),
+        mondrian_playback::PreviewResolutionScale::Quarter
+    );
+    let intent = snapshot.transport().playback_intent();
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let PreviewGpuFrameState::Ready(viewer) = execute_gpu_preview_for_test_app(&runtime, &state)
+    else {
+        panic!("solid Viewer must resolve");
+    };
+    assert_eq!((viewer.width, viewer.height), (480, 270));
+    let viewer_generation = viewer.generation();
+    assert!(runtime.set_raster_requirement(PreviewRasterRequirement::CanonicalProgram));
+    assert!(runtime.bind_staged_gpu_frame_for_current(viewer, &snapshot).is_none());
+    let PreviewGpuFrameState::Ready(program) = execute_gpu_preview_for_test_app(&runtime, &state)
+    else {
+        panic!("canonical Program must resolve");
+    };
+    assert_eq!((program.width, program.height), (3840, 2160));
+    assert_ne!(program.generation(), viewer_generation);
+    assert_eq!(program.playback_intent(), intent);
+    assert_eq!(
+        state.preview_execution_snapshot(Instant::now()).transport().runtime_scale(),
+        mondrian_playback::PreviewResolutionScale::Quarter
+    );
+    drop(program);
+    assert!(runtime.set_raster_requirement(PreviewRasterRequirement::Viewer));
+    let PreviewGpuFrameState::Ready(viewer) = execute_gpu_preview_for_test_app(&runtime, &state)
+    else {
+        panic!("Viewer recovery must remain available after analysis closes");
+    };
+    assert_eq!((viewer.width, viewer.height), (480, 270));
+}
+
+#[test]
+fn canonical_program_raster_preserves_nested_canvases_with_equal_root_extent() {
+    let mut state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
+    pin_standard_execution_resources(&mut state);
+    let child = state.active_sequence_mut_uncommitted().expect("child");
+    child.settings.resolution = Resolution { width: 32, height: 16 };
+    child.settings.preview.resolution_scale = 0.25;
+    let child_id = child.id;
+    let child = child.clone();
+    let mut parent = Sequence::new("parent");
+    parent.settings.resolution = Resolution { width: 64, height: 32 };
+    parent.settings.preview.resolution_scale = 1.0;
+    let tb = parent.time_base();
+    parent.video_tracks[0]
+        .add_clip(
+            Clip::new_nested_sequence(child_id, tt(0, tb), tt(24, tb), None).expect("nested clip"),
+        )
+        .expect("nested track");
+    state.test_set_sequence(Some(parent));
+    state.test_add_sequence(child);
+    state.seek(4).expect("nested still");
+    let sequence = state.active_sequence().expect("root");
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let context = sequence
+        .settings
+        .root_program_color_context(state.project_color_environment())
+        .expect("Program context");
+    let PreviewTimelineResolution::Ready(viewer) =
+        runtime.resolve_timeline_for_test(&snapshot, &state, sequence, 4, 64, 32, context.clone())
+    else {
+        panic!("nested Viewer must resolve");
+    };
+    assert_eq!(
+        viewer.semantic_trace.nodes[1].execution_resolution,
+        Resolution { width: 8, height: 4 }
+    );
+    let PreviewGpuFrameState::Ready(staged) = execute_gpu_preview_for_test_app(&runtime, &state)
+    else {
+        panic!("nested Viewer candidate must resolve");
+    };
+    runtime.set_raster_requirement(PreviewRasterRequirement::CanonicalProgram);
+    assert!(
+        runtime.bind_staged_gpu_frame_for_current(staged, &snapshot).is_none(),
+        "equal root extents cannot authorize a reduced nested canvas"
+    );
+    let PreviewTimelineResolution::Ready(program) =
+        runtime.resolve_timeline_for_test(&snapshot, &state, sequence, 4, 64, 32, context)
+    else {
+        panic!("nested canonical Program must resolve");
+    };
+    assert_eq!(
+        program.semantic_trace.nodes[0].execution_resolution,
+        Resolution { width: 64, height: 32 }
+    );
+    assert_eq!(
+        program.semantic_trace.nodes[1].execution_resolution,
+        Resolution { width: 32, height: 16 }
+    );
+    assert_ne!(program.plan.cache_key, viewer.plan.cache_key);
+}
+
+#[test]
+fn canonical_program_raster_uses_full_source_in_current_and_future_media() {
+    let (mut state, asset_id, root) = state_with_invalid_video_asset_for_cpu_rgb(true);
+    state.play().expect("play");
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let full = media_preview_key_for_simple_sequence_frame_at_scale(
+        &runtime,
+        &state,
+        1,
+        mondrian_playback::PreviewResolutionScale::Full,
+    );
+    let reduced = media_preview_key_for_simple_sequence_frame_at_scale(
+        &runtime,
+        &state,
+        1,
+        mondrian_playback::PreviewResolutionScale::Quarter,
+    );
+    assert_ne!(reduced, full);
+    let document = state.authoring.as_mut().expect("authoring").document_mut_for_test_fixture();
+    document.settings.proxy_enabled = true;
+    document.proxy_mode_assets.insert(asset_id);
+    assert!(state.is_asset_proxy_mode(asset_id));
+    runtime.set_raster_requirement(PreviewRasterRequirement::CanonicalProgram);
+    let current = media_preview_key_for_simple_sequence_frame_at_scale(
+        &runtime,
+        &state,
+        1,
+        mondrian_playback::PreviewResolutionScale::Quarter,
+    );
+    assert_eq!(current, full);
+    let sequence = state.active_sequence().expect("Sequence");
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    let context = sequence
+        .settings
+        .root_program_color_context(state.project_color_environment())
+        .expect("Program context");
+    let future = runtime
+        .future_media_frame_keys_at_scale_for_test(
+            &snapshot,
+            &state,
+            sequence,
+            1,
+            mondrian_playback::PreviewResolutionScale::Quarter,
+            sequence.settings.resolution,
+            context,
+        )
+        .expect("future full source");
+    assert_eq!(future, vec![full]);
+    assert_eq!(runtime.metrics.media_proxy_path_misses.get(), 0);
+    runtime.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).expect("remove fixture");
 }

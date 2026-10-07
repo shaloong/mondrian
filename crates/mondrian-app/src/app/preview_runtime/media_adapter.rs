@@ -64,7 +64,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             transport.is_playing(),
             transport.seek_source(),
         ));
-        let representation_quality = preview_representation_quality(transport.runtime_scale());
+        let representation_quality = preview_representation_quality(self.execution_scale(snapshot));
         let key = match self.media_preview_key_for_timeline_request(
             snapshot,
             proxy_demands,
@@ -356,7 +356,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             request_missing_proxy_generation,
             self.hardware_decode_admission.get(),
             false,
-            preview_representation_quality(runtime_scale),
+            preview_representation_quality(
+                self.raster_requirement.get().execution_scale(runtime_scale),
+            ),
         )
     }
 
@@ -411,7 +413,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         };
         let proxy_config = authoring.proxy().config();
         let proxy_color = resolve_asset_proxy_color_contract(&asset, input_color).ok();
-        let prefer_proxy = authoring.proxy().prefers_proxy(*asset_id);
+        let prefer_proxy = self.raster_requirement.get() == PreviewRasterRequirement::Viewer
+            && authoring.proxy().prefers_proxy(*asset_id);
         match resolve_preview_media_source(PreviewMediaSourceRequest {
             asset: &asset,
             color_space_override,

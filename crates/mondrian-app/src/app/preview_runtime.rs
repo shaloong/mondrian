@@ -84,7 +84,7 @@ use crate::app::preview_media_task::{
 };
 #[cfg(test)]
 use crate::app::preview_quality::normalize_preview_resolution_scale;
-use crate::app::preview_quality::preview_execution_resolution;
+use crate::app::preview_quality::{preview_execution_resolution, PreviewRasterRequirement};
 use crate::app::preview_raster_frame::{
     preview_raster_presentation_contract, preview_raster_resource_key, PreviewRasterFrame,
 };
@@ -305,6 +305,8 @@ pub use super::preview_shutdown_evidence::{
 /// Adapter. The runtime treats it as an opaque payload and owns only its exact
 /// resolved-output lifetime.
 pub struct PreviewProductionRuntime<O: Clone> {
+    /// One consumer raster contract shared by current, speculative, and preroll work.
+    raster_requirement: Cell<PreviewRasterRequirement>,
     work_notifier: PreviewWorkNotifier,
     work_watch: PreviewWorkWatch,
     jobs: MediaPreviewJobQueueSender,
@@ -468,6 +470,25 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.execution.borrow_mut().clear_output();
         self.work_notifier.retry_became_actionable();
         true
+    }
+
+    pub(crate) fn set_raster_requirement(&self, requirement: PreviewRasterRequirement) -> bool {
+        if self.raster_requirement.replace(requirement) == requirement {
+            return false;
+        }
+        self.invalidate_preview_generation();
+        self.future_media_window.borrow_mut().clear_lowering_plans();
+        self.work_notifier.retry_became_actionable();
+        true
+    }
+
+    fn execution_scale(
+        &self,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+    ) -> mondrian_playback::PreviewResolutionScale {
+        self.raster_requirement
+            .get()
+            .execution_scale(snapshot.transport().runtime_scale())
     }
 
     fn schedule_cpu_fallback(
@@ -1060,7 +1081,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             frame,
             width,
             height,
-            runtime_scale: transport.runtime_scale(),
+            runtime_scale: self.execution_scale(snapshot),
+            raster_requirement: self.raster_requirement.get(),
             display_color_space,
             display_contract_identity: self.display_snapshot_identity.get(),
         };
@@ -1792,6 +1814,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             || previous.sequence_revision != next.sequence_revision
             || previous.project_author_generation != next.project_author_generation
             || previous.display_contract_identity != next.display_contract_identity
+            || previous.raster_requirement != next.raster_requirement
             || previous.width != next.width
             || previous.height != next.height
             || previous.display_color_space != next.display_color_space
@@ -1811,7 +1834,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         PreviewGpuOutputBlocker,
     > {
         let frame = snapshot.transport().current_frame().max(0);
-        let (width, height) = preview_dimensions_for_snapshot(snapshot, sequence);
+        let (width, height) =
+            preview_dimensions_for_snapshot(snapshot, sequence, self.raster_requirement.get());
         let display_snapshot = self.display_snapshot.borrow();
         let display_color_space = preview_display_color_space(
             sequence,
@@ -1827,6 +1851,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             height,
             display_color_space,
             self.display_snapshot_identity.get(),
+            self.raster_requirement.get(),
         );
         Ok((key, width, height, display_color_space))
     }
@@ -2629,6 +2654,7 @@ struct ViewerPreviewGenerationKey {
     sequence_id: SequenceId,
     sequence_revision: mondrian_core::SequenceRevision,
     project_author_generation: u64,
+    raster_requirement: PreviewRasterRequirement,
     display_contract_identity: Option<DisplayOutputIdentity>,
     /// Playback Epoch for a running cursor. `None` identifies an idle/still
     /// cursor, whose exact frame remains part of the generation identity.
@@ -2669,7 +2695,10 @@ impl ViewerPreviewGenerationKey {
         if !same_decode_authority {
             return ViewerPreviewGenerationTransition::Semantic;
         }
-        if self.width == current.width && self.height == current.height {
+        if self.width == current.width
+            && self.height == current.height
+            && self.raster_requirement == current.raster_requirement
+        {
             ViewerPreviewGenerationTransition::ViewerOnly
         } else {
             ViewerPreviewGenerationTransition::Representation
@@ -2684,6 +2713,7 @@ impl ViewerPreviewGenerationKey {
         height: u32,
         display_color_space: ColorSpace,
         display_contract_identity: Option<DisplayOutputIdentity>,
+        snapshot_requirement: PreviewRasterRequirement,
     ) -> Self {
         let transport = snapshot.transport();
         let playing = transport.is_playing();
@@ -2694,6 +2724,7 @@ impl ViewerPreviewGenerationKey {
                 .authoring()
                 .map(PreviewAuthoringSnapshot::author_generation)
                 .unwrap_or(0),
+            raster_requirement: snapshot_requirement,
             display_contract_identity,
             playback_epoch: playing.then(|| transport.epoch()),
             still_frame: (!playing).then_some(frame),
@@ -3225,10 +3256,17 @@ fn preview_dimensions_for_sequence(sequence: &Sequence) -> (u32, u32) {
 fn preview_dimensions_for_snapshot(
     snapshot: &PreviewExecutionSnapshot<'_>,
     sequence: &Sequence,
+    requirement: PreviewRasterRequirement,
 ) -> (u32, u32) {
-    preview_dimensions_for_sequence_at_runtime_scale(sequence, snapshot.transport().runtime_scale())
+    let resolution = requirement.execution_resolution(
+        sequence.settings.resolution,
+        sequence.settings.preview.resolution_scale,
+        snapshot.transport().runtime_scale(),
+    );
+    (resolution.width, resolution.height)
 }
 
+#[cfg(test)]
 fn preview_dimensions_for_sequence_at_runtime_scale(
     sequence: &Sequence,
     runtime_scale: mondrian_playback::PreviewResolutionScale,

@@ -121,6 +121,7 @@ struct FutureMediaWindowIdentity {
     root_sequence_revision: mondrian_core::SequenceRevision,
     effect_registry_revision: u64,
     runtime_scale: mondrian_playback::PreviewResolutionScale,
+    raster_requirement: PreviewRasterRequirement,
     target_resolution: Resolution,
     color_context: ProgramColorContext,
     asset_library_revision: u64,
@@ -822,7 +823,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             root_sequence_id: sequence.id,
             root_sequence_revision: sequence.revision,
             effect_registry_revision: mondrian_effects::effect_registry_revision(),
-            runtime_scale,
+            runtime_scale: self.raster_requirement.get().execution_scale(runtime_scale),
+            raster_requirement: self.raster_requirement.get(),
             target_resolution,
             color_context,
             asset_library_revision,
@@ -856,6 +858,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             frame,
             target_resolution,
             runtime_scale,
+            self.raster_requirement.get(),
             color_context,
             &self.visual_programs,
             &self.scratch,
@@ -878,7 +881,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 snapshot,
                 proxy_demands,
                 &demand,
-                crate::app::preview_quality::preview_representation_quality(runtime_scale),
+                crate::app::preview_quality::preview_representation_quality(
+                    self.raster_requirement.get().execution_scale(runtime_scale),
+                ),
                 false,
                 false,
             ) {
@@ -2285,7 +2290,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 bounded_cold_activation_frame: None,
             });
         }
-        let (width, height) = preview_dimensions_for_snapshot(snapshot, sequence);
+        let (width, height) =
+            preview_dimensions_for_snapshot(snapshot, sequence, self.raster_requirement.get());
         let color_context = sequence
             .settings
             .root_program_color_context(authoring.color_environment())
