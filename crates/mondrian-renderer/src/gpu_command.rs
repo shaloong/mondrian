@@ -216,6 +216,7 @@ pub(crate) struct GpuPassTimestampLayout {
 pub struct GpuPassTimestampReceipt {
     pub(crate) token: GpuTimestampToken,
     pub(crate) query_set: wgpu::QuerySet,
+    pub(crate) query_range: std::ops::Range<u32>,
     pub(crate) layout: Result<GpuPassTimestampLayout, GpuPassTimestampCoverageError>,
 }
 
@@ -234,6 +235,7 @@ impl GpuPassTimestampReceipt {
 pub struct GpuPassTimestampRecorder<'a> {
     encoder: &'a mut wgpu::CommandEncoder,
     query_set: wgpu::QuerySet,
+    query_range: std::ops::Range<u32>,
     leading_copy_anchor: GpuLeadingCopyTimestampAnchor,
     token: Option<GpuTimestampToken>,
     coverage: PassCoverage,
@@ -387,13 +389,15 @@ impl<'a> GpuPassTimestampRecorder<'a> {
     pub(crate) fn new(
         encoder: &'a mut wgpu::CommandEncoder,
         query_set: wgpu::QuerySet,
+        query_range: std::ops::Range<u32>,
         leading_copy_anchor: GpuLeadingCopyTimestampAnchor,
         token: GpuTimestampToken,
     ) -> Self {
-        let capacity = query_set.count();
+        let capacity = query_range.end - query_range.start;
         Self {
             encoder,
             query_set,
+            query_range,
             leading_copy_anchor,
             token: Some(token),
             coverage: PassCoverage::new(capacity),
@@ -406,11 +410,13 @@ impl<'a> GpuPassTimestampRecorder<'a> {
         query_set: wgpu::QuerySet,
         leading_copy_anchor: GpuLeadingCopyTimestampAnchor,
     ) -> Self {
-        let mut coverage = PassCoverage::new(query_set.count());
+        let query_range = 0..query_set.count();
+        let mut coverage = PassCoverage::new(query_range.end);
         coverage.stage_attribution = false;
         Self {
             encoder,
             query_set,
+            query_range,
             leading_copy_anchor,
             token: None,
             coverage,
@@ -448,8 +454,8 @@ impl<'a> GpuPassTimestampRecorder<'a> {
                 label: Some("mondrian_gpu_leading_copy_timestamp_anchor"),
                 timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
                     query_set: &self.query_set,
-                    beginning_of_pass_write_index: Some(start),
-                    end_of_pass_write_index: Some(end),
+                    beginning_of_pass_write_index: Some(self.query_range.start + start),
+                    end_of_pass_write_index: Some(self.query_range.start + end),
                 }),
             });
             pass.set_pipeline(&self.leading_copy_anchor.pipeline);
@@ -469,6 +475,7 @@ impl<'a> GpuPassTimestampRecorder<'a> {
         GpuPassTimestampReceipt {
             token: self.token.expect("frame recorder owns a ring token"),
             query_set: self.query_set,
+            query_range: self.query_range,
             layout: self.coverage.finish(),
         }
     }
@@ -492,8 +499,8 @@ impl GpuCommandEncoder for GpuPassTimestampRecorder<'_> {
         if let Some((start, end)) = self.coverage.pass(descriptor.timestamp_writes.is_some()) {
             measured.timestamp_writes = Some(wgpu::RenderPassTimestampWrites {
                 query_set: &self.query_set,
-                beginning_of_pass_write_index: Some(start),
-                end_of_pass_write_index: Some(end),
+                beginning_of_pass_write_index: Some(self.query_range.start + start),
+                end_of_pass_write_index: Some(self.query_range.start + end),
             });
         }
         self.encoder.begin_render_pass(&measured)
@@ -507,8 +514,8 @@ impl GpuCommandEncoder for GpuPassTimestampRecorder<'_> {
         if let Some((start, end)) = self.coverage.pass(descriptor.timestamp_writes.is_some()) {
             measured.timestamp_writes = Some(wgpu::ComputePassTimestampWrites {
                 query_set: &self.query_set,
-                beginning_of_pass_write_index: Some(start),
-                end_of_pass_write_index: Some(end),
+                beginning_of_pass_write_index: Some(self.query_range.start + start),
+                end_of_pass_write_index: Some(self.query_range.start + end),
             });
         }
         self.encoder.begin_compute_pass(&measured)

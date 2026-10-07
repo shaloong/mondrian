@@ -285,16 +285,13 @@ fn encoder_timestamp_layout() -> GpuPassTimestampLayout {
 
 struct GpuTimestampStageTimer {
     query_set: wgpu::QuerySet,
+    query_range: std::ops::Range<u32>,
     resolve_buffer: wgpu::Buffer,
     readback_buffer: wgpu::Buffer,
     timestamp_period_ns: f64,
 }
 
 impl GpuTimestampStageTimer {
-    fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Self> {
-        Self::with_capacity(device, queue, VIEWER_STAGE_TIMESTAMP_COUNT)
-    }
-
     fn with_capacity(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -308,6 +305,19 @@ impl GpuTimestampStageTimer {
             ty: wgpu::QueryType::Timestamp,
             count: query_capacity,
         });
+        Self::with_query_range(device, queue, query_set, 0..query_capacity)
+    }
+
+    fn with_query_range(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        query_set: wgpu::QuerySet,
+        query_range: std::ops::Range<u32>,
+    ) -> Option<Self> {
+        let query_capacity = query_range.end.checked_sub(query_range.start)?;
+        if query_capacity == 0 || query_range.end > query_set.count() {
+            return None;
+        }
         let resolve_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mondrian_viewer_stage_timestamp_resolve"),
             size: u64::from(query_capacity) * u64::from(wgpu::QUERY_SIZE),
@@ -322,6 +332,7 @@ impl GpuTimestampStageTimer {
         });
         Some(Self {
             query_set,
+            query_range,
             resolve_buffer,
             readback_buffer,
             timestamp_period_ns: f64::from(queue.get_timestamp_period()),
@@ -329,7 +340,7 @@ impl GpuTimestampStageTimer {
     }
 
     fn begin(&self, encoder: &mut wgpu::CommandEncoder) {
-        encoder.write_timestamp(&self.query_set, 0);
+        encoder.write_timestamp(&self.query_set, self.query_range.start);
     }
 
     fn mark(
@@ -337,17 +348,23 @@ impl GpuTimestampStageTimer {
         encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         marker: GpuTimestampStageMarker,
     ) -> Result<(), String> {
-        encoder.write_timestamp(&self.query_set, marker.query_index())
+        encoder.write_timestamp(
+            &self.query_set,
+            self.query_range.start + marker.query_index(),
+        )
     }
 
     fn finish(&self, encoder: &mut wgpu::CommandEncoder) {
-        encoder.write_timestamp(&self.query_set, VIEWER_STAGE_TIMESTAMP_COUNT - 1);
+        encoder.write_timestamp(
+            &self.query_set,
+            self.query_range.start + VIEWER_STAGE_TIMESTAMP_COUNT - 1,
+        );
     }
 
     fn resolve(&self, encoder: &mut wgpu::CommandEncoder, layout: GpuPassTimestampLayout) {
         encoder.resolve_query_set(
             &self.query_set,
-            0..layout.query_count,
+            self.query_range.start..self.query_range.start + layout.query_count,
             &self.resolve_buffer,
             0,
         );
@@ -673,14 +690,7 @@ impl GpuTimestampQueryRing {
         if capacity == 0 || gpu_timestamp_query_device_features(device.features()).is_empty() {
             return None;
         }
-        let mut slots = Vec::with_capacity(capacity);
-        for _ in 0..capacity {
-            slots.push(GpuTimestampQuerySlot {
-                timer: GpuTimestampStageTimer::new(device, queue)?,
-                layout: Some(encoder_timestamp_layout()),
-                state: GpuTimestampSlotState::Free,
-            });
-        }
+        let slots = Self::allocate_slots(device, queue, capacity, VIEWER_STAGE_TIMESTAMP_COUNT)?;
         Some(Self {
             device: device.clone(),
             queue: queue.clone(),
@@ -703,17 +713,7 @@ impl GpuTimestampQueryRing {
         max_passes_per_frame: u32,
     ) -> Option<Self> {
         let query_capacity = max_passes_per_frame.checked_mul(2)?;
-        if capacity == 0 || query_capacity == 0 || query_capacity > wgpu::QUERY_SET_MAX_QUERIES {
-            return None;
-        }
-        let mut slots = Vec::with_capacity(capacity);
-        for _ in 0..capacity {
-            slots.push(GpuTimestampQuerySlot {
-                timer: GpuTimestampStageTimer::with_capacity(device, queue, query_capacity)?,
-                layout: None,
-                state: GpuTimestampSlotState::Free,
-            });
-        }
+        let slots = Self::allocate_slots(device, queue, capacity, query_capacity)?;
         Some(Self {
             device: device.clone(),
             queue: queue.clone(),
@@ -724,6 +724,50 @@ impl GpuTimestampQueryRing {
             pass_timestamps: true,
             pass_leading_copy_anchor: Some(GpuLeadingCopyTimestampAnchor::new(device)),
         })
+    }
+
+    fn allocate_slots(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        capacity: usize,
+        queries_per_slot: u32,
+    ) -> Option<Vec<GpuTimestampQuerySlot>> {
+        let mut remaining = u32::try_from(capacity).ok()?;
+        let query_count = remaining.checked_mul(queries_per_slot)?;
+        if query_count == 0
+            || queries_per_slot > wgpu::QUERY_SET_MAX_QUERIES
+            || !device.features().contains(wgpu::Features::TIMESTAMP_QUERY)
+        {
+            return None;
+        }
+        // Pack slots into the fewest native counter buffers. A buffer per slot
+        // exhausts Metal's per-device buffer limit; one set may not fit a ring.
+        // Disjoint ranges remain owned until work and readback complete.
+        let slots_per_set = wgpu::QUERY_SET_MAX_QUERIES / queries_per_slot;
+        let mut slots = Vec::with_capacity(capacity);
+        while remaining != 0 {
+            let set_slots = remaining.min(slots_per_set);
+            let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("mondrian_viewer_shared_timestamp_queries"),
+                ty: wgpu::QueryType::Timestamp,
+                count: set_slots * queries_per_slot,
+            });
+            for index in 0..set_slots {
+                let start = index * queries_per_slot;
+                slots.push(GpuTimestampQuerySlot {
+                    timer: GpuTimestampStageTimer::with_query_range(
+                        device,
+                        queue,
+                        query_set.clone(),
+                        start..start + queries_per_slot,
+                    )?,
+                    layout: None,
+                    state: GpuTimestampSlotState::Free,
+                });
+            }
+            remaining -= set_slots;
+        }
+        Some(slots)
     }
 
     /// Borrow a scope before recording frame commands; polling never waits.
@@ -746,6 +790,7 @@ impl GpuTimestampQueryRing {
             GpuPassTimestampRecorder::new(
                 encoder,
                 query_set,
+                self.slots[token.slot].timer.query_range.clone(),
                 self.pass_leading_copy_anchor.as_ref().expect("pass anchor").clone(),
                 token,
             ),
@@ -766,6 +811,7 @@ impl GpuTimestampQueryRing {
             return Err(GpuTimestampRingError::InvalidToken);
         };
         if slot.timer.query_set != receipt.query_set
+            || slot.timer.query_range != receipt.query_range
             || !matches!(slot.state, GpuTimestampSlotState::Recording { token: active, .. } if active == token)
         {
             return Err(GpuTimestampRingError::InvalidToken);
@@ -1475,6 +1521,97 @@ mod tests {
             }
             drop(mapped);
             readback.unmap();
+        }
+        device.set_device_lost_callback(|reason, message| {
+            eprintln!("bulk-device-lost reason={reason:?} message={message}");
+        });
+        // A bounded telemetry ring must remain usable beyond Metal's limited
+        // number of native counter sample buffers. Each frame needs independent
+        // counters while all recordings await submission and later readback.
+        anyhow::ensure!(
+            GpuTimestampQueryRing::new_for_passes(&device, &queue, usize::MAX, 4,).is_none()
+        );
+        anyhow::ensure!(GpuTimestampQueryRing::new_for_passes(
+            &device,
+            &queue,
+            64,
+            wgpu::QUERY_SET_MAX_QUERIES,
+        )
+        .is_none());
+        // The headless production shape spans two query sets; neither its
+        // sixteen slots nor its 256-pass per-frame coverage may be reduced.
+        for (capacity, max_passes) in [(64, 4), (16, 256)] {
+            let mut bulk =
+                GpuTimestampQueryRing::new_for_passes(&device, &queue, capacity, max_passes)
+                    .expect("bounded actual-pass ring");
+            for batch in 0..2 {
+                let mut commands = Vec::new();
+                let mut tokens = Vec::new();
+                for _ in 0..capacity {
+                    let mut encoder = device.create_command_encoder(&Default::default());
+                    let (token, mut recorder) =
+                        bulk.begin_pass_frame(&device, &mut encoder)?.unwrap();
+                    for marker in [
+                        GpuTimestampStageMarker::AfterWorkingComposite,
+                        GpuTimestampStageMarker::AfterSpatial,
+                        GpuTimestampStageMarker::AfterProgramOutputBoundary,
+                        GpuTimestampStageMarker::AfterMonitorAdaptation,
+                    ] {
+                        {
+                            let mut pass = recorder.begin_compute_pass(&Default::default());
+                            pass.set_pipeline(&pipeline);
+                            pass.set_bind_group(0, &binding, &[]);
+                            pass.dispatch_workgroups(1024, 1, 1);
+                        }
+                        recorder.mark_stage(marker);
+                    }
+                    recorder.mark_stage(GpuTimestampStageMarker::AfterProgramScopes);
+                    recorder.mark_stage(GpuTimestampStageMarker::AfterSignalMonitoring);
+                    let receipt = recorder.finish();
+                    // Sharing a query set must not let another slot consume this receipt.
+                    let foreign_range = crate::gpu_command::GpuPassTimestampReceipt {
+                        token: receipt.token,
+                        query_set: receipt.query_set.clone(),
+                        query_range: receipt.query_range.end..receipt.query_range.end + 8,
+                        layout: receipt.layout,
+                    };
+                    anyhow::ensure!(matches!(
+                        bulk.finish_pass_frame(foreign_range),
+                        Err(super::GpuTimestampRingError::InvalidToken)
+                    ));
+                    anyhow::ensure!(bulk.finish_pass_frame(receipt)?);
+                    commands.push(encoder.finish());
+                    tokens.push(token);
+                }
+                queue.submit(commands);
+                for token in &tokens {
+                    bulk.after_submit(*token)?;
+                }
+                device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None })?;
+                bulk.collect_ready()?;
+                device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None })?;
+                let mut starts = std::collections::BTreeSet::new();
+                for slot in &bulk.slots {
+                    let mapped = slot.timer.readback_buffer.slice(..).get_mapped_range()?;
+                    let first = u64::from_ne_bytes(mapped[0..8].try_into()?);
+                    anyhow::ensure!(
+                        first > 0 && starts.insert(first),
+                        "query ranges alias or were not executed"
+                    );
+                    drop(mapped);
+                }
+                bulk.collect_ready()?;
+                let samples = bulk.take_completed();
+                anyhow::ensure!(samples.len() == capacity && bulk.discarded_samples() == 0);
+                anyhow::ensure!(samples
+                    .iter()
+                    .all(|s| s.elapsed_us > 0 && tokens.contains(&s.token)));
+                anyhow::ensure!(bulk
+                    .slots
+                    .iter()
+                    .all(|s| matches!(s.state, GpuTimestampSlotState::Free)));
+                eprintln!("bulk capacity={capacity} max_passes={max_passes} batch={batch} actual_samples={} independent_counter_ranges={} retired_slots={}", samples.len(), starts.len(), capacity);
+            }
         }
         let mut interval_timer =
             super::GpuTimestampPassIntervalTimer::new(&device, &queue, 2).unwrap();
