@@ -2334,3 +2334,58 @@ These checks qualify source authoring, persistence and routed UI behavior. The
 native product and SDK/output receipts above retain their original identities;
 this slice does not establish newly rebuilt native reset output, physical input,
 screen-reader or macOS qualification. The overall goal remains active.
+
+## Current reset, modal/resource and output qualification
+
+Clean source `9f70f9428b4bcdba9d144b7fa662785522057430` explicitly executed the
+owned native OpenFX reset and four group-history probes, each 1 passed, 0 failed,
+0 ignored: reset 5.30s, joint transform 4.79s, time 4.97s, value 4.70s,
+interpolation 5.01s. Reset covers Auto/Continuous source controls, stable identity,
+locked/stale/no-op refusal, constant off-key pixels, one Undo, saved live Redo,
+and fresh Unicode undone/redone archives. SDK checks zero keys, out-of-range
+key-time output preservation, failed-search index -1 in all three directions,
+constant values, zero derivative and exact integral. The curve-write rejection
+and constant instance-local initialization contracts remain distinct.
+
+Two initial fixture expectations were incorrect. The primary SDK requires -1
+for an empty key search; the existing Host obeyed that contract. Reset constants
+also accept unchanged SDK initialization within the native instance, while
+canonical curves reject SDK author writes. Correcting both fixture expectations
+made the unchanged Host pass; no numerical tolerance or output assertion was
+relaxed. The first rejected source/log/binary hashes and intermediate replay are
+retained locally; they are harness failures, not claimed product regressions.
+
+The complete Golden gate passed 3/3 with all seven stages in every run, source
+start/end identical and clean, baseline eligible, dirty diagnostics disabled.
+All three processes naturally exited with code 0 and no forced termination,
+in 124568/118980/120492ms. Each color-media H.264 output checked five pixels,
+maximum channel error 4/255. Encoder transport was CPU rawvideo pipe with NVENC;
+this is not zero-copy or performance qualification.
+
+Aggregate report:
+`target/validation/nle-backlog-complete/20261007T134358Z-complete-golden-6eced40d/complete-golden-consecutive-report.json`.
+Native product SHA-256:
+`d1df0aaedb814ee7ff5664cd08731408e279247627a393933fe1c5bd8ee3dda5`.
+Owned SDK fixture SHA-256:
+`3bb7a9e4f76562c84f0c913479991ce65127242ed28c2ae6bb6c1905173f2653`.
+
+The source-frozen supplementary gate then passed modal 16 (25.24s), event
+modal scope 1 (below 0.01s), resource 103 (27.01s, 5 native cases initially
+ignored), explicit native resource 5 (8.31s, none ignored), portable LUT/OCIO/media
+11 (8.94s), native window role 1 (9.32s) and actual Host group-pointer 6 (22.31s).
+All executed cases had zero failures. Native resource cases include actual helper
+completion, opaque paths, cancellation/timeout/retry child cleanup and the routed
+LUT resource draft with Undo, saved live Redo, Unicode reopen and output pixels.
+Portable cases include source removal, tampering, unresolved dependencies,
+custom OCIO search paths, rebound SQLite assets and actual media decode/render.
+Overlapping filter counts are not added. Product and fixture hashes stayed
+unchanged throughout both acceptance gates; all tracked source remained clean.
+Golden executable SHA-256:
+`2ece1f83e025fba898ae852a94eb5fff6e0fa699c9b32507d0710faca3620571`.
+
+Receipts `acceptance-reset-current-native.json` and
+`acceptance-reset-current-modal-resource-lut.json` retain exact source and binary
+identities and executed test logs. Previous receipts retain their own source
+versions. This qualifies the named Windows source/product/reference slices;
+physical keyboard, screen-reader, macOS, broader vendor/bus/MIDI/editor and
+performance matrices remain under the active original goal.
