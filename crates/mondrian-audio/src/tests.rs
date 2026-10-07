@@ -19,6 +19,9 @@ use std::sync::{Arc, Mutex};
 #[path = "tests/lookahead_limiter.rs"]
 mod lookahead_limiter_tests;
 
+#[path = "tests/processor_inspection.rs"]
+mod processor_inspection_tests;
+
 #[derive(Default)]
 struct RampSource {
     block_reads: usize,

@@ -286,12 +286,7 @@ impl PreparedAudioPlan {
         dependencies: &AudioPreparationDependencies,
         processor_resolver: &dyn AudioProcessorResolver,
     ) -> Result<Self, AudioCompileError> {
-        if contract.sample_rate == 0
-            || contract.max_block_frames == 0
-            || u32::try_from(contract.max_block_frames).is_err()
-        {
-            return Err(AudioCompileError::InvalidRenderContract);
-        }
+        contract.validate()?;
         let schedule = PreparedAudioSchedule::build(
             program.as_ref(),
             contract,

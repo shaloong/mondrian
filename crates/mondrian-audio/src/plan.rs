@@ -299,6 +299,16 @@ pub struct AudioRenderContract {
 }
 
 impl AudioRenderContract {
+    pub(crate) fn validate(self) -> Result<(), crate::AudioCompileError> {
+        if self.sample_rate == 0
+            || self.max_block_frames == 0
+            || u32::try_from(self.max_block_frames).is_err()
+        {
+            return Err(crate::AudioCompileError::InvalidRenderContract);
+        }
+        Ok(())
+    }
+
     /// Conservative default admission budget for processor-private Session state.
     pub const DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES: usize = 256 * 1024 * 1024;
     /// Conservative default admission budget for public-output lookahead.

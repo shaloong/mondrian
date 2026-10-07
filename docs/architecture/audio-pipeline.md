@@ -433,6 +433,24 @@ Bus. The UI no longer maintains its own main-route-only deletion policy. Invalid
 dependency addresses disable deletion with a localized reason. These inspection
 facts do not change the existing author transaction, history or DSP execution.
 
+`inspect_audio_processor_inputs` is the non-realtime control query for one exact
+author processor. Its closed target selects a channel-strip Rack or a named
+Scope with an explicit Component occurrence. Timeline resolves the canonical
+Rack and verifies the Scope binding; Audio translates its occurrence and sends
+the actual definition, parameters, opaque state and Render Contract through the
+same prepared-factory resolver as execution. Ordered auxiliary keys/layouts and
+mode/latency/tail facts are captured without creating a mutable render Session.
+Locked authors remain inspectable. Rate/block admission is shared with prepared
+plans; adapter panic, mode and auxiliary-contract admission use the existing
+processor preparation seam.
+
+Product controls must run this query on a bounded non-realtime worker, publish
+only results still belonging to the current author target, and invalidate stale
+facts before routing edits. The query is not a per-frame UI call or persistent
+author bus schema. Full-Program resource admission and canonical routing
+transactions remain required. Sidechain source/disconnect widgets and their
+asynchronous product integration remain subsequent work.
+
 This main-edge contract covers dry paths, pre/post-fader sends, submixes,
 stems, and multiple parallel paths. A sidechain is a separate typed edge from
 one Track/Bus strip port to `(AudioProcessorInstanceId, bus_key)`. It retains

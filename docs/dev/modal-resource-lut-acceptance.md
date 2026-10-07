@@ -2657,3 +2657,35 @@ invalid addresses, canonical Bus order, localized disabled controls and inspecti
 without history. Existing route factories, gain Undo and cycle refusal also pass.
 This source qualification does not create sidechain source/disconnect controls
 or infer a new native/Golden, performance or platform qualification.
+
+## Control-side processor input inspection foundation
+
+`inspect_audio_processor_inputs` queries one canonical author processor through
+the existing prepared-factory resolver. Its closed target handles both Rack
+stages on Track/Bus/Program Output and an explicitly bound shared-Scope occurrence.
+Actual definition, parameters and opaque bytes are borrowed from the canonical
+author snapshot. Render extent, auxiliary key/layout and processing-mode checks,
+and adapter panic isolation are shared with preparation. Locked authors remain
+inspectable; the query creates no mutable render Session or history entry.
+
+Four source regressions cover all six channel-strip addresses, both processing
+modes and two restored-state port configurations; two distinct occurrences of a
+locked shared Scope; stale Scope and processor refusal before any resolver call;
+invalid rate/block bounds, duplicate keys, wrong layouts, mode refusal and panic;
+and the real built-in Gain factory. The Gain check retains its declared 1024-byte
+prepared storage (64 f64 gain factors plus 128 f32 samples), rather than assuming
+stateless processing means zero scratch.
+
+Initial compilation exposed a Vec-to-slice borrow mismatch and was corrected
+without copying author state. The first executed suite had 114 passed/1 failed/
+15 ignored because the new Gain test incorrectly expected zero scratch. After
+correcting that independent storage expectation, pipeline 21418 passed the whole
+audio library: **115 passed, 0 failed, 15 ignored**, 0.70s. Strict full-workspace/
+all-target/all-feature Clippy `-D warnings` passed in 2m32s; format and diff checks
+passed. Ignored native cases were not executed by this source gate.
+
+The product must integrate this query with bounded asynchronous control work,
+stale-result rejection and localized sidechain source/disconnect widgets. The API
+alone does not qualify that GUI workflow, current native/Golden, vendor names,
+platforms or performance. Earlier b5eb715 native and Golden receipts retain their
+exact source identities; the full NLE goal remains active.
