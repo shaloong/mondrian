@@ -226,8 +226,10 @@ one scanner after restored-state callbacks. The worker feeds distinct planar
 ports through the existing isolated bus contract and shared PCM transport,
 with buffers allocated during preparation. It rejects incompatible layouts,
 duplicate IDs/main roles and changed auxiliary order. Source ABI fixtures
-cover two distinct sidechains and subsequent silence. Packaged-worker and
-authored sidechain history/output qualification remain pending.
+cover two distinct sidechains and subsequent silence. Clean ae3c78f packaged
+worker/strict owned stereo DLL qualification also covers restored port state,
+activation-valid latency, PDC, routing Undo and Unicode archive output.
+Mixed layouts, other vendors and formats retain their separate open scope.
 Descriptor discovery executes one installed library in a separate deadline-bound
 child and validates its bounded response. The same child can probe a selected
 definition for exact Mono/Stereo port, latency, and tail facts after restoring

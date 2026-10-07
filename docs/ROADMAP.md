@@ -2,7 +2,7 @@
 
 > 更新日期：2026-10-08
 >
-> 当前状态：M1 Windows Alpha 收口中（当前候选完整 Golden 与原生音频参考已通过；CI、设备和完整工作区测试资格待补）
+> 当前状态：M1 Windows Alpha 收口中（具名完整 Golden 基线与最新 CLAP 原生侧链参考已通过；最新完整 Golden、CI、设备和完整工作区测试资格待补）
 >
 > 当前主线：完成 M1 当前候选资格收口，再推进 M2 的产品可靠性与交互完整性
 
@@ -56,7 +56,7 @@ M1 的目标是 L1，不要求所有高级组合都可执行。暂未实现的�
 | 里程碑 | 状态 | 结果 |
 | --- | --- | --- |
 | M0 核心契约与架构收敛 | **完成** | 项目、时间、编辑、音频、色彩、执行与验证权威已收敛到唯一生产路径 |
-| M1 Windows Alpha | **收口中** | 核心工作流已有具名基线；当前候选完整 Golden 已通过，CI、设备和完整工作区门禁仍待验收 |
+| M1 Windows Alpha | **收口中** | 核心工作流已有具名基线；0adaea3 完整 Golden 基线已通过；最新 Golden、CI、设备和完整工作区门禁仍待验收 |
 | M2 Beta | **下一阶段** | 产品交互、恢复、复杂项目、设备矩阵、独立色彩资格和发布工程 |
 | M3 专业能力与互操作 | **后续** | 高级效果、响度、插件、跟踪、交换格式 |
 | M4 多平台实机资格 | **后续** | macOS/Linux 真实设备、打包、签名与长期维护 |
@@ -80,7 +80,7 @@ M1 的目标是 L1，不要求所有高级组合都可执行。暂未实现的�
 | 项目打包 | `.mdp`、媒体、LUT 与 OCIO 依赖盘点、搬迁和重开验证已接入 | 大项目、缺失资源和跨平台搬迁实机验收 |
 | i18n | Fluent 中英文、伪语言和主要界面路径已接入；状态提示与历史保存消息 ID/参数并即时切换语言，159 个非测试模块调用点已迁移；内置特效、Title、Mask 的参数名称、分组和枚举选项按稳定定义地址展示本地化文本，作者键值保持不变 | 清除剩余用户可见字面量，类型化内部诊断原因并补齐语言验收 |
 | 参数数值输入 | Rack、Mixer 和组件参数保留 f64；整数拒绝小数，JSON 保存重开保持浮点位值；文本草稿在确认前不写入项目，Escape 取消不产生关键帧或撤销记录；Inspector 位置/缩放/锚点与通用 Vec2/Vec3/Vec4 控件只提交变化分量，保留其他分量、独立关键帧及未修改曲线的共享存储；Clip/Effect/Mask 统一参数写入契约；Undo/Redo 保留当前编辑时间，跨帧率按真实播放时间重新绑定；撤销删除当前序列时恢复原序列导航，后续 Viewer 完整变换可精确撤销重做；Inspector 滑块拖动保留捕获并持续刷新 Viewer；数值曲线点／手柄拖动持续更新 canonical 作者状态与 Viewer，结束时保留一个历史项，取消和回到原点不留历史 | 完整键盘操作、厂商参数与平台矩阵 |
-| CLAP / VST3 | 用户选择的单主总线 Float32 音频效果可隔离处理；自有参考插件的 Auto／Continuous 曲线、剪贴板、联合编辑、参数默认重置与一次 Undo／保存后 Redo／Unicode 重开已通过真实逐样本输出验收 | CLAP 已实现同主布局辅助输入并通过源码 ABI 回归，打包子进程／作者工作流验收待补；VST3 辅助总线、多布局、MIDI／编辑器、厂商状态／参数及性能资格待推进 |
+| CLAP / VST3 | 用户选择的单主总线 Float32 音频效果可隔离处理；自有参考插件的 Auto／Continuous 曲线、剪贴板、联合编辑、参数默认重置与一次 Undo／保存后 Redo／Unicode 重开已通过真实逐样本输出验收 | CLAP 同主布局辅助输入已通过激活生命周期／真实打包 worker／自有立体声插件的侧链、PDC、Undo／保存重开参考验收；VST3 辅助总线、多布局、MIDI／编辑器、厂商状态／参数及性能资格待推进 |
 | OpenFX | Filter / RGBA Float32 / Double/Boolean/Integer 子集接入共享效果图，插件声明的默认插值贯通新关键帧与数值写入，视觉参数 Inspector 按数值声明保留整数与 Double 输入精度；工厂绑定作者实例与执行会话，普通 CPU 合成/时间采样/混合执行取消及逻辑帧预算贯通；原生图像按 action 借用并检查释放，UHD 参考路径在 768 MiB 逻辑工作预算内通过；Preview/CPU-prefix/fallback/Export 已接入原生驻留配额并跨帧复用，取消及故障仍回收；canonical 常量／曲线的完整值、导数、积分和关键帧查询已通过真实 SDK；拒绝未支持的有序/时间采样契约 | 插件发起的持久作者写入、更多上下文／像素格式、厂商／平台与性能矩阵 |
 
 ---
@@ -113,23 +113,26 @@ Linux/macOS 共享生产 Interface 和常规 CI，但实机发布资格属于 M4
 
 ### 4.2 收口矩阵
 
-当前候选资格以具体源码和报告为准。`0adaea304c6d6f672ef61c43c0ea4a9f668971fa`
-在 2026-10-08 完成 Windows 产品重建、CLAP／VST3 自有单主总线参考验收与完整
+资格以具体源码和报告为准；下表区分已验收基线与最新修订待补项。`0adaea304c6d6f672ef61c43c0ea4a9f668971fa`
+曾在 2026-10-08 完成 Windows 产品重建、CLAP／VST3 自有单主总线参考验收与完整
 Golden 连续三轮；源码起止干净且一致，产品哈希全程一致。见
 [验收记录](dev/modal-resource-lut-acceptance.md#clean-native-audio-reset-and-current-candidate-qualification)。
 这份候选尚未推送，不能继承 2026-08 历史版本的三平台 CI、4K／设备或完整工作区
-测试资格。历史记录继续保留其原始版本；下表分别列出实现状态与实际资格。
+测试资格。最新原生 CLAP 修订 `ae3c78f` 已通过激活生命周期、辅助输入、PDC、
+Undo／保存重开与逐样本输出参考；其完整 Golden 尚未重跑。见
+[最新侧链验收](dev/modal-resource-lut-acceptance.md#clean-activated-latency-clap-auxiliary-qualification)。
+历史记录继续保留其原始版本；下表分别列出实现状态与实际资格。
 
-| 能力 | Engineering state | 当前候选资格 |
+| 能力 | Engineering state | 具名资格与待补项 |
 | --- | --- | --- |
-| 项目与恢复 | 实现闭合：durable save/autosave、SQLite snapshot、非阻塞 close、恢复确认和故障注入不覆盖源 | 具名当前候选完整 Golden 已通过 3/3 |
-| 素材与代理 | 实现闭合：有界 probe、fingerprint、稳定 AssetId、离线/重连、proxy/original 与 cache revision | Golden Proxy/Relink 已覆盖 |
-| 编辑 | M1 核心操作、Link、Lift/Extract、T/S、snapping、常速/反向/hold 与 Transition 已接入 | 当前 Golden Editorial/Transport 阶段已通过；专项 Retime 矩阵保留具名历史记录并随候选验收 |
+| 项目与恢复 | 实现闭合：durable save/autosave、SQLite snapshot、非阻塞 close、恢复确认和故障注入不覆盖源 | 0adaea3 完整 Golden 已通过 3/3；最新候选待验收 |
+| 素材与代理 | 实现闭合：有界 probe、fingerprint、稳定 AssetId、离线/重连、proxy/original 与 cache revision | 0adaea3 Golden Proxy/Relink 已覆盖 |
+| 编辑 | M1 核心操作、Link、Lift/Extract、T/S、snapping、常速/反向/hold 与 Transition 已接入 | 0adaea3 Golden Editorial/Transport 阶段已通过；专项 Retime 矩阵保留具名历史记录并随候选验收 |
 | 播放 | 实现闭合：Clock、latest-wins、严格帧覆盖、取消、CPU/native decode 与 Viewer completion | 历史 v7 4K Main10 基线已通过；当前候选专门矩阵待验收 |
-| 音频 | 实现闭合：gain/pan/fade、mute/solo、meter、automation、PDC、limiter、嵌套与共享 Runtime | 当前候选原生参考与 Golden 已通过；历史 CPAL A/V recovery 基线保留，当前设备矩阵待验收 |
-| 视觉 | 作者级 Crop、基础算子、Basic Title、Cross Dissolve 与 Hold/Linear/Bezier 作者语义已接入 | 当前 Golden 视觉阶段已通过；完整 CPU/GPU reference 矩阵保留历史基线，当前专项待验收 |
-| 色彩 | Rec.709/sRGB、PQ、HLG 与 straight Alpha 已有独立 reference；未知解释会阻止或要求 override | 当前 Golden 色彩／媒体阶段已通过；完整独立 reference 矩阵保留历史基线，当前专项待验收；Camera Log 属于 M2 |
-| 导出 | H.264 High/AAC SDR、HEVC Main10、不可变 snapshot、取消、失败清理与完成前 probe 已接入 | 当前 Golden 交付／重开阶段已通过；历史长 Work Area 基线保留，当前专项待验收 |
+| 音频 | 实现闭合：gain/pan/fade、mute/solo、meter、automation、PDC、limiter、嵌套与共享 Runtime | ae3c78f CLAP 侧链原生参考已通过；Golden 为 0adaea3 基线；历史 CPAL A/V recovery 基线保留，当前设备矩阵待验收 |
+| 视觉 | 作者级 Crop、基础算子、Basic Title、Cross Dissolve 与 Hold/Linear/Bezier 作者语义已接入 | 0adaea3 Golden 视觉阶段已通过；完整 CPU/GPU reference 矩阵保留历史基线，当前专项待验收 |
+| 色彩 | Rec.709/sRGB、PQ、HLG 与 straight Alpha 已有独立 reference；未知解释会阻止或要求 override | 0adaea3 Golden 色彩／媒体阶段已通过；完整独立 reference 矩阵保留历史基线，当前专项待验收；Camera Log 属于 M2 |
+| 导出 | H.264 High/AAC SDR、HEVC Main10、不可变 snapshot、取消、失败清理与完成前 probe 已接入 | 0adaea3 Golden 交付／重开阶段已通过；历史长 Work Area 基线保留，当前专项待验收 |
 | 平台与质量 | 三平台生产入口和 Adapter 已进入 CI 配置；本地 workspace 门禁可执行 | 历史三平台 CI 基线保留；当前未推送候选的三平台 CI 与完整工作区测试待验收 |
 
 ### 4.3 退出门槛
@@ -142,7 +145,7 @@ Golden 连续三轮；源码起止干净且一致，产品哈希全程一致。�
 - [ ] 当前候选完成 v7 4K Main10 播放/seek/supersession 和真实 CPAL A/V recovery；历史具名报告只作回归基线。
 - [x] 所有生产结果归类为 `Verified`、`ExplicitlyDegraded` 或 `Blocked/Unresolved`；没有隐式 RGBA8、错误源帧、Video Master 或静默效果旁路。
 - [ ] 当前候选的 Windows/Linux/macOS native CI 通过，平台专属类型不泄漏到共享语义。
-- [x] 具名当前候选完整 Golden 连续三轮通过；保留源码、二进制与各阶段报告身份。
+- [ ] 最新候选完整 Golden 连续三轮通过；保留源码、二进制与各阶段报告身份。0adaea3 的 3/3 基线继续保留。
 - [ ] 当前候选完整 workspace fmt/clippy/test 与专门设备门禁收口；已通过的针对性库回归和严格 Clippy 不替代全部矩阵。
 
 ### 4.4 已接受的 Alpha 限制

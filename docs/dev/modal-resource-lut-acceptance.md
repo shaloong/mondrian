@@ -2474,3 +2474,33 @@ fixture require a new current-worker receipt. No new Golden, vendor, mixed-layou
 MIDI/editor, macOS, performance or remote-CI qualification is inferred here.
 
 Receipt: `.scratch/curve-viewport/acceptance-clap-sidechain-current-native.json`.
+
+### Clean activated-latency CLAP auxiliary qualification
+
+Clean source `ae3c78fdebf2eb7c9982b1074f6863514f3ccf41` independently rebuilt the product and
+strict owned sidechain DLL. Pipeline 36698 exited 0, retaining clean identical
+source and stable product/fixture hashes before and after. Product build 10m25s;
+App native history/PDC test 1 passed / 0 failed / 0 ignored (11.28s), installed-worker
+bus/state/partition/reset test 1/0/0 ignored (5.44s), existing main-bus sample-event
+regression 1/0/0 ignored (0.81s). Product SHA256:
+`135ADF508644BF69904AF438C870F94FDBFAE5B08A9564F3A24034D2C7AE861F`.
+Strict sidechain DLL SHA256:
+`252FDA73E12C02801487442409C2DE3D92D392495E39DEA19D8309C31CAD995E`.
+Gain fixture remained `CB2FA1B4956CEDBDA4BBAA4B24EFA2D16924820C7C7FCEB4E4881633F21FD687`.
+
+The strict DLL returns an invalid sentinel before activation and latency 3 while
+active. It retains the previous independent weighted stereo DSP, actual 3-frame
+delay/tail, restored port order/removal and silence/reset cases. Therefore this
+run validates the corrected latency lifecycle together with the named routed
+PDC/Undo/save/reopen/public-PCM reference, rather than inheriting the earlier
+constant-latency fixture result. The source ABI regression first failed with
+4294967295 instead of 3, then verified activated probe/worker admission and
+proper deactivation after stale latency refusal. Full audio library 109 passed,
+0 failed, 14 ignored and workspace/all-targets/all-features Clippy-Dwarnings/fmt
+passed before this commit.
+
+Receipt: `.scratch/curve-viewport/acceptance-clap-activation-current-native.json`.
+VST3 auxiliary inputs, mixed layouts, MIDI/editors, vendors, platform/performance
+and latest complete-Golden/remote-CI qualification remain separate open work.
+The earlier 0adaea3 Golden and 84f7445 constant-latency receipts retain their
+original source/fixture scope and are not relabeled as current executions.
