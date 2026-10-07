@@ -1823,6 +1823,23 @@ pub(super) fn audio_automation_curve_control(
 ) -> Box<dyn Widget> {
     let action_model = model.clone();
     let menu_model = model.clone();
+    let clipboard_model = model.clone();
+    let clipboard_menu_model = model.clone();
+    let clipboard_choices = [
+        (
+            mondrian_ui_widgets::CurveClipboardCommand::Cut,
+            "command-edit-cut",
+        ),
+        (
+            mondrian_ui_widgets::CurveClipboardCommand::Copy,
+            "command-edit-copy",
+        ),
+        (
+            mondrian_ui_widgets::CurveClipboardCommand::Paste,
+            "command-edit-paste",
+        ),
+    ]
+    .map(|(command, message)| (command, localizer.text(message), message));
     let menu_choices = [
         InterpolationType::Hold,
         InterpolationType::Linear,
@@ -1847,7 +1864,7 @@ pub(super) fn audio_automation_curve_control(
         .with_keyboard_help(
             localizer.text("curve-editor-name"),
             localizer.text(if model.current_author_time.is_ok() {
-                "curve-editor-selection-keyboard-help"
+                "curve-editor-clipboard-keyboard-help"
             } else {
                 "curve-editor-keyboard-help"
             }),
@@ -1863,6 +1880,7 @@ pub(super) fn audio_automation_curve_control(
             .ok(),
         )
         .with_keyframe_ids(ids)
+        .with_selection_projection(model.selected_keyframe_ids.iter().copied())
         .with_tangents(model.tangents())
         .with_preview_projection(move |event| match event {
             CurveGestureEvent::Begin(_) => {
@@ -1908,8 +1926,15 @@ pub(super) fn audio_automation_curve_control(
         })
         .with_point_policies(model.point_policies())
         .with_display_points(model.display_points.clone())
+        .on_clipboard(move |command, ids| {
+            crate::app_ui::audio_automation::audio_curve_clipboard_action(
+                &clipboard_model,
+                command,
+                ids,
+            )
+        })
         .with_selection_context_menu(move |ids| {
-            menu_choices
+            let mut items = menu_choices
                 .iter()
                 .filter(|(mode, _, _)| {
                     let family = match mode {
@@ -1937,7 +1962,20 @@ pub(super) fn audio_automation_curve_control(
                         });
                     MenuItem::new(label.clone(), action).with_message_id(*message).checked(checked)
                 })
-                .collect()
+                .collect::<Vec<_>>();
+            items.push(MenuItem::separator());
+            items.extend(clipboard_choices.iter().map(|(command, label, message)| {
+                MenuItem::new(
+                    label.clone(),
+                    crate::app_ui::audio_automation::audio_curve_clipboard_action(
+                        &clipboard_menu_model,
+                        *command,
+                        ids,
+                    ),
+                )
+                .with_message_id(*message)
+            }));
+            items
         })
         .enabled(model.is_editable);
     if model.current_author_time.is_ok() {
@@ -2644,16 +2682,16 @@ fn focused_curve_clipboard_action(
     ids: &[KeyframeId],
 ) -> Action {
     use crate::app::product_action::{
-        ClipCurveClipboardOperation, ClipCurveClipboardPayload, ClipProductAction,
+        ClipCurveClipboardPayload, ClipProductAction, CurveClipboardOperation,
     };
     let operation = match command {
         mondrian_ui_widgets::CurveClipboardCommand::Copy => {
-            ClipCurveClipboardOperation::Copy { keyframe_ids: ids.to_vec() }
+            CurveClipboardOperation::Copy { keyframe_ids: ids.to_vec() }
         }
         mondrian_ui_widgets::CurveClipboardCommand::Cut => {
-            ClipCurveClipboardOperation::Cut { keyframe_ids: ids.to_vec() }
+            CurveClipboardOperation::Cut { keyframe_ids: ids.to_vec() }
         }
-        mondrian_ui_widgets::CurveClipboardCommand::Paste => ClipCurveClipboardOperation::Paste {},
+        mondrian_ui_widgets::CurveClipboardCommand::Paste => CurveClipboardOperation::Paste {},
     };
     ProductAction::Clip(ClipProductAction::CurveClipboard(Box::new(
         ClipCurveClipboardPayload { clip_id, parameter: parameter.clone(), operation },
@@ -2749,7 +2787,7 @@ fn numeric_curve_editor(
         .with_frame_time_step(model.frame_time_step)
         .with_keyboard_help(
             localizer.text("curve-editor-name"),
-            localizer.text("curve-editor-visual-clipboard-keyboard-help"),
+            localizer.text("curve-editor-clipboard-keyboard-help"),
         )
         .with_view_key(target.as_ref().and_then(|target| serde_json::to_string(target).ok()))
         .with_keyframe_ids(ids)

@@ -67,6 +67,7 @@ pub(crate) struct AudioAutomationCurveModel {
     pub(crate) source_curve: mondrian_core::ExactAutomationCurve,
     pub(crate) curve_contract: mondrian_timeline::AudioAutomationCurveContract,
     pub(crate) target: AudioAutomationTarget,
+    pub(crate) selected_keyframe_ids: Vec<KeyframeId>,
     pub(crate) viewport: AudioAutomationViewport,
     pub(crate) keys: Vec<AudioAutomationCurveKeyModel>,
     pub(crate) display_points: Vec<CurvePoint>,
@@ -79,6 +80,20 @@ pub(crate) struct AudioAutomationCurveModel {
 }
 
 impl AudioAutomationCurveModel {
+    /// Project the existing App selection intent without authoring or inventing key identities.
+    pub(crate) fn project_selection(&mut self, state: &crate::app::AppState) {
+        self.selected_keyframe_ids = state
+            .animation_selection
+            .audio_curve
+            .as_ref()
+            .filter(|selection| {
+                self.time_context.sequence_time.domain
+                    == AuthoringTimeDomain::Sequence(selection.sequence_id)
+                    && self.target == selection.target
+            })
+            .map_or_else(Vec::new, |selection| selection.keyframe_ids.clone());
+    }
+
     pub(crate) fn key_points(&self) -> Vec<(mondrian_core::KeyframeId, CurvePoint)> {
         let Ok(end) = self.viewport.range.end() else {
             return Vec::new();
@@ -311,6 +326,7 @@ pub(crate) fn project_audio_automation(
         },
         curve_contract: inspection.curve_contract().clone(),
         target,
+        selected_keyframe_ids: Vec::new(),
         viewport,
         keys: keys.into_values().collect(),
         display_points,
@@ -321,6 +337,41 @@ pub(crate) fn project_audio_automation(
         is_editable: inspection.is_editable(),
         edit_disabled_reason: inspection.edit_blocker().map(ToString::to_string),
     })
+}
+
+/// Lower one focused complete-selection clipboard intent with explicit owner identity.
+pub(crate) fn audio_curve_clipboard_action(
+    model: &AudioAutomationCurveModel,
+    command: mondrian_ui_widgets::CurveClipboardCommand,
+    ids: &[KeyframeId],
+) -> Option<Action> {
+    use crate::app::product_action::{
+        AudioCurveClipboardPayload, AudioProductAction, CurveClipboardOperation, ProductAction,
+    };
+    use mondrian_ui_widgets::CurveClipboardCommand;
+    let AuthoringTimeDomain::Sequence(sequence_id) = model.time_context.sequence_time.domain else {
+        return None;
+    };
+    if command != CurveClipboardCommand::Copy && !model.is_editable {
+        return None;
+    }
+    let operation = match command {
+        CurveClipboardCommand::Copy | CurveClipboardCommand::Cut if ids.is_empty() => return None,
+        CurveClipboardCommand::Copy => CurveClipboardOperation::Copy { keyframe_ids: ids.to_vec() },
+        CurveClipboardCommand::Cut => CurveClipboardOperation::Cut { keyframe_ids: ids.to_vec() },
+        CurveClipboardCommand::Paste => CurveClipboardOperation::Paste {},
+    };
+    Some(
+        ProductAction::Audio(AudioProductAction::CurveClipboard(Box::new(
+            AudioCurveClipboardPayload {
+                sequence_id,
+                target: model.target.clone(),
+                scope_occurrence: model.time_context.scope_occurrence,
+                operation,
+            },
+        )))
+        .into_external_action(),
+    )
 }
 
 /// Admit one complete-selection preset through the current audio definition.

@@ -311,6 +311,69 @@ impl ExactAutomationCurve {
         Ok(())
     }
 
+    /// Capture a complete nonempty stable selection without projecting values or handles.
+    /// Keys retain their original time order and constrained tangent intent.
+    /// Empty, duplicate or missing identities refuse the entire capture.
+    pub fn capture_keyframes(
+        &self,
+        ids: &[KeyframeId],
+    ) -> Result<Vec<ExactAutomationKeyframe>, AutomationError> {
+        self.validate()?;
+        if ids.is_empty() {
+            return Err(AutomationError::EmptyKeySelection);
+        }
+        let identities = ids.iter().copied().collect::<HashSet<_>>();
+        if identities.len() != ids.len() {
+            return Err(AutomationError::DuplicateKeyframeIdentity);
+        }
+        let keys = self
+            .keyframes
+            .iter()
+            .filter(|key| identities.contains(&key.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if keys.len() != ids.len() {
+            return Err(AutomationError::UnknownKeyframe);
+        }
+        Ok(keys)
+    }
+
+    /// Paste a complete exact group and normalize its final neighbors once.
+    /// Existing keys at the group's exact times are replaced; other keys remain.
+    /// Values and manual handles are never converted through display coordinates.
+    /// Empty groups, invalid keys, duplicate identities/times and final constraint
+    /// failures leave the original curve unchanged.
+    pub fn paste_keyframes(
+        &mut self,
+        keys: &[ExactAutomationKeyframe],
+    ) -> Result<(), AutomationError> {
+        self.validate()?;
+        if keys.is_empty() {
+            return Err(AutomationError::EmptyKeySelection);
+        }
+        let mut identities = HashSet::with_capacity(keys.len());
+        let mut times = HashSet::with_capacity(keys.len());
+        for key in keys {
+            validate_keyframe(key)?;
+            if !identities.insert(key.id) {
+                return Err(AutomationError::DuplicateKeyframeIdentity);
+            }
+            if !times.insert(key.time) {
+                return Err(AutomationError::NonIncreasingTime);
+            }
+        }
+        let mut candidate = self.clone();
+        candidate.keyframes.retain(|key| !times.contains(&key.time));
+        for key in keys {
+            candidate.keyframes.push(key.clone());
+        }
+        candidate.keyframes.sort_by_key(|key| key.time);
+        candidate.normalize_constrained_tangents()?;
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Change one key's outgoing interpolation and its optional two-sided tangent constraint.
     ///
     /// Auto and continuous modes also enable Bezier interpolation on the
@@ -1452,6 +1515,123 @@ fn bezier_value(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clipboard_capture_retains_raw_values_order_and_complete_constraints() {
+        let mut curve =
+            ExactAutomationCurve::new(ParameterId::new_static("test.capture"), 0.0).expect("curve");
+        for (time, value) in [(0, 0.2), (1, 0.3), (2, 0.7)] {
+            curve
+                .set_keyframe(ExactAutomationKeyframe::linear(
+                    TimelineTime::new(time, 3).expect("exact"),
+                    value,
+                ))
+                .expect("key");
+        }
+        let ids = curve.keyframes.iter().map(|key| key.id).collect::<Vec<_>>();
+        curve
+            .set_keyframes_interpolation(&ids, InterpolationType::AutoBezier)
+            .expect("Auto");
+        let before = curve.clone();
+        assert_eq!(
+            curve.capture_keyframes(&[ids[2], ids[0]]).expect("complete"),
+            vec![before.keyframes[0].clone(), before.keyframes[2].clone()]
+        );
+        assert_eq!(
+            curve.capture_keyframes(&[ids[0]]).expect("raw")[0].value.to_bits(),
+            0.2_f64.to_bits()
+        );
+        for invalid in [
+            vec![],
+            vec![ids[0], ids[0]],
+            vec![ids[0], KeyframeId::new()],
+        ] {
+            assert!(curve.capture_keyframes(&invalid).is_err());
+            assert_eq!(curve, before);
+        }
+    }
+
+    #[test]
+    fn clipboard_paste_replaces_exact_times_and_refuses_entire_invalid_group() {
+        let mut curve =
+            ExactAutomationCurve::new(ParameterId::new_static("test.paste"), 0.0).expect("curve");
+        let first = ExactAutomationKeyframe::linear(TimelineTime::ZERO, 0.4);
+        let replaced = ExactAutomationKeyframe::linear(TimelineTime::new(1, 3).expect("time"), 0.8);
+        curve.set_keyframe(first.clone()).expect("first");
+        curve.set_keyframe(replaced).expect("replace target");
+        let original = curve.clone();
+        let one = ExactAutomationKeyframe::linear(TimelineTime::new(1, 3).expect("time"), 0.2);
+        let two = ExactAutomationKeyframe::linear(TimelineTime::new(2, 3).expect("time"), 0.3);
+        let mut nonfinite = two.clone();
+        nonfinite.value = f64::NAN;
+        let mut duplicate_id = two.clone();
+        duplicate_id.id = one.id;
+        let mut duplicate_time = two.clone();
+        duplicate_time.time = one.time;
+        let mut existing_id = two.clone();
+        existing_id.id = first.id;
+        for invalid in [
+            vec![],
+            vec![one.clone(), nonfinite],
+            vec![one.clone(), duplicate_id],
+            vec![one.clone(), duplicate_time],
+            vec![one.clone(), existing_id],
+        ] {
+            assert!(curve.paste_keyframes(&invalid).is_err());
+            assert_eq!(curve, original);
+        }
+        curve.paste_keyframes(&[two.clone(), one.clone()]).expect("complete paste");
+        assert_eq!(
+            curve.keyframes.iter().map(|key| key.id).collect::<Vec<_>>(),
+            vec![first.id, one.id, two.id]
+        );
+        assert_eq!(curve.keyframes[1].value.to_bits(), 0.2_f64.to_bits());
+        assert_eq!(curve.keyframes[2].value.to_bits(), 0.3_f64.to_bits());
+        assert_eq!(curve.keyframes[0], first);
+    }
+
+    #[test]
+    fn clipboard_paste_constrained_group_evaluates_like_the_exact_original() {
+        for mode in [
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let mut source = ExactAutomationCurve::new(ParameterId::new_static("test.source"), 0.0)
+                .expect("source");
+            for (time, value) in [(0, -24.125), (1, -12.2), (2, -18.3)] {
+                source
+                    .set_keyframe(ExactAutomationKeyframe::linear(
+                        TimelineTime::new(time, 3).expect("time"),
+                        value,
+                    ))
+                    .expect("key");
+            }
+            let ids = source.keyframes.iter().map(|key| key.id).collect::<Vec<_>>();
+            source.set_keyframes_interpolation(&ids, mode).expect("constraints");
+            let mut keys = source.capture_keyframes(&ids).expect("capture");
+            let offset = TimelineTime::new(7, 11).expect("offset");
+            for key in &mut keys {
+                key.id = KeyframeId::new();
+                key.time = key.time.checked_add(offset).expect("translate");
+            }
+            let mut target = ExactAutomationCurve::new(ParameterId::new_static("test.target"), 0.0)
+                .expect("target");
+            target.paste_keyframes(&keys).expect("one final normalization");
+            target.validate().expect("valid constraints");
+            for index in 0..=20 {
+                let time = TimelineTime::new(index, 30).expect("sample");
+                assert!(
+                    (source.evaluate(time).expect("source")
+                        - target
+                            .evaluate(time.checked_add(offset).expect("translate"))
+                            .expect("target"))
+                    .abs()
+                        < 1e-10
+                );
+            }
+            assert!(target.keyframes.iter().all(|key| !ids.contains(&key.id)));
+        }
+    }
+
     #[test]
     fn batch_key_removal_rejects_whole_selection_and_retains_original_final_value() {
         for mode in [

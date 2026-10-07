@@ -1,6 +1,6 @@
 //! Focused visual curve clipboard commands over the sole transient clipboard.
 
-use super::product_action::{ClipCurveClipboardOperation, ClipCurveClipboardPayload};
+use super::product_action::{ClipCurveClipboardPayload, CurveClipboardOperation};
 use super::*;
 
 /// Typed product refusal; diagnostic text is never used as a UI message key.
@@ -69,16 +69,16 @@ impl AppState {
             return false;
         }
         match &payload.operation {
-            ClipCurveClipboardOperation::Copy { keyframe_ids } => {
+            CurveClipboardOperation::Copy { keyframe_ids } => {
                 property.capture_complete_keyframes(keyframe_ids).is_ok()
             }
-            ClipCurveClipboardOperation::Cut { keyframe_ids } => {
+            CurveClipboardOperation::Cut { keyframe_ids } => {
                 self.active_sequence()
                     .and_then(|sequence| sequence.clip_track_location(payload.clip_id))
                     .is_some_and(|location| !location.is_locked)
                     && property.capture_complete_keyframes(keyframe_ids).is_ok()
             }
-            ClipCurveClipboardOperation::Paste {} => {
+            CurveClipboardOperation::Paste {} => {
                 self.can_paste_from_app_clipboard() && self.has_animation_clipboard()
             }
         }
@@ -99,10 +99,10 @@ impl AppState {
         if !property.descriptor.schema.is_animatable {
             return Err(CurveClipboardError::NotAnimated.into_core());
         }
-        let cut = matches!(&payload.operation, ClipCurveClipboardOperation::Cut { .. });
+        let cut = matches!(&payload.operation, CurveClipboardOperation::Cut { .. });
         match payload.operation {
-            ClipCurveClipboardOperation::Copy { keyframe_ids }
-            | ClipCurveClipboardOperation::Cut { keyframe_ids } => {
+            CurveClipboardOperation::Copy { keyframe_ids }
+            | CurveClipboardOperation::Cut { keyframe_ids } => {
                 if keyframe_ids.is_empty()
                     || keyframe_ids.iter().copied().collect::<HashSet<_>>().len()
                         != keyframe_ids.len()
@@ -145,7 +145,7 @@ impl AppState {
                 }
                 self.clipboard = Some(AppClipboard::AnimationKeyframes(clipboard));
             }
-            ClipCurveClipboardOperation::Paste {} => {
+            CurveClipboardOperation::Paste {} => {
                 let Some(AppClipboard::AnimationKeyframes(clipboard)) = &self.clipboard else {
                     return Err(CurveClipboardError::IncompatibleClipboard.into_core());
                 };
@@ -244,7 +244,7 @@ mod tests {
                     .into_external_action(),
             )
             .expect("focused Copy");
-        request.operation = ClipCurveClipboardOperation::Paste {};
+        request.operation = CurveClipboardOperation::Paste {};
         state
             .dispatch_action(
                 ProductAction::Clip(ClipProductAction::CurveClipboard(Box::new(request.clone())))
@@ -330,7 +330,7 @@ mod tests {
                 )
                 .expect("focused Copy");
             assert_eq!(state.project_author_generation(), generation);
-            request.operation = ClipCurveClipboardOperation::Paste {};
+            request.operation = CurveClipboardOperation::Paste {};
             state
                 .dispatch_action(
                     ProductAction::Clip(ClipProductAction::CurveClipboard(Box::new(
@@ -423,7 +423,7 @@ mod tests {
             keyframes: groups,
         })
         .expect("seed canonical group as one batch");
-        request.operation = ClipCurveClipboardOperation::Copy { keyframe_ids: ids.clone() };
+        request.operation = CurveClipboardOperation::Copy { keyframe_ids: ids.clone() };
         let original = state.active_sequence().expect("original").clone();
         let generation = state.project_author_generation();
         assert!(state.curve_clipboard_available(&request));
@@ -434,7 +434,7 @@ mod tests {
             )
             .expect("complete Copy");
         assert_eq!(state.project_author_generation(), generation);
-        request.operation = ClipCurveClipboardOperation::Paste {};
+        request.operation = CurveClipboardOperation::Paste {};
         assert!(state.curve_clipboard_available(&request));
         state
             .dispatch_action(
@@ -490,8 +490,7 @@ mod tests {
                 } else {
                     state.copy_selected_clips_to_clipboard().expect("previous Clip clipboard");
                 }
-                let ClipCurveClipboardOperation::Copy { mut keyframe_ids } = request.operation
-                else {
+                let CurveClipboardOperation::Copy { mut keyframe_ids } = request.operation else {
                     panic!("fixture Copy")
                 };
                 match case {
@@ -510,7 +509,7 @@ mod tests {
                     }
                     _ => state.selection.selected_clips.clear(),
                 }
-                request.operation = ClipCurveClipboardOperation::Cut { keyframe_ids };
+                request.operation = CurveClipboardOperation::Cut { keyframe_ids };
                 let before = state.active_sequence().expect("before").clone();
                 let clipboard = state.clipboard.clone();
                 let selected = state.animation_selection.selected_keyframes.clone();
@@ -547,7 +546,7 @@ mod tests {
         use crate::app::product_action::{ClipProductAction, ProductAction};
         use mondrian_timeline::clip::Transform2D;
         let (mut state, mut request) = clipboard_fixture();
-        let ClipCurveClipboardOperation::Copy { keyframe_ids } = request.operation.clone() else {
+        let CurveClipboardOperation::Copy { keyframe_ids } = request.operation.clone() else {
             panic!("Copy")
         };
         let bag = state
@@ -578,7 +577,7 @@ mod tests {
         state.set_animation_keyframe_selection(selected);
         let original = state.active_sequence().expect("original").clone();
         let generation = state.project_author_generation();
-        request.operation = ClipCurveClipboardOperation::Cut { keyframe_ids: keyframe_ids.clone() };
+        request.operation = CurveClipboardOperation::Cut { keyframe_ids: keyframe_ids.clone() };
         assert!(state.curve_clipboard_available(&request));
         state
             .dispatch_action(
@@ -693,7 +692,7 @@ mod tests {
             ClipCurveClipboardPayload {
                 clip_id,
                 parameter,
-                operation: ClipCurveClipboardOperation::Copy { keyframe_ids: ids },
+                operation: CurveClipboardOperation::Copy { keyframe_ids: ids },
             },
         )
     }
@@ -752,22 +751,19 @@ mod tests {
                 1 => request.parameter.animation_track_id = mondrian_core::AnimationTrackId::new(),
                 2 => {
                     request.operation =
-                        ClipCurveClipboardOperation::Copy { keyframe_ids: vec![KeyframeId::new()] }
+                        CurveClipboardOperation::Copy { keyframe_ids: vec![KeyframeId::new()] }
                 }
                 3 => {
-                    let ClipCurveClipboardOperation::Copy { keyframe_ids } = &mut request.operation
+                    let CurveClipboardOperation::Copy { keyframe_ids } = &mut request.operation
                     else {
                         panic!("copy");
                     };
                     keyframe_ids.push(keyframe_ids[0]);
                 }
-                4 => {
-                    request.operation =
-                        ClipCurveClipboardOperation::Copy { keyframe_ids: Vec::new() }
-                }
+                4 => request.operation = CurveClipboardOperation::Copy { keyframe_ids: Vec::new() },
                 5 => {
                     state.copy_selected_clips_to_clipboard().expect("legitimate Clip clipboard");
-                    request.operation = ClipCurveClipboardOperation::Paste {};
+                    request.operation = CurveClipboardOperation::Paste {};
                 }
                 6 => {
                     let time = TimelineTime::new(3, 4).expect("time");
@@ -784,12 +780,12 @@ mod tests {
                         .current_timeline_time()
                         .expect("clock")
                         .is_some_and(|current| current >= time));
-                    request.operation = ClipCurveClipboardOperation::Paste {};
+                    request.operation = CurveClipboardOperation::Paste {};
                 }
                 7 => {
                     state.active_sequence_mut_uncommitted().expect("late lock").video_tracks[0]
                         .is_locked = true;
-                    request.operation = ClipCurveClipboardOperation::Paste {};
+                    request.operation = CurveClipboardOperation::Paste {};
                 }
                 8 => {
                     let clip = state
@@ -799,8 +795,7 @@ mod tests {
                         .expect("clip");
                     let bag = clip.intrinsic_parameter_bag();
                     let rotation = bag.property(Transform2D::ROTATION_PATH).expect("rotation");
-                    let ClipCurveClipboardOperation::Copy { keyframe_ids } = &request.operation
-                    else {
+                    let CurveClipboardOperation::Copy { keyframe_ids } = &request.operation else {
                         panic!("copy");
                     };
                     let mut selected = keyframe_ids
@@ -824,11 +819,11 @@ mod tests {
                     state
                         .dispatch_action(mondrian_editor_state::Action::Copy)
                         .expect("legitimate multi-parameter clipboard");
-                    request.operation = ClipCurveClipboardOperation::Paste {};
+                    request.operation = CurveClipboardOperation::Paste {};
                 }
                 _ => {
                     state.clipboard = None;
-                    request.operation = ClipCurveClipboardOperation::Paste {};
+                    request.operation = CurveClipboardOperation::Paste {};
                 }
             }
             let sequence = state.active_sequence().expect("before").clone();

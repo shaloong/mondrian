@@ -33,13 +33,14 @@ impl AppState {
                         validate_clip_clipboard_targets(seq, &clipboard.entries).is_ok()
                     })
             }
-            None => false,
+            Some(AppClipboard::AudioAutomation(_)) | None => false,
         }
     }
 
     /// Kind of the sole current clipboard value, derived without separate state.
     pub fn active_clipboard_kind(&self) -> Option<AppClipboardKind> {
         match self.clipboard.as_ref()? {
+            AppClipboard::AudioAutomation(_) => Some(AppClipboardKind::AudioAutomation),
             AppClipboard::AnimationKeyframes(_) => Some(AppClipboardKind::AnimationKeyframes),
             AppClipboard::Clips(_) => Some(AppClipboardKind::Clips),
         }

@@ -1414,4 +1414,4 @@ error-curve-clipboard-empty = 关键帧剪贴板为空。
 error-curve-clipboard-missing-playhead = 请先选择序列并设置播放头位置，再粘贴关键帧。
 error-curve-clipboard-out-of-bounds = 整组关键帧必须位于目标片段内，请移动播放头或减少所选关键帧。
 
-curve-editor-visual-clipboard-keyboard-help = { curve-editor-selection-keyboard-help } Ctrl/Cmd＋C：复制所选关键帧；Ctrl/Cmd＋X：剪切所选关键帧，一次撤销；Ctrl/Cmd＋V：在播放头位置粘贴到此曲线，一次撤销。
+curve-editor-clipboard-keyboard-help = { curve-editor-selection-keyboard-help } Ctrl/Cmd＋C：复制所选关键帧；Ctrl/Cmd＋X：剪切所选关键帧，一次撤销；Ctrl/Cmd＋V：在播放头位置粘贴到此曲线，一次撤销。

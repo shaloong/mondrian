@@ -872,3 +872,13 @@ key in an edit outcome is not the selection authority for a batch. The same
 post-commit rule applies to intrinsic Clip and Effect curves; rejection changes
 neither selection nor history. Selection projections compare currently present
 keys, so real Undo/Redo can remove and restore the complete selected group.
+
+### Exact numeric curve group capture and paste
+
+Core ExactAutomationCurve captures a complete nonempty stable selection in author
+order, retaining raw f64 values, exact times, manual controls and tangent intent.
+Empty, duplicate or missing identities refuse the complete capture. Group paste
+replaces keys at the supplied exact times on a detached candidate, normalizes
+constraints once against final neighbors and validates before publication.
+Invalid groups cannot partially replace destination keys. This is the numeric
+foundation for focused audio clipboard integration; App wiring remains separate.

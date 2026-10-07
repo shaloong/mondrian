@@ -76,6 +76,11 @@ pub enum AudioAutomationTarget {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AudioAutomationEdit {
+    /// Paste one complete exact group with a single final constraint normalization.
+    PasteKeyframes {
+        /// Complete fresh-identity keys in the addressed owner's time domain.
+        keyframes: Vec<ExactAutomationKeyframe>,
+    },
     /// Remove a unique nonempty key set with one constraint normalization.
     RemoveKeyframes {
         /// Stable keys in the addressed curve.
@@ -205,6 +210,11 @@ impl AudioAutomationCurveContract {
             })
             .map_err(AudioAutomationEditError::AuthorState)
     }
+    /// Definition schema used to admit complete canonical clipboard values.
+    pub fn schema(&self) -> &ParameterSchema {
+        &self.schema
+    }
+
     /// Prepare one exact curve without publishing state, generation or author history.
     /// Identity, scalar and handle values, animation and interpolation are definition-admitted.
     pub fn preview_edit(
@@ -857,6 +867,9 @@ fn edit_curve(
     schema: &ParameterSchema,
 ) -> Result<(), AudioAutomationEditError> {
     match edit {
+        AudioAutomationEdit::PasteKeyframes { keyframes } => {
+            curve.paste_keyframes(keyframes).map_err(invalid_automation)?;
+        }
         AudioAutomationEdit::RemoveKeyframes { keyframe_ids, retain_time } => {
             curve.remove_keyframes(keyframe_ids, *retain_time).map_err(invalid_automation)?;
         }
@@ -1014,6 +1027,72 @@ fn processor_mut<'a>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clipboard_paste_group_shares_definition_preview_author_codec_and_locks() {
+        let mut sequence = Sequence::new("Clipboard group");
+        let track_id = sequence.audio_tracks[0].id;
+        let target = AudioAutomationTarget::ChannelFader {
+            owner: AudioChannelStripOwner::Track { track_id },
+        };
+        let keys = vec![
+            ExactAutomationKeyframe::linear(TimelineTime::new(1, 3).expect("exact"), -24.125),
+            ExactAutomationKeyframe::linear(TimelineTime::new(7, 11).expect("exact"), -12.2),
+        ];
+        let request = AudioAutomationEditRequest {
+            target: target.clone(),
+            edit: AudioAutomationEdit::PasteKeyframes { keyframes: keys.clone() },
+        };
+        let decoded: AudioAutomationEditRequest =
+            serde_json::from_str(&serde_json::to_string(&request).expect("encode"))
+                .expect("decode");
+        assert_eq!(decoded, request);
+        let inspection = inspect_audio_automation(&sequence, &target).expect("definition");
+        let source = ExactAutomationCurve::new(
+            inspection.parameter_id().clone(),
+            inspection.default_value(),
+        )
+        .expect("empty source");
+        let preview = inspection
+            .curve_contract()
+            .preview_edit(&source, &request.edit)
+            .expect("whole group preview");
+        assert!(apply_audio_automation_edit(&mut sequence, &request).expect("commit").changed);
+        let authored = inspect_audio_automation(&sequence, &target)
+            .expect("definition")
+            .curve()
+            .expect("curve")
+            .clone();
+        assert_eq!(authored, preview);
+        assert_eq!(authored.keyframes[0], keys[0]);
+        assert_eq!(authored.keyframes[1], keys[1]);
+        let before = sequence.clone();
+        assert!(!apply_audio_automation_edit(&mut sequence, &request).expect("noop").changed);
+        assert_eq!(sequence, before);
+        let mut invalid_keys = keys;
+        invalid_keys[1].value = 1e200;
+        let invalid = AudioAutomationEditRequest {
+            target: target.clone(),
+            edit: AudioAutomationEdit::PasteKeyframes { keyframes: invalid_keys },
+        };
+        assert!(inspect_audio_automation(&sequence, &target)
+            .expect("definition")
+            .curve_contract()
+            .preview_edit(&authored, &invalid.edit)
+            .is_err());
+        assert!(apply_audio_automation_edit(&mut sequence, &invalid).is_err());
+        assert_eq!(
+            sequence, before,
+            "definition refuses before publishing any key"
+        );
+        sequence.audio_tracks[0].is_locked = true;
+        let locked = sequence.clone();
+        assert!(matches!(
+            apply_audio_automation_edit(&mut sequence, &request),
+            Err(AudioAutomationEditError::Blocked(_))
+        ));
+        assert_eq!(sequence, locked);
+    }
+
     use super::*;
     use crate::audio::{
         AudioProcessorInstance, AudioRoute, AudioRouteDestination, AudioRouteSource,

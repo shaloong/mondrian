@@ -3972,3 +3972,17 @@ ContextMenu starts with no selection until hover or keyboard navigation chooses
 a row. Mouse hover may clear the selection; Enter/Space with no highlighted row
 is an owned refusal and never falls back to another command. Activation always
 matches the current painted row, independently of how the popup was opened.
+
+### Focused audio curve clipboard commands
+
+Audio CurveEditor callbacks and localized local Cut/Copy/Paste rows lower the same
+closed AudioCurveClipboardPayload as root edit commands. Stable Sequence/target
+identity and explicit shared-Scope occurrence accompany complete key IDs. The App
+uses its sole clipboard, performs fresh author admission and publishes Cut capture
+only after one successful author edit. Paste publishes fresh selected IDs through
+the existing AnimationSelectionState after commit. Panel-model composition joins
+that typed Sequence/target selection to all audio curves; CurveEditor's existing
+selection projection replaces local selection only when the explicit group changes.
+Missing Undo keys filter out at the widget boundary and restored Redo keys reappear.
+This does not put selection into author history or introduce a second clipboard.
+Command readiness and the wider owner/native matrix remain acceptance work.

@@ -1678,3 +1678,20 @@ probed stereo WAV, definition-pinned instances, author-session interpolation
 edits, durable project/library reopening and shared AudioProgramRuntime rendering
 with different realtime/offline block partitions. Its receipt must name the
 actually tested product and fixture hashes; compile-only output is not acceptance.
+
+### Complete exact clipboard group authoring
+
+Core capture retains exact authored keys and refuses incomplete stable selection.
+Timeline PasteKeyframes prepares the complete target curve once, normalizes final
+constraints once and applies the existing numeric definition and owner lock
+admission. No per-key author transaction or alternate audio evaluation path is
+introduced. The App audio curve command carries Sequence identity, exact target,
+explicit shared-Scope occurrence and the common Copy/Cut/Paste operation. Its
+sole transient clipboard stores complete relative-time keys and numeric unit/type.
+Capture validates the whole selection before publication; Cut commits once first.
+Paste creates fresh identities, maps current exact owner time, checks whole
+Component extent and reuses Timeline batch admission. Sequence curves remain
+unbounded by the viewport. Global Paste refuses an audio payload without an
+explicit focused target. Localized actual curve menus share the same commands.
+Real Host Copy/Cut and App codec/history/Unicode reopen matrices pass; new-group
+selection after Paste and wider owner/native acceptance remain to qualify.

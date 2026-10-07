@@ -72,6 +72,9 @@ impl AppState {
             }
             AudioProductAction::SetTrackSolo(payload) => self.set_audio_track_solo(payload),
             AudioProductAction::EditAutomation(request) => self.edit_audio_automation(request),
+            AudioProductAction::CurveClipboard(payload) => {
+                self.dispatch_audio_curve_clipboard(*payload)
+            }
             AudioProductAction::EditComponent(request) => self.edit_audio_component(request),
             AudioProductAction::EditProcessorRack(request) => {
                 if matches!(request.edit, AudioProcessorRackEdit::RebindNative { .. }) {
@@ -336,7 +339,10 @@ impl AppState {
         })
     }
 
-    fn edit_audio_automation(&mut self, request: AudioAutomationEditRequest) -> Result<()> {
+    pub(super) fn edit_audio_automation(
+        &mut self,
+        request: AudioAutomationEditRequest,
+    ) -> Result<()> {
         let sequence_id =
             self.active_sequence_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
                 step_id: "audio_edit_automation".to_owned(),

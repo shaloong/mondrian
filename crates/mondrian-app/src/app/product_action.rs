@@ -230,6 +230,8 @@ pub const AUDIO_EDIT_CHANNEL_STRIP: &str = "edit_channel_strip";
 pub const AUDIO_EDIT_ROUTING: &str = "edit_routing";
 /// External action name for one stable-address audio automation edit.
 pub const AUDIO_EDIT_AUTOMATION: &str = "edit_automation";
+/// External action name for focused audio curve clipboard operations.
+pub const AUDIO_CURVE_CLIPBOARD: &str = "curve_clipboard";
 /// External action name for one placement-local Audio Component edit.
 pub const AUDIO_EDIT_COMPONENT: &str = "edit_component";
 /// External action name for one open-Session Track solo change.
@@ -467,6 +469,8 @@ pub enum AudioProductAction {
     SetTrackSolo(AudioTrackSoloPayload),
     /// Apply one exact owner-time curve mutation.
     EditAutomation(AudioAutomationEditRequest),
+    /// Capture or paste complete keys through the sole transient clipboard.
+    CurveClipboard(Box<AudioCurveClipboardPayload>),
     /// Apply one stable-address placement-local Component mutation.
     EditComponent(AudioComponentEditRequest),
     /// Apply one stable-address Rack mutation in one author transaction.
@@ -730,6 +734,9 @@ impl ProductAction {
                         namespace, name, payload,
                     )?),
                 ))),
+                AUDIO_CURVE_CLIPBOARD => Ok(Some(Self::Audio(AudioProductAction::CurveClipboard(
+                    Box::new(decode_payload(namespace, name, payload)?),
+                )))),
                 AUDIO_EDIT_AUTOMATION => Ok(Some(Self::Audio(AudioProductAction::EditAutomation(
                     decode_payload(namespace, name, payload)?,
                 )))),
@@ -1118,6 +1125,11 @@ impl ProductAction {
             Self::Audio(AudioProductAction::SetTrackSolo(payload)) => (
                 AUDIO_NAMESPACE,
                 AUDIO_SET_TRACK_SOLO,
+                serde_json::json!(payload),
+            ),
+            Self::Audio(AudioProductAction::CurveClipboard(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_CURVE_CLIPBOARD,
                 serde_json::json!(payload),
             ),
             Self::Audio(AudioProductAction::EditAutomation(request)) => (
@@ -2695,7 +2707,7 @@ impl ClipCurveEditPayload {
 /// Clipboard intent for a complete stable selection or the focused paste target.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ClipCurveClipboardOperation {
+pub enum CurveClipboardOperation {
     /// Capture a unique nonempty set of complete keys.
     Copy {
         /// Stable authored identities in the addressed property.
@@ -2710,6 +2722,20 @@ pub enum ClipCurveClipboardOperation {
     Paste {},
 }
 
+/// Focus-qualified clipboard request for one exact audio curve and occurrence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioCurveClipboardPayload {
+    /// Sequence that owns the target; another active sequence never adopts it.
+    pub sequence_id: SequenceId,
+    /// Stable curve address, independent of its visible panel or row.
+    pub target: mondrian_timeline::AudioAutomationTarget,
+    /// Explicit occurrence for a shared Processing Scope's owner-time mapping.
+    pub scope_occurrence: Option<mondrian_timeline::AudioComponentAddress>,
+    /// Complete capture or focused target paste.
+    pub operation: CurveClipboardOperation,
+}
+
 /// Focus-qualified clipboard request; parameter identity names its exact instance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2719,7 +2745,7 @@ pub struct ClipCurveClipboardPayload {
     /// Exact property instance; no display path or parameter-name fallback.
     pub parameter: AnimationParameterAddress,
     /// Complete selection capture or explicit target paste.
-    pub operation: ClipCurveClipboardOperation,
+    pub operation: CurveClipboardOperation,
 }
 
 /// Edit one Clip-owned numeric curve through stable author identity.
@@ -2765,6 +2791,9 @@ impl<'a> ProductActionAvailability<'a> {
             ProductAction::Timeline(action) => self.allows_timeline(action),
             ProductAction::Track(action) => self.allows_track(action),
             ProductAction::VideoTransition(action) => self.allows_video_transition(action),
+            ProductAction::Audio(AudioProductAction::CurveClipboard(payload)) => {
+                self.state.audio_curve_clipboard_available(payload)
+            }
             ProductAction::Audio(_) => self.state.active_sequence().is_some(),
             ProductAction::Asset(action) => self.allows_asset(action),
             ProductAction::Viewer(action) => self.allows_viewer(action),
@@ -3940,9 +3969,9 @@ mod tests {
                 .expect("parameter ID"),
         };
         for operation in [
-            ClipCurveClipboardOperation::Cut { keyframe_ids: vec![KeyframeId::new()] },
-            ClipCurveClipboardOperation::Copy { keyframe_ids: vec![KeyframeId::new()] },
-            ClipCurveClipboardOperation::Paste {},
+            CurveClipboardOperation::Cut { keyframe_ids: vec![KeyframeId::new()] },
+            CurveClipboardOperation::Copy { keyframe_ids: vec![KeyframeId::new()] },
+            CurveClipboardOperation::Paste {},
         ] {
             let expected = ProductAction::Clip(ClipProductAction::CurveClipboard(Box::new(
                 ClipCurveClipboardPayload {

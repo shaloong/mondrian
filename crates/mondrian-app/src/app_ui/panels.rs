@@ -399,7 +399,7 @@ impl AppUiPanelModels {
             ViewerPanelModel::from_app_state_with_preview_and_locale(state, preview, localizer);
         let scopes = ScopesPanelModel::from_viewer(&viewer);
         let input_pipeline = asset_input_pipeline_for_state(state);
-        Self {
+        let mut models = Self {
             curve_author_scope: state.authoring_session_id().zip(state.active_sequence_id()),
             locale: inspector_localizer.locale(),
             panel_titles: localized_panel_titles(localizer),
@@ -422,6 +422,50 @@ impl AppUiPanelModels {
                 state,
                 inspector_localizer,
             ),
+        };
+        models.project_audio_curve_selection(state);
+        models
+    }
+
+    fn project_audio_curve_selection(&mut self, state: &AppState) {
+        fn project_rack(rack: &mut AudioProcessorRackModel, state: &AppState) {
+            if let Some(curve) = &mut rack.scope_input_gain_automation {
+                curve.project_selection(state);
+            }
+            for processor in &mut rack.processors {
+                for parameter in &mut processor.parameters {
+                    if let Some(curve) = &mut parameter.automation {
+                        curve.project_selection(state);
+                    }
+                }
+            }
+        }
+        for component in &mut self.inspector.audio_components {
+            for curve in [
+                &mut component.volume_automation,
+                &mut component.pan_automation,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                curve.project_selection(state);
+            }
+        }
+        for rack in &mut self.inspector.audio_processor_racks {
+            project_rack(rack, state);
+        }
+        for channel in &mut self.mixer.channels {
+            if let Some(curve) = &mut channel.fader_automation {
+                curve.project_selection(state);
+            }
+            for route in &mut channel.outbound_routes {
+                if let Some(curve) = &mut route.gain_automation {
+                    curve.project_selection(state);
+                }
+            }
+            for rack in &mut channel.processor_racks {
+                project_rack(rack, state);
+            }
         }
     }
 

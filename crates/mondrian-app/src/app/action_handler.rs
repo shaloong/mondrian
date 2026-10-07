@@ -1030,7 +1030,7 @@ impl AppState {
                 self.paste_animation_keyframes_from_action()
             }
             Some(AppClipboardKind::Clips) => self.paste_clip_clipboard_from_action(),
-            None => Err(action_not_executed(
+            Some(AppClipboardKind::AudioAutomation) | None => Err(action_not_executed(
                 "paste",
                 "剪贴板为空或当前没有可用的粘贴目标",
             )),

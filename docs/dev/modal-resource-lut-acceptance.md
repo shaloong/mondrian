@@ -1768,3 +1768,43 @@ representation is f32 while canonical author channels retain f64. The accepted
 focused .25/.5/.75 fixture proves those values and handles, not arbitrary raw
 Number bits. A source audit and unexecuted reproduction draft identify this next
 qualification; they are not reported as an observed runtime failure.
+
+## Audio automation clipboard and history acceptance
+
+On 2026-10-07, audio curves gained the same focused Copy/Cut/Paste protocol as
+visual curves. Capture preserves canonical f64 values, exact time, handles and
+constrained tangent intent. Paste generates fresh identities, validates the
+complete group against the destination definition and owner time, then commits
+one authoring transaction. Cut publishes the clipboard only after a successful
+authoring commit. Invalid intents and locked mutations retain clipboard,
+document, generations and history.
+
+Actual Host Copy/Cut failures were reproduced (0 passed, 2 failed), then repaired.
+A separate actual Paste failure exposed selection retaining the old key after
+commit (2 passed, 1 failed). Post-edit selection now joins the existing panel
+projection by exact sequence and audio target. The retained Host regressions pass
+(3 passed), including subsequent Cut preserving the original key and Undo.
+
+Private App tests exercise Linear, Auto Bezier and Continuous Bezier capture,
+shifted paste, raw values and handles, one history entry, Undo, save of the undone
+state, Redo, save of the edited state and fresh Unicode-path reopen of both.
+Nine invalid intents and locked Copy/Cut/Paste exercise refusal atomicity.
+
+Final gates ran sequentially against frozen source:
+
+| Gate | Result |
+| --- | --- |
+| Core all-feature library tests | 472 passed, 0 failed, 1 ignored; 6.56s |
+| Timeline all-feature library tests | 241 passed, 0 failed, 0 ignored; 0.36s |
+| App all-feature library tests | 2606 passed, 0 failed, 68 ignored; 368.48s |
+| UI widgets all-feature library tests | 1105 passed, 0 failed, 0 ignored; 301.52s |
+| Workspace/all-target/all-feature Clippy, `-D warnings` | Passed; 5m11s |
+| Formatting and diff checks | Passed |
+
+App includes the existing real modal Tab/Shift+Tab, disabled Apply traversal,
+resource transactions and real cube LUT Undo/save/reopen regressions. Ignored
+cases are not counted as executed. These gates do not constitute a new native
+plugin or encoded LUT receipt; the source-bound native receipts above remain
+historical. Audio Component/Scope/route/rack boundary matrices, root menu and
+Undo/Redo selection projection, read-only inspection and newly pasted native
+CLAP/VST3 output still require acceptance. The full product goal remains active.

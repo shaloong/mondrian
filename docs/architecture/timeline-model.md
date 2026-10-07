@@ -1659,3 +1659,11 @@ publication; no sequential per-key transaction is used.
 
 
 Audio batch interpolation is one AudioAutomationEditRequest, with definition-backed complete-selection preparation. Constraint-created controls must fit current hard bounds; refusal preserves the whole Sequence, and later legal edits remain usable.
+
+### Exact audio automation group paste
+
+AudioAutomationEdit::PasteKeyframes lowers one complete exact group through Core's
+batch paste primitive. AudioAutomationCurveContract uses the same definition
+admission for preview and author publication. The existing target resolution,
+owner locks, full AudioProgram validation and no-op outcome remain the sole
+Timeline authoring path. App clipboard payloads never bypass this edit interface.

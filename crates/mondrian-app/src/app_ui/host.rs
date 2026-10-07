@@ -5714,6 +5714,208 @@ mod tests {
     }
 
     #[test]
+    fn focused_audio_curve_copy_uses_stable_keys_without_authoring() {
+        assert_focused_audio_curve_clipboard(false, false);
+    }
+
+    #[test]
+    fn focused_audio_curve_cut_retains_clips_and_commits_one_restoring_undo() {
+        assert_focused_audio_curve_clipboard(true, false);
+    }
+
+    #[test]
+    fn focused_audio_curve_paste_selects_new_group_and_subsequent_cut_keeps_original() {
+        assert_focused_audio_curve_clipboard(false, true);
+    }
+
+    fn assert_focused_audio_curve_clipboard(cut: bool, paste: bool) {
+        use crate::app::ui_actions::audio_automation_edit_action;
+        use mondrian_core::{ExactAutomationKeyframe, TimeScale};
+        use mondrian_timeline::{
+            inspect_audio_automation, AudioAutomationEdit, AudioAutomationEditRequest,
+            AudioAutomationTarget, AudioChannelStripOwner,
+        };
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        use mondrian_ui_core::types::KeyCode;
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1600.0);
+        let mut state = workspace_app_state_with_timed_solid();
+        let sequence = state.active_sequence().expect("sequence");
+        let target = AudioAutomationTarget::ChannelFader {
+            owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+        };
+        let time = sequence
+            .total_duration()
+            .expect("duration")
+            .checked_scale(TimeScale::new(1, 2).expect("half"))
+            .expect("middle");
+        let keyframe = ExactAutomationKeyframe::linear(time, -24.125);
+        let key_id = keyframe.id;
+        state
+            .dispatch_action(audio_automation_edit_action(AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+            }))
+            .expect("authored audio key");
+        let original = state.active_sequence().expect("original").clone();
+        let generation = state.project_author_generation();
+        let history = state.authoring_history().expect("history").diagnostics();
+        assert!(state.active_clipboard_kind().is_none());
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences {
+                workspace_preset: WorkspacePreset::Audio,
+                ..Default::default()
+            },
+            temp_preferences_path("focused-audio-clipboard"),
+        );
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let curve_id = panel_curve_with_point_count(host.active_root(), PanelKind::Mixer, false, 3)
+            .expect("actual audio curve with one authored key and two virtual boundaries");
+        let point = {
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let editor = tree
+                .get(curve_id)
+                .expect("curve")
+                .as_any()
+                .expect("type")
+                .downcast_ref::<mondrian_ui_widgets::CurveEditor>()
+                .expect("editor");
+            editor.point_position(editor.points()[1])
+        };
+        let pending = PendingUiActions::default();
+        let dispatch = |action| pending.push(action);
+        let mut router = EventRouter::new(host.active_root().id());
+        for event in [
+            UiEvent::MouseDown {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseUp {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            UiEvent::KeyDown {
+                key: if cut { KeyCode::X } else { KeyCode::C },
+                modifiers: Modifiers::ctrl(),
+            },
+        ] {
+            router.route(
+                event,
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &dispatch,
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        }
+        assert_eq!(
+            host.app_state().active_clipboard_kind(),
+            Some(crate::app::AppClipboardKind::AudioAutomation),
+            "focused audio keys must be captured into the sole App clipboard"
+        );
+        let after = host.app_state().active_sequence().expect("after").clone();
+        assert_eq!(
+            after.video_tracks, original.video_tracks,
+            "audio Cut cannot cut Clips"
+        );
+        let inspection = inspect_audio_automation(&after, &target).expect("same stable target");
+        if cut {
+            assert!(inspection.curve().is_none_or(|curve| curve.keyframes.is_empty()));
+            assert_eq!(host.app_state().project_author_generation(), generation + 1);
+            assert_eq!(
+                host.app_state()
+                    .authoring_history()
+                    .expect("history")
+                    .diagnostics()
+                    .undo_entries,
+                history.undo_entries + 1
+            );
+            pending.push(Action::Undo);
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("one Undo")
+                .author_state_eq_ignoring_revision(&original));
+        } else {
+            assert_eq!(inspection.curve().expect("curve").keyframes[0].id, key_id);
+            assert!(after.author_state_eq_ignoring_revision(&original));
+            assert_eq!(host.app_state().project_author_generation(), generation);
+            assert_eq!(
+                host.app_state().authoring_history().expect("history").diagnostics(),
+                history
+            );
+            if paste {
+                router.route(
+                    UiEvent::KeyDown { key: KeyCode::V, modifiers: Modifiers::ctrl() },
+                    &mut WidgetTreeView::new(host.active_root_mut()),
+                    &dispatch,
+                );
+                host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+                let pasted_state = host.app_state().active_sequence().expect("pasted").clone();
+                let pasted_keys = inspect_audio_automation(&pasted_state, &target)
+                    .expect("target")
+                    .curve()
+                    .expect("curve")
+                    .keyframes
+                    .clone();
+                assert_eq!(pasted_keys.len(), 2);
+                let fresh = pasted_keys.iter().find(|key| key.id != key_id).expect("fresh key").id;
+                assert_eq!(host.app_state().project_author_generation(), generation + 1);
+                let refreshed_id =
+                    panel_curve_with_point_count(host.active_root(), PanelKind::Mixer, false, 3)
+                        .expect("refreshed audio curve");
+                assert_eq!(
+                    router.focused(),
+                    Some(refreshed_id),
+                    "Paste keeps the audio keyboard owner"
+                );
+                {
+                    let tree = WidgetTreeView::new(host.active_root_mut());
+                    let editor = tree
+                        .get(refreshed_id)
+                        .expect("curve")
+                        .as_any()
+                        .expect("type")
+                        .downcast_ref::<mondrian_ui_widgets::CurveEditor>()
+                        .expect("editor");
+                    assert_eq!(editor.selected_keyframe_ids(), vec![fresh],
+                        "Paste must select the new group instead of leaving the original keys selected");
+                }
+                router.route(
+                    UiEvent::KeyDown { key: KeyCode::X, modifiers: Modifiers::ctrl() },
+                    &mut WidgetTreeView::new(host.active_root_mut()),
+                    &dispatch,
+                );
+                host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+                let cut_state = host.app_state().active_sequence().expect("focused Cut").clone();
+                let remaining = inspect_audio_automation(&cut_state, &target)
+                    .expect("target")
+                    .curve()
+                    .expect("original still present")
+                    .keyframes
+                    .clone();
+                assert_eq!(remaining.len(), 1);
+                assert_eq!(
+                    remaining[0].id, key_id,
+                    "Cut after Paste cannot remove the original group"
+                );
+                assert_eq!(host.app_state().project_author_generation(), generation + 2);
+                pending.push(Action::Undo);
+                host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+                assert!(host
+                    .app_state()
+                    .active_sequence()
+                    .expect("one Undo")
+                    .author_state_eq_ignoring_revision(&pasted_state));
+            }
+        }
+    }
+
+    #[test]
     fn focused_curve_cut_keeps_clip_and_removes_only_the_complete_key_group() {
         use mondrian_core::automation::{Keyframe, PropertyMutation};
         use mondrian_core::{PropertyHost, TimeScale};

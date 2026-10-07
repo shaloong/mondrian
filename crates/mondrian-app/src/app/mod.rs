@@ -110,6 +110,7 @@ pub(crate) use animation_authoring::{
 };
 mod animation_state;
 mod audio_authoring;
+mod audio_curve_clipboard;
 mod audio_idle_warmup;
 mod audio_monitoring;
 mod clip_authoring;
@@ -371,10 +372,19 @@ pub struct SelectionState {
 
 #[derive(Debug, Clone, Default)]
 pub struct AnimationSelectionState {
+    pub(crate) audio_curve: Option<AudioCurveSelection>,
     pub active_property: Option<AnimationPropertySelection>,
     pub remembered_active_properties: HashMap<ClipId, AnimationParameterAddress>,
     pub selected_keyframes: HashSet<AnimationKeyframeSelection>,
     pub bubble_host: Option<AnimationBubbleHost>,
+}
+
+/// Explicit post-edit audio selection retained through temporarily absent Undo keys.
+#[derive(Debug, Clone)]
+pub(crate) struct AudioCurveSelection {
+    pub(crate) sequence_id: SequenceId,
+    pub(crate) target: mondrian_timeline::AudioAutomationTarget,
+    pub(crate) keyframe_ids: Vec<KeyframeId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -418,6 +428,7 @@ struct ClipClipboardEntry {
 /// Sole transient clipboard payload; copying replaces the previous author intent.
 #[derive(Debug, Clone)]
 enum AppClipboard {
+    AudioAutomation(audio_curve_clipboard::AudioAutomationClipboard),
     AnimationKeyframes(AnimationClipboard),
     Clips(ClipClipboard),
 }
@@ -425,6 +436,8 @@ enum AppClipboard {
 /// Active app clipboard payload kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppClipboardKind {
+    /// Complete exact keys copied from a focused audio automation curve.
+    AudioAutomation,
     /// Animation keyframes copied from the selected clip.
     AnimationKeyframes,
     /// Timeline clips copied from the active sequence.
