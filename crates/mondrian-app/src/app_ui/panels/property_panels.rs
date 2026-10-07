@@ -4346,7 +4346,7 @@ mod temporal_handle_tests {
             UiEvent::MouseDown {
                 position: inserted,
                 button: MouseButton::Left,
-                modifiers: Modifiers::none(),
+                modifiers: Modifiers::ctrl(),
             },
         );
         assert!(editor.has_active_pointer_interaction());
@@ -4892,7 +4892,11 @@ mod temporal_handle_tests {
                 UiEvent::MouseDown {
                     position,
                     button: MouseButton::Left,
-                    modifiers: Modifiers::none(),
+                    modifiers: if insertion {
+                        Modifiers::ctrl()
+                    } else {
+                        Modifiers::none()
+                    },
                 },
                 UiEvent::MouseUp {
                     position,
@@ -5710,7 +5714,7 @@ mod temporal_handle_tests {
             UiEvent::MouseDown {
                 position,
                 button: MouseButton::Left,
-                modifiers: Modifiers::none(),
+                modifiers: Modifiers::ctrl(),
             },
             UiEvent::MouseUp {
                 position,

@@ -2124,3 +2124,37 @@ arbitrary vendor plugins, multi-bus/MIDI/editor completeness, all monitor edges
 or macOS. Marquee selection and the wider original workflow, platform, i18n and
 performance obligations remain open. Subsequent documentation-only commits do
 not imply a rebuilt product at a different source revision.
+## Stable keyframe marquee selection
+
+Blank dragging in an authored curve now selects stable key IDs. Plain dragging
+replaces selection, Shift adds, and Ctrl/Cmd+Shift toggles against the selection
+at pointer-down. Ctrl/Cmd clicking a key toggles it; Ctrl/Cmd clicking blank space
+explicitly inserts a key. Transfer curves without authored selection retain
+point insertion. English and Chinese interaction help describe these controls.
+
+Selection alone never changes project author generation or history. Read-only
+curves support the same inspection. Escape restores the original selection;
+layout changes and owner replacement cancel transient selection and release the
+owned capture. Dense keys with coincident projected centers remain distinct by
+ID. Nonfinite motion is ignored, and viewport boundary points are excluded.
+Painting consumes semantic theme tokens.
+
+Local Windows validation before commit:
+
+- CurveEditor: 93 passed, 0 failed, 0 ignored (4.38s).
+- Actual Host group-pointer routing: 6 passed, 0 failed, 0 ignored (14.71s),
+  including Auto and Continuous marquee followed by joint dragging, refusal,
+  cancellation, Undo, saved live Redo and fresh Unicode reopen.
+- Temporal App tests: 30 passed, 0 failed, 1 performance test ignored.
+- Complete App library: 2615 passed, 0 failed, 68 ignored (655.07s).
+- Workspace/all-targets/all-features Clippy with warnings denied: passed (2m38s).
+- Formatting and diff whitespace checks: passed.
+
+The valid authored fixture reproduced blank insertion before the repair; dense
+selection also reproduced capture surviving a resize. Both regressions now pass.
+Older insertion tests use the explicit primary-modifier chord and retain their
+original author-ID, value and history assertions. Ignored native tests are not
+counted as executed by the complete App run. The preceding c47b9a5 native receipt
+retains its named source scope; this marquee change has not yet received a fresh
+product-binary qualification. Broader plugin, platform, i18n, output and
+performance obligations remain open under the original goal.

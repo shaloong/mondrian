@@ -4065,3 +4065,34 @@ Audio live projection includes exact coordinates for all known authored key IDs,
 including those moved outside the visible interval. Painting still clips the
 current viewport. This prevents a moved key remaining as a stale edge point and
 does not extend the Component author bounds or invent another curve evaluator.
+
+### Pure authored-key marquee inspection
+
+Temporal curves with stable-key selection use blank-space left dragging for
+marquee selection. Plain input replaces the selection, Shift adds, and
+Ctrl/Cmd+Shift toggles against the frozen selection at pointer press. Selection
+is calculated from visible stable-key centers and clipped logical plot geometry;
+virtual viewport boundaries are excluded. Ctrl/Cmd clicking a key toggles it,
+while Ctrl/Cmd clicking blank space explicitly inserts an authored key. Transfer
+curves retain their point-editing interaction because they have no authored-key
+selection contract.
+
+Marquee capture changes only the existing widget inspection selection. It never
+opens an author gesture, emits a parameter edit or consumes an Undo entry.
+Escape restores the original stable selection; release retains the final set.
+Read-only curves expose the same inspection behavior. Nonfinite pointer events
+leave the last admitted selection intact, and repeated movement re-evaluates
+the frozen origin rather than cumulatively toggling keys.
+
+Owner replacement transfers the pre-marquee inspection and an obligation to
+release the previous widget's capture, without transferring drag geometry or
+callbacks. Programmatic geometry replacement discards the selection capture.
+Changing plot layout during selection restores the original selection and
+defers capture release to the next routed event, preventing stale rectangle
+coordinates after native window resizing. Distinct exact key identities that
+share a projected center remain individually included by the marquee.
+The selection rectangle consumes semantic theme colors and border spacing;
+English/Chinese help exposes the insertion and modifier policy. Existing
+complete-selection author actions and clipboard dispatch consume the resulting
+stable IDs, so marquee does not introduce an alternate author or selection
+service.

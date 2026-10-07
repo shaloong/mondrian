@@ -6470,22 +6470,45 @@ mod tests {
 
     #[test]
     fn inspector_group_pointer_grab_retains_the_complete_stable_selection() {
-        assert_inspector_group_pointer_transform(mondrian_core::InterpolationType::Linear);
+        assert_inspector_group_pointer_transform(mondrian_core::InterpolationType::Linear, false);
     }
 
     #[test]
     fn inspector_auto_group_pointer_transform_preserves_history_and_reopen() {
-        assert_inspector_group_pointer_transform(mondrian_core::InterpolationType::AutoBezier);
+        assert_inspector_group_pointer_transform(
+            mondrian_core::InterpolationType::AutoBezier,
+            false,
+        );
     }
 
     #[test]
     fn inspector_continuous_group_pointer_transform_preserves_history_and_reopen() {
         assert_inspector_group_pointer_transform(
             mondrian_core::InterpolationType::ContinuousBezier,
+            false,
         );
     }
 
-    fn assert_inspector_group_pointer_transform(interpolation: mondrian_core::InterpolationType) {
+    #[test]
+    fn inspector_auto_marquee_then_group_pointer_preserves_history_and_reopen() {
+        assert_inspector_group_pointer_transform(
+            mondrian_core::InterpolationType::AutoBezier,
+            true,
+        );
+    }
+
+    #[test]
+    fn inspector_continuous_marquee_then_group_pointer_preserves_history_and_reopen() {
+        assert_inspector_group_pointer_transform(
+            mondrian_core::InterpolationType::ContinuousBezier,
+            true,
+        );
+    }
+
+    fn assert_inspector_group_pointer_transform(
+        interpolation: mondrian_core::InterpolationType,
+        marquee: bool,
+    ) {
         use mondrian_core::automation::{Keyframe, PropertyMutation};
         use mondrian_core::{PropertyHost, TimeScale};
         use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
@@ -6545,17 +6568,27 @@ mod tests {
         let pending = PendingUiActions::default();
         let dispatch = |action| pending.push(action);
         let mut router = EventRouter::new(host.active_root().id());
-        for position in positions {
+        if marquee {
+            let origin = Point::new(
+                positions[0].x - 12.0,
+                positions[0].y.max(positions[1].y) + 12.0,
+            );
+            let end = Point::new(
+                positions[1].x + 12.0,
+                positions[0].y.min(positions[1].y) - 12.0,
+            );
             for event in [
                 UiEvent::MouseDown {
-                    position,
+                    position: origin,
                     button: MouseButton::Left,
-                    modifiers: Modifiers::shift(),
+                    modifiers: Modifiers::none(),
                 },
+                UiEvent::MouseMove { position: end, modifiers: Modifiers::none() },
+                UiEvent::MouseMove { position: end, modifiers: Modifiers::none() },
                 UiEvent::MouseUp {
-                    position,
+                    position: end,
                     button: MouseButton::Left,
-                    modifiers: Modifiers::shift(),
+                    modifiers: Modifiers::none(),
                 },
             ] {
                 router.route(
@@ -6564,6 +6597,42 @@ mod tests {
                     &dispatch,
                 );
                 host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+                assert!(host
+                    .app_state()
+                    .active_sequence()
+                    .expect("unchanged selection")
+                    .author_state_eq_ignoring_revision(&original));
+                assert_eq!(host.app_state().project_author_generation(), generation);
+                assert_eq!(
+                    host.app_state()
+                        .authoring_history()
+                        .expect("no selection history")
+                        .diagnostics(),
+                    history
+                );
+            }
+            assert!(router.captured().is_none());
+        } else {
+            for position in positions {
+                for event in [
+                    UiEvent::MouseDown {
+                        position,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::shift(),
+                    },
+                    UiEvent::MouseUp {
+                        position,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::shift(),
+                    },
+                ] {
+                    router.route(
+                        event,
+                        &mut WidgetTreeView::new(host.active_root_mut()),
+                        &dispatch,
+                    );
+                    host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+                }
             }
         }
         {

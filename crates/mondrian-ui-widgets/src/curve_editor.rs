@@ -373,6 +373,35 @@ struct CurveGroupDrag {
     last_delta: Option<(mondrian_core::TimelineTime, f64)>,
 }
 
+#[derive(Clone, Copy)]
+enum CurveSelectionMode {
+    Replace,
+    Add,
+    Toggle,
+}
+
+struct CurveSelectionDrag {
+    pointer_origin: Point,
+    pointer: Point,
+    plot: Rect,
+    origin_selected: Option<CurvePointTarget>,
+    origin_keys: std::collections::HashSet<mondrian_core::KeyframeId>,
+    origin_tangent: Option<(mondrian_core::KeyframeId, mondrian_core::BezierHandleSide)>,
+    candidates: Vec<(mondrian_core::KeyframeId, Point)>,
+    mode: CurveSelectionMode,
+}
+
+impl CurveSelectionDrag {
+    fn rectangle(&self) -> Rect {
+        Rect::from_min_max(
+            self.pointer_origin.x.min(self.pointer.x),
+            self.pointer_origin.y.min(self.pointer.y),
+            self.pointer_origin.x.max(self.pointer.x),
+            self.pointer_origin.y.max(self.pointer.y),
+        )
+    }
+}
+
 #[derive(Clone)]
 struct CurvePointMetadata {
     target: CurvePointTarget,
@@ -439,6 +468,7 @@ pub struct CurveEditor {
     tangent_origin: Option<Vec<CurveTangent>>,
     dragging: Option<CurvePointDrag>,
     group_drag: Option<CurveGroupDrag>,
+    selection_drag: Option<CurveSelectionDrag>,
     drag_value_origin: Option<(Vec<CurvePoint>, Vec<CurvePointMetadata>)>,
     drag_boundary_origin: Option<CurveBoundaryOrigin>,
     grid_columns: usize,
@@ -533,6 +563,7 @@ impl CurveEditor {
             tangent_origin: None,
             dragging: None,
             group_drag: None,
+            selection_drag: None,
             drag_value_origin: None,
             drag_boundary_origin: None,
             grid_columns: 4,
@@ -912,6 +943,7 @@ impl CurveEditor {
         }
         self.dragging = None;
         self.tangent_drag = None;
+        self.selection_drag = None;
         if let Some(pan) = self.panning.take() {
             self.viewport = pan.origin;
         }
@@ -1173,23 +1205,30 @@ impl CurveEditor {
         if self.panning.is_some() || self.context_menu.is_some() {
             return None;
         }
-        let author_draft = self.has_active_pointer_interaction() || self.gesture.is_some();
-        let selected = self
-            .selected
-            .and_then(|index| self.point_target(index))
-            .filter(|target| !author_draft || matches!(target, CurvePointTarget::Keyframe(_)));
+        let captured_interaction = self.has_active_pointer_interaction() || self.gesture.is_some();
+        let selected = match &self.selection_drag {
+            Some(drag) => drag.origin_selected,
+            None => self.selected.and_then(|index| self.point_target(index)),
+        }
+        .filter(|target| !captured_interaction || matches!(target, CurvePointTarget::Keyframe(_)));
         Some(CurveEditorViewState {
             viewport: self.viewport,
-            release_previous_capture: author_draft || self.pending_capture_release,
+            release_previous_capture: captured_interaction || self.pending_capture_release,
             view_key: self.view_key.clone()?,
             id: self.id,
             points: selected
                 .filter(|target| !matches!(target, CurvePointTarget::Keyframe(_)))
                 .map(|_| self.points.clone()),
             selected,
-            selected_keys: self.selected_keys.clone(),
+            selected_keys: self.selection_drag.as_ref().map_or_else(
+                || self.selected_keys.clone(),
+                |drag| drag.origin_keys.clone(),
+            ),
             selection_projection: self.selection_projection.clone(),
-            selected_tangent: self.selected_tangent,
+            selected_tangent: self
+                .selection_drag
+                .as_ref()
+                .map_or(self.selected_tangent, |drag| drag.origin_tangent),
             focused: self.focused,
             focus_visible: self.focus_visible,
         })
@@ -1321,6 +1360,107 @@ impl CurveEditor {
             ));
         }
         self.selected_tangent = None;
+    }
+
+    fn key_selection_enabled(&self) -> bool {
+        self.selection_deletion
+            || self.selection_time_movement
+            || self.selection_value_movement
+            || self.selection_menu.is_some()
+            || self.on_clipboard.is_some()
+    }
+
+    fn begin_selection_drag(
+        &mut self,
+        position: Point,
+        modifiers: Modifiers,
+        ctx: &mut EventContext,
+    ) {
+        let plot = self.plot_rect();
+        if !plot.contains(position)
+            || self.has_active_pointer_interaction()
+            || self.gesture.is_some()
+        {
+            return;
+        }
+        self.selection_drag = Some(CurveSelectionDrag {
+            pointer_origin: position,
+            pointer: position,
+            plot,
+            origin_selected: self.selected.and_then(|index| self.point_target(index)),
+            origin_keys: self.selected_keys.clone(),
+            origin_tangent: self.selected_tangent,
+            candidates: self
+                .point_metadata
+                .iter()
+                .zip(&self.points)
+                .filter_map(|(metadata, point)| {
+                    let CurvePointTarget::Keyframe(id) = metadata.target else {
+                        return None;
+                    };
+                    let position = self.to_screen(*point);
+                    plot.contains(position).then_some((id, position))
+                })
+                .collect(),
+            mode: if (modifiers.ctrl ^ modifiers.meta) && modifiers.shift {
+                CurveSelectionMode::Toggle
+            } else if modifiers.shift {
+                CurveSelectionMode::Add
+            } else {
+                CurveSelectionMode::Replace
+            },
+        });
+        self.move_selection_drag(position, ctx);
+        ctx.request_pointer_capture(self.id);
+        ctx.focus.request_focus(self.id);
+    }
+
+    fn move_selection_drag(&mut self, position: Point, ctx: &mut EventContext) {
+        let Some(drag) = self.selection_drag.as_mut() else {
+            return;
+        };
+        if !position.x.is_finite() || !position.y.is_finite() {
+            return;
+        }
+        drag.pointer = Point::new(
+            position.x.clamp(drag.plot.x, drag.plot.x + drag.plot.width),
+            position.y.clamp(drag.plot.y, drag.plot.y + drag.plot.height),
+        );
+        let rectangle = drag.rectangle();
+        let enclosed = drag
+            .candidates
+            .iter()
+            .filter_map(|(id, point)| rectangle.contains(*point).then_some(*id))
+            .collect::<std::collections::HashSet<_>>();
+        self.selected_keys = match drag.mode {
+            CurveSelectionMode::Replace => enclosed,
+            CurveSelectionMode::Add => drag.origin_keys.union(&enclosed).copied().collect(),
+            CurveSelectionMode::Toggle => {
+                drag.origin_keys.symmetric_difference(&enclosed).copied().collect()
+            }
+        };
+        self.selected = self.point_metadata.iter().position(|metadata| {
+            matches!(
+                metadata.target, CurvePointTarget::Keyframe(id) if self.selected_keys.contains(&id)
+            )
+        });
+        self.selected_tangent = None;
+        ctx.request_repaint();
+    }
+
+    fn finish_selection_drag(&mut self, cancel: bool, ctx: &mut EventContext) {
+        let Some(drag) = self.selection_drag.take() else {
+            return;
+        };
+        if cancel {
+            self.selected_keys = drag.origin_keys;
+            self.selected = drag.origin_selected.and_then(|target| {
+                self.point_metadata.iter().position(|metadata| metadata.target == target)
+            });
+            self.selected_tangent = drag.origin_tangent;
+        }
+        ctx.release_pointer_capture(self.id);
+        ctx.request_repaint();
     }
 
     /// Select a point by index.
@@ -1930,6 +2070,14 @@ impl CurveEditor {
     }
 
     fn cancel_drag_state(&mut self) -> bool {
+        if let Some(drag) = self.selection_drag.take() {
+            self.selected_keys = drag.origin_keys;
+            self.selected = drag.origin_selected.and_then(|target| {
+                self.point_metadata.iter().position(|metadata| metadata.target == target)
+            });
+            self.selected_tangent = drag.origin_tangent;
+            return false;
+        }
         if let Some(group) = self.group_drag.take() {
             let changed = self.points != group.points;
             let primary = self.selected_keyframe();
@@ -2548,6 +2696,10 @@ impl Widget for CurveEditor {
         } else {
             (0.0, 0.0)
         };
+        if self.selection_drag.as_ref().is_some_and(|drag| drag.plot != self.plot_rect()) {
+            self.cancel_drag_state();
+            self.pending_capture_release = true;
+        }
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
@@ -2573,9 +2725,36 @@ impl Widget for CurveEditor {
             self.focus_visible = false;
             self.dragging = None;
             self.group_drag = None;
+            self.selection_drag = None;
             self.tangent_drag = None;
             self.panning = None;
             return EventResult::Ignored;
+        }
+
+        if self.selection_drag.is_some() {
+            match event {
+                UiEvent::MouseMove { position, .. } => {
+                    self.move_selection_drag(*position, ctx);
+                    return EventResult::Handled;
+                }
+                UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
+                    self.move_selection_drag(*position, ctx);
+                    self.finish_selection_drag(false, ctx);
+                    return EventResult::Handled;
+                }
+                UiEvent::KeyDown { key: KeyCode::Escape, .. } => {
+                    self.finish_selection_drag(true, ctx);
+                    return EventResult::Handled;
+                }
+                UiEvent::FocusLost => self.finish_selection_drag(false, ctx),
+                UiEvent::KeyDown { key: KeyCode::Tab, .. } => {}
+                UiEvent::KeyDown { .. }
+                | UiEvent::MouseDown { .. }
+                | UiEvent::MouseWheel { .. } => {
+                    return EventResult::Handled;
+                }
+                _ => {}
+            }
         }
 
         if let Some(pan) = self.panning {
@@ -2705,19 +2884,26 @@ impl Widget for CurveEditor {
                 }
                 self.focus_visible = false;
                 ctx.tooltip.hide();
-                if (self.selection_deletion
-                    || self.selection_time_movement
-                    || self.selection_value_movement
-                    || self.selection_menu.is_some()
-                    || self.on_clipboard.is_some())
-                    && *modifiers == Modifiers::shift()
+                if self.key_selection_enabled()
+                    && !modifiers.alt
+                    && (modifiers.shift || modifiers.ctrl ^ modifiers.meta)
+                    && let Some(index) = self.hit_point(*position)
                 {
-                    if !self.has_active_pointer_interaction()
-                        && self.gesture.is_none()
-                        && let Some(index) = self.hit_point(*position)
-                    {
+                    if !self.has_active_pointer_interaction() && self.gesture.is_none() {
                         self.toggle_key_selection(index);
                         ctx.request_repaint();
+                    }
+                    return EventResult::Handled;
+                }
+                let insert_key =
+                    (modifiers.ctrl ^ modifiers.meta) && !modifiers.shift && !modifiers.alt;
+                if self.key_selection_enabled()
+                    && !insert_key
+                    && self.hit_point(*position).is_none()
+                    && self.hit_tangent(*position).is_none()
+                {
+                    if !modifiers.alt && !(modifiers.ctrl && modifiers.meta) {
+                        self.begin_selection_drag(*position, *modifiers, ctx);
                     }
                     return EventResult::Handled;
                 }
@@ -2883,11 +3069,7 @@ impl Widget for CurveEditor {
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::A, modifiers }
-                if (self.selection_deletion
-                    || self.selection_time_movement
-                    || self.selection_value_movement
-                    || self.selection_menu.is_some()
-                    || self.on_clipboard.is_some())
+                if self.key_selection_enabled()
                     && self.focused
                     && ctx.focus.focused_widget() == Some(self.id)
                     && (modifiers.ctrl ^ modifiers.meta)
@@ -3025,6 +3207,9 @@ impl Widget for CurveEditor {
 
         self.paint_rulers(ctx);
         ctx.encoder.push_clip(plot);
+        if let Some(drag) = &self.selection_drag {
+            ctx.encoder.draw_rect(drag.rectangle(), colors.accent, spacing.radius_none);
+        }
         for tangent in self
             .tangents
             .iter()
@@ -3097,6 +3282,23 @@ impl Widget for CurveEditor {
                 );
             }
         }
+        if let Some(drag) = &self.selection_drag {
+            let rectangle = drag.rectangle();
+            let corners = [
+                rectangle.min(),
+                Point::new(rectangle.x + rectangle.width, rectangle.y),
+                rectangle.max(),
+                Point::new(rectangle.x, rectangle.y + rectangle.height),
+            ];
+            for index in 0..corners.len() {
+                ctx.encoder.draw_line(
+                    corners[index],
+                    corners[(index + 1) % corners.len()],
+                    spacing.border_standard,
+                    colors.ring,
+                );
+            }
+        }
         ctx.encoder.pop_clip();
     }
 
@@ -3109,6 +3311,7 @@ impl Widget for CurveEditor {
             || self.tangent_drag.is_some()
             || self.panning.is_some()
             || self.group_drag.is_some()
+            || self.selection_drag.is_some()
     }
 
     fn edit_command_available(
@@ -3234,6 +3437,347 @@ mod tests {
     }
 
     #[test]
+    fn authored_curve_blank_marquee_selects_without_authoring_and_escape_restores_selection() {
+        let ids = [
+            mondrian_core::KeyframeId::new(),
+            mondrian_core::KeyframeId::new(),
+            mondrian_core::KeyframeId::new(),
+        ];
+        let points = vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.2, 0.25),
+            CurvePoint::new(0.5, 0.55),
+            CurvePoint::new(0.8, 0.85),
+            CurvePoint::new(1.0, 1.0),
+        ];
+        let edits = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let emitted = edits.clone();
+        let gestures = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let observed = gestures.clone();
+        let range = mondrian_core::ParameterNumericRange::new(0.0, 1.0).expect("range");
+        let axis = CurveValueAxis::new(range, range, Some(0.1)).expect("axis");
+        let mut editor = CurveEditor::with_author_points(points.clone(), axis)
+            .with_keyframe_ids(vec![None, Some(ids[0]), Some(ids[1]), Some(ids[2]), None])
+            .with_selection_deletion()
+            .on_edit(move |edit| {
+                emitted.borrow_mut().push(edit);
+                None
+            })
+            .on_gesture(move |event| {
+                observed.borrow_mut().push(event);
+                None
+            });
+        editor.layout(Rect::new(0.0, 0.0, 480.0, 200.0));
+        let mut ctx = event_ctx();
+        let origin = editor.to_screen(CurvePoint::new(0.1, 0.15));
+        let end = editor.to_screen(CurvePoint::new(0.6, 0.65));
+        assert_eq!(
+            editor.points(),
+            points,
+            "fixture retains exact author geometry"
+        );
+        editor.event(
+            &UiEvent::MouseDown {
+                position: origin,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(
+            editor.points(),
+            points,
+            "blank selection must not insert a key"
+        );
+        assert!(edits.borrow().is_empty() && gestures.borrow().is_empty());
+        editor.event(
+            &UiEvent::MouseMove { position: end, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        let selected = editor
+            .selected_keyframe_ids()
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(selected, ids[..2].iter().copied().collect());
+        editor.event(
+            &UiEvent::MouseUp {
+                position: end,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(!editor.has_active_pointer_interaction());
+        assert!(edits.borrow().is_empty() && gestures.borrow().is_empty());
+        editor.event(
+            &UiEvent::MouseDown {
+                position: origin,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        editor.event(
+            &UiEvent::MouseMove {
+                position: editor.to_screen(CurvePoint::new(0.3, 0.35)),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(editor.selected_keyframe_ids(), vec![ids[0]]);
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(
+            editor
+                .selected_keyframe_ids()
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+            selected
+        );
+        assert!(!editor.has_active_pointer_interaction());
+        assert_eq!(editor.points(), points);
+        assert!(edits.borrow().is_empty() && gestures.borrow().is_empty());
+    }
+
+    #[test]
+    fn authored_marquee_modifier_modes_are_origin_relative_visible_and_read_only_safe() {
+        for read_only in [false, true] {
+            for modifiers in [
+                Modifiers::none(),
+                Modifiers::shift(),
+                Modifiers { ctrl: true, shift: true, ..Modifiers::none() },
+                Modifiers { meta: true, shift: true, ..Modifiers::none() },
+            ] {
+                let ids = [
+                    mondrian_core::KeyframeId::new(),
+                    mondrian_core::KeyframeId::new(),
+                    mondrian_core::KeyframeId::new(),
+                ];
+                let points = vec![
+                    CurvePoint::new(0.0, 0.0),
+                    CurvePoint::new(0.2, 0.25),
+                    CurvePoint::new(0.5, 0.55),
+                    CurvePoint::new(0.8, 0.85),
+                    CurvePoint::new(1.0, 1.0),
+                ];
+                let edits = std::rc::Rc::new(RefCell::new(Vec::new()));
+                let emitted = edits.clone();
+                let range = mondrian_core::ParameterNumericRange::new(0.0, 1.0).expect("range");
+                let axis = CurveValueAxis::new(range, range, None).expect("axis");
+                let mut editor = CurveEditor::with_author_points(points.clone(), axis)
+                    .with_view_key(Some("marquee-owner".into()))
+                    .with_keyframe_ids(vec![None, Some(ids[0]), Some(ids[1]), Some(ids[2]), None])
+                    .with_selection_deletion()
+                    .with_selection_projection(ids[..2].iter().copied())
+                    .on_edit(move |edit| {
+                        emitted.borrow_mut().push(edit);
+                        None
+                    })
+                    .editable(!read_only);
+                editor.layout(Rect::new(0.0, 0.0, 480.0, 200.0));
+                let mut ctx = event_ctx();
+                let origin = editor.to_screen(CurvePoint::new(0.4, 0.45));
+                let end = editor.to_screen(CurvePoint::new(0.9, 0.95));
+                editor.event(
+                    &UiEvent::MouseDown {
+                        position: origin,
+                        button: MouseButton::Left,
+                        modifiers,
+                    },
+                    &mut ctx,
+                );
+                assert_eq!(
+                    ctx.requests.pointer_capture,
+                    Some(mondrian_ui_core::widget::PointerCaptureRequest::Capture(
+                        editor.id()
+                    ))
+                );
+                let expected: std::collections::HashSet<_> = if modifiers.ctrl || modifiers.meta {
+                    [ids[0], ids[2]].into_iter().collect()
+                } else if modifiers.shift {
+                    ids.into_iter().collect()
+                } else {
+                    [ids[1], ids[2]].into_iter().collect()
+                };
+                for _ in 0..3 {
+                    editor.event(&UiEvent::MouseMove { position: end, modifiers }, &mut ctx);
+                    assert_eq!(
+                        editor
+                            .selected_keyframe_ids()
+                            .into_iter()
+                            .collect::<std::collections::HashSet<_>>(),
+                        expected
+                    );
+                }
+                editor.event(
+                    &UiEvent::MouseMove { position: Point::new(f32::NAN, end.y), modifiers },
+                    &mut ctx,
+                );
+                assert_eq!(
+                    editor
+                        .selected_keyframe_ids()
+                        .into_iter()
+                        .collect::<std::collections::HashSet<_>>(),
+                    expected
+                );
+                let view = editor.view_state().expect("owned inspection");
+                assert_eq!(view.selected_keys, ids[..2].iter().copied().collect());
+                assert!(view.release_previous_capture);
+                editor.event(
+                    &UiEvent::MouseUp {
+                        position: end,
+                        button: MouseButton::Left,
+                        modifiers,
+                    },
+                    &mut ctx,
+                );
+                assert_eq!(
+                    ctx.requests.pointer_capture,
+                    Some(mondrian_ui_core::widget::PointerCaptureRequest::Release(
+                        editor.id()
+                    ))
+                );
+                assert!(!editor.has_active_pointer_interaction());
+                assert_eq!(
+                    editor
+                        .selected_keyframe_ids()
+                        .into_iter()
+                        .collect::<std::collections::HashSet<_>>(),
+                    expected
+                );
+                assert_eq!(editor.points(), points);
+                assert!(edits.borrow().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn marquee_owner_replacement_cancels_inspection_and_releases_previous_capture() {
+        let id = mondrian_core::KeyframeId::new();
+        let points = vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ];
+        let make_editor = || {
+            CurveEditor::with_points(points.clone())
+                .with_view_key(Some("same-owner".into()))
+                .with_keyframe_ids(vec![None, Some(id), None])
+                .with_selection_deletion()
+                .with_selection_projection([id])
+        };
+        let mut editor = make_editor();
+        editor.layout(Rect::new(0.0, 0.0, 480.0, 200.0));
+        let mut ctx = event_ctx();
+        let origin = editor.to_screen(CurvePoint::new(0.1, 0.1));
+        editor.event(
+            &UiEvent::MouseDown {
+                position: origin,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(editor.selected_keyframe_ids().is_empty());
+        let view = editor.view_state().expect("captured inspection");
+        let mut replacement = make_editor().editable(false);
+        assert!(replacement.restore_view_state(&view));
+        assert_eq!(replacement.selected_keyframe_ids(), [id]);
+        assert!(!replacement.has_active_pointer_interaction());
+        ctx.requests.pointer_capture = None;
+        replacement.event(
+            &UiEvent::MouseMove { position: origin, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(mondrian_ui_core::widget::PointerCaptureRequest::Release(
+                editor.id()
+            ))
+        );
+        assert_eq!(replacement.selected_keyframe_ids(), [id]);
+        assert_eq!(replacement.points(), points);
+    }
+
+    #[test]
+    fn marquee_selects_dense_stable_keys_and_resize_cancels_without_authoring() {
+        let ids = [
+            mondrian_core::KeyframeId::new(),
+            mondrian_core::KeyframeId::new(),
+        ];
+        let range = mondrian_core::ParameterNumericRange::new(0.0, 1.0).expect("range");
+        let axis = CurveValueAxis::new(range, range, None).expect("axis");
+        let points = vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ];
+        let mut editor = CurveEditor::with_author_points(points.clone(), axis)
+            .with_keyframe_ids(vec![None, Some(ids[0]), Some(ids[1]), None])
+            .with_selection_deletion()
+            .on_edit(|_| -> Option<Action> { panic!("selection must not author") })
+            .on_gesture(|_| -> Option<Action> {
+                panic!("selection must not begin an author gesture")
+            });
+        editor.layout(Rect::new(0.0, 0.0, 480.0, 200.0));
+        let origin = editor.to_screen(CurvePoint::new(0.4, 0.4));
+        let end = editor.to_screen(CurvePoint::new(0.6, 0.6));
+        let mut ctx = event_ctx();
+        for event in [
+            UiEvent::MouseDown {
+                position: origin,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseMove { position: end, modifiers: Modifiers::none() },
+            UiEvent::MouseUp {
+                position: end,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            editor.event(&event, &mut ctx);
+        }
+        assert_eq!(
+            editor.selected_keyframe_ids(),
+            ids,
+            "identical projected centers retain distinct exact author IDs"
+        );
+        editor.event(
+            &UiEvent::MouseDown {
+                position: origin,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(editor.selected_keyframe_ids().is_empty());
+        assert!(editor.has_active_pointer_interaction());
+        editor.layout(Rect::new(0.0, 0.0, 720.0, 300.0));
+        assert!(
+            !editor.has_active_pointer_interaction(),
+            "layout changes invalidate captured selection geometry"
+        );
+        assert_eq!(editor.selected_keyframe_ids(), ids);
+        ctx.requests.pointer_capture = None;
+        editor.event(
+            &UiEvent::MouseMove { position: end, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(mondrian_ui_core::widget::PointerCaptureRequest::Release(
+                editor.id()
+            ))
+        );
+        assert_eq!(editor.points(), points);
+        assert_eq!(editor.selected_keyframe_ids(), ids);
+    }
+
+    #[test]
     fn read_only_curve_preserves_copy_navigation_viewport_and_refuses_author_input() {
         let id = mondrian_core::KeyframeId::new();
         let points = vec![
@@ -3315,6 +3859,8 @@ mod tests {
             editor.to_screen(editor.tangents[0].point),
             editor.to_screen(CurvePoint::new(0.25, 0.8)),
         ] {
+            let inspection_drag =
+                editor.hit_point(point).is_none() && editor.hit_tangent(point).is_none();
             editor.event(
                 &UiEvent::MouseDown {
                     position: point,
@@ -3323,7 +3869,7 @@ mod tests {
                 },
                 &mut ctx,
             );
-            assert!(!editor.has_active_pointer_interaction());
+            assert_eq!(editor.has_active_pointer_interaction(), inspection_drag);
             editor.event(
                 &UiEvent::MouseMove {
                     position: Point::new(point.x + 15.0, point.y - 10.0),
@@ -3339,6 +3885,7 @@ mod tests {
                 },
                 &mut ctx,
             );
+            assert!(!editor.has_active_pointer_interaction());
         }
         assert_eq!(editor.points(), points);
         assert!(edits.borrow().is_empty());

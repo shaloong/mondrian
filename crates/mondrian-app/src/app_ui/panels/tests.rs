@@ -10292,7 +10292,7 @@ fn assert_fixed_curve_input_constraint(model: &InspectorPanelModel) {
                     &UiEvent::MouseDown {
                         position: screen(160.0, 27.0),
                         button: MouseButton::Left,
-                        modifiers: Modifiers::none(),
+                        modifiers: Modifiers::ctrl(),
                     },
                     &mut ctx,
                 );

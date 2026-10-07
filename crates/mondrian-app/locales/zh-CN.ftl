@@ -1398,7 +1398,7 @@ curve-editor-name = 曲线编辑器
 curve-editor-keyboard-help = Home/End：首尾点；Ctrl/Cmd＋左右：上一个／下一个点；Alt＋左右：入／出手柄；Alt＋上：返回点；左右：一帧；Shift＋左右：五帧；上下：数值微调；Shift＋F10：插值菜单。 Ctrl/Cmd＋滚轮：时间缩放，加 Shift：数值缩放；中键拖动：平移；Ctrl/Cmd＋PageUp/PageDown：缩放，加 Shift：数值缩放；Ctrl/Cmd＋Shift＋方向键：平移；Ctrl/Cmd＋0：复位视图。
 curve-editor-shape-keyboard-help = Home/End：首尾点；Ctrl/Cmd＋左右：上一个／下一个点；方向键：微调；Shift＋方向键：较大幅度微调。 Ctrl/Cmd＋滚轮：时间缩放，加 Shift：数值缩放；中键拖动：平移；Ctrl/Cmd＋PageUp/PageDown：缩放，加 Shift：数值缩放；Ctrl/Cmd＋Shift＋方向键：平移；Ctrl/Cmd＋0：复位视图。
 
-curve-editor-selection-keyboard-help = { curve-editor-keyboard-help } Shift＋点选：切换关键帧选择；Ctrl/Cmd＋A：全选作者关键帧；Delete/Backspace：整组删除，一次撤销；Escape：清空选择。←/→：整组移动一帧（Shift：五帧）。↑/↓：整组数值移动一步（Shift：五步），到边界时一起停止。右键已选关键帧或 Shift＋F10：整组修改插值。拖动已选关键帧：整组移动；Escape：取消拖动。
+curve-editor-selection-keyboard-help = { curve-editor-keyboard-help } Shift 或 Ctrl/Cmd＋点选：切换关键帧选择；Ctrl/Cmd＋A：全选作者关键帧；Delete/Backspace：整组删除，一次撤销；Escape：清空选择。←/→：整组移动一帧（Shift：五帧）。↑/↓：整组数值移动一步（Shift：五步），到边界时一起停止。右键已选关键帧或 Shift＋F10：整组修改插值。拖动已选关键帧：整组移动；Escape：取消拖动。 拖动空白：框选关键帧；Shift：追加；Ctrl/Cmd＋Shift：切换。Ctrl/Cmd＋点击空白：插入关键帧。框选时按 Escape 恢复原选择。
 
 audio-rack-occurrence-row = 时间参照
 audio-rack-occurrence-choose = 选择音频组件
@@ -1417,4 +1417,4 @@ error-curve-clipboard-out-of-bounds = 整组关键帧必须位于目标片段内
 curve-editor-clipboard-keyboard-help = { curve-editor-selection-keyboard-help } Ctrl/Cmd＋C：复制所选关键帧；Ctrl/Cmd＋X：剪切所选关键帧，一次撤销；Ctrl/Cmd＋V：在播放头位置粘贴到此曲线，一次撤销。
 
 curve-editor-read-only-keyboard-help = 只读曲线。单击查看点；Home/End 和 Ctrl/Cmd＋左右导航。Ctrl/Cmd＋滚轮缩放，中键拖动平移，Ctrl/Cmd＋0 复位视图。
-curve-editor-read-only-clipboard-keyboard-help = { curve-editor-read-only-keyboard-help } Shift＋点选切换关键帧选择，Ctrl/Cmd＋A 全选作者关键帧，Ctrl/Cmd＋C 复制。当前不可编辑。
+curve-editor-read-only-clipboard-keyboard-help = { curve-editor-read-only-keyboard-help } Shift 或 Ctrl/Cmd＋点选切换关键帧选择，Ctrl/Cmd＋A 全选作者关键帧，Ctrl/Cmd＋C 复制。当前不可编辑。 拖动空白框选，Shift 追加，Ctrl/Cmd＋Shift 切换；Escape 恢复原选择。
