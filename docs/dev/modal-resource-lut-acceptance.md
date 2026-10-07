@@ -2554,3 +2554,81 @@ full-workspace test, physical accessibility/device/macOS or broad vendor/plugin
 qualification is inferred. VST3 auxiliary inputs and mixed layouts, MIDI/editors,
 broader OpenFX contracts, remaining product interaction/i18n/performance matrices
 remain open under the original full NLE goal.
+
+## Current VST3 auxiliary, modal, resource and LUT acceptance
+
+Clean source `b5eb715b4d9134cf9793cc409a7978a945f0c5ed` was qualified on
+2026-10-08 (local time). Native pipeline 51451 and complete/supplemental pipeline
+56537 both exited 0. Source start/end were clean and identical; every recorded
+product and fixture hash remained stable. No push was performed.
+
+The product worker rebuild took 663593ms. The owned stereo Float32 CLAP/VST3
+sidechain matrix then executed explicitly:
+
+| Native gate | Actual result |
+| --- | --- |
+| App detector-only routing, PDC, Undo/saved Redo/Unicode reopen and PCM | 2 passed, 0 failed, 0 ignored; 22.04s |
+| Audio native ports, activation, restored state, delay/tail, partitions and reset | 2 passed, 0 failed, 0 ignored; 10.05s |
+| Existing VST3 linear sample-offset parameter queues | 1 passed, 0 failed, 0 ignored; 1.67s |
+| Existing VST3 nondefault opaque snapshot and isolated worker restoration | 1 passed, 0 failed, 0 ignored; 0.98s |
+| Existing CLAP sample-offset events | 1 passed, 0 failed, 0 ignored; 0.81s |
+
+The separate VST3 fixture uses fresh class/controller identities, duplicate port
+names, initially inactive native auxiliary ports, an independent weighted PCM
+oracle and a real fixed 3-frame delay. Its opaque component/controller state
+changes signal weights and removes an auxiliary port. Audio checks both
+Realtime/Offline modes and two block partitions, explicit unconnected silence,
+fresh-state reset and refusal of a stale prepared port contract. App checks
+locked-source and missing-processor atomic refusal, one Undo, saving while live
+Redo remains available, fresh Unicode archives with an empty session history and
+exact shared-runtime output across different Realtime/Offline partitions.
+These are actual DLL/product worker executions, not merely compiled ignored tests.
+
+Complete Golden passed **3/3**, all seven stages per round, distinct run/project
+identities, natural exit 0 and no forced termination. The contract-owned build
+took 14963ms; process times were 126754 / 122029 / 121158ms. Clean stable source
+attestation and baseline eligibility passed; each of the three report hashes was
+independently checked against the aggregate receipt.
+
+| Supplemental gate | Actual result |
+| --- | --- |
+| Modal Tab/Shift+Tab containment, restoration and priority | 16 passed, 0 failed, 0 ignored; 24.68s |
+| Event-router removed/replaced/empty modal owners and background shortcuts | 1 passed, 0 failed, 0 ignored |
+| Resource drafts, asynchronous transactions, Undo/save/reopen and real LUT pixels | 103 passed, 0 failed, 5 native tests ignored; 25.37s |
+| Those five native resource/helper cases, explicitly executed | 5 passed, 0 failed, 0 ignored; 8.69s |
+| Portable media/LUT/OCIO relocation, source removal and tampering | 11 passed, 0 failed, 0 ignored; 9.65s |
+| Real native startup/workspace window role cycle | 1 passed, 0 failed, 0 ignored; 9.17s |
+| CLAP/VST3 constrained curves, reset, Undo/saved Redo/Unicode reopen and native PCM | 2 passed, 0 failed, 0 ignored; 186.73s |
+| Group pointer/refusal/cancellation/return-to-origin/history | 6 passed, 0 failed, 0 ignored; 14.75s |
+
+Resource coverage includes pending Apply leaving focus traversal, timeout retry,
+IME/locale draft preservation, late responses after edit/cancel/lock/replacement,
+changed Save As path bases and one committed history entry. LUT references do
+not create library media. Real cube assertions cover Alpha, zero-Alpha hidden RGB
+and tiny positive Alpha; portable tests remove originals before reopening and
+check both Preview and Export pixels. Each Golden color/media stage samples five
+final H.264 pixels with maximum channel error **4/255**. The actual transport is
+`cpu_rawvideo_pipe`; this qualifies output quality, not zero-copy or performance.
+
+Product SHA-256:
+`F4997C31D4663084C7AED47B1A58138DB24325CD87617B100F4577D40163E153`.
+Golden SHA-256:
+`209F8EFC6C638E809DB98752921EA05E2518E94B9B29E1B4868C117CD9104147`.
+Owned VST3 sidechain fixture SHA-256:
+`1D5AD851F5C7DD74745F529D75C9ECB9CEA7B1D1C640407D36A87C77672E059F`.
+Owned CLAP sidechain fixture SHA-256:
+`252FDA73E12C02801487442409C2DE3D92D392495E39DEA19D8309C31CAD995E`.
+OpenFX owned query fixture SHA-256:
+`3BB7A9E4F76562C84F0C913479991CE65127242ED28C2AE6BB6C1905173F2653`.
+Earlier CLAP/VST3 gain fixture hashes were preserved throughout.
+
+Aggregate report:
+`E:/dev/mondrian/target/validation/nle-backlog-complete/20261007T200417Z-complete-golden-787863b2/complete-golden-consecutive-report.json`.
+Native receipt: `.scratch/curve-viewport/acceptance-vst3-sidechain-current-native.json`.
+Supplemental receipt: `.scratch/curve-viewport/acceptance-vst3-current-modal-resource-lut.json`.
+Earlier receipts retain their own source identities. This does not infer current
+full-workspace tests, remote CI, physical input/accessibility/device/macOS,
+mixed layouts, MIDI/editors, broad vendor support or performance qualification.
+Sidechain GUI controls and the Mixer deletion projection for retained sidechain
+edges still need work. Broader OpenFX, product interaction/i18n and the original
+full professional NLE goal remain active.

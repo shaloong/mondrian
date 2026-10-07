@@ -7,7 +7,8 @@ integer indices `0..=step_count` and hold interpolation, then normalize at the
 ABI boundary. Discovery and worker both reject unsupported multiple main buses, layouts,
 mode changes, metadata drift, and latency/tail drift. Same-main-layout auxiliary
 inputs now preserve native bus slots through discovery and preparation; the
-current packaged/native sidechain qualification is still pending. Worker
+owned stereo Float32 packaged/native sidechain qualification passed at b5eb715.
+Mixed layouts and broader vendor/platform qualification remain open. Worker
 continuity entry releases the previous class and reloads the exact class from
 the saved opaque state, while sample-offset points enter the VST3 process queue.
 A reference Gain DLL built from the permissively licensed `vst3-rs` example
@@ -1825,9 +1826,10 @@ plugin process or automation evaluator is introduced.
 Two source regressions independently reject duplicate main roles, surround
 arrangements with the same channel count, missing/changed prepared metadata and
 unbounded inputs; audio library111 passed/0 failed/14 ignored. These are source
-contracts, not a current native sidechain, performance or vendor qualification.
-A new owned native fixture must exercise actual activation, per-bus processing,
-state changes, reset and routed Undo/save/reopen/public PCM before that claim.
+contracts; they did not themselves qualify native execution, performance or
+vendors. The subsequent owned native qualification below exercises actual
+activation, per-bus processing, state changes, reset and routed
+Undo/save/reopen/public PCM.
 
 Dependency provenance and the preserved MIT license are in
 `vendor/vst3-host/MONDRIAN-PATCHES.md` and `LICENSE`.
@@ -1856,6 +1858,19 @@ opaque component/controller state, changed native count, reset/silence and stale
 admission. The App CLAP/VST3 cases share the existing author-history/public-PCM
 assertion body (distinct native setup), checking detector-only routing, locked
 and missing refusal, one Undo, saved live Redo and fresh Unicode project archives.
-Fixture build/test compilation is not native execution proof. Current packaged
-product rebuild and explicit ignored-test execution are required before claiming
-qualification; the prior ac6f069 source and 3b44084 Golden scopes are unchanged.
+Fixture build/test compilation is not native execution proof. Clean source
+`b5eb715b4d9134cf9793cc409a7978a945f0c5ed` was rebuilt into the actual product
+worker and explicitly qualified: App CLAP/VST3 sidechain history 2 passed,
+audio native sidechain matrix 2 passed, and three separate native main-bus
+parameter/state regressions passed, all with zero failures and zero ignored.
+The auxiliary fixture checks both processing modes, independent weighted PCM,
+two partition patterns, opaque state-controlled ports, real activation,
+3-frame delay/tail, reset/silence and stale-contract refusal. The App matrix
+checks detector-only routing, PDC, locked/missing refusal, one Undo, saved live
+Redo and fresh Unicode project archives. Source and binary identities remained
+stable. Complete Golden also passed 3/3 at this source; current modal/resource,
+portable LUT/OCIO, native window and audio-history gates passed separately.
+See [the scoped receipt](../dev/modal-resource-lut-acceptance.md#current-vst3-auxiliary-modal-resource-and-lut-acceptance).
+These owned stereo Float32 references do not qualify sidechain GUI controls,
+mixed layouts, MIDI, plugin editors, arbitrary vendors, devices or performance.
+The prior ac6f069 source and 3b44084 Golden receipts retain their original scope.

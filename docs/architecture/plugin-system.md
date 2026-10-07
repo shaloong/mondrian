@@ -825,6 +825,11 @@ and removal of existing trailing whitespace in three loader files.
 A version upgrade alone cannot expose the required loaded-instance declarations.
 The SDK role/activation contract is documented in
 [IComponent](https://github.com/steinbergmedia/vst3_pluginterfaces/blob/master/vst/ivstcomponent.h).
-Current source audio regressions passed; native packaged sidechain, broader
-layouts, MIDI/editor/vendor/platform and performance qualification remain open.
-Earlier ae3c78f/3b44084 product and Golden receipts retain their named source scope.
+Clean b5eb715 product worker and owned stereo Float32 CLAP/VST3 fixtures passed
+native sidechain activation/state/PCM/partition/reset and author routing/PDC/
+Undo/save/reopen qualification. Three native main-bus parameter/state regressions
+also passed; complete Golden passed 3/3 at the same source. See
+[the scoped receipt](../dev/modal-resource-lut-acceptance.md#current-vst3-auxiliary-modal-resource-and-lut-acceptance).
+Sidechain GUI controls, broader layouts, MIDI/editor/vendor/platform and
+performance qualification remain open. Earlier ae3c78f/3b44084 product and
+Golden receipts retain their named source scope.

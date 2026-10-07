@@ -80,7 +80,7 @@ M1 的目标是 L1，不要求所有高级组合都可执行。暂未实现的�
 | 项目打包 | `.mdp`、媒体、LUT 与 OCIO 依赖盘点、搬迁和重开验证已接入 | 大项目、缺失资源和跨平台搬迁实机验收 |
 | i18n | Fluent 中英文、伪语言和主要界面路径已接入；状态提示与历史保存消息 ID/参数并即时切换语言，159 个非测试模块调用点已迁移；内置特效、Title、Mask 的参数名称、分组和枚举选项按稳定定义地址展示本地化文本，作者键值保持不变 | 清除剩余用户可见字面量，类型化内部诊断原因并补齐语言验收 |
 | 参数数值输入 | Rack、Mixer 和组件参数保留 f64；整数拒绝小数，JSON 保存重开保持浮点位值；文本草稿在确认前不写入项目，Escape 取消不产生关键帧或撤销记录；Inspector 位置/缩放/锚点与通用 Vec2/Vec3/Vec4 控件只提交变化分量，保留其他分量、独立关键帧及未修改曲线的共享存储；Clip/Effect/Mask 统一参数写入契约；Undo/Redo 保留当前编辑时间，跨帧率按真实播放时间重新绑定；撤销删除当前序列时恢复原序列导航，后续 Viewer 完整变换可精确撤销重做；Inspector 滑块拖动保留捕获并持续刷新 Viewer；数值曲线点／手柄拖动持续更新 canonical 作者状态与 Viewer，结束时保留一个历史项，取消和回到原点不留历史 | 完整键盘操作、厂商参数与平台矩阵 |
-| CLAP / VST3 | 用户选择的单主总线 Float32 音频效果可隔离处理；自有参考插件的 Auto／Continuous 曲线、剪贴板、联合编辑、参数默认重置与一次 Undo／保存后 Redo／Unicode 重开已通过真实逐样本输出验收 | CLAP 同主布局辅助输入已通过激活生命周期／真实打包 worker／自有立体声插件的侧链、PDC、Undo／保存重开参考验收；VST3 辅助总线、多布局、MIDI／编辑器、厂商状态／参数及性能资格待推进 |
+| CLAP / VST3 | 用户选择的 Float32 音频效果可隔离处理；自有参考插件的约束曲线、剪贴板、参数重置与 Undo／保存后 Redo／Unicode 重开已通过逐样本输出验收；b5eb715 的 CLAP／VST3 同主布局辅助输入已通过真实打包 worker、自有立体声侧链、激活／状态／分块／重置、PDC 与保存重开参考验收 | Mixer 侧链控件与删除总线投影、多布局、MIDI／编辑器、厂商状态／参数及性能资格待推进 |
 | OpenFX | Filter / RGBA Float32 / Double/Boolean/Integer 子集接入共享效果图，插件声明的默认插值贯通新关键帧与数值写入，视觉参数 Inspector 按数值声明保留整数与 Double 输入精度；工厂绑定作者实例与执行会话，普通 CPU 合成/时间采样/混合执行取消及逻辑帧预算贯通；原生图像按 action 借用并检查释放，UHD 参考路径在 768 MiB 逻辑工作预算内通过；Preview/CPU-prefix/fallback/Export 已接入原生驻留配额并跨帧复用，取消及故障仍回收；canonical 常量／曲线的完整值、导数、积分和关键帧查询已通过真实 SDK；拒绝未支持的有序/时间采样契约 | 插件发起的持久作者写入、更多上下文／像素格式、厂商／平台与性能矩阵 |
 
 ---
@@ -124,18 +124,21 @@ Undo／保存重开与逐样本输出参考，见
 随后 3b44084 完整 Golden 通过 3/3，模态 Tab、资源事务、LUT 输出／打包搬迁和
 原生音频历史专项通过，见
 [当前完整验收](dev/modal-resource-lut-acceptance.md#current-activated-host-modal-resource-and-lut-acceptance)。
+当前 `b5eb715` 已通过 CLAP／VST3 原生侧链及三项主输入参数／状态回归、完整
+Golden 连续 3/3，以及模态／资源／LUT／打包／音频历史专项。源码和二进制身份
+稳定，见 [当前验收](dev/modal-resource-lut-acceptance.md#current-vst3-auxiliary-modal-resource-and-lut-acceptance)。
 历史记录继续保留其原始版本；下表分别列出实现状态与实际资格。
 
 | 能力 | Engineering state | 具名资格与待补项 |
 | --- | --- | --- |
-| 项目与恢复 | 实现闭合：durable save/autosave、SQLite snapshot、非阻塞 close、恢复确认和故障注入不覆盖源 | 3b44084 完整 Golden 已通过 3/3，资源事务／原生重开专项通过 |
-| 素材与代理 | 实现闭合：有界 probe、fingerprint、稳定 AssetId、离线/重连、proxy/original 与 cache revision | 3b44084 Golden Proxy/Relink 已覆盖 |
-| 编辑 | M1 核心操作、Link、Lift/Extract、T/S、snapping、常速/反向/hold 与 Transition 已接入 | 3b44084 Golden Editorial/Transport 阶段已通过；专项 Retime 矩阵保留具名历史记录并随候选验收 |
+| 项目与恢复 | 实现闭合：durable save/autosave、SQLite snapshot、非阻塞 close、恢复确认和故障注入不覆盖源 | b5eb715 完整 Golden 已通过 3/3，资源事务／原生重开专项通过 |
+| 素材与代理 | 实现闭合：有界 probe、fingerprint、稳定 AssetId、离线/重连、proxy/original 与 cache revision | b5eb715 Golden Proxy/Relink 已覆盖 |
+| 编辑 | M1 核心操作、Link、Lift/Extract、T/S、snapping、常速/反向/hold 与 Transition 已接入 | b5eb715 Golden Editorial/Transport 阶段已通过；专项 Retime 矩阵保留具名历史记录并随候选验收 |
 | 播放 | 实现闭合：Clock、latest-wins、严格帧覆盖、取消、CPU/native decode 与 Viewer completion | 历史 v7 4K Main10 基线已通过；当前候选专门矩阵待验收 |
-| 音频 | 实现闭合：gain/pan/fade、mute/solo、meter、automation、PDC、limiter、嵌套与共享 Runtime | ae3c78f CLAP 侧链原生参考已通过；3b44084 Golden 与 CLAP/VST3 历史／PCM 参考已通过；历史 CPAL A/V recovery 基线保留，当前设备矩阵待验收 |
-| 视觉 | 作者级 Crop、基础算子、Basic Title、Cross Dissolve 与 Hold/Linear/Bezier 作者语义已接入 | 3b44084 Golden 视觉阶段已通过；完整 CPU/GPU reference 矩阵保留历史基线，当前专项待验收 |
-| 色彩 | Rec.709/sRGB、PQ、HLG 与 straight Alpha 已有独立 reference；未知解释会阻止或要求 override | 3b44084 Golden 色彩／媒体阶段已通过；完整独立 reference 矩阵保留历史基线，当前专项待验收；Camera Log 属于 M2 |
-| 导出 | H.264 High/AAC SDR、HEVC Main10、不可变 snapshot、取消、失败清理与完成前 probe 已接入 | 3b44084 Golden 交付／重开阶段已通过；历史长 Work Area 基线保留，当前专项待验收 |
+| 音频 | 实现闭合：gain/pan/fade、mute/solo、meter、automation、PDC、limiter、嵌套与共享 Runtime | b5eb715 CLAP／VST3 侧链、主输入参数／状态、历史／PCM 和 Golden 参考已通过；历史 CPAL A/V recovery 基线保留，当前设备矩阵待验收 |
+| 视觉 | 作者级 Crop、基础算子、Basic Title、Cross Dissolve 与 Hold/Linear/Bezier 作者语义已接入 | b5eb715 Golden 视觉阶段已通过；完整 CPU/GPU reference 矩阵保留历史基线，当前专项待验收 |
+| 色彩 | Rec.709/sRGB、PQ、HLG 与 straight Alpha 已有独立 reference；未知解释会阻止或要求 override | b5eb715 Golden 色彩／媒体阶段与 LUT 资源输出专项已通过；完整独立 reference 矩阵保留历史基线，当前专项待验收；Camera Log 属于 M2 |
+| 导出 | H.264 High/AAC SDR、HEVC Main10、不可变 snapshot、取消、失败清理与完成前 probe 已接入 | b5eb715 Golden 交付／重开阶段已通过；历史长 Work Area 基线保留，当前专项待验收 |
 | 平台与质量 | 三平台生产入口和 Adapter 已进入 CI 配置；本地 workspace 门禁可执行 | 历史三平台 CI 基线保留；当前未推送候选的三平台 CI 与完整工作区测试待验收 |
 
 ### 4.3 退出门槛
@@ -148,7 +151,7 @@ Undo／保存重开与逐样本输出参考，见
 - [ ] 当前候选完成 v7 4K Main10 播放/seek/supersession 和真实 CPAL A/V recovery；历史具名报告只作回归基线。
 - [x] 所有生产结果归类为 `Verified`、`ExplicitlyDegraded` 或 `Blocked/Unresolved`；没有隐式 RGBA8、错误源帧、Video Master 或静默效果旁路。
 - [ ] 当前候选的 Windows/Linux/macOS native CI 通过，平台专属类型不泄漏到共享语义。
-- [x] 具名 3b44084 完整 Golden 连续三轮通过；保留源码、二进制与各阶段报告身份。后续源码修订须重新验收。
+- [x] 具名 b5eb715 完整 Golden 连续三轮通过；保留源码、二进制与各阶段报告身份。后续源码修订须重新验收。
 - [ ] 当前候选完整 workspace fmt/clippy/test 与专门设备门禁收口；已通过的针对性库回归和严格 Clippy 不替代全部矩阵。
 
 ### 4.4 已接受的 Alpha 限制
