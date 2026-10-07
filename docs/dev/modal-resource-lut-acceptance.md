@@ -1858,3 +1858,41 @@ This is the current receipt for the executed modal/resource/LUT and native
 interpolation/time/value/history cases. Newly pasted audio groups still require
 their separate native output gate; read-only interaction and wider owner, vendor,
 bus, editor, platform and performance matrices remain open. No push occurred.
+
+## Native pasted audio curve history and sample output
+
+The existing owned CLAP/VST3 gain history fixtures now also execute the closed
+audio clipboard protocol after fresh edited-project reopen. Both tests explicitly
+ran with **2 passed, 0 failed, 0 ignored**, 72.96s, covering Auto Bezier and
+Continuous Bezier on each native format's Track pre-fader gain parameter.
+
+Copy is author/history-neutral. A stale complete-selection Cut refuses without
+changing author state; subsequent Paste proves the captured group remains usable.
+Same-time Paste creates fresh IDs, retains exact times, raw value bits, tangent
+intent and handles, advances one author generation and adds one history entry.
+Native PCM remains identical before Paste, after Paste, after Undo, after saved
+live Redo and after fresh reopening of both Unicode-path snapshots. Each render
+uses realtime partitions 64/64/129 and offline partitions 37/59/161, checks all
+257 stereo samples against canonical evaluation within `1e-6`, and requires
+identical PCM across partitions.
+
+The first fixture attempt compiled successfully but failed both tests at fresh
+reopen: it retained the original Session's exclusive logical-project lease while
+opening a second Session. This was a fixture ownership error. The corrected
+fixture consumes the owning AppState, saves Undo, executes live Redo, saves Redo,
+drops that Session, then sequentially opens and closes each saved snapshot.
+Production lease rules and all signal/history assertions remain intact.
+
+This extension changes only `#[cfg(test)]` code in `audio_rendering.rs`. It uses
+the clean `3d26dfc` product and unchanged native binaries identified above; the
+Host test patch starts from documentation-only `364cd070ec3d09b5a27c368f7b7c204888e1f480`.
+The gate separately records the test source SHA256 and verifies product/fixture
+hashes before and after execution. It does not claim a new production rebuild.
+Shifted/native Component/Scope/route and multi-bus matrices remain separate.
+
+Qualified Host test source SHA256:
+`AFFEBBF6140E90FD034321C91E05348B6C7ACE1564E52E3A9159DF94C2F98E65`.
+Strict workspace/all-target/all-feature Clippy with `-D warnings` passed
+(2m07s), followed by formatting and diff checks. No production code changed in
+this test extension; the prior full library and clean Golden receipts retain
+their named source scope. No push was performed; the overall goal stays active.

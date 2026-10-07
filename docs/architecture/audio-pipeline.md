@@ -1694,5 +1694,9 @@ Component extent and reuses Timeline batch admission. Sequence curves remain
 unbounded by the viewport. Global Paste refuses an audio payload without an
 explicit focused target. Localized actual curve menus share the same commands.
 Real Host Copy/Cut/Paste, fresh pasted-group selection and subsequent Cut preserving
-the original key pass. App codec/history/Unicode reopen matrices also pass. Wider
-owner admission and newly pasted native processor output remain to qualify.
+the original key pass. App codec/history/Unicode reopen matrices also pass. The
+owned native CLAP/VST3 Track pre-fader gain fixtures additionally qualify fresh
+pasted Auto/Continuous groups, stale Cut refusal, one Undo, saved live Redo and
+sequential fresh Unicode reopen with sample-accurate realtime/offline PCM. Fresh
+reopen releases the original Session first, preserving exclusive project leases.
+Wider Component/Scope/route/rack admission and native contracts remain to qualify.

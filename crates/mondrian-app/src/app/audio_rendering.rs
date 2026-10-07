@@ -915,10 +915,146 @@ mod tests {
                 reopened.asset_library().expect("SQLite").list_assets().expect("assets").len(),
                 1
             );
-            drop(reopened);
+            qualify_native_audio_clipboard_history(reopened, &target, resolver, root.path());
             drop(library);
             drop(root);
         }
+    }
+
+    fn qualify_native_audio_clipboard_history(
+        mut state: AppState,
+        target: &mondrian_timeline::AudioAutomationTarget,
+        resolver: &dyn AudioProcessorResolver,
+        directory: &std::path::Path,
+    ) {
+        use super::super::product_action::{
+            AudioCurveClipboardPayload, AudioProductAction, CurveClipboardOperation, ProductAction,
+        };
+        use mondrian_core::KeyframeId;
+        let original = state.active_sequence().expect("original native clipboard state").clone();
+        let source = mondrian_timeline::inspect_audio_automation(&original, target)
+            .expect("native target")
+            .curve()
+            .expect("native source")
+            .clone();
+        let ids: Vec<_> = source.keyframes.iter().map(|key| key.id).collect();
+        let action = |operation| {
+            ProductAction::Audio(AudioProductAction::CurveClipboard(Box::new(
+                AudioCurveClipboardPayload {
+                    sequence_id: original.id,
+                    target: target.clone(),
+                    scope_occurrence: None,
+                    operation,
+                },
+            )))
+            .into_external_action()
+        };
+        let generation = state.project_author_generation();
+        let before = assert_native_audio_group_signal(&state, target, resolver);
+        assert!(!state.can_undo_action() && !state.can_redo_action());
+        state
+            .dispatch_action(action(CurveClipboardOperation::Copy {
+                keyframe_ids: ids.clone(),
+            }))
+            .expect("native Copy retains complete constrained group");
+        assert_eq!(state.project_author_generation(), generation);
+        assert!(!state.can_undo_action() && !state.can_redo_action());
+        state
+            .dispatch_action(action(CurveClipboardOperation::Cut {
+                keyframe_ids: vec![ids[0], KeyframeId::new()],
+            }))
+            .expect_err("stale native Cut refuses the complete group");
+        assert!(state
+            .active_sequence()
+            .expect("unchanged")
+            .author_state_eq_ignoring_revision(&original));
+        assert_eq!(state.project_author_generation(), generation);
+        assert!(!state.can_undo_action() && !state.can_redo_action());
+        state
+            .dispatch_action(action(CurveClipboardOperation::Paste {}))
+            .expect("native Paste commits one complete group");
+        let pasted_sequence = state.active_sequence().expect("pasted").clone();
+        let pasted = mondrian_timeline::inspect_audio_automation(&pasted_sequence, target)
+            .expect("native target")
+            .curve()
+            .expect("pasted curve")
+            .clone();
+        assert_eq!(pasted.keyframes.len(), source.keyframes.len());
+        for (old, new) in source.keyframes.iter().zip(&pasted.keyframes) {
+            assert!(!ids.contains(&new.id));
+            assert_eq!(new.time, old.time);
+            assert_eq!(new.value.to_bits(), old.value.to_bits());
+            assert_eq!(new.interpolation_to_next, old.interpolation_to_next);
+            assert_eq!(new.tangent_mode, old.tangent_mode);
+            assert_eq!(new.in_handle, old.in_handle);
+            assert_eq!(new.out_handle, old.out_handle);
+        }
+        assert_eq!(state.project_author_generation(), generation + 1);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics().undo_entries,
+            1
+        );
+        assert_eq!(
+            assert_native_audio_group_signal(&state, target, resolver),
+            before
+        );
+        assert!(state.undo_timeline().expect("native Paste Undo"));
+        assert!(state
+            .active_sequence()
+            .expect("undone")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(!state.can_undo_action() && state.can_redo_action());
+        assert_eq!(
+            assert_native_audio_group_signal(&state, target, resolver),
+            before
+        );
+        let undone_path = directory.join("原生音频剪贴板撤销🙂.mdp");
+        state.save_project_file_as(undone_path.clone()).expect("save undone clipboard");
+        assert!(
+            state.can_redo_action(),
+            "save preserves live native clipboard Redo"
+        );
+        assert!(state.redo_timeline().expect("native clipboard Redo after save"));
+        assert!(state
+            .active_sequence()
+            .expect("redone")
+            .author_state_eq_ignoring_revision(&pasted_sequence));
+        assert_eq!(
+            assert_native_audio_group_signal(&state, target, resolver),
+            before
+        );
+        let pasted_path = directory.join("原生音频剪贴板重做🙂.mdp");
+        state
+            .save_project_file_as(pasted_path.clone())
+            .expect("save native clipboard Redo");
+        drop(state);
+        let mut reopened = AppState::new();
+        reopened.open_project_file(undone_path).expect("fresh clipboard Undo reopen");
+        assert!(reopened
+            .active_sequence()
+            .expect("undone reopen")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        assert!(reopened.active_clipboard_kind().is_none());
+        assert_eq!(
+            assert_native_audio_group_signal(&reopened, target, resolver),
+            before
+        );
+        drop(reopened);
+        let mut reopened = AppState::new();
+        reopened
+            .open_project_file(pasted_path)
+            .expect("fresh native clipboard Redo reopen");
+        assert!(reopened
+            .active_sequence()
+            .expect("pasted reopen")
+            .author_state_eq_ignoring_revision(&pasted_sequence));
+        assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        assert!(reopened.active_clipboard_kind().is_none());
+        assert_eq!(
+            assert_native_audio_group_signal(&reopened, target, resolver),
+            before
+        );
     }
 
     fn assert_native_audio_group_signal(
