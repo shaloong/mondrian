@@ -1840,3 +1840,22 @@ has its own workspace boundary and is excluded from the product workspace.
 do not activate upstream GUI/device tooling. The original libc0.2.186 and all
 other registry versions are retained; only the host package source identity
 changes in Cargo.lock.
+
+
+### Owned VST3 sidechain qualification fixture
+
+The separate `vst3-sidechain` fixture preserves the stateful gain reference and
+uses fresh class/controller identities. Default-inactive auxiliary ports require
+real native activation. An independent weighted stereo DSP, fixed3-frame delay,
+matching latency/tail, state-controlled weights/port removal and the existing
+sample-offset linear queue convention serve as output oracles. Native SDK slots
+and duplicate names do not become inferred main roles or alternate author IDs.
+
+An ignored audio integration matrix checks both modes, two block partitions,
+opaque component/controller state, changed native count, reset/silence and stale
+admission. The App CLAP/VST3 cases share the existing author-history/public-PCM
+assertion body (distinct native setup), checking detector-only routing, locked
+and missing refusal, one Undo, saved live Redo and fresh Unicode project archives.
+Fixture build/test compilation is not native execution proof. Current packaged
+product rebuild and explicit ignored-test execution are required before claiming
+qualification; the prior ac6f069 source and 3b44084 Golden scopes are unchanged.

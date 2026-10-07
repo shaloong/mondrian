@@ -352,6 +352,192 @@ fn installed_clap_sidechain_preserves_native_buses_state_delay_and_partitions() 
     }
 }
 
+#[test]
+#[ignore = "requires current product and owned VST3 sidechain native fixture"]
+fn installed_vst3_sidechain_preserves_native_buses_state_delay_and_partitions() {
+    let helper = std::env::var_os("MONDRIAN_VST3_TEST_HELPER")
+        .map(PathBuf::from)
+        .expect("current packaged worker");
+    let plugin = std::env::var_os("MONDRIAN_VST3_SIDECHAIN_TEST_PLUGIN")
+        .map(PathBuf::from)
+        .expect("owned sidechain fixture");
+    let catalog = DiscoveredVst3AudioProcessorSpecResolver::discover(helper, [plugin])
+        .expect("discover native sidechain DLL");
+    assert_eq!(catalog.descriptors().len(), 1);
+    assert_eq!(catalog.descriptors()[0].name, "Mondrian Sidechain Fixture");
+    for mode in [AudioProcessingMode::Realtime, AudioProcessingMode::Offline] {
+        for port_mode in 0..=2 {
+            let render = AudioRenderContract { processing_mode: mode, ..test_render_contract() };
+            let state = vst3_sidechain_snapshot(0.5, port_mode);
+            let mut instance = catalog
+                .create_instance(
+                    &catalog.descriptors()[0].class_id,
+                    render,
+                    Some(state.clone()),
+                )
+                .expect("capture restored native port configuration");
+            // Static restored state is the signal oracle; automation has its own native gate.
+            instance.parameters.clear();
+            assert_eq!(
+                instance.opaque_state.as_ref().map(AsRef::as_ref),
+                Some(state.as_slice())
+            );
+            let spec = catalog
+                .resolve(AudioProcessorPrepareRequest::new(
+                    AudioProcessorOccurrence {
+                        instance_id: instance.id,
+                        owner: AudioProcessorOccurrenceOwner::Output(ProgramOutputId::new()),
+                        insertion: AudioProcessorInsertionPoint::PreFader,
+                    },
+                    &instance.definition,
+                    &instance.parameters,
+                    instance.opaque_state.as_ref().map(AsRef::as_ref),
+                    render,
+                ))
+                .expect("resolve restored port metadata");
+            let expected_ids: &[u32] = if port_mode == 2 { &[1] } else { &[1, 2] };
+            assert_eq!(
+                spec.auxiliary_inputs
+                    .buses
+                    .iter()
+                    .map(|bus| bus.bus_key.as_str())
+                    .collect::<Vec<_>>(),
+                expected_ids
+                    .iter()
+                    .map(|id| format!("vst3.audio-input.{id}"))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                spec.plugin_execution_contract.algorithmic_latency_frames(),
+                3
+            );
+            assert_eq!(
+                spec.plugin_execution_contract.tail(),
+                AudioProcessorTail::Finite(3)
+            );
+            for partitions in [&[4, 4, 4, 2][..], &[3, 2, 1, 4, 4][..]] {
+                let factory = IsolatedAudioProcessorFactory::prepare(spec.clone())
+                    .expect("prepare native sidechain worker");
+                let mut processor = factory.create().expect("create isolated instance");
+                processor.enter_state(100).expect("enter native continuity");
+                let mut output = Vec::new();
+                let mut offset = 0;
+                for &frames in partitions {
+                    let mut io = NativeSidechainAudioIo {
+                        main: fixture_sidechain_samples(0, offset, frames),
+                        inputs: expected_ids
+                            .iter()
+                            .map(|id| {
+                                (
+                                    format!("vst3.audio-input.{id}"),
+                                    vst3_sidechain_samples(*id, offset, frames),
+                                )
+                            })
+                            .collect(),
+                    };
+                    let start = 100 + offset as i64;
+                    let context = AudioProcessorProcessContext::new(
+                        AudioRenderRequest { start_sample: start, frames },
+                        AudioSampleRate::new(48_000).expect("sample rate"),
+                        AudioChannelLayout::Stereo,
+                        mode,
+                        AudioKernelBackend::ScalarReference,
+                    );
+                    processor
+                        .process(
+                            context,
+                            &mut io,
+                            AudioParameterEventBatch::new(start, frames, &[], &[], &[]),
+                        )
+                        .expect("process independent native auxiliary PCM");
+                    output.extend(io.main);
+                    offset += frames;
+                }
+                for (frame, actual) in output.chunks_exact(2).enumerate() {
+                    for (channel, &value) in actual.iter().enumerate() {
+                        let expected = if frame < 3 {
+                            0.0
+                        } else {
+                            let sample = frame - 3;
+                            let main = fixture_sidechain_samples(0, sample, 1)[channel];
+                            let first = fixture_sidechain_samples(11, sample, 1)[channel];
+                            let second = if port_mode == 2 {
+                                0.0
+                            } else {
+                                fixture_sidechain_samples(7, sample, 1)[channel]
+                            };
+                            let (first_weight, second_weight) = if port_mode == 1 {
+                                (5.0, 3.0)
+                            } else {
+                                (3.0, 5.0)
+                            };
+                            (2.0 * main + first_weight * first + second_weight * second) * 0.5
+                        };
+                        assert!((value - expected).abs() <= 1e-6,
+                            "{mode:?}, ports{port_mode}, partitions{partitions:?}, frame{frame}, channel{channel}: {value} != {expected}");
+                    }
+                }
+                processor.enter_state(0).expect("reset native delay");
+                let mut io = NativeSidechainAudioIo {
+                    main: vec![0.25; 8],
+                    inputs: expected_ids
+                        .iter()
+                        .map(|id| (format!("vst3.audio-input.{id}"), vec![0.0; 8]))
+                        .collect(),
+                };
+                let context = AudioProcessorProcessContext::new(
+                    AudioRenderRequest { start_sample: 0, frames: 4 },
+                    AudioSampleRate::new(48_000).expect("sample rate"),
+                    AudioChannelLayout::Stereo,
+                    mode,
+                    AudioKernelBackend::ScalarReference,
+                );
+                processor
+                    .process(
+                        context,
+                        &mut io,
+                        AudioParameterEventBatch::new(0, 4, &[], &[], &[]),
+                    )
+                    .expect("silent auxiliary input following active native signal");
+                assert_eq!(io.main, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.25]);
+            }
+            if port_mode == 0 {
+                let mut stale = spec.clone();
+                let mut payload: serde_json::Value =
+                    serde_json::from_slice(&stale.preparation_payload).expect("worker payload");
+                let changed_state = vst3_sidechain_snapshot(0.5, 2);
+                payload["state"] = serde_json::json!(changed_state);
+                stale.preparation_payload =
+                    serde_json::to_vec(&payload).expect("changed-state payload");
+                assert!(
+                    IsolatedAudioProcessorFactory::prepare(stale).is_err(),
+                    "changed restored native count must refuse stale admission"
+                );
+            }
+        }
+    }
+}
+
+fn vst3_sidechain_samples(index: u32, start: usize, frames: usize) -> Vec<f32> {
+    fixture_sidechain_samples(if index == 1 { 11 } else { 7 }, start, frames)
+}
+
+fn vst3_sidechain_snapshot(gain: f64, mode: u32) -> Vec<u8> {
+    let mut component = Vec::with_capacity(20);
+    component.extend_from_slice(b"MSS1");
+    component.extend_from_slice(&1_u32.to_le_bytes());
+    component.extend_from_slice(&gain.to_le_bytes());
+    component.extend_from_slice(&mode.to_le_bytes());
+    let mut snapshot = Vec::with_capacity(28 + 2 * component.len());
+    snapshot.extend_from_slice(b"VST3HOST_STATE\0\0");
+    snapshot.extend_from_slice(&1_u32.to_le_bytes());
+    snapshot.extend_from_slice(&(component.len() as u32).to_le_bytes());
+    snapshot.extend_from_slice(&(component.len() as u32).to_le_bytes());
+    snapshot.extend_from_slice(&component);
+    snapshot.extend_from_slice(&component);
+    snapshot
+}
+
 fn fixture_sidechain_samples(id: u32, start: usize, frames: usize) -> Vec<f32> {
     (start..start + frames)
         .flat_map(|sample| {

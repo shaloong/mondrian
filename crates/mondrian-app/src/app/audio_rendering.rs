@@ -751,12 +751,9 @@ mod tests {
     #[test]
     #[ignore = "requires current product and owned CLAP sidechain DLL"]
     fn native_clap_sidechain_routing_undo_save_reopen_preserves_output() {
-        use super::super::product_action::{AudioProductAction, ProductAction};
         use mondrian_audio::{
             DiscoveredClapAudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
         };
-        use mondrian_timeline::audio::{AudioChannelStripOutputPort, AudioRouteSource};
-        use mondrian_timeline::{AudioRoutingEdit, AudioRoutingEditRequest};
         let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
             .map(std::path::PathBuf::from)
             .expect("current product");
@@ -774,8 +771,45 @@ mod tests {
                 Some(opaque),
             )
             .expect("capture stateful native definition");
-        let processor_id = instance.id;
         let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
+        assert_native_sidechain_history(instance, &resolver, "clap.audio-input.11");
+    }
+
+    #[test]
+    #[ignore = "requires current product and owned VST3 sidechain DLL"]
+    fn native_vst3_sidechain_routing_undo_save_reopen_preserves_output() {
+        use mondrian_audio::{
+            DiscoveredVst3AudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
+        };
+        let helper = std::env::var_os("MONDRIAN_VST3_TEST_HELPER")
+            .map(std::path::PathBuf::from)
+            .expect("current product");
+        let plugin = std::env::var_os("MONDRIAN_VST3_SIDECHAIN_TEST_PLUGIN")
+            .map(std::path::PathBuf::from)
+            .expect("owned VST3 sidechain DLL");
+        let installed = DiscoveredVst3AudioProcessorSpecResolver::discover(helper, [plugin])
+            .expect("discover native sidechain");
+        assert_eq!(installed.descriptors().len(), 1);
+        let instance = installed
+            .create_instance(
+                &installed.descriptors()[0].class_id,
+                reference_render_contract(),
+                None,
+            )
+            .expect("capture default native state");
+        let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
+        assert_native_sidechain_history(instance, &resolver, "vst3.audio-input.1");
+    }
+
+    fn assert_native_sidechain_history(
+        instance: mondrian_timeline::audio::AudioProcessorInstance,
+        resolver: &dyn AudioProcessorResolver,
+        bus_key: &str,
+    ) {
+        use super::super::product_action::{AudioProductAction, ProductAction};
+        use mondrian_timeline::audio::{AudioChannelStripOutputPort, AudioRouteSource};
+        use mondrian_timeline::{AudioRoutingEdit, AudioRoutingEditRequest};
+        let processor_id = instance.id;
         let (root, library, mut sequence) = native_gain_media_fixture();
         let asset_id = sequence.audio_tracks[0].clips[0].media_asset_id().expect("media asset");
         let detector = sequence.add_audio_track();
@@ -809,7 +843,7 @@ mod tests {
                 edit: AudioRoutingEdit::CreateProcessorSidechain {
                     source,
                     processor_id,
-                    bus_key: "clap.audio-input.11".to_owned(),
+                    bus_key: bus_key.to_owned(),
                 },
             }))
             .into_external_action()
@@ -817,7 +851,7 @@ mod tests {
         let mut state = AppState::new();
         state.test_set_sequence(Some(sequence.clone()));
         state.test_set_asset_library(Some(library));
-        let before = assert_native_sidechain_delivery(&state, &resolver, 0.25);
+        let before = assert_native_sidechain_delivery(&state, resolver, 0.25);
         let generation = state.project_author_generation();
         let history = state.authoring_history().expect("history").diagnostics();
         state
@@ -862,7 +896,7 @@ mod tests {
         );
         let edited = state.active_sequence().expect("edited").clone();
         assert_eq!(edited.audio_program.sidechain_routes.len(), 1);
-        let after = assert_native_sidechain_delivery(&state, &resolver, 0.4375);
+        let after = assert_native_sidechain_delivery(&state, resolver, 0.4375);
         assert_ne!(before, after);
         assert!(state.undo_timeline().expect("one route Undo"));
         assert!(state
@@ -870,7 +904,7 @@ mod tests {
             .expect("Undo")
             .author_state_eq_ignoring_revision(&sequence));
         assert_eq!(
-            assert_native_sidechain_delivery(&state, &resolver, 0.25),
+            assert_native_sidechain_delivery(&state, resolver, 0.25),
             before
         );
         assert!(!state.can_undo_action() && state.can_redo_action());
@@ -883,7 +917,7 @@ mod tests {
             .expect("Redo")
             .author_state_eq_ignoring_revision(&edited));
         assert_eq!(
-            assert_native_sidechain_delivery(&state, &resolver, 0.4375),
+            assert_native_sidechain_delivery(&state, resolver, 0.4375),
             after
         );
         let edited_path = root.path().join("原生侧链重做🙂.mdp");
@@ -906,7 +940,7 @@ mod tests {
                 1
             );
             assert_eq!(
-                assert_native_sidechain_delivery(&reopened, &resolver, expected),
+                assert_native_sidechain_delivery(&reopened, resolver, expected),
                 output
             );
         }
