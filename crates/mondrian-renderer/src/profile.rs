@@ -950,6 +950,14 @@ impl GpuTimestampQueryRing {
         std::mem::take(&mut self.completed)
     }
 
+    /// Observe callbacks already driven by the device progress owner and advance
+    /// deferred counter readback. Does not poll or wait on the device itself.
+    /// Returns true only when every query slot is free, including readback work.
+    pub fn poll_after_device_progress(&mut self) -> Result<bool, GpuTimestampRingError> {
+        self.collect_ready()?;
+        Ok(self.slots.iter().all(|slot| matches!(slot.state, GpuTimestampSlotState::Free)))
+    }
+
     /// Drain measured work and deferred resolve submissions after an offline interval.
     pub fn finish_all(
         &mut self,
@@ -1464,6 +1472,10 @@ mod tests {
                 ring.slots[0].state,
                 GpuTimestampSlotState::Recorded { .. }
             ));
+            anyhow::ensure!(
+                !ring.poll_after_device_progress()?,
+                "recorded queries cannot report complete retirement before submission"
+            );
             // Oracle readback is outside the measured compute scope.
             encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, 65536 * 4);
             queue.submit([encoder.finish()]);
@@ -1482,7 +1494,19 @@ mod tests {
             });
             let mut saw_resolve_pending = false;
             let samples = if sample >= 8 {
-                ring.finish_all(&device)?
+                // Exercise the native Window retirement seam for complete and
+                // rejected coverage alike. Device progress belongs to the
+                // caller; this observation only advances deferred readback.
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    anyhow::ensure!(Instant::now() < deadline, "query retirement timed out");
+                    device.poll(wgpu::PollType::Poll)?;
+                    if ring.poll_after_device_progress()? {
+                        break;
+                    }
+                    std::thread::yield_now();
+                }
+                ring.take_completed()
             } else {
                 let deadline = Instant::now() + Duration::from_secs(5);
                 while ring.completed.is_empty() {

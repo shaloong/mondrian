@@ -1748,6 +1748,17 @@ decode work and presentation are outside this encoder timing span; it is not
 all queue traffic or end-to-end Viewer latency. Semantic stage markers are
 shared across both timing modes.
 
+The native Window owner enables actual-pass timing only when
+`MONDRIAN_RENDER_PROFILE` is enabled. Its ring has eight query slots and at
+most 64 measured passes per frame. Exhaustion discards timing coverage without
+changing the recorded workload. Submission and sample logs bind query identity
+to the owning device generation; reopen does not reuse that identity. Counter
+readback remains owned by the existing generation retirement envelope. After
+the initial queue barrier, the device progress owner continues nonblocking
+polling until deferred counter callbacks and the other retirement resources
+prove safe release. Timing errors do not authorize early resource release or
+replace the renderer's result with a fallback.
+
 The standalone scopes and Standard View gates use the same actual-pass
 recorder through `GpuTimestampPassIntervalTimer`. A consuming receipt binds
 the measured command interval to its query allocation. This synchronous gate

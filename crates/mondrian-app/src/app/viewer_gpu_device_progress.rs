@@ -1742,6 +1742,29 @@ where
                     );
                 }
             }
+        } else if !terminal_before_wait
+            .as_ref()
+            .is_some_and(ViewerGpuDeviceGenerationTerminal::wgpu_work_is_terminal)
+        {
+            // Retirement can submit deferred readback after the initial queue
+            // barrier. Keep its callbacks moving until the envelope proves
+            // release is safe; the barrier alone does not retire those resources.
+            match catch_unwind(AssertUnwindSafe(|| driver.poll())) {
+                Ok(Ok(())) => {}
+                Ok(Err(reason)) => {
+                    health.mark_progress_failure(None, reason, Instant::now());
+                }
+                Err(panic) => {
+                    health.mark_progress_failure(
+                        None,
+                        format!(
+                            "wgpu generation retirement callback progress panicked: {}",
+                            panic_payload_message(panic)
+                        ),
+                        Instant::now(),
+                    );
+                }
+            }
         }
 
         // A device-lost callback may be delivered by the wait above. Concrete
@@ -2698,6 +2721,64 @@ mod tests {
             worker.progress_state.active_slots.load(Ordering::Acquire),
             0
         );
+    }
+
+    #[test]
+    fn retirement_drives_deferred_callbacks_after_the_queue_barrier() {
+        struct DeferredCallbackWait {
+            retirement_polls: Arc<AtomicUsize>,
+            safe_to_release: Arc<AtomicBool>,
+            waits: Arc<AtomicUsize>,
+        }
+        impl ViewerGpuDeviceWait<u64> for DeferredCallbackWait {
+            fn poll(&mut self) -> Result<(), String> {
+                if self.retirement_polls.load(Ordering::Acquire) > 0 {
+                    self.safe_to_release.store(true, Ordering::Release);
+                }
+                Ok(())
+            }
+
+            fn check_completion(
+                &mut self,
+                _submission: Option<&u64>,
+            ) -> Result<ViewerGpuDeviceWaitStatus, String> {
+                self.waits.fetch_add(1, Ordering::Relaxed);
+                Ok(ViewerGpuDeviceWaitStatus::Satisfied)
+            }
+        }
+        let safe_to_release = Arc::new(AtomicBool::new(false));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let waits = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let health =
+            ViewerGpuDeviceGenerationHealth::for_test(ViewerGpuDeviceProgressWake::default());
+        let mut worker = ViewerGpuDeviceProgressWorker::spawn(
+            "deferred-generation-retirement-test",
+            DeferredCallbackWait {
+                retirement_polls: Arc::clone(&polls),
+                safe_to_release: Arc::clone(&safe_to_release),
+                waits: Arc::clone(&waits),
+            },
+            ViewerGpuDeviceProgressPolicy::new(Duration::from_millis(1)).expect("valid policy"),
+            health,
+            None,
+        )
+        .expect("spawn progress worker");
+        let handoff = worker.enqueue_generation_retirement(Box::new(TestRetirement {
+            safe_to_release: Arc::clone(&safe_to_release),
+            polls,
+            drops: Arc::clone(&drops),
+            require_device_lost: false,
+        }));
+        let evidence = worker.shutdown_and_wait(true, handoff, Duration::from_secs(1));
+        // On the old loop the callback cannot run after QueueEmpty. Release the
+        // test-owned envelope even when the regression fails; do not strand a
+        // background test worker just to demonstrate the timeout.
+        safe_to_release.store(true, Ordering::Release);
+        wait_for_atomic(&drops, 1);
+        assert!(progress_shutdown_complete(evidence), "{evidence:?}");
+        assert_eq!(waits.load(Ordering::Acquire), 1);
+        assert_eq!(drops.load(Ordering::Acquire), 1);
     }
 
     #[test]

@@ -1857,6 +1857,7 @@ struct AppUiWindowSession {
     renderer_device: wgpu::Device,
     renderer_queue: wgpu::Queue,
     viewer_gpu_execution: ViewerGpuDeviceGenerationMember<ViewerGpuExecutionRuntime>,
+    viewer_gpu_profile: Option<mondrian_renderer::profile::GpuTimestampQueryRing>,
     viewer_gpu_presentation: WindowViewerGpuPresentationState,
     viewer_gpu_submissions: ViewerGpuSubmissionLifecycle<
         WindowViewerGpuSubmissionOwner,
@@ -2056,6 +2057,8 @@ impl WindowViewerGpuPresentationState {
 
 struct WindowViewerGpuGenerationRetirement {
     runtime: mondrian_renderer::ViewerGpuExecutionRetirement,
+    profile: Option<mondrian_renderer::profile::GpuTimestampQueryRing>,
+    device_generation: ViewerGpuDeviceGenerationId,
     lifecycle: ViewerGpuSubmissionLifecycle<
         WindowViewerGpuSubmissionOwner,
         ViewerHeterogeneousGpuCompletedBatch,
@@ -2072,6 +2075,7 @@ struct WindowViewerGpuGenerationRetirement {
     >,
     _lost_submission_owners: Vec<WindowViewerGpuSubmissionOwner>,
     native_retirement_error_logged: bool,
+    profiling_retirement_error_logged: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2134,6 +2138,27 @@ impl ViewerGpuDeviceGenerationRetirement for WindowViewerGpuGenerationRetirement
                 .extend(self.lifecycle.retire_owners_after_wgpu_device_loss());
         }
 
+        // Actual device loss invalidates query work as it does other wgpu
+        // work. Do not submit counter resolution to a lost device. Ordinary
+        // progress/telemetry errors still require a real retirement receipt.
+        if let Some(profile) = &mut self.profile
+            && !terminal.is_some_and(ViewerGpuDeviceGenerationTerminal::wgpu_work_is_terminal)
+        {
+            let ready = match profile.poll_after_device_progress() {
+                Ok(ready) => ready,
+                Err(error) => {
+                    if !self.profiling_retirement_error_logged {
+                        tracing::error!(%error, "Window GPU profiling retirement failed");
+                        self.profiling_retirement_error_logged = true;
+                    }
+                    false
+                }
+            };
+            trace_window_gpu_profile_samples(profile, Some(self.device_generation));
+            if !ready {
+                return None;
+            }
+        }
         if self.lifecycle.is_occupied() {
             return None;
         }
@@ -2241,7 +2266,12 @@ fn request_app_ui_device(
         required_features: native_video_texture_device_features(adapter.features())
             | ocio_lut_filtering_device_features(adapter.features())
             | mondrian_renderer::program_scopes_device_features(adapter.features())
-            | working_texture_features,
+            | working_texture_features
+            | if mondrian_renderer::profile::profiling_enabled() {
+                adapter.features() & wgpu::Features::TIMESTAMP_QUERY
+            } else {
+                wgpu::Features::empty()
+            },
         ..wgpu::DeviceDescriptor::default()
     };
     pollster::block_on(mondrian_renderer::request_device_with_native_video_support(
@@ -3847,6 +3877,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let platform = SystemPlatformService;
     let tracing_guard = init_product_tracing(&platform);
+    mondrian_renderer::profile::init_profiling();
     #[cfg(feature = "validation")]
     let validation_shutdown_deadline =
         surface_reopen_validation.as_ref().map(|validation| validation.deadline);
@@ -6997,6 +7028,73 @@ fn drive_viewer_heterogeneous_completion(
     }
 }
 
+fn trace_window_gpu_profile_samples(
+    profile: &mut mondrian_renderer::profile::GpuTimestampQueryRing,
+    generation: Option<ViewerGpuDeviceGenerationId>,
+) {
+    for sample in profile.take_completed() {
+        tracing::info!(
+            target: "mondrian_app::gpu_profile",
+            device_generation = ?generation.map(ViewerGpuDeviceGenerationId::get),
+            sample_id = sample.token.id(),
+            gpu_execution_us = sample.elapsed_us,
+            stages_json = %serde_json::to_string(&sample.stages).expect("integer GPU stage timings"),
+            discarded_samples = profile.discarded_samples(),
+            "Window GPU hardware timestamp sample"
+        );
+    }
+}
+
+fn record_window_viewer_gpu_profile(
+    runtime: &mut ViewerGpuExecutionRuntime,
+    profile: Option<&mut mondrian_renderer::profile::GpuTimestampQueryRing>,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: &mut wgpu::CommandEncoder,
+    request: ViewerGpuExecutionRequest<'_>,
+    generation: Option<ViewerGpuDeviceGenerationId>,
+) -> (
+    Result<mondrian_renderer::ViewerGpuExecutionRecord, ViewerGpuExecutionError>,
+    Option<mondrian_renderer::profile::GpuTimestampToken>,
+) {
+    let Some(profile) = profile else {
+        return (runtime.record(device, queue, encoder, request), None);
+    };
+    let scope = match profile.begin_pass_frame(device, encoder) {
+        Ok(scope) => scope,
+        Err(error) => {
+            tracing::error!(%error, "Window GPU timestamp observation failed before recording");
+            trace_window_gpu_profile_samples(profile, generation);
+            return (runtime.record(device, queue, encoder, request), None);
+        }
+    };
+    let Some((token, mut recorder)) = scope else {
+        trace_window_gpu_profile_samples(profile, generation);
+        return (runtime.record(device, queue, encoder, request), None);
+    };
+    let result = runtime.record(device, queue, &mut recorder, request);
+    let receipt = recorder.finish();
+    let coverage = profile.finish_pass_frame(receipt);
+    trace_window_gpu_profile_samples(profile, generation);
+    match coverage {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!("Window GPU timestamp scope has incomplete command coverage"),
+        Err(error) => {
+            // Recording already happened. A diagnostic failure cannot replace
+            // its result or free queries that submitted commands may reference.
+            tracing::error!(%error, "Window GPU timestamp recording receipt rejected");
+        }
+    }
+    if result.is_err() {
+        if let Err(error) = profile.abandon_frame(token) {
+            tracing::error!(%error, "Window GPU timestamp failed-frame abandonment failed");
+        }
+        (result, None)
+    } else {
+        (result, Some(token))
+    }
+}
+
 fn fail_viewer_gpu_frame(host: &AppUiHost, frame: &mut PreviewGpuFrame) {
     if let Some(execution) = frame.take_heterogeneous_gpu_execution() {
         let _ = host.fail_heterogeneous_viewer_gpu(execution);
@@ -7726,7 +7824,9 @@ fn prepare_viewer_gpu_preview(
     );
     let source_rect = presentation_geometry.presentation.normalized_source_rect();
     let renderer_record_started = Instant::now();
-    let mut record = match session.viewer_gpu_execution.record(
+    let (record_result, timestamp_token) = record_window_viewer_gpu_profile(
+        &mut session.viewer_gpu_execution,
+        session.viewer_gpu_profile.as_mut(),
         device,
         queue,
         &mut encoder,
@@ -7785,7 +7885,9 @@ fn prepare_viewer_gpu_preview(
                 None
             }),
         },
-    ) {
+        session.viewer_gpu_device_progress.generation_id(),
+    );
+    let mut record = match record_result {
         Ok(record) => record,
         Err(error) => {
             if let ViewerGpuExecutionError::Backpressure(reason) = &error {
@@ -7893,6 +7995,11 @@ fn prepare_viewer_gpu_preview(
         );
         drop(record);
         drop(encoder);
+        if let (Some(profile), Some(token)) = (&mut session.viewer_gpu_profile, timestamp_token)
+            && let Err(error) = profile.abandon_frame(token)
+        {
+            tracing::error!(%error, "Window GPU profiling pre-submit abandonment failed");
+        }
         session.viewer_gpu_execution.clear_frame_resources();
         drop(progress_permit);
         fail_viewer_gpu_frame(host, &mut frame);
@@ -7908,6 +8015,22 @@ fn prepare_viewer_gpu_preview(
     }
     progress_permit.arm_native_completion_wake(queue);
     let submission_index = queue.submit(std::iter::once(encoder.finish()));
+    if let (Some(profile), Some(token)) = (&mut session.viewer_gpu_profile, timestamp_token) {
+        if let Err(error) = profile.after_submit(token) {
+            tracing::error!(%error, "Window GPU profiling submission tracking failed");
+        }
+        tracing::info!(
+            target: "mondrian_app::gpu_profile",
+            device_generation = ?session
+                .viewer_gpu_device_progress
+                .generation_id()
+                .map(ViewerGpuDeviceGenerationId::get),
+            sample_id = token.id(),
+            submission_id = submission_id.get(),
+            frame = frame.frame,
+            "Window GPU profiling submission"
+        );
+    }
     tracing::debug!(
         target: "mondrian_app::viewer_submission",
         submission_id = submission_id.get(),
@@ -9076,6 +9199,15 @@ impl AppUiPreparedWindowSession {
             renderer_device: device.clone(),
             renderer_queue: queue.clone(),
             viewer_gpu_execution: ViewerGpuDeviceGenerationMember::empty(),
+            viewer_gpu_profile: if role == AppUiWindowRole::Workspace
+                && mondrian_renderer::profile::profiling_enabled()
+            {
+                mondrian_renderer::profile::GpuTimestampQueryRing::new_for_passes(
+                    device, queue, 8, 64,
+                )
+            } else {
+                None
+            },
             viewer_gpu_presentation: WindowViewerGpuPresentationState::default(),
             viewer_gpu_submissions: ViewerGpuSubmissionLifecycle::new(),
             staged_viewer_gpu_successors: PreviewGpuFrameStaging::default(),
@@ -9280,10 +9412,13 @@ impl AppUiWindowSession {
             &mut self.viewer_gpu_submissions,
             ViewerGpuSubmissionLifecycle::new(),
         );
+        let device_generation = progress.generation_id();
         Ok((
             progress,
             WindowViewerGpuGenerationRetirement {
                 runtime: runtime.into_retirement(),
+                profile: self.viewer_gpu_profile.take(),
+                device_generation,
                 lifecycle,
                 _presentation: std::mem::take(&mut self.viewer_gpu_presentation),
                 _renderer_device: self.renderer_device.clone(),
@@ -9292,6 +9427,7 @@ impl AppUiWindowSession {
                 _completed_submissions: Vec::new(),
                 _lost_submission_owners: Vec::new(),
                 native_retirement_error_logged: false,
+                profiling_retirement_error_logged: false,
             },
         ))
     }
