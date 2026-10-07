@@ -377,6 +377,18 @@ fn present_headless_preview_candidate_inner(
                     return Ok(HeadlessPreviewCandidate::Loading);
                 }
             }
+            // Resolution can advance beyond a semantically promoted successor
+            // whose physical publication was rejected by Playback. The old
+            // semantic current key is no longer a reason to retain that
+            // off-screen lease when this accepted candidate needs a different
+            // output. Preserve the actual visible owner and any still-relevant
+            // preparation; submitted owners retain their completion lifetime.
+            if let Some((output_key, output)) = gpu.retire_stale_prepared_physical_output(
+                expected_prepared_output.as_ref(),
+                Some(&frame.output_key),
+            ) {
+                clear_revoked_headless_gpu_output(preview, &output_key, &output);
+            }
             let submitted = match gpu.submit(*frame, gpu_completion_deadline) {
                 Ok(submitted) => submitted,
                 Err(HeadlessViewerGpuError::Backpressure(_)) => {

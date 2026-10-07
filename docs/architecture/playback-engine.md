@@ -2650,6 +2650,12 @@ into the pointer-only semantic and physical slot promotion, validates the exact
 prepared key and artifact, and then completes the demand against that prior
 publication time. A replacement without prepared publication proof still runs
 terminal preflight at the actual submission or promotion attempt.
+After a replacement passes preflight, its resolved output key also bounds
+prepared physical residency. A successor promoted into semantic current but
+rejected by Playback must not remain physically prepared solely because the
+previous semantic current key still names it. Retire that obsolete off-screen
+lease before recording the replacement, retaining the actual visible output,
+any still-relevant preparation, and every submitted completion owner.
 
 Non-playback lane eligibility diagnostics are produced under the Frame Work
 Broker's state lock using the same current failover, prefetch borrowing and
