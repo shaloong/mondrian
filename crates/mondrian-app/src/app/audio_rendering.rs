@@ -751,6 +751,16 @@ mod tests {
     #[test]
     #[ignore = "requires current product and owned CLAP sidechain DLL"]
     fn native_clap_sidechain_routing_undo_save_reopen_preserves_output() {
+        qualify_native_clap_sidechain(false);
+    }
+
+    #[test]
+    #[ignore = "requires current product and owned CLAP sidechain DLL"]
+    fn native_clap_same_strip_prefader_sidechain_undo_save_reopen_preserves_output() {
+        qualify_native_clap_sidechain(true);
+    }
+
+    fn qualify_native_clap_sidechain(same_strip: bool) {
         use mondrian_audio::{
             DiscoveredClapAudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
         };
@@ -772,12 +782,22 @@ mod tests {
             )
             .expect("capture stateful native definition");
         let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
-        assert_native_sidechain_history(instance, &resolver, "clap.audio-input.11");
+        assert_native_sidechain_history(instance, &resolver, "clap.audio-input.11", same_strip);
     }
 
     #[test]
     #[ignore = "requires current product and owned VST3 sidechain DLL"]
     fn native_vst3_sidechain_routing_undo_save_reopen_preserves_output() {
+        qualify_native_vst3_sidechain(false);
+    }
+
+    #[test]
+    #[ignore = "requires current product and owned VST3 sidechain DLL"]
+    fn native_vst3_same_strip_prefader_sidechain_undo_save_reopen_preserves_output() {
+        qualify_native_vst3_sidechain(true);
+    }
+
+    fn qualify_native_vst3_sidechain(same_strip: bool) {
         use mondrian_audio::{
             DiscoveredVst3AudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
         };
@@ -798,13 +818,14 @@ mod tests {
             )
             .expect("capture default native state");
         let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
-        assert_native_sidechain_history(instance, &resolver, "vst3.audio-input.1");
+        assert_native_sidechain_history(instance, &resolver, "vst3.audio-input.1", same_strip);
     }
 
     fn assert_native_sidechain_history(
         instance: mondrian_timeline::audio::AudioProcessorInstance,
         resolver: &dyn AudioProcessorResolver,
         bus_key: &str,
+        same_strip: bool,
     ) {
         use super::super::product_action::{AudioProductAction, ProductAction};
         use mondrian_timeline::audio::{AudioChannelStripOutputPort, AudioRouteSource};
@@ -812,32 +833,58 @@ mod tests {
         let processor_id = instance.id;
         let (root, library, mut sequence) = native_gain_media_fixture();
         let asset_id = sequence.audio_tracks[0].clips[0].media_asset_id().expect("media asset");
-        let detector = sequence.add_audio_track();
-        sequence
-            .add_media_audio_clip(
-                detector,
-                mondrian_timeline::Clip::new(
-                    asset_id,
-                    mondrian_core::TimelineTime::ZERO,
-                    mondrian_core::TimelineTime::ONE,
+        let detector = if same_strip {
+            sequence.audio_tracks[0].id
+        } else {
+            let detector = sequence.add_audio_track();
+            sequence
+                .add_media_audio_clip(
+                    detector,
+                    mondrian_timeline::Clip::new(
+                        asset_id,
+                        mondrian_core::TimelineTime::ZERO,
+                        mondrian_core::TimelineTime::ONE,
+                    )
+                    .expect("detector clip"),
+                    AudioSourceComponentId::primary(),
                 )
-                .expect("detector clip"),
-                AudioSourceComponentId::primary(),
-            )
-            .expect("authored detector source");
-        sequence
-            .audio_program
-            .track_channels
-            .get_mut(&detector)
-            .expect("detector strip")
-            .strip
-            .fader_db = -6.020_599_913_279_624;
-        sequence.audio_program.routes.retain(|route| !matches!(route.source, AudioRouteSource::Track { track_id, .. } if track_id == detector));
-        sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
+                .expect("authored detector source");
+            sequence
+                .audio_program
+                .track_channels
+                .get_mut(&detector)
+                .expect("detector strip")
+                .strip
+                .fader_db = -6.020_599_913_279_624;
+            sequence.audio_program.routes.retain(|route| {
+                !matches!(route.source,
+                AudioRouteSource::Track { track_id, .. } if track_id == detector)
+            });
+            detector
+        };
+        if same_strip {
+            sequence
+                .audio_program
+                .track_channels
+                .get_mut(&detector)
+                .expect("main strip")
+                .strip
+                .post_fader
+                .processors
+                .push(instance);
+        } else {
+            sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
+        }
         let source = AudioRouteSource::Track {
             track_id: detector,
-            port: AudioChannelStripOutputPort::PostMute,
+            port: if same_strip {
+                AudioChannelStripOutputPort::PreFader
+            } else {
+                AudioChannelStripOutputPort::PostMute
+            },
         };
+        // Independent owned ABI fixture: gain * (2 main + 3 first auxiliary).
+        let routed_expected = if same_strip { 0.625 } else { 0.4375 };
         let action = |processor_id| {
             ProductAction::Audio(AudioProductAction::EditRouting(AudioRoutingEditRequest {
                 edit: AudioRoutingEdit::CreateProcessorSidechain {
@@ -896,7 +943,7 @@ mod tests {
         );
         let edited = state.active_sequence().expect("edited").clone();
         assert_eq!(edited.audio_program.sidechain_routes.len(), 1);
-        let after = assert_native_sidechain_delivery(&state, resolver, 0.4375);
+        let after = assert_native_sidechain_delivery(&state, resolver, routed_expected);
         assert_ne!(before, after);
         assert!(state.undo_timeline().expect("one route Undo"));
         assert!(state
@@ -917,7 +964,7 @@ mod tests {
             .expect("Redo")
             .author_state_eq_ignoring_revision(&edited));
         assert_eq!(
-            assert_native_sidechain_delivery(&state, resolver, 0.4375),
+            assert_native_sidechain_delivery(&state, resolver, routed_expected),
             after
         );
         let edited_path = root.path().join("原生侧链重做🙂.mdp");
@@ -925,7 +972,7 @@ mod tests {
         drop(state);
         for (path, authored, expected, output) in [
             (undone_path, &sequence, 0.25, before),
-            (edited_path, &edited, 0.4375, after),
+            (edited_path, &edited, routed_expected, after),
         ] {
             let mut reopened = AppState::new();
             reopened.open_project_file(path).expect("fresh Unicode sidechain reopen");

@@ -1819,11 +1819,33 @@ fn unique_ids<T: Copy + Ord>(values: impl IntoIterator<Item = T>) -> Option<BTre
     Some(set)
 }
 
+/// Causal channel execution stages shared by author routing and execution lowering.
+/// Scope processing, input summing, trim and the pre-fader rack precede `PreFader`.
+/// Fader, post-fader rack and mute complete `PostFader`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AudioChannelSignalStage {
+    /// Input and pre-fader processing, producing the pre-fader tap.
+    PreFader,
+    /// Post-fader processing, producing both final taps.
+    PostFader,
+}
+
+impl AudioChannelSignalStage {
+    /// Stage that must complete before this channel tap is available.
+    pub fn producing(port: AudioChannelStripOutputPort) -> Self {
+        match port {
+            AudioChannelStripOutputPort::PreFader => Self::PreFader,
+            AudioChannelStripOutputPort::PostFaderPreMute
+            | AudioChannelStripOutputPort::PostMute => Self::PostFader,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum AudioAuthorRoutingNode {
-    Track(TrackId),
-    Bus(MixBusId),
-    Output(ProgramOutputId),
+    Track(TrackId, AudioChannelSignalStage),
+    Bus(MixBusId, AudioChannelSignalStage),
+    Output(ProgramOutputId, AudioChannelSignalStage),
 }
 
 fn validate_routing_cycles(
@@ -1868,8 +1890,12 @@ fn validate_routing_cycles(
 impl AudioAuthorRoutingNode {
     pub(crate) fn from_source(source: AudioRouteSource) -> Self {
         match source {
-            AudioRouteSource::Track { track_id, .. } => Self::Track(track_id),
-            AudioRouteSource::Bus { bus_id, .. } => Self::Bus(bus_id),
+            AudioRouteSource::Track { track_id, port } => {
+                Self::Track(track_id, AudioChannelSignalStage::producing(port))
+            }
+            AudioRouteSource::Bus { bus_id, port } => {
+                Self::Bus(bus_id, AudioChannelSignalStage::producing(port))
+            }
         }
     }
 }
@@ -1886,6 +1912,7 @@ pub(crate) fn author_routing_graph(
     audio_tracks: &[Track],
 ) -> AudioAuthorRoutingGraph {
     let mut processor_targets = BTreeMap::<_, BTreeSet<_>>::new();
+    let mut outgoing = BTreeMap::<AudioAuthorRoutingNode, BTreeSet<AudioAuthorRoutingNode>>::new();
     let mut record_rack = |rack: &AudioProcessorRack,
                            targets: &BTreeSet<AudioAuthorRoutingNode>| {
         for processor in &rack.processors {
@@ -1896,38 +1923,49 @@ pub(crate) fn author_routing_graph(
         }
     };
     for (track_id, channel) in &program.track_channels {
-        let targets = BTreeSet::from([AudioAuthorRoutingNode::Track(*track_id)]);
-        record_rack(&channel.strip.pre_fader, &targets);
-        record_rack(&channel.strip.post_fader, &targets);
+        let pre = AudioAuthorRoutingNode::Track(*track_id, AudioChannelSignalStage::PreFader);
+        let post = AudioAuthorRoutingNode::Track(*track_id, AudioChannelSignalStage::PostFader);
+        outgoing.entry(pre).or_default().insert(post);
+        outgoing.entry(post).or_default();
+        record_rack(&channel.strip.pre_fader, &BTreeSet::from([pre]));
+        record_rack(&channel.strip.post_fader, &BTreeSet::from([post]));
     }
     for bus in &program.buses {
-        let targets = BTreeSet::from([AudioAuthorRoutingNode::Bus(bus.id)]);
-        record_rack(&bus.strip.pre_fader, &targets);
-        record_rack(&bus.strip.post_fader, &targets);
+        let pre = AudioAuthorRoutingNode::Bus(bus.id, AudioChannelSignalStage::PreFader);
+        let post = AudioAuthorRoutingNode::Bus(bus.id, AudioChannelSignalStage::PostFader);
+        outgoing.entry(pre).or_default().insert(post);
+        outgoing.entry(post).or_default();
+        record_rack(&bus.strip.pre_fader, &BTreeSet::from([pre]));
+        record_rack(&bus.strip.post_fader, &BTreeSet::from([post]));
     }
     for output in &program.outputs {
-        let targets = BTreeSet::from([AudioAuthorRoutingNode::Output(output.id)]);
-        record_rack(&output.strip.pre_fader, &targets);
-        record_rack(&output.strip.post_fader, &targets);
+        let pre = AudioAuthorRoutingNode::Output(output.id, AudioChannelSignalStage::PreFader);
+        let post = AudioAuthorRoutingNode::Output(output.id, AudioChannelSignalStage::PostFader);
+        outgoing.entry(pre).or_default().insert(post);
+        outgoing.entry(post).or_default();
+        record_rack(&output.strip.pre_fader, &BTreeSet::from([pre]));
+        record_rack(&output.strip.post_fader, &BTreeSet::from([post]));
     }
     let mut scope_tracks = BTreeMap::<_, BTreeSet<_>>::new();
     for track in audio_tracks {
         for edit in track.clips.iter().flat_map(|clip| &clip.audio_components) {
-            scope_tracks
-                .entry(edit.processing.scope_id)
-                .or_default()
-                .insert(AudioAuthorRoutingNode::Track(track.id));
+            scope_tracks.entry(edit.processing.scope_id).or_default().insert(
+                AudioAuthorRoutingNode::Track(track.id, AudioChannelSignalStage::PreFader),
+            );
         }
     }
     for scope in &program.processing_scopes {
         let targets = scope_tracks.get(&scope.id).cloned().unwrap_or_default();
         record_rack(&scope.processors, &targets);
     }
-    let mut outgoing = BTreeMap::<AudioAuthorRoutingNode, BTreeSet<AudioAuthorRoutingNode>>::new();
     for route in &program.routes {
         let destination = match route.destination {
-            AudioRouteDestination::Bus(bus_id) => AudioAuthorRoutingNode::Bus(bus_id),
-            AudioRouteDestination::Output(output_id) => AudioAuthorRoutingNode::Output(output_id),
+            AudioRouteDestination::Bus(bus_id) => {
+                AudioAuthorRoutingNode::Bus(bus_id, AudioChannelSignalStage::PreFader)
+            }
+            AudioRouteDestination::Output(output_id) => {
+                AudioAuthorRoutingNode::Output(output_id, AudioChannelSignalStage::PreFader)
+            }
         };
         outgoing
             .entry(AudioAuthorRoutingNode::from_source(route.source))

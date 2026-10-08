@@ -1179,11 +1179,24 @@ mod tests {
                 .find(|channel| channel.owner == AudioChannelStripOwner::Bus { bus_id: target })
                 .expect("Target Bus");
             assert!(
+                target_channel.route_create_options.iter().any(|option| option.destination
+                    == AudioRouteDestination::Bus(detector)
+                    && matches!(
+                        option.source,
+                        AudioRouteSource::Bus { port: AudioChannelStripOutputPort::PreFader, .. }
+                    )),
+                "Causal pre-fader forward send remains accessible"
+            );
+            assert!(
                 target_channel
                     .route_create_options
                     .iter()
-                    .all(|option| option.destination != AudioRouteDestination::Bus(detector)),
-                "Feedback option must be hidden even when sidechain enabled={enabled}"
+                    .filter(|option| option.destination == AudioRouteDestination::Bus(detector))
+                    .all(|option| matches!(
+                        option.source,
+                        AudioRouteSource::Bus { port: AudioChannelStripOutputPort::PreFader, .. }
+                    )),
+                "Final-tap feedback must be hidden even when sidechain enabled={enabled}"
             );
             assert!(
                 target_channel

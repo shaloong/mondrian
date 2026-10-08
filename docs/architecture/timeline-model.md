@@ -1,5 +1,14 @@
 # Timeline Model
 
+Audio routing uses channel signal stages rather than collapsing whole strips
+into one node. Pre-fader taps are produced after the pre rack, while final taps
+follow the post rack. Retained main routes target input stages; sidechains target
+their exact pre/post rack stage, and Scope processors target every materialized
+Track input stage. Internal pre-to-post edges preserve causality. The same
+complete retained graph powers atomic author validation and candidate menus,
+including disabled connections. Safe same-strip and reciprocal pre-to-post
+connections are admitted without weakening actual feedback or source-lock rules.
+
 Mask parameter admission accepts Core's complete or sparse `ParameterValueWrite`,
 verifies Mask ownership and lock, and delegates canonical preparation to the
 current Mask Property Bag at explicit owner-local time. Applying the prepared

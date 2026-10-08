@@ -1,5 +1,18 @@
 # Audio pipeline
 
+Channel execution is lowered into ordered pre-fader and post-fader stages.
+The pre stage sums inputs and runs Scope/trim/pre racks, then immediately
+publishes pre-fader sidechain taps. The post stage applies the fader/post rack
+and mute, then publishes final taps and meters. A separate main-path order is
+used only to propagate declared latency; it does not determine execution order.
+Scratch liveness spans stage positions, all main-route consumers and the public
+output copy. Reciprocal pre-to-post dependencies and same-strip pre-to-post
+connections are causal; final-tap feedback remains rejected. Preparation owns
+stage sorting and storage; processing allocates no stage graph or buffers.
+Late auxiliary arrival still fails explicitly when main-path sidechain delay
+compensation cannot be represented. Native and wider layout qualification remain
+separate from source regression evidence.
+
 The VST3 adapter uses a selected-plugin catalog, a deadline-bound metadata
 child, and a distinct supervised audio-worker mode. Its authoring schema keeps
 continuous parameter values normalized to `0..=1`; stepped parameters use

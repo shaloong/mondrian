@@ -11,7 +11,9 @@ use mondrian_core::{
     AudioChannelLayout, AudioChannelPosition, AudioComponentEditId, AudioSampleRate,
     SourceSamplingBoundary, TimelineTime, TimelineTimeError,
 };
-use mondrian_timeline::audio::{AudioChannelStripOutputPort, AudioTransitionCurve};
+use mondrian_timeline::audio::{
+    AudioChannelSignalStage, AudioChannelStripOutputPort, AudioTransitionCurve,
+};
 use std::sync::Arc;
 
 /// Pull-style source Adapter for generated contribution identities.
@@ -565,48 +567,50 @@ impl AudioRenderSession {
         let schedule = &self.plan.schedule;
         let backend = self.plan.kernel_backend();
         let sample_rate = AudioSampleRate::new(contract.sample_rate)?;
-        for node_slot in 0..schedule.nodes.len() {
+        for &(node_slot, stage) in &schedule.execution_order {
             let node = &schedule.nodes[node_slot];
             let scratch_slot = node.scratch_slot;
-            self.node_buffers[scratch_slot].clear(samples);
+            if stage == AudioChannelSignalStage::PreFader {
+                self.node_buffers[scratch_slot].clear(samples);
 
-            if matches!(node.origin, PreparedNodeOrigin::Track(_)) {
-                render_track_contributions(
-                    schedule,
-                    node_slot,
-                    source,
-                    request,
-                    sample_rate,
-                    contract.channel_layout,
-                    backend,
-                    &mut self.node_buffers[scratch_slot],
-                    &mut self.scratch,
-                    &mut self.contribution_delay_lines,
-                    &mut self.processor_host,
-                    &self.sidechain_source_buffers,
-                    &mut self.sidechain_delay_lines,
-                )?;
-            } else {
-                for route_index in node.incoming.clone() {
-                    let delay_line = self
-                        .route_delay_lines
-                        .get_mut(route_index)
-                        .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
-                    sum_prepared_route(
+                if matches!(node.origin, PreparedNodeOrigin::Track(_)) {
+                    render_track_contributions(
                         schedule,
-                        route_index,
+                        node_slot,
+                        source,
                         request,
                         sample_rate,
-                        contract.channel_count(),
+                        contract.channel_layout,
                         backend,
-                        &mut self.node_buffers,
-                        delay_line,
+                        &mut self.node_buffers[scratch_slot],
                         &mut self.scratch,
+                        &mut self.contribution_delay_lines,
+                        &mut self.processor_host,
+                        &self.sidechain_source_buffers,
+                        &mut self.sidechain_delay_lines,
                     )?;
+                } else {
+                    for route_index in node.incoming.clone() {
+                        let delay_line = self
+                            .route_delay_lines
+                            .get_mut(route_index)
+                            .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+                        sum_prepared_route(
+                            schedule,
+                            route_index,
+                            request,
+                            sample_rate,
+                            contract.channel_count(),
+                            backend,
+                            &mut self.node_buffers,
+                            delay_line,
+                            &mut self.scratch,
+                        )?;
+                    }
                 }
             }
-
             process_strip(
+                stage,
                 schedule,
                 node,
                 request,
@@ -624,6 +628,9 @@ impl AudioRenderSession {
                     .sidechain_sources
                     .get(*source_slot)
                     .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+                if AudioChannelSignalStage::producing(source.port) != stage {
+                    continue;
+                }
                 let destination = self
                     .sidechain_source_buffers
                     .get_mut(*source_slot)
@@ -631,7 +638,8 @@ impl AudioRenderSession {
                 destination[..samples]
                     .copy_from_slice(self.node_buffers[scratch_slot].port(source.port, samples));
             }
-            if meter_start_sample.is_some()
+            if stage == AudioChannelSignalStage::PostFader
+                && meter_start_sample.is_some()
                 && !self.meter_bank.measure_target(
                     node_slot,
                     &self.node_buffers[scratch_slot].post_mute[..samples],
@@ -1070,6 +1078,7 @@ fn sum_route_signal(
 
 #[allow(clippy::too_many_arguments)]
 fn process_strip(
+    stage: AudioChannelSignalStage,
     schedule: &PreparedAudioSchedule,
     node: &PreparedNode,
     request: AudioRenderRequest,
@@ -1087,26 +1096,30 @@ fn process_strip(
         .frames
         .checked_mul(channels)
         .ok_or(AudioExecutionError::BufferTooLarge)?;
-    dsp::multiply_constant_into(
-        backend,
-        &mut buffers.pre_fader[..samples],
-        &buffers.input[..samples],
-        dsp::db_to_linear(node.strip.input_trim_db),
-    );
     let sample_rate = AudioSampleRate::new(sample_rate)?;
-    processor_host.process_rack(
-        &node.pre_rack,
-        &schedule.processors,
-        &schedule.processor_auxiliary_buses,
-        &schedule.sidechain_bindings,
-        request,
-        sample_rate,
-        channel_layout,
-        backend,
-        &mut buffers.pre_fader[..samples],
-        sidechain_source_buffers,
-        sidechain_delay_lines,
-    )?;
+    if stage == AudioChannelSignalStage::PreFader {
+        dsp::multiply_constant_into(
+            backend,
+            &mut buffers.pre_fader[..samples],
+            &buffers.input[..samples],
+            dsp::db_to_linear(node.strip.input_trim_db),
+        );
+        processor_host.process_rack(
+            &node.pre_rack,
+            &schedule.processors,
+            &schedule.processor_auxiliary_buses,
+            &schedule.sidechain_bindings,
+            request,
+            sample_rate,
+            channel_layout,
+            backend,
+            &mut buffers.pre_fader[..samples],
+            sidechain_source_buffers,
+            sidechain_delay_lines,
+        )?;
+
+        return Ok(());
+    }
 
     if let Some(curve) = &node.fader_automation {
         let frame_db = &mut scratch.frame_gain_db[..request.frames];

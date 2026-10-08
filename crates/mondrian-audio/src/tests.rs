@@ -784,6 +784,209 @@ fn compiler_derives_track_and_range_from_real_clip_placement() {
 }
 
 #[test]
+fn prefader_sidechain_to_same_strip_postrack_publishes_current_block() {
+    assert_stage_sidechain_pcm(StageSidechainScenario::SameStrip);
+}
+
+#[test]
+fn reciprocal_prefader_sidechains_are_causal_and_partition_invariant() {
+    assert_stage_sidechain_pcm(StageSidechainScenario::Reciprocal);
+}
+
+#[test]
+fn prefader_main_send_can_return_from_bus_to_source_postrack() {
+    assert_stage_sidechain_pcm(StageSidechainScenario::BusReturn);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StageSidechainScenario {
+    SameStrip,
+    Reciprocal,
+    BusReturn,
+}
+
+fn assert_stage_sidechain_pcm(scenario: StageSidechainScenario) {
+    let reciprocal = scenario == StageSidechainScenario::Reciprocal;
+    struct VaryingSource(std::collections::BTreeMap<AudioComponentEditId, f32>);
+    impl AudioPcmSource for VaryingSource {
+        fn read_indexed_interleaved(
+            &mut self,
+            edit: AudioComponentEditId,
+            frames: &[i64],
+            layout: AudioChannelLayout,
+            destination: &mut [f32],
+        ) -> Result<(), AudioExecutionError> {
+            for (frame, position) in frames.iter().copied().enumerate() {
+                let value = if position < 0 {
+                    0.0
+                } else {
+                    self.0[&edit] * (position as f32 + 1.0)
+                };
+                destination[frame * layout.channel_count()..(frame + 1) * layout.channel_count()]
+                    .fill(value);
+            }
+            Ok(())
+        }
+    }
+    let mut sequence = Sequence::new("causal stages");
+    sequence.settings.audio_channel_layout = AudioChannelLayout::Mono;
+    let tracks = sequence
+        .audio_tracks
+        .iter()
+        .take(if reciprocal { 2 } else { 1 })
+        .map(|track| track.id)
+        .collect::<Vec<_>>();
+    let mut values = std::collections::BTreeMap::new();
+    let mut processors = Vec::new();
+    for (index, track) in tracks.iter().copied().enumerate() {
+        sequence
+            .add_media_audio_clip(
+                track,
+                Clip::new(AssetId::new(), TimelineTime::ZERO, tt(4, 1)).expect("clip"),
+                AudioSourceComponentId::primary(),
+            )
+            .expect("audio source");
+        let edit = sequence
+            .audio_tracks
+            .iter()
+            .find(|candidate| candidate.id == track)
+            .expect("track")
+            .clips[0]
+            .audio_components[0]
+            .id;
+        values.insert(edit, if index == 0 { 0.25 } else { 0.75 });
+        let processor = AudioProcessorInstance {
+            id: mondrian_core::AudioProcessorInstanceId::new(),
+            definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
+                plugin_id: "test.mondrian.sidechain_copy".to_owned(),
+                schema_version: 1,
+                binary_sha256: None,
+            },
+            bypassed: false,
+            parameters: Default::default(),
+            opaque_state: None,
+        };
+        processors.push(processor.id);
+        let strip =
+            &mut sequence.audio_program.track_channels.get_mut(&track).expect("strip").strip;
+        strip.fader_db = -6.020_599_913_279_624;
+        strip.post_fader.processors.push(processor);
+    }
+    for (index, processor_id) in processors.iter().copied().enumerate() {
+        let source_track = tracks[if reciprocal { 1 - index } else { index }];
+        sequence.audio_program.sidechain_routes.push(AudioProcessorSidechainRoute::new(
+            AudioRouteSource::Track {
+                track_id: source_track,
+                port: AudioChannelStripOutputPort::PreFader,
+            },
+            processor_id,
+            "detector",
+        ));
+    }
+    if scenario == StageSidechainScenario::BusReturn {
+        let bus_id = mondrian_core::MixBusId::new();
+        sequence.audio_program.buses.push(AudioMixBus {
+            id: bus_id,
+            name: "pre-fader send return".to_owned(),
+            strip: Default::default(),
+        });
+        sequence.audio_program.routes.clear();
+        sequence.audio_program.routes.push(AudioRoute::new(
+            AudioRouteSource::Track {
+                track_id: tracks[0],
+                port: AudioChannelStripOutputPort::PreFader,
+            },
+            AudioRouteDestination::Bus(bus_id),
+        ));
+        sequence.audio_program.routes.push(AudioRoute::new(
+            AudioRouteSource::Track {
+                track_id: tracks[0],
+                port: AudioChannelStripOutputPort::PostMute,
+            },
+            AudioRouteDestination::Output(sequence.audio_program.outputs[0].id),
+        ));
+        sequence.audio_program.sidechain_routes[0].source = AudioRouteSource::Bus {
+            bus_id,
+            port: AudioChannelStripOutputPort::PostMute,
+        };
+    }
+    let expected = (1..=8)
+        .map(|position| position as f32 * if reciprocal { 1.0 } else { 0.25 })
+        .collect::<Vec<_>>();
+    for mode in [AudioProcessingMode::Realtime, AudioProcessingMode::Offline] {
+        for backend in [
+            AudioKernelBackend::ScalarReference,
+            AudioKernelBackend::RuntimeVectorized,
+        ] {
+            let compiled = compile_audio_program(
+                &sequence,
+                AudioCompileRequest::program(sequence.audio_program.outputs[0].id),
+            )
+            .expect("causal closure");
+            let plan = Arc::new(
+                PreparedAudioPlan::prepare_with_processor_resolver(
+                    Arc::new(compiled),
+                    AudioRenderContract {
+                        sample_rate: 2,
+                        channel_layout: AudioChannelLayout::Mono,
+                        max_block_frames: 8,
+                        processing_mode: mode,
+                        processor_session_scratch_budget_bytes:
+                            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+                        public_output_lookahead_budget_frames:
+                            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+                        compensation_delay_scratch_budget_bytes:
+                            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+                    },
+                    backend,
+                    &TestSidechainResolver,
+                )
+                .expect("stage preparation"),
+            );
+            let mut session = AudioRenderSession::new(plan).expect("session");
+            for (epoch, partitions) in [(1, vec![8]), (2, vec![1, 2, 5]), (3, vec![3, 1, 4])] {
+                session
+                    .enter_state(AudioStateEntry {
+                        epoch: AudioContinuityEpoch::new(epoch),
+                        start_sample: 0,
+                    })
+                    .expect("fresh continuity");
+                let mut source = VaryingSource(values.clone());
+                let mut actual = Vec::new();
+                let mut start_sample = 0;
+                for frames in partitions {
+                    let mut block = vec![0.0; frames];
+                    session
+                        .render_into(
+                            &mut source,
+                            AudioRenderRequest { start_sample, frames },
+                            &mut block,
+                        )
+                        .expect("current-block sidechain");
+                    actual.extend(block);
+                    start_sample += frames as i64;
+                }
+                assert_eq!(actual, expected, "{mode:?} {backend:?} epoch {epoch}");
+            }
+        }
+    }
+    // Both final taps are after the target post rack: these really feed back.
+    for port in [
+        AudioChannelStripOutputPort::PostFaderPreMute,
+        AudioChannelStripOutputPort::PostMute,
+    ] {
+        let mut invalid = sequence.clone();
+        invalid.audio_program.sidechain_routes[0].source =
+            AudioRouteSource::Track { track_id: tracks[0], port };
+        assert!(compile_audio_program(
+            &invalid,
+            AudioCompileRequest::program(invalid.audio_program.outputs[0].id)
+        )
+        .is_err());
+    }
+}
+
+#[test]
 fn typed_sidechain_retains_detector_only_track_and_supplies_auxiliary_pcm() {
     let mut sequence = Sequence::new("sidechain");
     sequence.settings.audio_channel_layout = AudioChannelLayout::Mono;

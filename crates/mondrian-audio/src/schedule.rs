@@ -19,8 +19,8 @@ use mondrian_core::{
     ProgramOutputId, TimelineTime, TrackId,
 };
 use mondrian_timeline::audio::{
-    AudioChannelStripOutputPort, AudioComponentChannelMapping, AudioRouteDestination,
-    AudioRouteSource, AudioTransitionCurve,
+    AudioChannelSignalStage, AudioChannelStripOutputPort, AudioComponentChannelMapping,
+    AudioRouteDestination, AudioRouteSource, AudioTransitionCurve,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
@@ -154,7 +154,7 @@ pub enum AudioKernelBackend {
 /// Stable structural facts about one dense Prepared Audio Schedule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreparedAudioScheduleSummary {
-    /// Topologically ordered Track, Bus, and Output nodes.
+    /// Track, Bus, and Output nodes in main-path latency order.
     pub node_count: usize,
     /// Dense Track nodes.
     pub track_count: usize,
@@ -468,6 +468,7 @@ fn checked_sum<const N: usize>(values: [usize; N]) -> Result<usize, AudioResourc
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedAudioSchedule {
     pub(crate) nodes: Vec<PreparedNode>,
+    pub(crate) execution_order: Vec<(usize, AudioChannelSignalStage)>,
     pub(crate) routes: Vec<PreparedRoute>,
     pub(crate) contributions: Vec<PreparedContribution>,
     pub(crate) processors: Vec<PreparedProcessor>,
@@ -825,7 +826,7 @@ impl PreparedAudioSchedule {
             sidechain_source_buffers: Vec::new(),
         });
 
-        let node_order = prepared_node_order(program, &nodes)?;
+        let node_order = prepared_main_path_order(program, &nodes)?;
         let mut nodes_by_origin =
             nodes.into_iter().map(|node| (node.origin, node)).collect::<BTreeMap<_, _>>();
         nodes = node_order
@@ -1178,6 +1179,12 @@ impl PreparedAudioSchedule {
             )?;
         }
 
+        let execution_order = prepared_execution_order(program, &nodes)?;
+        let stage_positions = execution_order
+            .iter()
+            .enumerate()
+            .map(|(position, stage)| (*stage, position))
+            .collect::<BTreeMap<_, _>>();
         let mut processor_auxiliary_buses = Vec::new();
         let mut sidechain_bindings = Vec::new();
         let mut sidechain_sources = Vec::new();
@@ -1215,7 +1222,19 @@ impl PreparedAudioSchedule {
                         &bus_slots,
                         output_slot,
                     )?;
-                    if source_slot >= target_slot {
+                    let target_stage = match processor.occurrence.insertion {
+                        AudioProcessorInsertionPoint::Scope
+                        | AudioProcessorInsertionPoint::PreFader => {
+                            AudioChannelSignalStage::PreFader
+                        }
+                        AudioProcessorInsertionPoint::PostFader => {
+                            AudioChannelSignalStage::PostFader
+                        }
+                    };
+                    if stage_positions
+                        [&(source_slot, AudioChannelSignalStage::producing(source_port))]
+                        >= stage_positions[&(target_slot, target_stage)]
+                    {
                         return Err(AudioCompileError::InvalidPreparedGraph(format!(
                             "sidechain Route {} forms a non-causal processor dependency",
                             route.id
@@ -1286,12 +1305,17 @@ impl PreparedAudioSchedule {
                 .push(source_buffer_slot);
         }
 
-        let mut last_consumer = (0..nodes.len()).collect::<Vec<_>>();
+        let mut last_consumer = (0..nodes.len())
+            .map(|slot| stage_positions[&(slot, AudioChannelSignalStage::PostFader)])
+            .collect::<Vec<_>>();
         for route in &routes {
-            last_consumer[route.source_slot] =
-                last_consumer[route.source_slot].max(route.destination_slot);
+            last_consumer[route.source_slot] = last_consumer[route.source_slot]
+                .max(stage_positions[&(route.destination_slot, AudioChannelSignalStage::PreFader)]);
         }
-        let scratch_slot_count = assign_liveness_scratch(&mut nodes, &last_consumer);
+        // The output remains live until the public output copy after all stages.
+        last_consumer[output_slot] = execution_order.len();
+        let scratch_slot_count =
+            assign_liveness_scratch(&mut nodes, &last_consumer, &execution_order);
         let automation_curves = nodes
             .iter()
             .flat_map(|node| node.fader_automation.iter())
@@ -1452,6 +1476,7 @@ impl PreparedAudioSchedule {
         };
         Ok(Self {
             nodes,
+            execution_order,
             routes,
             contributions,
             processors,
@@ -1466,7 +1491,7 @@ impl PreparedAudioSchedule {
     }
 }
 
-fn prepared_node_order(
+fn prepared_main_path_order(
     program: &CompiledAudioProgram,
     nodes: &[PreparedNode],
 ) -> Result<Vec<PreparedNodeOrigin>, AudioCompileError> {
@@ -1509,22 +1534,6 @@ fn prepared_node_order(
         };
         add_edge(source, destination)?;
     }
-    for route in &program.sidechain_routes {
-        let source = match route.source {
-            AudioRouteSource::Track { track_id, .. } => PreparedNodeOrigin::Track(track_id),
-            AudioRouteSource::Bus { bus_id, .. } => PreparedNodeOrigin::Bus(bus_id),
-        };
-        let targets = processor_target_origins(program, route.processor_id);
-        if targets.is_empty() {
-            return Err(AudioCompileError::InvalidPreparedGraph(format!(
-                "sidechain Route {} targets a processor outside the selected closure",
-                route.id
-            )));
-        }
-        for destination in targets {
-            add_edge(source, destination)?;
-        }
-    }
     let mut ready = indegree
         .iter()
         .filter_map(|(origin, degree)| (*degree == 0).then_some(*origin))
@@ -1546,50 +1555,132 @@ fn prepared_node_order(
     }
     if order.len() != origins.len() {
         return Err(AudioCompileError::InvalidPreparedGraph(
-            "main/sidechain routing contains an instantaneous cycle".to_owned(),
+            "main routing contains an instantaneous cycle".to_owned(),
         ));
     }
     Ok(order)
 }
 
-fn processor_target_origins(
+fn prepared_execution_order(
     program: &CompiledAudioProgram,
-    processor_id: mondrian_core::AudioProcessorInstanceId,
-) -> BTreeSet<PreparedNodeOrigin> {
-    let mut targets = BTreeSet::new();
-    for (track_id, channel) in &program.track_channels {
-        if compiled_strip_contains_processor(&channel.strip, processor_id) {
-            targets.insert(PreparedNodeOrigin::Track(*track_id));
+    nodes: &[PreparedNode],
+) -> Result<Vec<(usize, AudioChannelSignalStage)>, AudioCompileError> {
+    let slots = nodes
+        .iter()
+        .enumerate()
+        .map(|(slot, node)| (node.origin, slot))
+        .collect::<BTreeMap<_, _>>();
+    let mut outgoing = BTreeMap::<_, BTreeSet<_>>::new();
+    for (slot, _) in nodes.iter().enumerate() {
+        outgoing.insert(
+            (slot, AudioChannelSignalStage::PreFader),
+            BTreeSet::from([(slot, AudioChannelSignalStage::PostFader)]),
+        );
+        outgoing.insert((slot, AudioChannelSignalStage::PostFader), BTreeSet::new());
+    }
+    let source_stage = |source: AudioRouteSource| {
+        let (origin, port) = match source {
+            AudioRouteSource::Track { track_id, port } => {
+                (PreparedNodeOrigin::Track(track_id), port)
+            }
+            AudioRouteSource::Bus { bus_id, port } => (PreparedNodeOrigin::Bus(bus_id), port),
+        };
+        slots
+            .get(&origin)
+            .copied()
+            .map(|slot| (slot, AudioChannelSignalStage::producing(port)))
+            .ok_or_else(|| {
+                AudioCompileError::InvalidPreparedGraph(
+                    "source outside selected closure".to_owned(),
+                )
+            })
+    };
+    for route in &program.routes {
+        let origin = match route.destination {
+            AudioRouteDestination::Bus(id) => PreparedNodeOrigin::Bus(id),
+            AudioRouteDestination::Output(id) => PreparedNodeOrigin::Output(id),
+        };
+        let slot = slots.get(&origin).copied().ok_or_else(|| {
+            AudioCompileError::InvalidPreparedGraph(
+                "destination outside selected closure".to_owned(),
+            )
+        })?;
+        outgoing
+            .entry(source_stage(route.source)?)
+            .or_default()
+            .insert((slot, AudioChannelSignalStage::PreFader));
+    }
+    for route in &program.sidechain_routes {
+        let mut targets = BTreeSet::new();
+        for (slot, node) in nodes.iter().enumerate() {
+            for (stage, rack) in [
+                (AudioChannelSignalStage::PreFader, &node.strip.pre_fader),
+                (AudioChannelSignalStage::PostFader, &node.strip.post_fader),
+            ] {
+                if compiled_rack_contains_processor(rack, route.processor_id) {
+                    targets.insert((slot, stage));
+                }
+            }
         }
-    }
-    for (bus_id, strip) in &program.buses {
-        if compiled_strip_contains_processor(strip, processor_id) {
-            targets.insert(PreparedNodeOrigin::Bus(*bus_id));
-        }
-    }
-    if compiled_strip_contains_processor(&program.output, processor_id) {
-        targets.insert(PreparedNodeOrigin::Output(program.output_id));
-    }
-    for (scope_id, scope) in &program.processing_scopes {
-        if compiled_rack_contains_processor(&scope.rack, processor_id) {
-            targets.extend(
-                program
+        for (scope_id, scope) in &program.processing_scopes {
+            if compiled_rack_contains_processor(&scope.rack, route.processor_id) {
+                for contribution in program
                     .contributions
                     .iter()
                     .filter(|contribution| contribution.processing_scope == *scope_id)
-                    .map(|contribution| PreparedNodeOrigin::Track(contribution.track_id)),
-            );
+                {
+                    let slot = slots
+                        .get(&PreparedNodeOrigin::Track(contribution.track_id))
+                        .copied()
+                        .ok_or_else(|| {
+                            AudioCompileError::InvalidPreparedGraph(
+                                "Scope Track outside selected closure".to_owned(),
+                            )
+                        })?;
+                    targets.insert((slot, AudioChannelSignalStage::PreFader));
+                }
+            }
+        }
+        if targets.is_empty() {
+            return Err(AudioCompileError::InvalidPreparedGraph(
+                "sidechain target outside selected closure".to_owned(),
+            ));
+        }
+        outgoing.entry(source_stage(route.source)?).or_default().extend(targets);
+    }
+    let mut indegree = outgoing
+        .keys()
+        .copied()
+        .map(|stage| (stage, 0_usize))
+        .collect::<BTreeMap<_, _>>();
+    for target in outgoing.values().flatten() {
+        *indegree.get_mut(target).ok_or_else(|| {
+            AudioCompileError::InvalidPreparedGraph("missing stage".to_owned())
+        })? += 1;
+    }
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(stage, degree)| (*degree == 0).then_some(*stage))
+        .collect::<BTreeSet<_>>();
+    let mut order = Vec::with_capacity(outgoing.len());
+    while let Some(stage) = ready.pop_first() {
+        order.push(stage);
+        for target in outgoing.get(&stage).into_iter().flatten() {
+            let degree = indegree.get_mut(target).ok_or_else(|| {
+                AudioCompileError::InvalidPreparedGraph("missing stage".to_owned())
+            })?;
+            *degree -= 1;
+            if *degree == 0 {
+                ready.insert(*target);
+            }
         }
     }
-    targets
-}
-
-fn compiled_strip_contains_processor(
-    strip: &CompiledChannelStrip,
-    processor_id: mondrian_core::AudioProcessorInstanceId,
-) -> bool {
-    compiled_rack_contains_processor(&strip.pre_fader, processor_id)
-        || compiled_rack_contains_processor(&strip.post_fader, processor_id)
+    if order.len() != outgoing.len() {
+        return Err(AudioCompileError::InvalidPreparedGraph(
+            "main/sidechain stage dependency cycle".to_owned(),
+        ));
+    }
+    Ok(order)
 }
 
 fn compiled_rack_contains_processor(
@@ -1806,10 +1897,18 @@ fn append_transition_bindings(
     }
 }
 
-fn assign_liveness_scratch(nodes: &mut [PreparedNode], last_consumer: &[usize]) -> usize {
+fn assign_liveness_scratch(
+    nodes: &mut [PreparedNode],
+    last_consumer: &[usize],
+    execution_order: &[(usize, AudioChannelSignalStage)],
+) -> usize {
     let mut scratch_live_until = Vec::<usize>::new();
-    for (node_slot, node) in nodes.iter_mut().enumerate() {
-        let reusable = scratch_live_until.iter().position(|live_until| *live_until < node_slot);
+    for (position, (node_slot, stage)) in execution_order.iter().copied().enumerate() {
+        if stage != AudioChannelSignalStage::PreFader {
+            continue;
+        }
+        let node = &mut nodes[node_slot];
+        let reusable = scratch_live_until.iter().position(|live_until| *live_until < position);
         let scratch_slot = reusable.unwrap_or_else(|| {
             scratch_live_until.push(0);
             scratch_live_until.len() - 1

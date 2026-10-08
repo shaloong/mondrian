@@ -317,10 +317,10 @@ impl AudioRouteCandidateInspection {
     ) -> bool {
         let target = match destination {
             AudioRouteDestination::Bus(bus_id) if self.buses.contains(&bus_id) => {
-                AudioAuthorRoutingNode::Bus(bus_id)
+                AudioAuthorRoutingNode::Bus(bus_id, crate::AudioChannelSignalStage::PreFader)
             }
             AudioRouteDestination::Output(output_id) if self.outputs.contains(&output_id) => {
-                AudioAuthorRoutingNode::Output(output_id)
+                AudioAuthorRoutingNode::Output(output_id, crate::AudioChannelSignalStage::PreFader)
             }
             _ => return false,
         };
@@ -542,13 +542,12 @@ pub fn inspect_audio_route_candidates(
             ));
         }
     }
-    let nodes = known_tracks
-        .iter()
+    let reachability = graph
+        .outgoing
+        .keys()
         .copied()
-        .map(AudioAuthorRoutingNode::Track)
-        .chain(buses.iter().copied().map(AudioAuthorRoutingNode::Bus))
-        .chain(outputs.iter().copied().map(AudioAuthorRoutingNode::Output));
-    let reachability = nodes.map(|node| (node, reachable_nodes(node, &graph.outgoing))).collect();
+        .map(|node| (node, reachable_nodes(node, &graph.outgoing)))
+        .collect();
     let processor_targets = graph.processor_targets.into_iter().collect();
     Ok(AudioRouteCandidateInspection {
         editable_tracks,
@@ -1031,6 +1030,52 @@ mod tests {
         apply_audio_automation_edit, AudioAutomationEdit, AudioAutomationEditRequest,
         AudioAutomationTarget,
     };
+
+    #[test]
+    fn prefader_source_can_feed_same_strip_postrack_without_feedback() {
+        use crate::audio::{AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID};
+        let mut sequence = Sequence::new("Causal same-strip detector");
+        let track_id = sequence.audio_tracks[0].id;
+        let processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        let processor_id = processor.id;
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track_id)
+            .expect("Track channel")
+            .strip
+            .post_fader
+            .processors
+            .push(processor);
+        let admission = inspect_audio_route_candidates(&sequence).expect("Valid graph");
+        let source = AudioRouteSource::Track {
+            track_id,
+            port: AudioChannelStripOutputPort::PreFader,
+        };
+        // PreFader is after the pre rack, before the fader and post rack.
+        assert!(admission.allows_processor_sidechain_addition(source, processor_id));
+        for port in [
+            AudioChannelStripOutputPort::PostFaderPreMute,
+            AudioChannelStripOutputPort::PostMute,
+        ] {
+            assert!(!admission.allows_processor_sidechain_addition(
+                AudioRouteSource::Track { track_id, port },
+                processor_id
+            ));
+        }
+        apply_audio_routing_edit(
+            &mut sequence,
+            &AudioRoutingEditRequest {
+                edit: AudioRoutingEdit::CreateProcessorSidechain {
+                    source,
+                    processor_id,
+                    bus_key: "detector".to_owned(),
+                },
+            },
+        )
+        .expect("Forward source must enter one author transaction");
+        assert_eq!(sequence.audio_program.sidechain_routes.len(), 1);
+    }
 
     #[test]
     fn bulk_bus_dependencies_include_both_racks_disabled_edges_and_source_locks() {
