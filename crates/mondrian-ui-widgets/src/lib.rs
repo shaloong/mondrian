@@ -7,6 +7,7 @@ pub mod button;
 pub mod checkbox;
 pub mod color_picker;
 pub mod context_menu;
+mod control_inspection;
 pub mod curve_editor;
 pub mod dialog_surface;
 pub mod dock_panel;

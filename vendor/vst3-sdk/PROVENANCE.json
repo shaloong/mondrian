@@ -1,0 +1,168 @@
+{
+  "schema": 1,
+  "sdk_version": "3.8.1",
+  "sdk_commit": "3cdf9ca5d1f5b1b21e0a86832aa4abe55607bd96",
+  "pluginterfaces_commit": "4f547e8e102b47de4a8b8aaf343c73b700786372",
+  "upstream_binding_generator_runtime_commit": "b2a45f2d40e602eff5a224b41613735388868590",
+  "generation_input_receipt_sha256": "0e64f3c30551b480e01d8a831ae27524458c40eb2bfb87faec05694cec68d919",
+  "generation_environment_receipt_sha256": "b419168f1595205c1ba4c14e7eb4193fe2caf5fab9d5ca10ddc894870bdbbfec",
+  "official_full_tree_receipt_sha256": "eaac51b06d30cbecc2303a9c981bb7104c1fbf984867ff46ad05df3952d4037a",
+  "generated_binding_sha256": "9cf5371fc7a883a857e4c74d8d4c9de43cdd958e14a73e3158cb568ff6d23940",
+  "generator_delta": "sort input header paths only; no ABI definitions handwritten",
+  "licenses": {
+    "upstream_runtime": "MIT OR Apache-2.0",
+    "official_sdk": "MIT, Copyright 2026 Steinberg Media Technologies GmbH"
+  },
+  "generation": {
+    "target": "x86_64-pc-windows-gnu",
+    "binding_sha256": "9cf5371fc7a883a857e4c74d8d4c9de43cdd958e14a73e3158cb568ff6d23940",
+    "cargo_lock_sha256": "a597f059102945c8c929b3a58b54959949b267218fc96776475bda2690c08b62",
+    "transcript_sha256": "8057fbe07324a30fd2662af55142eb5db4c4c168163a5b650932d99c80461499",
+    "compiler_environment": "LLVM 18.1.8 libclang; MinGW include discovery via PATH; original generator TARGET selection",
+    "qualification": "Windows GNU generation succeeded. Native MSVC and macOS ABI oracles remain required; this is not cross-platform qualification."
+  },
+  "shipped_files": [
+    {
+      "path": "Cargo.toml",
+      "bytes": 724,
+      "sha256": "9efdb4cc5790ce3e2a6857827f35dfd90ca1981f1897136409b6a4be701d9659"
+    },
+    {
+      "path": "com-scrape-types/Cargo.toml",
+      "bytes": 278,
+      "sha256": "333fc4645913e98c6fa699c258f93055fc7f9f04447c2e115ceda8824dfe4626"
+    },
+    {
+      "path": "com-scrape-types/src/class.rs",
+      "bytes": 10883,
+      "sha256": "a52f26b439833deb4a88164104890416810ac6fc21233c2ccdb3ae70bb88a16c"
+    },
+    {
+      "path": "com-scrape-types/src/lib.rs",
+      "bytes": 6989,
+      "sha256": "51da8e7aa748ac38b64514fab0b1fcea7b9b3eee0d0152fed84107b6531a97fa"
+    },
+    {
+      "path": "com-scrape-types/src/ptr.rs",
+      "bytes": 10287,
+      "sha256": "7b5c1b7ce49e97f5bb600e1cfb2f588e8084d50296ad70018cbab1bf8b7acb62"
+    },
+    {
+      "path": "com-scrape-types/src/tests.rs",
+      "bytes": 12345,
+      "sha256": "b176f2d2d1428ff0d0b9faacf941f663cc19e822f9ed21f64be58644d7db739a"
+    },
+    {
+      "path": "GENERATION-Cargo.lock",
+      "bytes": 1662,
+      "sha256": "a597f059102945c8c929b3a58b54959949b267218fc96776475bda2690c08b62"
+    },
+    {
+      "path": "GENERATION-SOURCES.json",
+      "bytes": 23407,
+      "sha256": "0e64f3c30551b480e01d8a831ae27524458c40eb2bfb87faec05694cec68d919"
+    },
+    {
+      "path": "LICENSE-APACHE",
+      "bytes": 10174,
+      "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+      "path": "LICENSE-MIT",
+      "bytes": 1023,
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    },
+    {
+      "path": "LICENSE-SDK-MIT",
+      "bytes": 1094,
+      "sha256": "e86d79e19e4a33ebc442d2e0d083887dfc75a2a8de9fe17eeddedb84810ad74e"
+    },
+    {
+      "path": "README-UPSTREAM.md",
+      "bytes": 772,
+      "sha256": "ce903ed77e13982a52add20b2f8a8487b19e758ebfb15cb269824935755bde0f"
+    },
+    {
+      "path": "README.md",
+      "bytes": 2142,
+      "sha256": "49b048c3cd4dc910582df93c5ef004b88cf61fa6b738672c8b7f99f1b95ccb84"
+    },
+    {
+      "path": "src/bindings.rs",
+      "bytes": 688550,
+      "sha256": "9cf5371fc7a883a857e4c74d8d4c9de43cdd958e14a73e3158cb568ff6d23940"
+    },
+    {
+      "path": "src/lib.rs",
+      "bytes": 2946,
+      "sha256": "c78a30c2090c71921e602fbc875ad0ba27aaf7bb6002dee8ba34363ac9d5065a"
+    },
+    {
+      "path": "src/support.rs",
+      "bytes": 6326,
+      "sha256": "70b10e60b5c35b19c17093ebdf0f2f36d539e6896c7f673528800d901702f95c"
+    }
+  ],
+  "local_packaging_changes": {
+    "runtime_workspace": "resolver 3; SDK package plus sole com-scrape-types member",
+    "formatting": "cargo fmt --all; generated bindings remain rustfmt-skipped by original upstream module attribute",
+    "changed_files": [
+      {
+        "path": "Cargo.toml",
+        "packaged_sha256": "7382587e2f3142ecf8a059cdea68849ba9f59d1e252dcb2fa7ed30acb7a4723f",
+        "current_sha256": "9efdb4cc5790ce3e2a6857827f35dfd90ca1981f1897136409b6a4be701d9659"
+      },
+      {
+        "path": "com-scrape-types/src/class.rs",
+        "packaged_sha256": "0b29ca9a6c3cef45f7b6bbe770ce35933ab85881ffaf1929c7ecfe628891d0f6",
+        "current_sha256": "a52f26b439833deb4a88164104890416810ac6fc21233c2ccdb3ae70bb88a16c"
+      },
+      {
+        "path": "com-scrape-types/src/ptr.rs",
+        "packaged_sha256": "01b665e625134968f7c427875d361c84cab6f600133a0ebb08951b1c6bc8f648",
+        "current_sha256": "7b5c1b7ce49e97f5bb600e1cfb2f588e8084d50296ad70018cbab1bf8b7acb62"
+      },
+      {
+        "path": "com-scrape-types/src/tests.rs",
+        "packaged_sha256": "f2c0e0029a2a347c5170a1c9c3026429fbd980251543de705cc883cc07d4965d",
+        "current_sha256": "b176f2d2d1428ff0d0b9faacf941f663cc19e822f9ed21f64be58644d7db739a"
+      },
+      {
+        "path": "README.md",
+        "packaged_sha256": "d646106e395e0f95bdc0a74ced3032d3e25235e46acb2c7030d24728f61d9c50",
+        "current_sha256": "49b048c3cd4dc910582df93c5ef004b88cf61fa6b738672c8b7f99f1b95ccb84"
+      },
+      {
+        "path": "src/support.rs",
+        "packaged_sha256": "fece4ff714d965f85f35c8858f1f138416ffb3789d5277ecf61dc05409a94e4e",
+        "current_sha256": "70b10e60b5c35b19c17093ebdf0f2f36d539e6896c7f673528800d901702f95c"
+      }
+    ],
+    "warning_cleanup": "Remove unused module-level std::ptr::addr_of import; offset_of macro retains its own scoped import. No COM behavior change."
+  },
+  "generator_exclusion_policy": {
+    "policy": "Unmodified pinned upstream generator policy; complete source verification is independent of declaration export coverage.",
+    "headers": [
+      "pluginterfaces/base/funknownimpl.h",
+      "pluginterfaces/base/ustring.h",
+      "pluginterfaces/test/itest.h",
+      "pluginterfaces/vst/ivsttestplugprovider.h"
+    ],
+    "types": [
+      "Steinberg::SKI::Detail::Adopt",
+      "Steinberg::ConstStringTable",
+      "Steinberg::FUID",
+      "Steinberg::FReleaser",
+      "Steinberg::LARGE_INT"
+    ],
+    "excluded_sdk_testing_interfaces": [
+      "ITest",
+      "ITestResult",
+      "ITestSuite",
+      "ITestFactory",
+      "ITestPlugProvider",
+      "ITestPlugProvider2"
+    ],
+    "FUnknown_trait": "Original upstream generator uses the canonical custom COM support seam."
+  }
+}

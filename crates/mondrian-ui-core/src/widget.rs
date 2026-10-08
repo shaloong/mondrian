@@ -215,6 +215,135 @@ impl AccessibilityNode {
     }
 }
 
+/// Keyboard key whose matching release completes one button activation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyboardActivationKey {
+    /// Complete an Enter activation on the matching Enter release.
+    Enter,
+    /// Complete a Space activation on the matching Space release.
+    Space,
+}
+
+/// Owned release intent for the exact enabled semantic control being inspected.
+///
+/// Its key is retained only within the same role, panel and live author session.
+/// The replacement control executes its fresh callback on the matching release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyboardActivationLease {
+    /// Exact activation key that must be released once.
+    pub key: KeyboardActivationKey,
+}
+
+/// Exact numeric presentation baseline used only to admit a retained input draft.
+///
+/// Floating bits preserve declared precision and signed zero. This baseline is
+/// compared with a fresh model; it never replaces that model's author value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumericInputInspectionValue {
+    /// IEEE 754 bits of an f32 numeric input value.
+    Float32(u32),
+    /// IEEE 754 bits of an f64 numeric input value.
+    Float64(u64),
+    /// Exact signed integer numeric input value.
+    Integer(i64),
+}
+
+/// Fresh numeric model contract required before a local text draft can resume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumericInputInspectionContract {
+    /// Exact committed baseline, compared and never copied into author state.
+    pub baseline: NumericInputInspectionValue,
+    /// Inclusive lower entry bound.
+    pub min: NumericInputInspectionValue,
+    /// Inclusive upper entry bound.
+    pub max: NumericInputInspectionValue,
+    /// Configured keyboard increment, or the default increment when absent.
+    pub step: Option<NumericInputInspectionValue>,
+    /// Minimum display decimals, which also govern default keyboard stepping.
+    pub minimum_decimals: usize,
+}
+
+/// Maximum number of retained local text edit entries.
+pub const TEXT_INPUT_HISTORY_MAX_ENTRIES: usize = 100;
+/// Maximum retained UTF-8 snapshot allocation per local text history (16 MiB).
+pub const TEXT_INPUT_HISTORY_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// One bounded local text edit's reversible grapheme-based snapshots.
+/// This is inspection data, independent of author history and callbacks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextInputHistoryInspectionEntry {
+    /// Text before the local edit.
+    pub text_before: String,
+    /// Text after the local edit.
+    pub text_after: String,
+    /// Grapheme caret before the local edit.
+    pub cursor_before: usize,
+    /// Grapheme caret after the local edit.
+    pub cursor_after: usize,
+    /// Selection anchor before the local edit.
+    pub anchor_before: Option<usize>,
+    /// Selection anchor after the local edit.
+    pub anchor_after: Option<usize>,
+}
+/// Bounded local Undo/Redo snapshots admitted with the same numeric draft owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextInputHistoryInspectionState {
+    /// Retained text edits; both entry-count and allocation budgets apply.
+    pub entries: Vec<TextInputHistoryInspectionEntry>,
+    /// Number of retained entries already applied to the current text.
+    pub position: usize,
+    /// An unconfirmed text interaction owns history keys even after exhaustion or eviction.
+    pub owns_input: bool,
+}
+
+/// Local committed-text draft with grapheme-based selection and caret coordinates.
+///
+/// IME preedit, pointer selection/capture, author history and callbacks are excluded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextInputDraftInspectionState {
+    /// Unconfirmed single-line text.
+    pub text: String,
+    /// Caret offset measured in grapheme clusters.
+    pub cursor: usize,
+    /// Selection anchor measured in grapheme clusters, when present.
+    pub selection_anchor: Option<usize>,
+    /// Bounded local history and its unconfirmed keyboard ownership.
+    pub history: TextInputHistoryInspectionState,
+}
+
+/// Numeric input's owned local draft, admitted only by an exact fresh contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumericInputInspectionState {
+    /// Original model contract that the newly projected model must equal.
+    pub contract: NumericInputInspectionContract,
+    /// Local text, selection and caret; no authoritative value or callback.
+    pub draft: TextInputDraftInspectionState,
+}
+
+/// Inspection identity for one explicitly addressed author control.
+///
+/// Hosts match the exact key, panel and live author session before restoring it.
+/// It carries focus and explicitly owned keyboard input intent. Numeric drafts
+/// require an exact fresh baseline/contract. Author values, callbacks, pointer
+/// state/capture, menu paths and IME preedit are never restored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlInspectionState {
+    /// Application-owned semantic address, independent of presentation and value.
+    pub key: String,
+    /// Identity resolved by the sole event router in the replacement tree.
+    pub widget_id: WidgetId,
+    /// Compatible input role required by a replacement control.
+    pub role: AccessibilityRole,
+    /// Local keyboard focus presentation.
+    pub focused: bool,
+    /// Whether keyboard focus should be drawn.
+    pub focus_visible: bool,
+    /// Pending release intent; cleared at modal and invalid-owner boundaries.
+    pub keyboard_activation: Option<KeyboardActivationLease>,
+    /// Numeric local draft; boxed so ordinary control inspection stays compact.
+    pub numeric_input: Option<Box<NumericInputInspectionState>>,
+}
+
 /// A semantic clipboard command addressed to the original editing control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditCommand {
@@ -708,6 +837,44 @@ pub trait Widget {
     /// TextInput, ColorPicker, Dropdown, CurveEditor, List) override to return
     /// `true`.
     fn can_focus(&self) -> bool {
+        false
+    }
+
+    /// Set an explicit semantic key on this control, without dispatching input.
+    ///
+    /// Returns false for widgets that do not support semantic focus inspection.
+    /// Containers do not assign keys recursively: compound builders must address
+    /// their exact control roles, so siblings never share an accidental identity.
+    fn set_control_inspection_key(&mut self, _key: Option<String>) -> bool {
+        false
+    }
+
+    /// Whether this addressed text draft permits model refresh without capturing it.
+    ///
+    /// This allocation-free admission predicate introduces no focus authority.
+    /// Actual restoration still requires unique semantic identity and fresh owner
+    /// contracts. Unaddressed inputs and unsupported widgets return false.
+    fn can_inspect_text_draft(&self) -> bool {
+        false
+    }
+
+    /// Inspect focus and supported local input intent; pointer and author state stay live.
+    fn control_inspection_state(&self) -> Option<ControlInspectionState> {
+        None
+    }
+
+    /// Restore only the same enabled semantic control and compatible input role.
+    /// New model values, schemas and callbacks remain authoritative.
+    fn restore_control_inspection_state(&mut self, _state: &ControlInspectionState) -> bool {
+        false
+    }
+
+    /// Cancel an owned keyboard release intent at an input-scope boundary.
+    ///
+    /// Returns whether an intent was canceled. Focus, widget identity, pointer
+    /// capture, author values and text drafts are unaffected. Scope owners invoke
+    /// this directly when opening a modal, even before the next routed event.
+    fn cancel_keyboard_activation(&mut self) -> bool {
         false
     }
 

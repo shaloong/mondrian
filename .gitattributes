@@ -9,3 +9,11 @@
 
 # Endurance profiles bind the exact raw workload bytes by SHA-256.
 tests/validation/endurance-workloads/*.json -text
+
+# Vendored package provenance binds original source/license bytes on every OS.
+vendor/vst3-sdk/** -text
+vendor/harfrust/** -text
+
+# The exact official SDK notice includes a final blank line; preserve its hash.
+LICENSES/VST3-SDK-MIT.txt -text whitespace=-blank-at-eof
+vendor/vst3-sdk/LICENSE-SDK-MIT whitespace=-blank-at-eof

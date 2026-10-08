@@ -10,6 +10,7 @@
 // ofx
 #include "ofxCore.h"
 #include "ofxImageEffect.h"
+#include "ofxGPURender.h"
 #include "ofxPixels.h"
 
 // ofx host
@@ -46,6 +47,9 @@ namespace MondrianOpenFx
     _properties.setIntProperty(kOfxImageEffectPropSupportsTiles, false);
     _properties.setIntProperty(kOfxImageEffectPropTemporalClipAccess, false);
     _properties.setStringProperty(kOfxImageEffectPropSupportedComponents, kOfxImageComponentRGBA, 0);
+    _properties.setStringProperty(kOfxImageEffectPropSupportedPixelDepths, kOfxBitDepthFloat, 0);
+    _properties.createProperty({kOfxImageEffectPropCPURenderSupported,
+                               OFX::Host::Property::eString, 1, true, "true"});
     _properties.setStringProperty(kOfxImageEffectPropSupportedContexts, kOfxImageEffectContextFilter, 0);
     _properties.setIntProperty(kOfxImageEffectPropSupportsMultipleClipDepths, 0);
     _properties.setIntProperty(kOfxImageEffectPropSupportsMultipleClipPARs, 0);
@@ -78,6 +82,8 @@ namespace MondrianOpenFx
   OFX::Host::ImageEffect::Descriptor *Host::makeDescriptor(OFX::Host::ImageEffect::ImageEffectPlugin* plugin)
   {
     OFX::Host::ImageEffect::Descriptor *desc = new OFX::Host::ImageEffect::Descriptor(plugin);
+    desc->getProps().createProperty({kOfxImageEffectPropCPURenderSupported,
+                                    OFX::Host::Property::eString, 1, false, "true"});
     return desc;
   }
 
@@ -86,6 +92,8 @@ namespace MondrianOpenFx
                                                            OFX::Host::ImageEffect::ImageEffectPlugin *plugin)
   {
     OFX::Host::ImageEffect::Descriptor *desc = new OFX::Host::ImageEffect::Descriptor(rootContext, plugin);
+    desc->getProps().createProperty({kOfxImageEffectPropCPURenderSupported,
+                                    OFX::Host::Property::eString, 1, false, "true"});
     return desc;
   }
 
@@ -94,6 +102,8 @@ namespace MondrianOpenFx
                                                            OFX::Host::ImageEffect::ImageEffectPlugin *plugin)
   {
     OFX::Host::ImageEffect::Descriptor *desc = new OFX::Host::ImageEffect::Descriptor(bundlePath, plugin);
+    desc->getProps().createProperty({kOfxImageEffectPropCPURenderSupported,
+                                    OFX::Host::Property::eString, 1, false, "true"});
     return desc;
   }
 

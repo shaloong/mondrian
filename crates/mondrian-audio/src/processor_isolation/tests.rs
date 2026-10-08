@@ -200,7 +200,7 @@ fn installed_clap_sidechain_preserves_native_buses_state_delay_and_partitions() 
         "org.mondrian.fixture.sidechain"
     );
     for mode in [AudioProcessingMode::Realtime, AudioProcessingMode::Offline] {
-        for port_mode in 0..=2 {
+        for port_mode in 0..=3 {
             let render = AudioRenderContract { processing_mode: mode, ..test_render_contract() };
             let mut state = vec![port_mode];
             state.extend(0.5_f32.to_le_bytes());
@@ -229,11 +229,23 @@ fn installed_clap_sidechain_preserves_native_buses_state_delay_and_partitions() 
                     render,
                 ))
                 .expect("resolve restored port metadata");
+            let offline_quality = port_mode == 3 && mode == AudioProcessingMode::Offline;
+            let delay = if offline_quality { 5 } else { 3 };
+            let gain = if offline_quality { 0.75 } else { 0.5 };
             let expected_ids: &[u32] = match port_mode {
-                0 => &[11, 7],
+                0 | 3 => &[11, 7],
                 1 => &[7, 11],
-                _ => &[11],
+                2 => &[11],
+                _ => unreachable!("bounded fixture state"),
             };
+            assert_eq!(
+                spec.plugin_execution_contract.realtime_capable(),
+                mode == AudioProcessingMode::Realtime
+            );
+            assert_eq!(
+                spec.plugin_execution_contract.offline_capable(),
+                mode == AudioProcessingMode::Offline
+            );
             assert_eq!(
                 spec.auxiliary_inputs
                     .buses
@@ -247,11 +259,11 @@ fn installed_clap_sidechain_preserves_native_buses_state_delay_and_partitions() 
             );
             assert_eq!(
                 spec.plugin_execution_contract.algorithmic_latency_frames(),
-                3
+                delay
             );
             assert_eq!(
                 spec.plugin_execution_contract.tail(),
-                AudioProcessorTail::Finite(3)
+                AudioProcessorTail::Finite(delay)
             );
             for partitions in [&[4, 4, 4, 2][..], &[3, 2, 1, 4, 4][..]] {
                 let factory = IsolatedAudioProcessorFactory::prepare(spec.clone())
@@ -314,10 +326,10 @@ fn installed_clap_sidechain_preserves_native_buses_state_delay_and_partitions() 
                 }
                 for (frame, actual) in output.chunks_exact(2).enumerate() {
                     for (channel, &value) in actual.iter().enumerate() {
-                        let expected = if frame < 3 {
+                        let expected = if frame < delay {
                             0.0
                         } else {
-                            let sample = frame - 3;
+                            let sample = frame - delay;
                             let main = fixture_sidechain_samples(0, sample, 1)[channel];
                             let first = fixture_sidechain_samples(11, sample, 1)[channel];
                             let second = if port_mode == 2 {
@@ -325,7 +337,7 @@ fn installed_clap_sidechain_preserves_native_buses_state_delay_and_partitions() 
                             } else {
                                 fixture_sidechain_samples(7, sample, 1)[channel]
                             };
-                            (2.0 * main + 3.0 * first + 5.0 * second) * 0.5
+                            (2.0 * main + 3.0 * first + 5.0 * second) * gain
                         };
                         assert!((value - expected).abs() <= 1e-6,
                             "{mode:?}, ports{port_mode}, partitions{partitions:?}, frame{frame}, channel{channel}: {value} != {expected}");
@@ -353,7 +365,12 @@ fn installed_clap_sidechain_preserves_native_buses_state_delay_and_partitions() 
                         AudioParameterEventBatch::new(0, 4, &[], &[], &[]),
                     )
                     .expect("silent auxiliary input following active native signal");
-                assert_eq!(io.main, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.25]);
+                let expected_reset = if delay == 5 {
+                    [0.0; 8]
+                } else {
+                    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.25]
+                };
+                assert_eq!(io.main, expected_reset);
             }
             if port_mode == 0 {
                 let mut stale = spec.clone();
@@ -370,6 +387,44 @@ fn installed_clap_sidechain_preserves_native_buses_state_delay_and_partitions() 
                 );
             }
         }
+    }
+}
+
+#[test]
+#[ignore = "requires current product and owned CLAP render/thread-check fixture"]
+fn installed_clap_render_refuses_hard_realtime_and_declined_offline() {
+    let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+        .map(PathBuf::from)
+        .expect("current worker");
+    let plugin = std::env::var_os("MONDRIAN_CLAP_SIDECHAIN_TEST_PLUGIN")
+        .map(PathBuf::from)
+        .expect("owned render fixture");
+    let catalog = DiscoveredClapAudioProcessorSpecResolver::discover(helper, [plugin])
+        .expect("native catalog");
+    for state_mode in [4, 5] {
+        let mut state = vec![state_mode];
+        state.extend(0.5_f32.to_le_bytes());
+        let realtime = AudioRenderContract {
+            processing_mode: AudioProcessingMode::Realtime,
+            ..test_render_contract()
+        };
+        let offline = AudioRenderContract {
+            processing_mode: AudioProcessingMode::Offline,
+            ..test_render_contract()
+        };
+        catalog
+            .create_instance(
+                "org.mondrian.fixture.sidechain",
+                realtime,
+                Some(state.clone()),
+            )
+            .expect("realtime remains supported");
+        assert!(
+            catalog
+                .create_instance("org.mondrian.fixture.sidechain", offline, Some(state))
+                .is_err(),
+            "state{state_mode}: unavailable offline mode must be rejected before author capture"
+        );
     }
 }
 
@@ -1287,3 +1342,7 @@ impl AudioProcessorAudioIo for TestAudioIo {
         })
     }
 }
+
+mod native_performance;
+
+mod native_transport;

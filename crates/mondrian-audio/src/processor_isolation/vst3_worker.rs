@@ -417,6 +417,9 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         mut block: IsolatedAudioProcessorWorkerBlock<'_>,
     ) -> Result<(), AudioProcessorHostError> {
         let frames = block.frames();
+        let end_sample = block.start_sample().checked_add(frames as i64).ok_or_else(|| {
+            AudioProcessorHostError::Process("VST3 sample position overflowed".to_owned())
+        })?;
         let channels = self.render.channel_count();
         if self.last_end != Some(block.start_sample())
             || frames == 0
@@ -515,6 +518,16 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         self.plugin
             .as_mut()
             .ok_or_else(|| AudioProcessorHostError::Process("VST3 processor is closed".to_owned()))?
+            .set_process_timeline_context(vst3_host::audio::ProcessTimelineContext {
+                sample_position: block.start_sample(),
+                sample_rate: block.sample_rate(),
+            })
+            .map_err(|error| {
+                AudioProcessorHostError::Process(format!("VST3 timeline delivery failed: {error}"))
+            })?;
+        self.plugin
+            .as_mut()
+            .ok_or_else(|| AudioProcessorHostError::Process("VST3 processor is closed".to_owned()))?
             .process_bus_audio(&mut self.buffers)
             .map_err(|error| {
                 AudioProcessorHostError::Process(format!("VST3 processing failed: {error}"))
@@ -524,11 +537,7 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
                 *sample = self.buffers.outputs[0].channels[channel][frame];
             }
         }
-        self.last_end = Some(
-            block.start_sample().checked_add(frames as i64).ok_or_else(|| {
-                AudioProcessorHostError::Process("VST3 sample position overflowed".to_owned())
-            })?,
-        );
+        self.last_end = Some(end_sample);
         Ok(())
     }
 }

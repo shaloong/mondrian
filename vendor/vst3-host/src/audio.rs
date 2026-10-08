@@ -1,5 +1,18 @@
 //! Audio types and utilities for VST3 host
 
+/// Canonical signal timeline facts for the next native process block.
+///
+/// Installing this context clears optional fields and validity flags. Tempo,
+/// time signature, musical time, continuous time and playing state must come
+/// from separate canonical facts; this position-only context does not infer them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProcessTimelineContext {
+    /// Signed absolute signal position, already adjusted for input-path latency.
+    pub sample_position: i64,
+    /// Exact prepared signal rate in samples per second.
+    pub sample_rate: u32,
+}
+
 /// Audio buffers for plugin processing
 #[derive(Debug)]
 pub struct AudioBuffers {

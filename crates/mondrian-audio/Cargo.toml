@@ -24,6 +24,9 @@ clack-extensions.workspace = true
 vst3-host.workspace = true
 
 [dev-dependencies]
+libloading.workspace = true
+# Test the same canonical binding selected by the native audio adapter.
+vst3.workspace = true
 clack-plugin.workspace = true
 clack-host = { workspace = true, features = ["clack-plugin"] }
 clack-extensions = { workspace = true, features = ["clack-plugin"] }

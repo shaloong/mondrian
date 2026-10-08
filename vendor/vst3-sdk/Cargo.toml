@@ -1,0 +1,23 @@
+[package]
+name = "vst3"
+version = "0.3.0"
+authors = ["Micah Johnston <micahrjohnston@gmail.com>"]
+edition = "2021"
+description = "VST3 3.8.1 bindings generated from pinned official Steinberg headers"
+license = "MIT OR Apache-2.0"
+publish = false
+readme = "README.md"
+
+[dependencies]
+com-scrape-types = { path = "com-scrape-types", version = "0.1.1" }
+
+[package.metadata.mondrian]
+sdk-version = "3.8.1"
+sdk-commit = "3cdf9ca5d1f5b1b21e0a86832aa4abe55607bd96"
+pluginterfaces-commit = "4f547e8e102b47de4a8b8aaf343c73b700786372"
+generator-upstream-commit = "b2a45f2d40e602eff5a224b41613735388868590"
+
+# Own the runtime packages independently of each consumer workspace.
+[workspace]
+resolver = "3"
+members = ["com-scrape-types"]

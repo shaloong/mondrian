@@ -12,12 +12,15 @@
 #include <array>
 #include <limits>
 #include <type_traits>
+#include <stdexcept>
+#include <mutex>
 
 #include "render.h"
 
 // ofx
 #include "ofxCore.h"
 #include "ofxImageEffect.h"
+#include "ofxGPURender.h"
 #include "ofxPixels.h"
 
 // ofx host
@@ -36,6 +39,146 @@
 #include "host_descriptor.h"
 #include "effect_instance.h"
 #include "image_clip.h"
+
+// Keep the module loaded between the optional early host callback and the
+// HostSupport enumeration. Each selected worker owns exactly one native host.
+class SelectedBinaryBootstrap {
+  OFX::Binary _binary;
+public:
+  explicit SelectedBinaryBootstrap(const char* path) : _binary(path) { _binary.ref(); }
+  ~SelectedBinaryBootstrap() { _binary.unref(); }
+  SelectedBinaryBootstrap(const SelectedBinaryBootstrap&) = delete;
+  SelectedBinaryBootstrap& operator=(const SelectedBinaryBootstrap&) = delete;
+
+  int initialize(MondrianOpenFx::Host& host) {
+    if (!_binary.isLoaded() || _binary.isInvalid()) { return 3; }
+    const auto callback = reinterpret_cast<OfxStatus (*)(const OfxHost*)>(
+        _binary.findSymbol("OfxSetHost"));
+    if (!callback) { return 0; }
+    const OfxStatus status = callback(host.getHandle());
+    if (status == kOfxStatFailed) { return 7; }
+    return status == kOfxStatOK ? 0 : 3;
+  }
+};
+
+// The product owns selected-binary admission; the generic vendor scanner is not
+// involved. Keep original export indices for PluginHandle's later OfxGetPlugin.
+class SelectedPluginBinary final : public OFX::Host::PluginBinary {
+  static bool boundedIdentifier(const char* value, size_t maximum) {
+    if (!value) { return false; }
+    for (size_t index = 0; index < maximum; ++index) {
+      const auto byte = static_cast<unsigned char>(value[index]);
+      if (byte == 0) { return index != 0; }
+      if (byte < 0x21 || byte > 0x7e) { return false; }
+    }
+    return false;
+  }
+public:
+  SelectedPluginBinary(const char* path, const char* bundle)
+      : OFX::Host::PluginBinary(path, bundle, 0, 0) {}
+
+  int initialize(OFX::Host::PluginCache& cache) {
+    if (isInvalid()) { return 3; }
+    _binary.ref();
+    if (!isLoaded() || isInvalid()) { return 3; }
+    _fileModificationTime = _binary.getTime();
+    _fileSize = _binary.getSize();
+    _binaryChanged = false;
+    const auto count = reinterpret_cast<int (*)(void)>(
+        _binary.findSymbol("OfxGetNumberOfPlugins"));
+    const auto getPlugin = reinterpret_cast<OfxPlugin* (*)(int)>(
+        _binary.findSymbol("OfxGetPlugin"));
+    if (!count || !getPlugin) { return 3; }
+    const int plugins = count();
+    if (plugins < 0 || plugins > 1024) { return 3; }
+    for (int index = 0; index < plugins; ++index) {
+      OfxPlugin* header = getPlugin(index);
+      if (!header) { return 3; }
+      // This worker admits only ImageEffect API v1. Compare the exact known
+      // literal including NUL; never parse or bound unrelated API metadata.
+      if (header->apiVersion != 1 || !header->pluginApi ||
+          std::strncmp(header->pluginApi, kOfxImageEffectPluginApi,
+                       sizeof(kOfxImageEffectPluginApi)) != 0) { continue; }
+      auto* api = cache.findApiHandler(kOfxImageEffectPluginApi, 1);
+      if (!api) { return 3; }
+      if (!boundedIdentifier(header->pluginIdentifier, 256) ||
+          !header->setHost || !header->mainEntry) { return 3; }
+      auto plugin = std::unique_ptr<OFX::Host::Plugin>(api->newPlugin(this, index, header));
+      if (!plugin) { return 3; }
+      _plugins.push_back(plugin.get());
+      plugin.release();
+    }
+    return 0;
+  }
+};
+
+// HostSupport routes host-only callbacks through a global pointer. Owners are
+// acquired once for an owner lifetime; no render callback takes this lease.
+// A second owner is refused immediately, including same-thread reentry. Waiting
+// for a long-lived owner here could deadlock a caller preparing two sessions.
+class ImageEffectHostBusy final : public std::runtime_error {
+public:
+  ImageEffectHostBusy() : std::runtime_error("OpenFX worker already owns a native host binding") {}
+};
+
+class ImageEffectHostLease {
+  static std::recursive_mutex& ownerMutex() {
+    static std::recursive_mutex mutex;
+    return mutex;
+  }
+  std::unique_lock<std::recursive_mutex> _ownership;
+  OFX::Host::ImageEffect::Host* _ownedHost;
+public:
+  explicit ImageEffectHostLease(OFX::Host::ImageEffect::Host& host)
+      : _ownership(ownerMutex(), std::try_to_lock), _ownedHost(&host) {
+    if (!_ownership.owns_lock() || OFX::Host::ImageEffect::gImageEffectHost) {
+      throw ImageEffectHostBusy();
+    }
+  }
+  ~ImageEffectHostLease() {
+    if (OFX::Host::ImageEffect::gImageEffectHost == _ownedHost) {
+      OFX::Host::ImageEffect::gImageEffectHost = nullptr;
+    }
+  }
+  ImageEffectHostLease(const ImageEffectHostLease&) = delete;
+  ImageEffectHostLease& operator=(const ImageEffectHostLease&) = delete;
+};
+
+class OwnedImageEffectCache {
+  ImageEffectHostLease _lease;
+  OFX::Host::ImageEffect::PluginCache _cache;
+public:
+  explicit OwnedImageEffectCache(OFX::Host::ImageEffect::Host& host)
+      : _lease(host), _cache(host) {}
+  OFX::Host::ImageEffect::PluginCache& get() { return _cache; }
+};
+
+struct MondrianOpenFxDiscoveryOwner {
+  MondrianOpenFx::Host host;
+  OwnedImageEffectCache imageCache;
+  MondrianOpenFxDiscoveryOwner() : imageCache(host) {}
+};
+
+static bool admitsCpu(const OFX::Host::ImageEffect::Base& effect) {
+  return effect.getProps().getStringProperty(kOfxImageEffectPropCPURenderSupported) == "true";
+}
+
+extern "C" int mondrian_openfx_discovery_host_create(void** owner, const void** handle) noexcept {
+  if (!owner || !handle) { return 2; }
+  *owner = nullptr;
+  *handle = nullptr;
+  try {
+    auto discovery = std::make_unique<MondrianOpenFxDiscoveryOwner>();
+    *handle = discovery->host.getHandle();
+    *owner = discovery.release();
+    return 0;
+  } catch (const ImageEffectHostBusy&) { return MONDRIAN_OPENFX_HOST_BUSY; }
+  catch (...) { return 6; }
+}
+
+extern "C" void mondrian_openfx_discovery_host_destroy(void* owner) noexcept {
+  delete static_cast<MondrianOpenFxDiscoveryOwner*>(owner);
+}
 
 static int stringMode(const OFX::Host::Property::Set& properties) {
   const auto& mode = properties.getStringProperty(kOfxParamPropStringMode);
@@ -109,7 +252,8 @@ static int loadFrame(MondrianOpenFx::FrameState& state, const void* input,
       !std::isfinite(info.frame) || !std::isfinite(info.frame_rate) ||
       !std::isfinite(info.first_frame) || !std::isfinite(info.last_frame) ||
       !std::isfinite(info.pixel_aspect_ratio) || info.frame_rate <= 0.0 ||
-      info.pixel_aspect_ratio <= 0.0 || info.first_frame > info.frame ||
+      info.pixel_aspect_ratio <= 0.0 ||
+      !std::isfinite(info.width * info.pixel_aspect_ratio) || info.first_frame > info.frame ||
       info.frame > info.last_frame) { return 2; }
   const size_t pixels = size_t(info.width) * size_t(info.height);
   if (frameBytes != pixels * sizeof(OfxRGBAColourF) ||
@@ -210,14 +354,15 @@ struct MondrianOpenFxSession {
   MondrianOpenFx::FrameState frame;
   MondrianOpenFx::Host host;
   OFX::Host::PluginCache cache;
-  OFX::Host::ImageEffect::PluginCache imageCache;
-  std::unique_ptr<OFX::Host::PluginBinary> binary;
+  OwnedImageEffectCache imageCache;
+  std::unique_ptr<SelectedBinaryBootstrap> bootstrap;
+  std::unique_ptr<SelectedPluginBinary> binary;
   std::unique_ptr<OFX::Host::ImageEffect::Instance> instance;
   bool failed = false;
 
   MondrianOpenFxSession() : imageCache(host) {
     cache.setCacheVersion("mondrian-openfx-v1");
-    imageCache.registerInCache(cache);
+    imageCache.get().registerInCache(cache);
   }
 
   int applyParameters(const MondrianOpenFxParameter* parameters, int count,
@@ -394,27 +539,35 @@ struct MondrianOpenFxSession {
   }
 
   int initialize(const char* path, const char* bundle, const char* identifier,
-                 const void* input, size_t bytes, const MondrianOpenFxFrameInfo& info,
+                 const MondrianOpenFx::FrameState& initial,
                  const MondrianOpenFxParameter* parameters, int count) {
     MondrianOpenFx::FrameBorrow borrowed(frame);
-    const int loaded = loadFrame(frame, input, bytes, info);
-    if (loaded != 0) { return loaded; }
-    binary = std::make_unique<OFX::Host::PluginBinary>(path, bundle, &cache);
-    auto* plugin = selectFilter(imageCache, *binary, identifier);
+    // The C admission boundary validated these borrowed frame facts before
+    // acquiring a host owner. Do not rescan the complete raster during setup.
+    frame.input = initial.input;
+    frame.pixelCount = initial.pixelCount;
+    frame.info = initial.info;
+    bootstrap = std::make_unique<SelectedBinaryBootstrap>(path);
+    const int bootstrapped = bootstrap->initialize(host);
+    if (bootstrapped != 0) { return bootstrapped; }
+    binary = std::make_unique<SelectedPluginBinary>(path, bundle);
+    const int enumerated = binary->initialize(cache);
+    if (enumerated != 0) { return enumerated; }
+    auto* plugin = selectFilter(imageCache.get(), *binary, identifier);
     if (!plugin) { return 3; }
     auto* descriptor = plugin->getContext(kOfxImageEffectContextFilter);
-    if (!descriptor || !admitsIndependentFrames(*descriptor) || !admitsParameterDefaults(*descriptor)) { return 7; }
+    if (!descriptor || !admitsCpu(*descriptor) || !admitsIndependentFrames(*descriptor) || !admitsParameterDefaults(*descriptor)) { return 7; }
     instance.reset(plugin->createInstance(kOfxImageEffectContextFilter, &frame));
     if (!instance) { return 4; }
     const int applied = applyParameters(parameters, count, false, kOfxChangeUserEdited, false);
     if (applied != 0) { return applied; }
     if (!accepted(instance->createInstanceAction())) { return 4; }
-    return admitsIndependentFrames(*instance) ? 0 : 7;
+    return admitsCpu(*instance) && admitsIndependentFrames(*instance) ? 0 : 7;
   }
 
   int render(const void* input, void* output, size_t bytes,
              const MondrianOpenFxFrameInfo& info,
-             const MondrianOpenFxParameter* parameters, int count) {
+             const MondrianOpenFxParameter* parameters, int count, int& outputAlpha) {
     if (failed) { return 2; }
     // A prepared session has a fixed image-storage contract. Violating it is
     // a transport fault, unlike an author snapshot rejected before assignment.
@@ -442,12 +595,18 @@ struct MondrianOpenFxSession {
       return applied;
     }
     if (!instance->getClipPreferences()) { return 4; }
-    if (!admitsIndependentFrames(*instance)) { return 7; }
+    if (!admitsCpu(*instance) || !admitsIndependentFrames(*instance)) { return 7; }
     for (const char* name : {"Source", "Output"}) {
       auto* clip = instance->getClip(name);
       if (!clip || clip->getPixelDepth() != kOfxBitDepthFloat ||
           clip->getComponents() != kOfxImageComponentRGBA) { return 7; }
     }
+    const auto& premultiplication = instance->getOutputPreMultiplication();
+    int representation = MONDRIAN_OPENFX_ALPHA_INVALID;
+    if (premultiplication == kOfxImageUnPreMultiplied) { representation = MONDRIAN_OPENFX_ALPHA_STRAIGHT; }
+    else if (premultiplication == kOfxImagePreMultiplied) { representation = MONDRIAN_OPENFX_ALPHA_PREMULTIPLIED; }
+    else if (premultiplication == kOfxImageOpaque) { representation = MONDRIAN_OPENFX_ALPHA_OPAQUE; }
+    else { return 7; }
     // Clear the retained allocation and require a new fetch for this render.
     // Change/preference callbacks cannot make an old output appear completed.
     outputClip->beginFrame();
@@ -462,7 +621,7 @@ struct MondrianOpenFxSession {
     status = instance->getRegionOfInterestAction(info.frame, scale, region, rois);
     if (accepted(status)) {
       MondrianOpenFx::ImageAccess images(frame, true, true);
-      status = instance->renderAction(info.frame, kOfxImageFieldBoth, window,
+      status = instance->renderAction(info.frame, kOfxImageFieldNone, window,
                                      scale, false, false, false);
     }
     bool written = status == kOfxStatOK && !frame.invalidImageLifetime && outputClip->outputFetched();
@@ -476,7 +635,7 @@ struct MondrianOpenFxSession {
     const auto endStatus = instance->endRenderAction(info.frame, info.frame, 1.0,
                                                     false, scale, false, false);
     const bool completed = status == kOfxStatOK && written && accepted(endStatus);
-    if (completed) { failed = false; }
+    if (completed) { failed = false; outputAlpha = representation; }
     return completed ? 0 : 5;
   }
 };
@@ -486,17 +645,21 @@ static int describe(const char* binary, const char* bundle,
                     char* label, size_t labelCapacity, size_t* labelLength,
                     MondrianOpenFxParameterCallback callback, void* context)
 {
+  MondrianOpenFx::Host host;
   OFX::Host::PluginCache cache;
   cache.setCacheVersion("mondrian-openfx-v1");
-  MondrianOpenFx::Host host;
-  OFX::Host::ImageEffect::PluginCache imageEffectPluginCache(host);
-  imageEffectPluginCache.registerInCache(cache);
-  OFX::Host::PluginBinary selectedBinary(binary, bundle,
-                                         &cache);
-  auto* plugin = selectFilter(imageEffectPluginCache, selectedBinary, identifier);
+  OwnedImageEffectCache imageEffectPluginCache(host);
+  imageEffectPluginCache.get().registerInCache(cache);
+  SelectedBinaryBootstrap bootstrap(binary);
+  const int bootstrapped = bootstrap.initialize(host);
+  if (bootstrapped != 0) { return bootstrapped; }
+  SelectedPluginBinary selectedBinary(binary, bundle);
+  const int enumerated = selectedBinary.initialize(cache);
+  if (enumerated != 0) { return enumerated; }
+  auto* plugin = selectFilter(imageEffectPluginCache.get(), selectedBinary, identifier);
   if (!plugin) { return 3; }
   auto* descriptor = plugin->getContext(kOfxImageEffectContextFilter);
-  if (!descriptor || !admitsIndependentFrames(*descriptor) || !admitsParameterDefaults(*descriptor)) { return 7; }
+  if (!descriptor || !admitsCpu(*descriptor) || !admitsIndependentFrames(*descriptor) || !admitsParameterDefaults(*descriptor)) { return 7; }
   const std::string& displayName = descriptor->getLabel();
   if (displayName.size() > labelCapacity) { return 7; }
   std::memcpy(label, displayName.data(), displayName.size());
@@ -641,7 +804,8 @@ extern "C" int mondrian_openfx_describe(
         !callback || !context) { return 2; }
     return describe(binary, bundle, identifier, label, labelCapacity,
                     labelLength, callback, context);
-  } catch (const std::exception& error) {
+  } catch (const ImageEffectHostBusy&) { return MONDRIAN_OPENFX_HOST_BUSY; }
+  catch (const std::exception& error) {
     std::cerr << "OpenFX description failed: " << error.what() << std::endl;
     return 6;
   } catch (...) {
@@ -658,13 +822,18 @@ extern "C" int mondrian_openfx_session_create(
   if (!output) { return 2; }
   *output = nullptr;
   try {
-    if (!binary || !bundle || !identifier || !info) { return 2; }
+    if (!binary || !bundle || !identifier || !info || count < 0 || count > 4096 ||
+        (count != 0 && !parameters)) { return 2; }
+    MondrianOpenFx::FrameState initial;
+    const int loaded = loadFrame(initial, input, bytes, *info);
+    if (loaded != 0) { return loaded; }
     auto session = std::make_unique<MondrianOpenFxSession>();
-    const int status = session->initialize(binary, bundle, identifier, input, bytes,
-                                          *info, parameters, count);
+    const int status = session->initialize(binary, bundle, identifier, initial,
+                                          parameters, count);
     if (status == 0) { *output = session.release(); }
     return status;
-  } catch (const std::exception& error) {
+  } catch (const ImageEffectHostBusy&) { return MONDRIAN_OPENFX_HOST_BUSY; }
+  catch (const std::exception& error) {
     std::cerr << "OpenFX session creation failed: " << error.what() << std::endl;
     return 6;
   } catch (...) { return 6; }
@@ -673,12 +842,14 @@ extern "C" int mondrian_openfx_session_create(
 extern "C" int mondrian_openfx_session_render(
     MondrianOpenFxSession* session, const void* input, void* output, size_t bytes,
     const MondrianOpenFxFrameInfo* info, const MondrianOpenFxParameter* parameters,
-    int count) noexcept
+    int count, int* outputAlpha) noexcept
 {
+  if (outputAlpha) { *outputAlpha = MONDRIAN_OPENFX_ALPHA_INVALID; }
   if (!session) { return 2; }
   try {
+    if (!outputAlpha) { session->failed = true; return 2; }
     if (!info) { session->failed = true; return 2; }
-    return session->render(input, output, bytes, *info, parameters, count);
+    return session->render(input, output, bytes, *info, parameters, count, *outputAlpha);
   } catch (const std::exception& error) {
     session->failed = true;
     std::cerr << "OpenFX session render failed: " << error.what() << std::endl;

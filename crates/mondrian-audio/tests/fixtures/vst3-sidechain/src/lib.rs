@@ -72,7 +72,7 @@ unsafe fn read_gain_state(stream: *mut IBStream) -> Option<(f64, u32)> {
     }
     let gain = f64::from_le_bytes(bytes[8..16].try_into().ok()?);
     let mode = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
-    (gain.is_finite() && (0.0..=1.0).contains(&gain) && mode <= 2).then_some((gain, mode))
+    (gain.is_finite() && (0.0..=1.0).contains(&gain) && mode <= 3).then_some((gain, mode))
 }
 
 unsafe fn write_gain_state(stream: *mut IBStream, gain: f64, mode: u32) -> tresult {
@@ -104,6 +104,7 @@ struct GainProcessor {
     delay: [AtomicU32; 6],
     position: AtomicUsize,
     gain: AtomicU64,
+    sample_rate: AtomicU64,
 }
 
 impl Class for GainProcessor {
@@ -116,6 +117,7 @@ impl GainProcessor {
     fn new() -> GainProcessor {
         GainProcessor {
             gain: AtomicU64::new(0.5f64.to_bits()),
+            sample_rate: AtomicU64::new(0),
             mode: AtomicU32::new(0),
             active_buses: AtomicU32::new(0),
             delay: std::array::from_fn(|_| AtomicU32::new(0)),
@@ -315,7 +317,11 @@ impl IAudioProcessorTrait for GainProcessor {
         3
     }
 
-    unsafe fn setupProcessing(&self, _setup: *mut ProcessSetup) -> tresult {
+    unsafe fn setupProcessing(&self, setup: *mut ProcessSetup) -> tresult {
+        if setup.is_null() { return kInvalidArgument; }
+        let rate = (*setup).sampleRate;
+        if !rate.is_finite() || rate <= 0.0 { return kInvalidArgument; }
+        self.sample_rate.store(rate.to_bits(), Ordering::Relaxed);
         kResultOk
     }
 
@@ -330,6 +336,19 @@ impl IAudioProcessorTrait for GainProcessor {
         let data = &*data;
         let mode = self.mode.load(Ordering::Relaxed);
         let count = if mode == 2 { 2 } else { 3 };
+        let timeline_start = if mode == 3 {
+            if data.processContext.is_null() { return kInvalidArgument; }
+            let context = &*data.processContext;
+            if context.sampleRate != f64::from_bits(self.sample_rate.load(Ordering::Relaxed))
+                || context.state != 0 || context.systemTime != 0 || context.continousTimeSamples != 0
+                || context.projectTimeMusic != 0.0 || context.barPositionMusic != 0.0
+                || context.cycleStartMusic != 0.0 || context.cycleEndMusic != 0.0
+                || context.tempo != 0.0 || context.timeSigNumerator != 0 || context.timeSigDenominator != 0
+                || context.samplesToNextClock != 0 || context.smpteOffsetSubframes != 0
+                || context.projectTimeSamples.checked_add(i64::from(data.numSamples)).is_none()
+            { return kInvalidArgument; }
+            Some(context.projectTimeSamples)
+        } else { None };
         let mask = ((1 << count) - 1) | (1 << 8);
         if data.numSamples < 0
             || data.numSamples > 65536
@@ -375,7 +394,11 @@ impl IAudioProcessorTrait for GainProcessor {
                 let pointer = *outputs[0].__field0.channelBuffers32.add(channel);
                 let slot = position * 2 + channel;
                 *pointer.add(frame) = f32::from_bits(
-                    self.delay[slot].swap((gain as f32 * value).to_bits(), Ordering::Relaxed),
+                    self.delay[slot].swap({
+                    let tag = timeline_start.map_or(0.0, |start| ((start + frame as i64) % 251) as f32 / 1024.0);
+                    let gain = if timeline_start.is_some() { gain as f32 + tag } else { gain as f32 };
+                    (gain * value).to_bits()
+                }, Ordering::Relaxed),
                 );
             }
             position = (position + 1) % 3;
@@ -427,7 +450,13 @@ impl IAudioProcessorTrait for GainProcessor {
 
 impl IProcessContextRequirementsTrait for GainProcessor {
     unsafe fn getProcessContextRequirements(&self) -> u32 {
-        0
+        // Requirements are instance-static and queried before state restore.
+        // Asking for a field never makes an unavailable host fact valid.
+        use IProcessContextRequirements_::Flags_ as R;
+        (R::kNeedSystemTime | R::kNeedContinousTimeSamples | R::kNeedProjectTimeMusic
+            | R::kNeedBarPositionMusic | R::kNeedCycleMusic | R::kNeedSamplesToNextClock
+            | R::kNeedTempo | R::kNeedTimeSignature | R::kNeedChord | R::kNeedFrameRate
+            | R::kNeedTransportState) as u32
     }
 }
 

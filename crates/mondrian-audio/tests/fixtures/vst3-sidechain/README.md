@@ -17,3 +17,11 @@ Build outside the workspace with `cargo build --locked --manifest-path
 crates/mondrian-audio/tests/fixtures/vst3-sidechain/Cargo.toml --target-dir
 target/vst3-sidechain-fixture`. This is a qualification oracle, not a shipped
 plugin or a copy of the product renderer. Native output qualification is pending.
+
+Transport state 3 preserves default buses/delay and applies the signed timeline
+gain modulation used by the CLAP fixture, keeping zero-input silence and finite
+tail semantics. The native
+component always requests all SDK context fields; only state 3 requires absolute
+projectTimeSamples and prepared sampleRate, zero optional values and zero
+optional validity flags. Requests alone cannot establish host fact availability.
+States 0–2 retain their original DSP and bus behavior.

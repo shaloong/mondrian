@@ -15,14 +15,18 @@ use crate::{
     AudioProcessorPrepareRequest,
 };
 use clack_extensions::latency::PluginLatency;
+use clack_extensions::render::{PluginRender, RenderMode};
 use clack_extensions::state::PluginState;
 use clack_extensions::tail::{PluginTail, TailLength};
-use clack_host::events::event_types::ParamValueEvent;
+use clack_extensions::thread_check::{HostThreadCheck, HostThreadCheckImpl};
+use clack_host::events::event_types::{ParamValueEvent, TransportEvent, TransportFlags};
+use clack_host::events::{EventFlags, EventHeader};
 use clack_host::prelude::{
-    AudioPortBuffer, AudioPortBufferType, AudioPorts, ClapId, EventBuffer, HostHandlers, HostInfo,
-    InputChannel, OutputEvents, Pckn, PluginAudioConfiguration, PluginAudioProcessor, PluginEntry,
-    PluginInstance, SharedHandler,
+    AudioPortBuffer, AudioPortBufferType, AudioPorts, ClapId, EventBuffer, HostExtensions,
+    HostHandlers, HostInfo, InputChannel, OutputEvents, Pckn, PluginAudioConfiguration,
+    PluginAudioProcessor, PluginEntry, PluginInstance, SharedHandler,
 };
+use clack_host::utils::{BeatTime, SecondsTime};
 use mondrian_core::{AudioProcessorInstanceId, AuthoringMap, ExactAutomationCurve};
 use mondrian_timeline::audio::{
     AudioProcessorDefinitionRef, AudioProcessorInstance, AudioProcessorParameter,
@@ -31,9 +35,12 @@ use mondrian_timeline::audio::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
+use std::marker::PhantomData;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
+use std::thread::{self, ThreadId};
 
 pub(super) struct ClapHost;
 
@@ -41,6 +48,8 @@ pub(super) struct ClapHost;
 pub(super) struct ClapHostShared {
     restart_requested: Arc<AtomicBool>,
     callback_requested: Arc<AtomicBool>,
+    main_thread: ThreadId,
+    audio_thread: Arc<AtomicBool>,
 }
 
 impl ClapHostShared {
@@ -48,6 +57,23 @@ impl ClapHostShared {
         Self {
             restart_requested: Arc::new(AtomicBool::new(false)),
             callback_requested: Arc::new(AtomicBool::new(false)),
+            main_thread: thread::current().id(),
+            audio_thread: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Mark only the synchronous CLAP audio-role calls, retaining fixed main identity.
+    ///
+    /// The guard can only be released on its owner thread and unwind restores
+    /// the previous mark. Nested markers preserve the enclosing role; they do
+    /// not detect native processor reentry.
+    pub(super) fn enter_audio_thread(&self) -> ClapAudioThreadGuard<'_> {
+        debug_assert_eq!(thread::current().id(), self.main_thread);
+        let previous = self.audio_thread.swap(true, Ordering::AcqRel);
+        ClapAudioThreadGuard {
+            active: &self.audio_thread,
+            previous,
+            owner_thread: PhantomData,
         }
     }
 
@@ -75,6 +101,55 @@ impl ClapHostShared {
     }
 }
 
+/// An owner-thread-only audio-role marker that restores its previous mark.
+///
+/// The zero-sized `Rc` marker makes this guard neither Send nor Sync, so its
+/// release cannot migrate to another thread. It does not detect processor reentry.
+pub(super) struct ClapAudioThreadGuard<'a> {
+    active: &'a AtomicBool,
+    previous: bool,
+    owner_thread: PhantomData<Rc<()>>,
+}
+
+impl Drop for ClapAudioThreadGuard<'_> {
+    fn drop(&mut self) {
+        self.active.store(self.previous, Ordering::Release);
+    }
+}
+
+impl HostThreadCheckImpl for ClapHostShared {
+    fn is_main_thread(&self) -> bool {
+        thread::current().id() == self.main_thread
+    }
+
+    fn is_audio_thread(&self) -> bool {
+        self.is_main_thread() && self.audio_thread.load(Ordering::Acquire)
+    }
+}
+
+/// Set the optional native render mode while the restored instance is deactivated.
+pub(super) fn configure_render_mode(
+    handle: &clack_host::prelude::PluginMainThreadHandle<'_>,
+    mode: crate::AudioProcessingMode,
+) -> Result<(), AudioProcessorHostError> {
+    let Some(extension) = handle.get_extension::<PluginRender>() else {
+        // Absence declares the same default realtime algorithm for both consumers.
+        return Ok(());
+    };
+    if mode == crate::AudioProcessingMode::Offline && extension.has_realtime_requirement(handle) {
+        return Err(unavailable("CLAP plugin requires real-time rendering"));
+    }
+    extension
+        .set(
+            handle,
+            match mode {
+                crate::AudioProcessingMode::Realtime => RenderMode::Realtime,
+                crate::AudioProcessingMode::Offline => RenderMode::Offline,
+            },
+        )
+        .map_err(|error| unavailable(format!("CLAP render mode was declined: {error}")))
+}
+
 impl SharedHandler<'_> for ClapHostShared {
     fn request_restart(&self) {
         self.restart_requested.store(true, Ordering::Release);
@@ -91,6 +166,10 @@ impl HostHandlers for ClapHost {
     type Shared<'a> = ClapHostShared;
     type MainThread<'a> = ();
     type AudioProcessor<'a> = ();
+
+    fn declare_extensions(builder: &mut HostExtensions<Self>, _shared: &Self::Shared<'_>) {
+        builder.register::<HostThreadCheck>();
+    }
 }
 
 /// Child-only CLAP factory. Plugin binaries are never loaded by the editor process.
@@ -581,6 +660,11 @@ fn prepare_loaded(
     }
 
     shared.service_callbacks(&mut instance)?;
+    configure_render_mode(
+        &instance.plugin_handle(),
+        request.render_contract().processing_mode,
+    )?;
+    shared.service_callbacks(&mut instance)?;
     let channel_count = request.render_contract().channel_count();
     let handle = instance.plugin_handle();
     if list_parameters(&handle)? != expected_parameters {
@@ -610,11 +694,14 @@ fn prepare_loaded(
         .get_extension::<PluginLatency>()
         .map(|extension| extension.get(&handle) as usize)
         .unwrap_or(0);
-    let tail = processor
-        .plugin_handle()
-        .get_extension::<PluginTail>()
-        .map(|extension| extension.get(&processor.plugin_handle()))
-        .unwrap_or(TailLength::Finite(0));
+    let tail = {
+        let _audio_role = shared.enter_audio_thread();
+        processor
+            .plugin_handle()
+            .get_extension::<PluginTail>()
+            .map(|extension| extension.get(&processor.plugin_handle()))
+            .unwrap_or(TailLength::Finite(0))
+    };
     let admitted_tail = match tail {
         TailLength::Finite(0) => crate::AudioProcessorTail::None,
         TailLength::Finite(frames) => crate::AudioProcessorTail::Finite(frames as usize),
@@ -623,7 +710,10 @@ fn prepare_loaded(
     if latency != request.plugin_execution_contract().algorithmic_latency_frames()
         || admitted_tail != request.plugin_execution_contract().tail()
     {
-        processor.ensure_processing_stopped();
+        {
+            let _audio_role = shared.enter_audio_thread();
+            processor.ensure_processing_stopped();
+        }
         drop(processor);
         let _ = instance.try_deactivate();
         return Err(invalid(
@@ -706,6 +796,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
     }
 
     fn enter_state(&mut self, start_sample: i64) -> Result<(), AudioProcessorHostError> {
+        let _audio_role = self.shared.enter_audio_thread();
         self.processor
             .as_mut()
             .ok_or_else(|| {
@@ -721,6 +812,9 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         mut block: IsolatedAudioProcessorWorkerBlock<'_>,
     ) -> Result<(), AudioProcessorHostError> {
         let frames = block.frames();
+        let end_sample = block.start_sample().checked_add(frames as i64).ok_or_else(|| {
+            AudioProcessorHostError::Process("CLAP sample position overflowed".to_owned())
+        })?;
         let channels = self.output.len();
         if self.last_end != Some(block.start_sample())
             || frames == 0
@@ -789,6 +883,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         for channel in &mut self.output {
             channel[..frames].fill(0.0);
         }
+        let transport = clap_transport(block.start_sample(), block.sample_rate())?;
         let input_audio = self.input_ports.with_input_buffers(self.input.iter_mut().map(|port| {
             AudioPortBuffer {
                 latency: 0,
@@ -803,26 +898,31 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
                 self.output.iter_mut().map(|channel| &mut channel[..frames]),
             ),
         }]);
-        let processor = self
-            .processor
-            .as_mut()
-            .ok_or_else(|| AudioProcessorHostError::Process("CLAP processor is closed".to_owned()))?
-            .ensure_processing_started()
-            .map_err(|error| {
-                AudioProcessorHostError::Process(format!("CLAP start failed: {error}"))
-            })?;
-        processor
-            .process(
-                &input_audio,
-                &mut output_audio,
-                &self.input_events.as_input(),
-                &mut OutputEvents::void(),
-                u64::try_from(block.start_sample()).ok(),
-                None,
-            )
-            .map_err(|error| {
-                AudioProcessorHostError::Process(format!("CLAP process failed: {error}"))
-            })?;
+        {
+            let _audio_role = self.shared.enter_audio_thread();
+            let processor = self
+                .processor
+                .as_mut()
+                .ok_or_else(|| {
+                    AudioProcessorHostError::Process("CLAP processor is closed".to_owned())
+                })?
+                .ensure_processing_started()
+                .map_err(|error| {
+                    AudioProcessorHostError::Process(format!("CLAP start failed: {error}"))
+                })?;
+            processor
+                .process(
+                    &input_audio,
+                    &mut output_audio,
+                    &self.input_events.as_input(),
+                    &mut OutputEvents::void(),
+                    None,
+                    Some(&transport),
+                )
+                .map_err(|error| {
+                    AudioProcessorHostError::Process(format!("CLAP process failed: {error}"))
+                })?;
+        }
         self.shared
             .service_callbacks(&mut self.instance)
             .map_err(|error| AudioProcessorHostError::Process(error.to_string()))?;
@@ -837,7 +937,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
                 *sample = value;
             }
         }
-        self.last_end = block.start_sample().checked_add(frames as i64);
+        self.last_end = Some(end_sample);
         Ok(())
     }
 }
@@ -845,11 +945,65 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
 impl Drop for ClapWorker {
     fn drop(&mut self) {
         if let Some(mut processor) = self.processor.take() {
-            processor.ensure_processing_stopped();
+            {
+                let _audio_role = self.shared.enter_audio_thread();
+                processor.ensure_processing_stopped();
+            }
             drop(processor);
         }
         let _ = self.instance.try_deactivate();
     }
+}
+
+/// Convert the canonical signed sample grid at the CLAP seconds boundary.
+///
+/// Round to the nearest fixed-point tick, with half ties away from zero, using
+/// integer arithmetic. Reject values outside CLAP's representable seconds range.
+fn clap_seconds_position(
+    start_sample: i64,
+    sample_rate: u32,
+) -> Result<SecondsTime, AudioProcessorHostError> {
+    if sample_rate == 0 {
+        return Err(invalid("CLAP transport sample rate is zero"));
+    }
+    let scaled = i128::from(start_sample) * i128::from(SecondsTime::FACTOR);
+    let denominator = i128::from(sample_rate);
+    let quotient = scaled / denominator;
+    let remainder = scaled % denominator;
+    let rounded = quotient
+        + if remainder.abs() * 2 >= denominator {
+            scaled.signum()
+        } else {
+            0
+        };
+    let bits = i64::try_from(rounded).map_err(|_| {
+        AudioProcessorHostError::Process(
+            "CLAP signed timeline position exceeds the seconds representation".to_owned(),
+        )
+    })?;
+    Ok(SecondsTime::from_bits(bits))
+}
+
+fn clap_transport(
+    start_sample: i64,
+    sample_rate: u32,
+) -> Result<TransportEvent, AudioProcessorHostError> {
+    Ok(TransportEvent {
+        header: EventHeader::new_core(0, EventFlags::empty()),
+        flags: TransportFlags::HAS_SECONDS_TIMELINE,
+        song_pos_seconds: clap_seconds_position(start_sample, sample_rate)?,
+        song_pos_beats: BeatTime::from_bits(0),
+        tempo: 0.0,
+        tempo_inc: 0.0,
+        loop_start_beats: BeatTime::from_bits(0),
+        loop_end_beats: BeatTime::from_bits(0),
+        loop_start_seconds: SecondsTime::from_bits(0),
+        loop_end_seconds: SecondsTime::from_bits(0),
+        bar_start: BeatTime::from_bits(0),
+        bar_number: 0,
+        time_signature_numerator: 0,
+        time_signature_denominator: 0,
+    })
 }
 
 fn invalid(detail: impl Into<String>) -> AudioProcessorHostError {
@@ -868,11 +1022,15 @@ mod tests {
         AudioPortFlags, AudioPortInfo, AudioPortInfoWriter, AudioPortType, PluginAudioPorts,
         PluginAudioPortsImpl,
     };
+    use clack_extensions::latency::{PluginLatency, PluginLatencyImpl};
     use clack_extensions::params::{
         ParamDisplayWriter, ParamInfo, ParamInfoFlags, ParamInfoWriter, PluginAudioProcessorParams,
         PluginMainThreadParams, PluginParams,
     };
+    use clack_extensions::render::{PluginRender, PluginRenderImpl, RenderMode};
     use clack_extensions::state::PluginStateImpl;
+    use clack_extensions::tail::{PluginTail, PluginTailImpl, TailLength};
+    use clack_extensions::thread_check::HostThreadCheck;
     use clack_plugin::events::spaces::CoreEventSpace;
     use clack_plugin::prelude::{
         Audio, ChannelPair, ClapId, DefaultPluginFactory, Events, HostAudioProcessorHandle,
@@ -1348,9 +1506,15 @@ mod tests {
         let probe = super::super::clap_discovery::probe_loaded(
             &entry,
             "org.mondrian.test.sidechain",
-            48_000,
-            AudioChannelLayout::Stereo,
-            4,
+            AudioRenderContract {
+                sample_rate: 48_000,
+                channel_layout: AudioChannelLayout::Stereo,
+                max_block_frames: 4,
+                processing_mode: AudioProcessingMode::Offline,
+                processor_session_scratch_budget_bytes: usize::MAX,
+                public_output_lookahead_budget_frames: usize::MAX,
+                compensation_delay_scratch_budget_bytes: usize::MAX,
+            },
             None,
             false,
         )
@@ -1403,9 +1567,15 @@ mod tests {
         let probe = super::super::clap_discovery::probe_loaded(
             &entry,
             "org.mondrian.test.sidechain",
-            48_000,
-            AudioChannelLayout::Stereo,
-            4,
+            AudioRenderContract {
+                sample_rate: 48_000,
+                channel_layout: AudioChannelLayout::Stereo,
+                max_block_frames: 4,
+                processing_mode: AudioProcessingMode::Offline,
+                processor_session_scratch_budget_bytes: usize::MAX,
+                public_output_lookahead_budget_frames: usize::MAX,
+                compensation_delay_scratch_budget_bytes: usize::MAX,
+            },
             None,
             false,
         )
@@ -1478,9 +1648,15 @@ mod tests {
         assert!(super::super::clap_discovery::probe_loaded(
             &entry,
             "org.mondrian.test.sidechain",
-            48_000,
-            AudioChannelLayout::Stereo,
-            4,
+            AudioRenderContract {
+                sample_rate: 48_000,
+                channel_layout: AudioChannelLayout::Stereo,
+                max_block_frames: 4,
+                processing_mode: AudioProcessingMode::Offline,
+                processor_session_scratch_budget_bytes: usize::MAX,
+                public_output_lookahead_budget_frames: usize::MAX,
+                compensation_delay_scratch_budget_bytes: usize::MAX
+            },
             None,
             false,
         )
@@ -1781,9 +1957,15 @@ mod tests {
         let default_probe = super::super::clap_discovery::probe_loaded(
             &entry,
             "org.mondrian.test.automated-gain",
-            48_000,
-            AudioChannelLayout::Stereo,
-            512,
+            AudioRenderContract {
+                sample_rate: 48_000,
+                channel_layout: AudioChannelLayout::Stereo,
+                max_block_frames: 512,
+                processing_mode: AudioProcessingMode::Offline,
+                processor_session_scratch_budget_bytes: usize::MAX,
+                public_output_lookahead_budget_frames: usize::MAX,
+                compensation_delay_scratch_budget_bytes: usize::MAX,
+            },
             None,
             true,
         )
@@ -1797,9 +1979,15 @@ mod tests {
         let restored_probe = super::super::clap_discovery::probe_loaded(
             &entry,
             "org.mondrian.test.automated-gain",
-            48_000,
-            AudioChannelLayout::Stereo,
-            512,
+            AudioRenderContract {
+                sample_rate: 48_000,
+                channel_layout: AudioChannelLayout::Stereo,
+                max_block_frames: 512,
+                processing_mode: AudioProcessingMode::Offline,
+                processor_session_scratch_budget_bytes: usize::MAX,
+                public_output_lookahead_budget_frames: usize::MAX,
+                compensation_delay_scratch_budget_bytes: usize::MAX,
+            },
             Some(&authored),
             true,
         )
@@ -2097,5 +2285,561 @@ mod tests {
         );
         worker.process(block).expect("process exact parameter offsets");
         assert_eq!(samples, [0.25, 0.25, 0.25, 0.25, 0.5, 0.5, 0.5, 0.5]);
+    }
+    // Owned ABI fixture: processing mode controls both the independent gain and
+    // declared delay, so silently retaining CLAP's default realtime mode fails.
+    struct LifecyclePlugin<const CASE: usize>;
+    struct LifecycleShared<'a> {
+        host: HostSharedHandle<'a>,
+        case: usize,
+        render_mode: AtomicU32,
+        active: AtomicBool,
+    }
+    struct LifecycleMain<'a>(&'a LifecycleShared<'a>);
+    struct LifecycleProcessor<'a, const CASE: usize> {
+        shared: &'a LifecycleShared<'a>,
+        delay: Vec<[f32; 2]>,
+        cursor: usize,
+    }
+    struct LifecycleAudit {
+        visited: AtomicU32,
+        failures: AtomicU32,
+    }
+    impl LifecycleAudit {
+        const fn new() -> Self {
+            Self {
+                visited: AtomicU32::new(0),
+                failures: AtomicU32::new(0),
+            }
+        }
+        fn clear(&self) {
+            self.visited.store(0, TestOrdering::SeqCst);
+            self.failures.store(0, TestOrdering::SeqCst);
+        }
+    }
+    static LIFECYCLE_AUDITS: [LifecycleAudit; 6] = [const { LifecycleAudit::new() }; 6];
+    const INIT: u32 = 1;
+    const CALLBACK: u32 = 2;
+    const RENDER: u32 = 4;
+    const ACTIVATE: u32 = 8;
+    const LATENCY: u32 = 16;
+    const TAIL: u32 = 32;
+    const RESET: u32 = 64;
+    const START: u32 = 128;
+    const PROCESS: u32 = 256;
+    const STOP: u32 = 512;
+    const DEACTIVATE: u32 = 1024;
+    const DESTROY: u32 = 2048;
+    const BACKGROUND: u32 = 4096;
+
+    impl LifecycleShared<'_> {
+        fn check(&self, stage: u32, audio: bool) {
+            let audit = &LIFECYCLE_AUDITS[self.case];
+            audit.visited.fetch_or(stage, TestOrdering::SeqCst);
+            if let Some(check) = self.host.get_extension::<HostThreadCheck>() {
+                if check.is_main_thread(&self.host) != Some(true)
+                    || check.is_audio_thread(&self.host) != Some(audio)
+                {
+                    audit.failures.fetch_add(1, TestOrdering::SeqCst);
+                }
+            } else if self.case >= 3 {
+                audit.failures.fetch_add(1, TestOrdering::SeqCst);
+            }
+        }
+        fn delay_frames(&self) -> usize {
+            if self.render_mode.load(TestOrdering::SeqCst) == 0 {
+                3
+            } else {
+                5
+            }
+        }
+    }
+    impl<'a> PluginShared<'a> for LifecycleShared<'a> {}
+    impl Drop for LifecycleShared<'_> {
+        fn drop(&mut self) {
+            self.check(DESTROY, false);
+        }
+    }
+
+    impl<const CASE: usize> Plugin for LifecyclePlugin<CASE> {
+        type Shared<'a> = LifecycleShared<'a>;
+        type MainThread<'a> = LifecycleMain<'a>;
+        type AudioProcessor<'a> = LifecycleProcessor<'a, CASE>;
+        fn declare_extensions(
+            builder: &mut PluginExtensions<Self>,
+            _shared: Option<&Self::Shared<'_>>,
+        ) {
+            builder
+                .register::<PluginAudioPorts>()
+                .register::<PluginRender>()
+                .register::<PluginLatency>()
+                .register::<PluginTail>();
+        }
+    }
+    impl<const CASE: usize> DefaultPluginFactory for LifecyclePlugin<CASE> {
+        fn get_descriptor() -> PluginDescriptor {
+            PluginDescriptor::new(
+                "org.mondrian.test.render-lifecycle",
+                "Render Lifecycle Fixture",
+            )
+        }
+        fn new_shared(host: HostSharedHandle<'_>) -> Result<Self::Shared<'_>, PluginError> {
+            if CASE >= 3 && host.get_extension::<HostThreadCheck>().is_none() {
+                return Err(PluginError::Message("missing host thread-check"));
+            }
+            let shared = LifecycleShared {
+                host,
+                case: CASE,
+                render_mode: AtomicU32::new(0),
+                active: AtomicBool::new(false),
+            };
+            shared.check(INIT, false);
+            if let Some(check) = host.get_extension::<HostThreadCheck>() {
+                let valid = std::thread::scope(|scope| {
+                    scope
+                        .spawn(move || {
+                            check.is_main_thread(&host) == Some(false)
+                                && check.is_audio_thread(&host) == Some(false)
+                        })
+                        .join()
+                        .expect("background extension check")
+                });
+                LIFECYCLE_AUDITS[CASE].visited.fetch_or(BACKGROUND, TestOrdering::SeqCst);
+                if !valid {
+                    LIFECYCLE_AUDITS[CASE].failures.fetch_add(1, TestOrdering::SeqCst);
+                }
+            }
+            host.request_callback();
+            Ok(shared)
+        }
+        fn new_main_thread<'a>(
+            _host: HostMainThreadHandle<'a>,
+            shared: &'a Self::Shared<'a>,
+        ) -> Result<Self::MainThread<'a>, PluginError> {
+            Ok(LifecycleMain(shared))
+        }
+    }
+    impl<'a> PluginMainThread<'a, LifecycleShared<'a>> for LifecycleMain<'a> {
+        fn on_main_thread(&self) {
+            self.0.check(CALLBACK, false);
+        }
+    }
+    impl PluginAudioPortsImpl for LifecycleMain<'_> {
+        fn count(&self, _is_input: bool) -> u32 {
+            1
+        }
+        fn get(&self, index: u32, _is_input: bool, writer: &mut AudioPortInfoWriter) {
+            if index == 0 {
+                writer.set(&AudioPortInfo {
+                    id: ClapId::new(0),
+                    name: b"main",
+                    channel_count: 2,
+                    flags: AudioPortFlags::IS_MAIN,
+                    port_type: Some(AudioPortType::STEREO),
+                    in_place_pair: None,
+                });
+            }
+        }
+    }
+    impl PluginRenderImpl for LifecycleMain<'_> {
+        fn has_hard_realtime_requirement(&self) -> bool {
+            self.0.check(RENDER, false);
+            self.0.case == 1
+        }
+        fn set(&self, mode: RenderMode) -> Result<(), PluginError> {
+            self.0.check(RENDER, false);
+            if self.0.case == 2 && mode == RenderMode::Offline {
+                return Err(PluginError::Message("offline rendering declined"));
+            }
+            self.0
+                .render_mode
+                .store((mode == RenderMode::Offline) as u32, TestOrdering::SeqCst);
+            Ok(())
+        }
+    }
+    impl PluginLatencyImpl for LifecycleMain<'_> {
+        fn get(&self) -> u32 {
+            self.0.check(LATENCY, false);
+            if self.0.active.load(TestOrdering::SeqCst) {
+                self.0.delay_frames() as u32
+            } else {
+                u32::MAX
+            }
+        }
+    }
+    impl<const CASE: usize> PluginTailImpl for LifecycleProcessor<'_, CASE> {
+        fn get(&self) -> TailLength {
+            self.shared.check(TAIL, true);
+            TailLength::Finite(self.delay.len() as u32)
+        }
+    }
+    impl<'a, const CASE: usize>
+        clack_plugin::plugin::PluginAudioProcessor<'a, LifecycleShared<'a>, LifecycleMain<'a>>
+        for LifecycleProcessor<'a, CASE>
+    {
+        fn activate(
+            _host: HostAudioProcessorHandle<'a>,
+            _main: &LifecycleMain<'a>,
+            shared: &'a LifecycleShared<'a>,
+            _config: PluginConfig,
+        ) -> Result<Self, PluginError> {
+            shared.check(ACTIVATE, false);
+            shared.active.store(true, TestOrdering::SeqCst);
+            Ok(Self {
+                shared,
+                delay: vec![[0.0; 2]; shared.delay_frames()],
+                cursor: 0,
+            })
+        }
+        fn reset(&mut self) {
+            self.shared.check(RESET, true);
+            self.delay.fill([0.0; 2]);
+            self.cursor = 0;
+        }
+        fn start_processing(&mut self) -> Result<(), PluginError> {
+            self.shared.check(START, true);
+            if CASE == 4 {
+                Err(PluginError::Message("fixture start failure"))
+            } else {
+                Ok(())
+            }
+        }
+        fn process(
+            &mut self,
+            _process: Process,
+            mut audio: Audio,
+            _events: Events,
+        ) -> Result<ProcessStatus, PluginError> {
+            self.shared.check(PROCESS, true);
+            self.shared.host.request_callback();
+            if CASE == 5 {
+                return Err(PluginError::Message("fixture process failure"));
+            }
+            let mut pair = audio.port_pair(0).ok_or(PluginError::Message("missing pair"))?;
+            let mut channels =
+                pair.channels()?.into_f32().ok_or(PluginError::Message("Float32 pair"))?;
+            let gain = if self.shared.render_mode.load(TestOrdering::SeqCst) == 0 {
+                2.0
+            } else {
+                3.0
+            };
+            let mut next_cursor = self.cursor;
+            for (channel, pair) in channels.iter_mut().enumerate() {
+                let mut cursor = self.cursor;
+                match pair {
+                    ChannelPair::InputOutput(input, output) => {
+                        for (target, source) in output.iter_mut().zip(input.iter()) {
+                            let delayed = self.delay[cursor][channel];
+                            self.delay[cursor][channel] = source * gain;
+                            *target = delayed;
+                            cursor = (cursor + 1) % self.delay.len();
+                        }
+                    }
+                    _ => return Err(PluginError::Message("separate input/output fixture")),
+                }
+                next_cursor = cursor;
+            }
+            self.cursor = next_cursor;
+            Ok(ProcessStatus::Continue)
+        }
+        fn stop_processing(&mut self) {
+            self.shared.check(STOP, true);
+        }
+        fn deactivate(self, _main: &LifecycleMain<'a>) {
+            self.shared.check(DEACTIVATE, false);
+            self.shared.active.store(false, TestOrdering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn clap_render_mode_selects_independent_pcm_and_scheduling_facts() {
+        for mode in [AudioProcessingMode::Offline, AudioProcessingMode::Realtime] {
+            LIFECYCLE_AUDITS[0].clear();
+            let expected_delay = if mode == AudioProcessingMode::Realtime {
+                3
+            } else {
+                5
+            };
+            let expected_gain = if mode == AudioProcessingMode::Realtime {
+                2.0
+            } else {
+                3.0
+            };
+            let entry = PluginEntry::load_from_clack::<SinglePluginEntry<LifecyclePlugin<0>>>(
+                c"/test/render-mode",
+            )
+            .expect("owned rendering entry");
+            let render = AudioRenderContract {
+                sample_rate: 48_000,
+                channel_layout: AudioChannelLayout::Stereo,
+                max_block_frames: 16,
+                processing_mode: mode,
+                processor_session_scratch_budget_bytes: 1024 * 1024,
+                public_output_lookahead_budget_frames: 1024,
+                compensation_delay_scratch_budget_bytes: 1024 * 1024,
+            };
+            let contract = AudioProcessorExecutionContract::new(
+                expected_delay,
+                AudioProcessorTail::Finite(expected_delay),
+                true,
+                mode == AudioProcessingMode::Realtime,
+                mode == AudioProcessingMode::Offline,
+                0,
+            )
+            .expect("mode facts");
+            let request = IsolatedAudioProcessorWorkerPrepareRequest {
+                payload: Vec::new(),
+                plugin_execution_contract: contract,
+                auxiliary_inputs: AudioProcessorAuxiliaryInputContract::default(),
+                parameter_ids: Vec::new(),
+                render_contract: render,
+            };
+            let mut worker = prepare_loaded(
+                request,
+                entry,
+                c"org.mondrian.test.render-lifecycle",
+                None,
+                &[],
+                &[],
+            )
+            .expect("prepare selected render mode");
+            for start in [73, 19] {
+                worker.enter_state(start).expect("reset selected mode");
+                let auxiliary = AudioProcessorAuxiliaryInputContract::default();
+                let mut samples = [0.0; 24];
+                for (frame, pair) in samples.chunks_exact_mut(2).enumerate() {
+                    let source = (frame as f32 + 1.0) / 16.0;
+                    pair.copy_from_slice(&[source, -source]);
+                }
+                worker
+                    .process(IsolatedAudioProcessorWorkerBlock::new(
+                        start,
+                        12,
+                        render,
+                        &mut samples,
+                        &auxiliary,
+                        &[],
+                        &[],
+                        &[],
+                    ))
+                    .expect("mode-specific DSP");
+                for (frame, pair) in samples.chunks_exact(2).enumerate() {
+                    let expected = if frame < expected_delay {
+                        0.0
+                    } else {
+                        (frame - expected_delay + 1) as f32 / 16.0 * expected_gain
+                    };
+                    assert_eq!(
+                        pair,
+                        [expected, -expected],
+                        "independent delayed gain oracle"
+                    );
+                }
+            }
+            drop(worker);
+            assert_eq!(LIFECYCLE_AUDITS[0].failures.load(TestOrdering::SeqCst), 0);
+            let stages = INIT
+                | CALLBACK
+                | RENDER
+                | ACTIVATE
+                | LATENCY
+                | TAIL
+                | RESET
+                | START
+                | PROCESS
+                | STOP
+                | DEACTIVATE
+                | DESTROY;
+            assert_eq!(
+                LIFECYCLE_AUDITS[0].visited.load(TestOrdering::SeqCst) & stages,
+                stages
+            );
+        }
+    }
+
+    #[test]
+    fn clap_render_mode_rejects_hard_realtime_and_declined_offline() {
+        lifecycle_offline_rejection::<1>();
+        lifecycle_offline_rejection::<2>();
+    }
+
+    fn lifecycle_offline_rejection<const CASE: usize>() {
+        let entry = PluginEntry::load_from_clack::<SinglePluginEntry<LifecyclePlugin<CASE>>>(
+            c"/test/render-rejection",
+        )
+        .expect("owned mode rejection entry");
+        let render = AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Stereo,
+            max_block_frames: 16,
+            processing_mode: AudioProcessingMode::Offline,
+            processor_session_scratch_budget_bytes: 1024 * 1024,
+            public_output_lookahead_budget_frames: 1024,
+            compensation_delay_scratch_budget_bytes: 1024 * 1024,
+        };
+        let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            payload: Vec::new(),
+            plugin_execution_contract: AudioProcessorExecutionContract::new(
+                3,
+                AudioProcessorTail::Finite(3),
+                true,
+                false,
+                true,
+                0,
+            )
+            .expect("untrusted mode facts"),
+            auxiliary_inputs: AudioProcessorAuxiliaryInputContract::default(),
+            parameter_ids: Vec::new(),
+            render_contract: render,
+        };
+        assert!(
+            matches!(prepare_loaded(request, entry, c"org.mondrian.test.render-lifecycle", None, &[], &[]),
+            Err(AudioProcessorHostError::Unavailable(detail)) if detail.contains("render") || detail.contains("real-time")),
+            "a realtime-only or declined mode cannot be admitted as offline"
+        );
+    }
+
+    #[test]
+    fn clap_thread_check_covers_processing_and_failure_teardown() {
+        lifecycle_thread_case::<3>(false);
+        lifecycle_thread_case::<4>(true);
+        lifecycle_thread_case::<5>(true);
+    }
+
+    fn lifecycle_thread_case<const CASE: usize>(fail: bool) {
+        let audit = &LIFECYCLE_AUDITS[CASE];
+        audit.clear();
+        let entry = PluginEntry::load_from_clack::<SinglePluginEntry<LifecyclePlugin<CASE>>>(
+            c"/test/thread-lifecycle",
+        )
+        .expect("owned lifecycle entry");
+        let render = AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Stereo,
+            max_block_frames: 16,
+            processing_mode: AudioProcessingMode::Realtime,
+            processor_session_scratch_budget_bytes: 1024 * 1024,
+            public_output_lookahead_budget_frames: 1024,
+            compensation_delay_scratch_budget_bytes: 1024 * 1024,
+        };
+        let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            payload: Vec::new(),
+            plugin_execution_contract: AudioProcessorExecutionContract::new(
+                3,
+                AudioProcessorTail::Finite(3),
+                true,
+                true,
+                false,
+                0,
+            )
+            .expect("fixture contract"),
+            auxiliary_inputs: AudioProcessorAuxiliaryInputContract::default(),
+            parameter_ids: Vec::new(),
+            render_contract: render,
+        };
+        let mut worker = prepare_loaded(
+            request,
+            entry,
+            c"org.mondrian.test.render-lifecycle",
+            None,
+            &[],
+            &[],
+        )
+        .expect("host thread extension and lifecycle preparation");
+        worker.enter_state(71).expect("audio reset role");
+        let auxiliary = AudioProcessorAuxiliaryInputContract::default();
+        let mut pcm = [0.25; 16];
+        assert_eq!(
+            worker
+                .process(IsolatedAudioProcessorWorkerBlock::new(
+                    71,
+                    8,
+                    render,
+                    &mut pcm,
+                    &auxiliary,
+                    &[],
+                    &[],
+                    &[]
+                ))
+                .is_err(),
+            fail
+        );
+        drop(worker);
+        assert_eq!(
+            audit.failures.load(TestOrdering::SeqCst),
+            0,
+            "all roles are native-instance specific"
+        );
+        let expected = INIT
+            | CALLBACK
+            | RENDER
+            | ACTIVATE
+            | LATENCY
+            | TAIL
+            | RESET
+            | START
+            | DEACTIVATE
+            | DESTROY
+            | BACKGROUND
+            | if CASE == 4 { 0 } else { PROCESS | STOP };
+        assert_eq!(
+            audit.visited.load(TestOrdering::SeqCst) & expected,
+            expected,
+            "all lifecycle paths executed"
+        );
+    }
+
+    #[test]
+    fn clap_thread_check_audio_role_is_instance_local_and_unwind_safe() {
+        let owner = ClapHostShared::new();
+        let sibling = ClapHostShared::new();
+        assert!(owner.is_main_thread());
+        assert!(!owner.is_audio_thread());
+        {
+            let _role = owner.enter_audio_thread();
+            assert!(owner.is_main_thread());
+            assert!(owner.is_audio_thread());
+            assert!(!sibling.is_audio_thread());
+            std::thread::scope(|scope| {
+                let shared = &owner;
+                scope
+                    .spawn(move || {
+                        assert!(!shared.is_main_thread());
+                        assert!(!shared.is_audio_thread());
+                    })
+                    .join()
+                    .expect("background query during owner audio role");
+            });
+        }
+        assert!(!owner.is_audio_thread());
+        let unwind = std::panic::catch_unwind(|| {
+            let _role = owner.enter_audio_thread();
+            assert!(owner.is_audio_thread());
+            panic!("controlled host unwind");
+        });
+        assert!(unwind.is_err());
+        assert!(!owner.is_audio_thread());
+    }
+}
+
+#[cfg(test)]
+mod canonical_transport_tests {
+    use super::*;
+    #[test]
+    fn signed_seconds_use_checked_integer_rounding() {
+        for (sample, rate, bits) in [
+            (1, 48_000, 44_739),
+            (-1, 48_000, -44_739),
+            (1, 3, 715_827_883),
+            (-1, 3, -715_827_883),
+            (96_000, 48_000, 4_294_967_296),
+        ] {
+            assert_eq!(
+                clap_seconds_position(sample, rate).expect("representable").to_bits(),
+                bits
+            );
+        }
+        assert!(clap_seconds_position(i64::MAX, 1).is_err());
+        assert!(clap_seconds_position(i64::MIN, 1).is_err());
     }
 }

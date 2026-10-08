@@ -260,3 +260,21 @@ pub(crate) fn make_event_ctx<'a>(
         requests,
     }
 }
+
+/// Native primary modifier for actual text Widget events, not classifier vectors.
+pub(crate) fn primary_text_modifiers() -> Modifiers {
+    Modifiers {
+        ctrl: !cfg!(target_os = "macos"),
+        meta: cfg!(target_os = "macos"),
+        ..Modifiers::none()
+    }
+}
+
+/// Native word-navigation modifier for actual text Widget events.
+pub(crate) fn word_text_modifiers() -> Modifiers {
+    Modifiers {
+        ctrl: !cfg!(target_os = "macos"),
+        alt: cfg!(target_os = "macos"),
+        ..Modifiers::none()
+    }
+}

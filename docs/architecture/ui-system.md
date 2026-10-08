@@ -1,5 +1,19 @@
 # UI System
 
+Shared Rack controls attach explicit semantic inspection identity to Slider,
+Checkbox, closed Dropdown, Button and IconButton views. The Widget contract
+carries identity, compatible role, focus presentation and owned keyboard release
+intent. Shell restores unambiguous
+keys within the same Panel and live author Session/Sequence; the event Router
+remains the sole focus and modal-scope authority. Rack keys include the exact
+Scope occurrence, Processor ID and native definition binding, parameter ID and
+control role. Translated labels, row ordinals, current author values and query
+operations never form identity. New model callbacks, values and schemas replace
+old presentation; deleted, disabled or rebound owners keep fresh identities.
+Pointer capture, drafts, raw press state and menu paths are never restored by this
+seam. Specialized CurveEditor geometry/key selection remains its own inspection
+snapshot under the same author-control scope guard.
+
 Clean source `718696e` qualifies the shared source menu models and their product
 actions against actual CLAP/VST3 PCM, one Undo/save-live-Redo and four Unicode
 archive reopens. Source-gain curves are retained by rewiring; their complete Rack
@@ -4231,3 +4245,172 @@ an unqualified route creation request. App checks the live observation identity
 before entering the sole routing transaction, so a stale popup cannot silently
 connect a removed/replaced native input. Existing retained route controls remain
 available under canonical source locks without requiring the plugin to load.
+
+
+Rack move/remove icon Buttons and sidechain scalar/source controls use the same
+primitive inspection identity as parameter controls. Sidechain subjects name an
+exact canonical RouteId or the native definition's stable input bus key; source
+endpoints, captions, gain/enable values and display order do not enter the key.
+Keys retain the exact Rack, native processor definition binding and selected
+Processing Scope occurrence. Each refresh rebuilds live callbacks and current
+input-observation/source fingerprints. Deleted or disabled controls refuse input
+identity restoration. Scope occurrence navigation instead belongs to its Rack
+and originally inspected Clip: choosing another component keeps that selector's
+keyboard trigger, while the chosen component's parameter/route controls become
+new occurrence owners. Inspecting another outer Clip replaces the selector owner.
+
+
+Release-activated icon Buttons additionally inspect one typed Enter/Space
+keyboard activation lease. It is admitted only by the same enabled semantic
+key/role and existing live session/Sequence/panel gates. A matching release
+consumes it once and executes the newly projected callback. Locale and native
+metadata refresh may retain that lease without delaying refresh. Raw pointer
+press, hover, capture, callbacks and draft state remain outside the snapshot;
+pointer-pressed icon Buttons refuse inspection restoration. Focus loss,
+disabled/deleted/rebound/other-occurrence owners and modal entry cancel the lease.
+Every shell modal entry passes through the root's `show_modal` boundary, which
+invokes the primitive `cancel_keyboard_activation` seam throughout the current
+widget tree before installing the modal. Cancellation clears only an owned
+keyboard release intent and its pressed visual; focus identity and independent
+pointer interaction remain unchanged. This boundary also covers Resource and
+pending-close dialogs and applies even when a modal opens and closes before the
+Router receives another input event or the host refreshes models. Model rebuild
+only restores already admitted inspection state. Immediate-activation
+widgets do not accept a release lease from a replacement widget kind.
+
+
+### Numeric author draft inspection
+
+An explicitly addressed compound numeric control gives its Slider and NumberInput
+distinct role keys under the same stable author owner. NumberInput uses the shared
+inspection collection, duplicate-key refusal and session/Sequence/panel gates;
+it introduces no alternate focus authority. Parameter binding includes its exact
+canonical ParameterSchema, independent of translated labels and current value.
+The Host's existing transient-input gate permits model rebuild for an admitted
+typed numeric draft, so focus cannot indefinitely postpone fresh metadata or
+canonical owner validation. Unaddressed text, pointer selection and IME preedit
+keep the existing transient input policy.
+
+A focused NumberInput may retain committed-input text, grapheme-based selection
+and caret across a model rebuild only when the fresh enabled numeric model has
+the same exact typed committed baseline, hard bounds, configured step and display
+precision. Floating bits and i64 storage avoid narrowing or approximate equality.
+Native metadata and locale-only refresh therefore preserve an unfinished draft.
+Canonical value changes, schema changes, locking, deleted/rebound owners, another
+Scope occurrence or a new author session refuse it. Fresh models and callbacks
+remain authoritative. Enter publishes at most one edit through the current action;
+Escape restores the fresh canonical baseline without author history.
+
+The TextInput helper retains local single-line text/selection/caret and bounded
+local history; it
+refuses pointer selection or active IME preedit and never restores callbacks,
+pointer capture, composition, clipboard intent or author Undo history. NumberInput exposes
+its actual inner text-field accessibility node rather than disappearing from the
+semantic tree. Localized numeric names/units/ranges and native assistive-technology
+publication remain separate work and are not claimed by this draft-retention seam.
+
+
+### Numeric text Edit command ownership
+
+NumberInput delegates semantic Edit-menu availability and Copy/Cut/Paste execution
+to its owned TextInput through the existing Widget/Router command seam. These
+commands operate on local draft text and selection; numeric parsing and author
+history still occur only on numeric confirmation. No-selection Copy/Cut is
+unavailable, failed clipboard operations and empty Paste preserve the draft and
+selection, and an owned command cannot fall through to generic Clip actions.
+The existing numeric Escape, fresh-model admission and single-commit behavior
+remain the numeric transaction boundary.
+
+
+### Shared text platform keymap
+
+Single-line and multiline text command classifiers share the existing explicit
+Windows/Linux/macOS PlatformKeymap and modifier helpers. The real widget adapter
+selects the current platform; classifiers accept a supplied platform so Mac
+semantics are executable on any test host. NumberInput uses the same TextInput
+adapter. Clipboard/select-all use exact primary modifiers (Control on Windows
+and Linux, Command on macOS), while word arrows use Control or Option. macOS
+Command arrows address line boundaries and multiline document boundaries; Shift
+extends selection. Conflicting secondary modifiers remain available to shortcuts
+or the system. Raw native modifiers and the sole EventRouter are unchanged.
+
+Platform decisions inside a supplied-keymap classifier use that keymap rather
+than the build host. These changes reuse existing text selection, Unicode word
+and grapheme movement, clipboard failure handling and numeric author commit
+boundaries. They do not claim native macOS event/IME/assistive-technology
+qualification or implement app command defaults; application shortcut defaults
+remain a separate boundary.
+
+
+### Local text history and word deletion
+
+Single-line and multiline inputs use one bounded text/caret/selection history
+engine: at most 100 entries and 16 MiB of retained UTF-8 snapshot allocations,
+with cached byte accounting and oldest-entry eviction. The Host asks an allocation-free
+Widget admission predicate for its transient-input gate; NumberInput capture and
+that predicate share the same addressed enabled/focused/pointer/IME guard. Actual
+Shell capture still applies unique-key, owner/session and fresh-model admission.
+History is captured once into the existing boxed payload; fresh replacement
+controls have no owned history to copy while their keys are counted. A single oversized edit
+cannot retain its local Undo snapshot; its current draft still stays intact.
+Local history retains explicit unconfirmed input ownership even after memory
+or count eviction, or Undo exhaustion, so empty history never falls through to
+Clip Undo. Coalescing requires uninterrupted text/caret/selection endpoints;
+Undo/Redo, discrete clipboard/IME edits and restored models break coalescing.
+Redo restores the actual caret and reverse selection that existed before Undo
+in one step, without synthetic tip entries.
+
+History contains only local text and grapheme coordinates. An admitted numeric
+inspection snapshot preserves its bounded Undo/Redo branch and ownership under
+the existing exact baseline/schema/session gate. Fresh callbacks are always
+used. Canonical baseline changes refuse the entire draft and history, while
+programmatic single-line synchronization resets them without author dispatch.
+Numeric Enter confirms at most one current value and clears local history;
+Escape discards it without author history. A pristine or confirmed NumberInput
+permits author Undo through the existing Router; an unfinished interaction owns
+local Undo even if the draft text has returned to its baseline.
+
+TextInput's existing `on_change` contract still dispatches every resulting text
+change through its fresh callback, including local Undo/Redo. Transactional
+`on_commit` text and numeric draft changes remain local until confirmation.
+This history never mutates an author document or copies author transactions.
+
+Exact primary Copy/Cut belongs to an enabled, focused text control even when
+there is no selection. Its keyboard result is an owned no-op, menu availability
+remains false, and no parent/global rebinding receives that text chord. Readonly
+multiline controls retain Copy and owned no-op mutation commands; disabled or
+unfocused controls do not gain shortcut ownership. Word Backspace/Delete uses
+Control on Windows/Linux and Option on macOS with no secondary modifier or
+Shift, gives an existing selection precedence, and otherwise uses the existing
+Unicode word/grapheme boundaries. Multiline deletion at a line boundary joins
+only that adjacent newline. Each deletion is one local reversible edit.
+
+### Complete text layout and viewport output
+
+Single-line input geometry obtains complete line width, logical UTF-8 caret position and pointer hit from one advanced cosmic-text layout per query, using the shared widget font owner. It no longer reshapes every grapheme prefix to find a mouse caret. Draft text, kerning, ligatures and bidirectional shaping context remain complete. Layout scratch is proportional to the active complete line and released after each query; this slice does not claim viewport-only shaping or a persistent layout cache.
+
+Text resolution tracks the command stream's nested clip and translation semantics and tests actual glyph ink bounds before atlas allocation/upload and image emission. An empty effective clip skips shaping. Off-viewport ink is omitted without substring reflow; only visible ink can force an atlas page reset. Swash image cache misses still rasterize off-viewport glyphs to obtain exact ink bounds, and `glyphs_requested` retains that complete request count. This slice bounds alpha copying, atlas allocation/uploads and draw commands, not all rasterization or full-line shaping. Public direct layout/render without a clip keeps its full-output contract.
+
+The compatible vendored HarfRust 0.5.2 backports upstream PR 397's 32-bit matched sequence index fix, with exact source/license provenance. It supports complete long lines without disabling overflow checking, downgrading advanced shaping or truncating drafts.
+
+
+### Complete single-line selection geometry
+
+TextInput paints selected visual advance spans and anchors IME preedit at the
+caret from one complete advanced cosmic-text layout query. Its paint snapshot
+carries only typed pixel spans and the complete caret position; it no longer
+reshapes a selected prefix or substring. A logical range can produce disjoint
+BiDi rectangles. Partial clusters use the same equal-grapheme advance convention
+as cosmic-text caret geometry, with each glyph's own BiDi direction. Contiguous
+advances coalesce before allocating per-span output, including long selections.
+The existing shared widget font owner and text renderer remain the sole shaping
+path. Public selection requests refuse malformed/out-of-range byte boundaries
+and invalid font sizes before shaping; empty selections yield no rectangles.
+
+Selection and caret movement preserve the existing callback/Undo boundary:
+navigation creates no text edit or history entry, text replacement creates one
+local entry, and Undo restores the original caret and reverse anchor. Ordinary
+live TextInput Undo still dispatches the resulting text through its existing
+fresh on_change callback; transactional numeric/commit inputs remain local until
+confirmation. This slice covers single-line geometry, not full visual BiDi
+keyboard traversal, native macOS IME qualification or multiline interaction.

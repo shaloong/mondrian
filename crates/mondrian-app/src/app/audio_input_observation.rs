@@ -813,7 +813,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn observed_native_scope_fixture() -> Fixture {
+    pub(crate) fn observed_native_scope_fixture() -> Fixture {
         let (mut state, mut queries, calls, started, release) = fixture(1);
         let sequence = state.active_sequence_mut_uncommitted().expect("Sequence");
         let mut processor = sequence.audio_program.outputs[0].strip.pre_fader.processors.remove(0);

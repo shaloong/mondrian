@@ -36,6 +36,7 @@ pub enum ButtonStyle {
 /// Button Widget —— 可点击的标签按钮
 pub struct Button {
     id: WidgetId,
+    inspection_identity: crate::control_inspection::ControlInspectionIdentity,
     label: String,
     leading_icon: Option<VectorIcon>,
     bounds: Rect,
@@ -81,9 +82,16 @@ impl Default for ButtonVisualTokens {
 }
 
 impl Button {
+    /// Address this control independently of labels, ordering and current value.
+    pub fn with_control_inspection_key(mut self, key: Option<String>) -> Self {
+        self.inspection_identity.set_key(key);
+        self
+    }
+
     pub fn new(label: impl Into<String>) -> Self {
         Self {
             id: WidgetId::new(),
+            inspection_identity: crate::control_inspection::ControlInspectionIdentity::default(),
             label: label.into(),
             leading_icon: None,
             bounds: Rect::ZERO,
@@ -371,6 +379,36 @@ impl Widget for Button {
 
     fn can_focus(&self) -> bool {
         self.enabled
+    }
+
+    fn set_control_inspection_key(&mut self, key: Option<String>) -> bool {
+        self.inspection_identity.set_key(key);
+        true
+    }
+
+    fn control_inspection_state(&self) -> Option<mondrian_ui_core::ControlInspectionState> {
+        self.inspection_identity.inspect(
+            self.id,
+            AccessibilityRole::Button,
+            self.focused,
+            self.focus_visible,
+            self.enabled,
+        )
+    }
+
+    fn restore_control_inspection_state(
+        &mut self,
+        state: &mondrian_ui_core::ControlInspectionState,
+    ) -> bool {
+        let Some((id, focused, focus_visible)) =
+            self.inspection_identity.restore(state, AccessibilityRole::Button, self.enabled)
+        else {
+            return false;
+        };
+        self.id = id;
+        self.focused = focused;
+        self.focus_visible = focus_visible;
+        true
     }
 
     fn accessibility(&self) -> Option<AccessibilityNode> {

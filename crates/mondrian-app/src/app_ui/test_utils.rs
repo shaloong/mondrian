@@ -287,3 +287,13 @@ pub(crate) fn native_sidechain_source_action(
 
     connection.expect("shared named connection action")
 }
+
+/// Native primary modifier for actual text/NumberInput Host fixture events.
+/// Explicit curve, timeline and classifier shortcut vectors keep their declared modifiers.
+pub(crate) fn primary_text_modifiers() -> Modifiers {
+    Modifiers {
+        ctrl: !cfg!(target_os = "macos"),
+        meta: cfg!(target_os = "macos"),
+        ..Modifiers::none()
+    }
+}

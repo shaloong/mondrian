@@ -110,6 +110,7 @@ namespace MondrianOpenFx {
   //  kOfxImageUnPreMultiplied - the image is unpremultiplied
   const std::string &FilterClipInstance::getPremult() const
   {
+    if (isOutput()) { return _effect->getOutputPreMultiplication(); }
     static const std::string v(kOfxImageUnPreMultiplied);
     return v;
   }

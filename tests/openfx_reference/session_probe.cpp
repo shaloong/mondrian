@@ -15,8 +15,105 @@
 #include <cmath>
 #include <array>
 #include <type_traits>
+#include "ofxGPURender.h"
+#include "ofxTimeLine.h"
 
 namespace {
+int bootstrapPhase = 0;
+bool cpuDisabled = false;
+
+bool honestHostCapabilities(const OfxHost* host) {
+  if (!host || !host->host || !host->fetchSuite) { return false; }
+  const auto* properties = static_cast<const OfxPropertySuiteV1*>(
+      host->fetchSuite(host->host, kOfxPropertySuite, 1));
+  if (!properties) { return false; }
+  const char* names[] = {kOfxImageEffectPropSupportedPixelDepths,
+                        kOfxImageEffectPropSupportedComponents,
+                        kOfxImageEffectPropSupportedContexts,
+                        kOfxImageEffectPropCPURenderSupported};
+  const char* expected[] = {kOfxBitDepthFloat, kOfxImageComponentRGBA,
+                           kOfxImageEffectContextFilter, "true"};
+  for (int index = 0; index < 4; ++index) {
+    int dimension = -1;
+    char* value = nullptr;
+    if (properties->propGetDimension(host->host, names[index], &dimension) != kOfxStatOK ||
+        dimension != 1 ||
+        properties->propGetString(host->host, names[index], 0, &value) != kOfxStatOK ||
+        !value || std::string(value) != expected[index]) { return false; }
+  }
+  for (const char* name : {kOfxImageEffectPropSupportsOverlays,
+                           kOfxImageEffectPropSupportsMultiResolution,
+                           kOfxImageEffectPropSupportsTiles,
+                           kOfxImageEffectPropTemporalClipAccess,
+                           kOfxImageEffectPropSupportsMultipleClipDepths,
+                           kOfxImageEffectPropSupportsMultipleClipPARs,
+                           kOfxParamHostPropSupportsCustomInteract}) {
+    int value = -1;
+    if (properties->propGetInt(host->host, name, 0, &value) != kOfxStatOK || value != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool canonicalProgressiveContract(const void* handle, OfxPropertySetHandle in) {
+  OfxPropertySetHandle properties = nullptr;
+  OfxImageClipHandle source = nullptr;
+  OfxRectD rod{};
+  double par = 0.0, size[2]{}, extent[2]{}, offset[2]{}, time = 0.0;
+  const auto* timeline = static_cast<const OfxTimeLineSuiteV1*>(
+      gHost->fetchSuite(gHost->host, kOfxTimeLineSuite, 1));
+  if (!timeline || timeline->getTime(const_cast<void*>(handle), &time) != kOfxStatOK ||
+      gEffectHost->getPropertySet((OfxImageEffectHandle)handle, &properties) != kOfxStatOK ||
+      gPropHost->propGetDouble(properties, kOfxImageEffectPropProjectPixelAspectRatio, 0, &par) != kOfxStatOK ||
+      gPropHost->propGetDoubleN(properties, kOfxImageEffectPropProjectSize, 2, size) != kOfxStatOK ||
+      gPropHost->propGetDoubleN(properties, kOfxImageEffectPropProjectExtent, 2, extent) != kOfxStatOK ||
+      gPropHost->propGetDoubleN(properties, kOfxImageEffectPropProjectOffset, 2, offset) != kOfxStatOK ||
+      gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Source", &source, nullptr) != kOfxStatOK ||
+      gEffectHost->clipGetRegionOfDefinition(source, time, &rod) != kOfxStatOK ||
+      !std::isfinite(size[0]) || !std::isfinite(extent[0]) || par <= 0.0 ||
+      size[0] != rod.x2 || extent[0] != rod.x2 || size[1] != rod.y2 ||
+      extent[1] != rod.y2 || offset[0] != 0.0 || offset[1] != 0.0 ||
+      rod.x1 != 0.0 || rod.y1 != 0.0) { return false; }
+  if (in) {
+    char* field = nullptr;
+    int window[4]{};
+    if (gPropHost->propGetString(in, kOfxImageEffectPropFieldToRender, 0, &field) != kOfxStatOK ||
+        !field || std::string(field) != kOfxImageFieldNone ||
+        gPropHost->propGetIntN(in, kOfxImageEffectPropRenderWindow, 4, window) != kOfxStatOK ||
+        window[0] != 0 || window[1] != 0 ||
+        window[2] * par != rod.x2 || window[3] != rod.y2) { return false; }
+  }
+  return true;
+}
+
+bool canonicalCoordinateOutput(const void* handle, OfxPropertySetHandle in) {
+  OfxImageClipHandle output = nullptr;
+  OfxPropertySetHandle image = nullptr;
+  double time = 0.0;
+  if (gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
+      gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Output", &output, nullptr) != kOfxStatOK ||
+      gEffectHost->clipGetImage(output, time, nullptr, &image) != kOfxStatOK) { return false; }
+  void* data = nullptr;
+  int bounds[4]{}, stride = 0;
+  double par = 0.0;
+  bool valid = gPropHost->propGetPointer(image, kOfxImagePropData, 0, &data) == kOfxStatOK && data &&
+      gPropHost->propGetIntN(image, kOfxImagePropBounds, 4, bounds) == kOfxStatOK &&
+      gPropHost->propGetInt(image, kOfxImagePropRowBytes, 0, &stride) == kOfxStatOK &&
+      gPropHost->propGetDouble(image, kOfxImagePropPixelAspectRatio, 0, &par) == kOfxStatOK &&
+      bounds[0] == 0 && bounds[1] == 0 && bounds[2] > 0 && bounds[3] > 0;
+  if (valid) {
+    for (int y = bounds[1]; y < bounds[3]; ++y) {
+      auto* row = reinterpret_cast<OfxRGBAColourF*>(static_cast<char*>(data) + y * stride);
+      for (int x = bounds[0]; x < bounds[2]; ++x) {
+        row[x].r += static_cast<float>((x + 0.5) * par / 32.0);
+        row[x].g += static_cast<float>((y + 0.5) / 64.0);
+      }
+    }
+  }
+  return gEffectHost->clipReleaseImage(image) == kOfxStatOK && valid;
+}
+
 struct ActionState { bool changing = false; int changes = 0; int renders = 0; int scaleChanges = 0; };
 std::map<const void*, ActionState> actions;
 std::string mode() {
@@ -787,10 +884,110 @@ bool lifecycleOutput(const void* handle, OfxPropertySetHandle in) {
   return gEffectHost->clipReleaseImage(image) == kOfxStatOK && valid;
 }
 
+bool defineOutputAlpha(const void* handle) {
+  OfxParamSetHandle params = nullptr;
+  OfxPropertySetHandle props = nullptr, effect = nullptr;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+      gParamHost->paramDefine(params, kOfxParamTypeChoice, "alphaMode", &props) != kOfxStatOK ||
+      gEffectHost->getPropertySet((OfxImageEffectHandle)handle, &effect) != kOfxStatOK ||
+      gPropHost->propSetString(effect, kOfxImageEffectPropClipPreferencesSlaveParam, 0, "alphaMode") != kOfxStatOK ||
+      gPropHost->propSetString(props, kOfxPropLabel, 0, "Output alpha") != kOfxStatOK ||
+      gPropHost->propSetInt(props, kOfxParamPropAnimates, 0, 0) != kOfxStatOK ||
+      gPropHost->propSetInt(props, kOfxParamPropDefault, 0, 0) != kOfxStatOK) { return false; }
+  const char* captions[] = {"Straight", "Premultiplied", "Opaque", "Invalid metadata",
+      "Nonfinite", "Division overflow", "Signed alpha", "Alpha above one", "Zero-alpha emission"};
+  for (int index = 0; index < 9; ++index) {
+    if (gPropHost->propSetString(props, kOfxParamPropChoiceOption, index, captions[index]) != kOfxStatOK) { return false; }
+  }
+  return true;
+}
+
+int outputAlphaMode(const void* handle, OfxPropertySetHandle in) {
+  OfxParamSetHandle params = nullptr;
+  OfxParamHandle parameter = nullptr;
+  int value = -1;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+      gParamHost->paramGetHandle(params, "alphaMode", &parameter, nullptr) != kOfxStatOK) { return -1; }
+  if (in) {
+    double time = 0.0;
+    if (gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
+        gParamHost->paramGetValueAtTime(parameter, time, &value) != kOfxStatOK) { return -1; }
+  } else if (gParamHost->paramGetValue(parameter, &value) != kOfxStatOK) { return -1; }
+  return value;
+}
+
+const char* outputAlphaRepresentation(int choice) {
+  if (choice == 0) { return kOfxImageUnPreMultiplied; }
+  if (choice == 2) { return kOfxImageOpaque; }
+  if (choice == 3) { return "org.mondrian.test.InvalidAlpha"; }
+  return kOfxImagePreMultiplied;
+}
+
+bool negotiatedAlphaOutput(const void* handle, OfxPropertySetHandle in, bool write) {
+  const int choice = outputAlphaMode(handle, in);
+  if (choice < 0 || choice > 8) { return false; }
+  // An invalid preference must be rejected before any Render action.
+  if (choice == 3) { std::abort(); }
+  double time = 0.0;
+  if (gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK) { return false; }
+  for (const char* name : {"Source", "Output"}) {
+    OfxImageClipHandle clip = nullptr;
+    OfxPropertySetHandle clipProps = nullptr, image = nullptr;
+    char* clipAlpha = nullptr;
+    char* imageAlpha = nullptr;
+    if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, name, &clip, &clipProps) != kOfxStatOK ||
+        gPropHost->propGetString(clipProps, kOfxImageEffectPropPreMultiplication, 0, &clipAlpha) != kOfxStatOK ||
+        gEffectHost->clipGetImage(clip, time, nullptr, &image) != kOfxStatOK) { return false; }
+    const char* expected = std::string(name) == "Source" ? kOfxImageUnPreMultiplied : outputAlphaRepresentation(choice);
+    bool valid = clipAlpha && std::string(clipAlpha) == expected &&
+        gPropHost->propGetString(image, kOfxImageEffectPropPreMultiplication, 0, &imageAlpha) == kOfxStatOK &&
+        imageAlpha && std::string(imageAlpha) == expected;
+    if (valid && write && std::string(name) == "Output") {
+      void* data = nullptr;
+      int bounds[4]{}, stride = 0;
+      valid = gPropHost->propGetPointer(image, kOfxImagePropData, 0, &data) == kOfxStatOK && data &&
+          gPropHost->propGetIntN(image, kOfxImagePropBounds, 4, bounds) == kOfxStatOK &&
+          gPropHost->propGetInt(image, kOfxImagePropRowBytes, 0, &stride) == kOfxStatOK;
+      if (valid) {
+        for (int y = bounds[1]; y < bounds[3]; ++y) {
+          auto* row = reinterpret_cast<OfxRGBAColourF*>(static_cast<char*>(data) + (y - bounds[1]) * stride);
+          for (int x = 0; x < bounds[2] - bounds[0]; ++x) {
+            auto& pixel = row[x];
+            if (choice == 2) { pixel.a = 123.0f; }
+            else if (choice != 0) {
+              pixel.r *= pixel.a; pixel.g *= pixel.a; pixel.b *= pixel.a;
+              if (choice == 8 && pixel.a == 0.0f) { pixel.r = 7.0f; pixel.g = -3.0f; pixel.b = 11.0f; }
+            }
+          }
+        }
+        auto& first = *static_cast<OfxRGBAColourF*>(data);
+        if (choice == 4) { first.r = std::numeric_limits<float>::quiet_NaN(); }
+        if (choice == 5) { first.r = std::numeric_limits<float>::max(); first.a = std::numeric_limits<float>::min(); }
+        if (choice == 6) { first.a = -0.5f; }
+        if (choice == 7) { first.a = 1.5f; }
+      }
+    }
+    if (gEffectHost->clipReleaseImage(image) != kOfxStatOK || !valid) { return false; }
+  }
+  return true;
+}
+
 OfxStatus probe(const char* action, const void* handle,
                 OfxPropertySetHandle in, OfxPropertySetHandle out) {
   const std::string operation(action);
   const std::string selected = mode();
+  if (selected == "output_alpha" && operation == kOfxImageEffectActionRender &&
+      !negotiatedAlphaOutput(handle, in, false)) { return kOfxStatFailed; }
+  if (selected == "bootstrap_skip") { std::abort(); }
+  if ((selected == "bootstrap_required" || selected == "host_capabilities") &&
+      operation == kOfxActionDescribe && !honestHostCapabilities(gHost)) { return kOfxStatFailed; }
+  if (selected == "canonical_progressive" &&
+      (operation == kOfxActionCreateInstance || operation == kOfxImageEffectActionRender) &&
+      !canonicalProgressiveContract(handle, in)) { return kOfxStatFailed; }
+  if (selected.find("cpu_unsupported_") == 0 && operation == kOfxImageEffectActionRender &&
+      selected != "cpu_unsupported_change") { std::abort(); }
+  if (selected == "cpu_unsupported_change" && operation == kOfxImageEffectActionRender &&
+      cpuDisabled) { std::abort(); }
   if (selected == "curve_authoring" &&
       (operation == kOfxActionCreateInstance || operation == kOfxActionBeginInstanceChanged ||
        operation == kOfxActionInstanceChanged || operation == kOfxActionEndInstanceChanged ||
@@ -944,6 +1141,33 @@ OfxStatus probe(const char* action, const void* handle,
        operation == kOfxActionInstanceChanged || operation == kOfxImageEffectActionRender ||
        operation == kOfxActionDestroyInstance) && !canonicalCurves(handle)) { return kOfxStatFailed; }
   const OfxStatus result = pluginMain(action, handle, in, out);
+  if (selected == "output_alpha") {
+    if (operation == kOfxImageEffectActionDescribeInContext && result == kOfxStatOK &&
+        !defineOutputAlpha(handle)) { return kOfxStatFailed; }
+    if (operation == kOfxImageEffectActionGetClipPreferences &&
+        (result == kOfxStatOK || result == kOfxStatReplyDefault)) {
+      const int choice = outputAlphaMode(handle, nullptr);
+      if (choice < 0 || choice > 8 || gPropHost->propSetString(out,
+          kOfxImageEffectPropPreMultiplication, 0, outputAlphaRepresentation(choice)) != kOfxStatOK) {
+        return kOfxStatFailed;
+      }
+      return kOfxStatOK;
+    }
+    if (operation == kOfxImageEffectActionRender && result == kOfxStatOK &&
+        !negotiatedAlphaOutput(handle, in, true)) { return kOfxStatFailed; }
+  }
+  if ((selected == "cpu_unsupported_descriptor" && operation == kOfxActionDescribe) ||
+      (selected == "cpu_unsupported_create" && operation == kOfxActionCreateInstance) ||
+      (selected == "cpu_unsupported_change" && operation == kOfxActionInstanceChanged)) {
+    OfxPropertySetHandle props = nullptr;
+    if (gEffectHost->getPropertySet((OfxImageEffectHandle)handle, &props) != kOfxStatOK ||
+        gPropHost->propSetString(props, kOfxImageEffectPropCPURenderSupported, 0, "false") != kOfxStatOK) {
+      return kOfxStatFailed;
+    }
+    cpuDisabled = true;
+  }
+  if (selected == "canonical_progressive" && operation == kOfxImageEffectActionRender &&
+      result == kOfxStatOK && !canonicalCoordinateOutput(handle, in)) { return kOfxStatFailed; }
   if ((selected == "curve_lifecycle" || selected == "curve_authoring" || isAuthorHistoryMode(selected)) && result == kOfxStatOK &&
       operation == kOfxImageEffectActionRender && !lifecycleOutput(handle, in)) { return kOfxStatFailed; }
   if ((selected == "compound" || selected == "compound_author" || selected == "compound_constant_animatable" || selected == "compound_frame_sample" || selected == "canonical_curves") && result == kOfxStatOK &&
@@ -1104,13 +1328,78 @@ OfxStatus probe(const char* action, const void* handle,
   }
   return result;
 }
+bool bootstrapImageMemory(const OfxHost* host) {
+  if (!host || !host->host || !host->fetchSuite) { return false; }
+  const auto* images = static_cast<const OfxImageEffectSuiteV1*>(
+      host->fetchSuite(host->host, kOfxImageEffectSuite, 1));
+  if (!images) { return false; }
+  OfxImageMemoryHandle memory = nullptr;
+  if (images->imageMemoryAlloc(nullptr, 256, &memory) != kOfxStatOK || !memory) { return false; }
+  void* storage = nullptr;
+  bool valid = images->imageMemoryLock(memory, &storage) == kOfxStatOK && storage;
+  if (valid) {
+    auto* bytes = static_cast<unsigned char*>(storage);
+    for (int index = 0; index < 256; ++index) { bytes[index] = static_cast<unsigned char>(index); }
+    for (int index = 0; index < 256; ++index) {
+      valid = valid && bytes[index] == static_cast<unsigned char>(index);
+    }
+    valid = images->imageMemoryUnlock(memory) == kOfxStatOK && valid;
+  }
+  return images->imageMemoryFree(memory) == kOfxStatOK && valid;
+}
+
+bool mixedApiMode() { return mode() == "mixed_api" || mode() == "mixed_api_long"; }
+
 OfxPlugin probePlugin = basicPlugin;
+void ignoredApiSetHost(OfxHost*) { std::abort(); }
+OfxStatus ignoredApiAction(const char*, const void*, OfxPropertySetHandle,
+                          OfxPropertySetHandle) { std::abort(); }
+OfxPlugin ignoredApiPlugin = {"org.mondrian.test.UnsupportedAPI", 1,
+    "org.mondrian.test.UnsupportedAPI.plugin", 1, 0, ignoredApiSetHost, ignoredApiAction};
+OfxPlugin longApiPlugin = {
+    "org.mondrian.test.UnsupportedAPI.mixedBundleCapability.withExtendedVendorVersionNamespace",
+    1, "org.mondrian.test.UnsupportedAPI.longPlugin", 1, 0, ignoredApiSetHost, ignoredApiAction};
+OfxPlugin otherApiPlugin = {"org.mondrian.test.UnsupportedAPI", 1,
+    "org.mondrian.test.UnsupportedAPI.otherPlugin", 1, 0, ignoredApiSetHost, ignoredApiAction};
+OfxPlugin newerImageApiPlugin = {kOfxImageEffectPluginApi, 2,
+    "org.mondrian.test.UnsupportedImageVersion", 1, 0, ignoredApiSetHost, ignoredApiAction};
 }
 extern "C" {
+OfxExport OfxStatus OfxSetHost(const OfxHost* host) {
+  if (mode() == "bootstrap_skip") { return kOfxStatFailed; }
+  if (mode() == "bootstrap_error") { return kOfxStatErrMissingHostFeature; }
+  if (mode() == "bootstrap_memory" && !bootstrapImageMemory(host)) { return kOfxStatErrMissingHostFeature; }
+  if (mode() != "bootstrap_required" && mode() != "bootstrap_memory" && !mixedApiMode() &&
+      mode() != "unsupported_api") { return kOfxStatOK; }
+  if (bootstrapPhase != 0 || !honestHostCapabilities(host)) { return kOfxStatErrUnknown; }
+  bootstrapPhase = 1;
+  return kOfxStatOK;
+}
 OfxExport OfxPlugin* OfxGetPlugin(int index) {
-  if (index != 0) { return nullptr; }
+  if (mode() == "bootstrap_skip") { std::abort(); }
+  if (mode() == "bootstrap_required" || mode() == "bootstrap_memory" || mixedApiMode() ||
+      mode() == "unsupported_api") {
+    if (bootstrapPhase < 2) { return nullptr; }
+    bootstrapPhase = 3;
+  }
+  if (mixedApiMode() || mode() == "unsupported_api") {
+    if (index == 0) { return mode() == "mixed_api_long" ? &longApiPlugin : &ignoredApiPlugin; }
+    if (index == 1) { return &newerImageApiPlugin; }
+    if (mixedApiMode() && index == 3) { return &otherApiPlugin; }
+    if (!mixedApiMode() || index != 2) { return nullptr; }
+  } else if (index != 0) { return nullptr; }
   probePlugin.mainEntry = probe;
   return &probePlugin;
 }
-OfxExport int OfxGetNumberOfPlugins() { return 1; }
+OfxExport int OfxGetNumberOfPlugins() {
+  if (mode() == "bootstrap_skip") { std::abort(); }
+  if (mode() == "bootstrap_required" || mode() == "bootstrap_memory" || mixedApiMode() ||
+      mode() == "unsupported_api") {
+    if (bootstrapPhase != 1) { return 0; }
+    bootstrapPhase = 2;
+  }
+  if (mixedApiMode()) { return 4; }
+  if (mode() == "unsupported_api") { return 2; }
+  return 1;
+}
 }

@@ -12,6 +12,8 @@ mod sealed {
 /// Integers retain i64 storage throughout editing; floating values retain their
 /// declared precision. Slider coordinates are presentation values only.
 pub trait NumberInputValue: sealed::Sealed + Copy + PartialEq + PartialOrd + 'static {
+    /// Exact typed representation used to admit local draft inspection.
+    fn inspection_value(self) -> mondrian_ui_core::NumericInputInspectionValue;
     /// Default valid bounds used if supplied floating bounds are non-finite.
     fn fallback_range() -> (Self, Self);
     /// Whether this value can be displayed and edited.
@@ -35,8 +37,11 @@ pub trait NumberInputValue: sealed::Sealed + Copy + PartialEq + PartialOrd + 'st
 }
 
 macro_rules! floating_input_value {
-    ($ty:ty) => {
+    ($ty:ty, $inspection_variant:ident) => {
         impl NumberInputValue for $ty {
+            fn inspection_value(self) -> mondrian_ui_core::NumericInputInspectionValue {
+                mondrian_ui_core::NumericInputInspectionValue::$inspection_variant(self.to_bits())
+            }
             fn fallback_range() -> (Self, Self) {
                 (0.0, 1.0)
             }
@@ -100,10 +105,13 @@ macro_rules! floating_input_value {
         }
     };
 }
-floating_input_value!(f32);
-floating_input_value!(f64);
+floating_input_value!(f32, Float32);
+floating_input_value!(f64, Float64);
 
 impl NumberInputValue for i64 {
+    fn inspection_value(self) -> mondrian_ui_core::NumericInputInspectionValue {
+        mondrian_ui_core::NumericInputInspectionValue::Integer(self)
+    }
     fn fallback_range() -> (Self, Self) {
         (Self::MIN, Self::MAX)
     }
@@ -205,6 +213,15 @@ impl<T: NumberInputValue> NumberInputModel<T> {
     }
     pub(super) fn set_step(&mut self, step: T) {
         self.step = step.is_positive().then_some(step);
+    }
+    pub(super) fn inspection_contract(&self) -> mondrian_ui_core::NumericInputInspectionContract {
+        mondrian_ui_core::NumericInputInspectionContract {
+            baseline: self.committed_value.inspection_value(),
+            min: self.min.inspection_value(),
+            max: self.max.inspection_value(),
+            step: self.step.map(NumberInputValue::inspection_value),
+            minimum_decimals: self.decimals,
+        }
     }
     pub(super) fn display_text(&self) -> String {
         self.committed_value.format(self.decimals)

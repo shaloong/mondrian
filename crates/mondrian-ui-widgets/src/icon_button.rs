@@ -16,6 +16,8 @@ use crate::vector_icon::VectorIcon;
 /// A compact button that paints vector icon geometry instead of text.
 pub struct IconButton {
     id: WidgetId,
+    inspection_identity: crate::control_inspection::ControlInspectionIdentity,
+    keyboard_activation: crate::control_inspection::KeyboardActivationState,
     icon: VectorIcon,
     tooltip: Option<String>,
     bounds: Rect,
@@ -58,6 +60,8 @@ impl IconButton {
     pub fn new(icon: VectorIcon) -> Self {
         Self {
             id: WidgetId::new(),
+            inspection_identity: crate::control_inspection::ControlInspectionIdentity::default(),
+            keyboard_activation: crate::control_inspection::KeyboardActivationState::default(),
             icon,
             tooltip: None,
             bounds: Rect::ZERO,
@@ -91,6 +95,7 @@ impl IconButton {
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         if !enabled {
+            self.keyboard_activation.cancel();
             self.state = ButtonState::Normal;
             self.focused = false;
             self.focus_visible = false;
@@ -120,7 +125,11 @@ impl IconButton {
     }
 
     fn clear_visual_state(&mut self) -> bool {
-        let changed = self.state != ButtonState::Normal || self.focused || self.focus_visible;
+        let keyboard_canceled = self.keyboard_activation.cancel();
+        let changed = self.state != ButtonState::Normal
+            || self.focused
+            || self.focus_visible
+            || keyboard_canceled;
         self.state = ButtonState::Normal;
         self.focused = false;
         self.focus_visible = false;
@@ -154,13 +163,14 @@ impl Widget for IconButton {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. }
                 if self.bounds.contains(*position) =>
             {
+                self.keyboard_activation.cancel();
                 self.state = ButtonState::Pressed;
                 self.focus_visible = false;
                 ctx.request_repaint();
                 EventResult::Handled
             }
             UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
-                if self.state == ButtonState::Pressed {
+                if self.state == ButtonState::Pressed && !self.keyboard_activation.is_armed() {
                     if self.bounds.contains(*position) {
                         self.activate(ctx);
                     }
@@ -218,15 +228,17 @@ impl Widget for IconButton {
                 }
                 EventResult::Handled
             }
-            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, modifiers }
-                if *modifiers == Modifiers::none() =>
-            {
+            UiEvent::KeyDown {
+                key: key @ (KeyCode::Enter | KeyCode::Space),
+                modifiers,
+            } if *modifiers == Modifiers::none() => {
+                self.keyboard_activation.arm(*key);
                 self.state = ButtonState::Pressed;
                 ctx.request_repaint();
                 EventResult::Handled
             }
-            UiEvent::KeyUp { key: KeyCode::Enter | KeyCode::Space, .. } => {
-                if self.state == ButtonState::Pressed {
+            UiEvent::KeyUp { key: key @ (KeyCode::Enter | KeyCode::Space), .. } => {
+                if self.keyboard_activation.release(*key) {
                     self.activate(ctx);
                     self.state = ButtonState::Hovered;
                     ctx.request_repaint();
@@ -275,6 +287,52 @@ impl Widget for IconButton {
 
     fn can_focus(&self) -> bool {
         self.enabled
+    }
+
+    fn set_control_inspection_key(&mut self, key: Option<String>) -> bool {
+        self.inspection_identity.set_key(key);
+        true
+    }
+
+    fn control_inspection_state(&self) -> Option<mondrian_ui_core::ControlInspectionState> {
+        let mut state = self.inspection_identity.inspect(
+            self.id,
+            AccessibilityRole::Button,
+            self.focused,
+            self.focus_visible,
+            self.enabled
+                && (self.state != ButtonState::Pressed || self.keyboard_activation.is_armed()),
+        )?;
+        state.keyboard_activation = self.keyboard_activation.inspection_lease(self.focused);
+        Some(state)
+    }
+
+    fn restore_control_inspection_state(
+        &mut self,
+        state: &mondrian_ui_core::ControlInspectionState,
+    ) -> bool {
+        let Some((id, focused, focus_visible)) = self
+            .inspection_identity
+            .restore_with_keyboard_activation(state, AccessibilityRole::Button, self.enabled, true)
+        else {
+            return false;
+        };
+        self.id = id;
+        self.focused = focused;
+        self.focus_visible = focus_visible;
+        self.keyboard_activation.restore(state.keyboard_activation);
+        if self.keyboard_activation.is_armed() {
+            self.state = ButtonState::Pressed;
+        }
+        true
+    }
+
+    fn cancel_keyboard_activation(&mut self) -> bool {
+        if !self.keyboard_activation.cancel() {
+            return false;
+        }
+        self.state = ButtonState::Normal;
+        true
     }
 
     fn accessibility(&self) -> Option<AccessibilityNode> {
@@ -756,5 +814,178 @@ mod tests {
         );
 
         assert!(ctx.tooltip.current().is_none());
+    }
+
+    #[test]
+    fn icon_button_release_intent_survives_fresh_callback_and_requires_matching_key() {
+        let mut original = IconButton::new(test_icon()).on_click(Action::Play);
+        original.set_control_inspection_key(Some("exact-author-button".to_owned()));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        original.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        original.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(
+            original.event(
+                &UiEvent::KeyUp { key: KeyCode::Space, modifiers: Modifiers::none() },
+                &mut ctx
+            ),
+            EventResult::Ignored,
+            "another activation key must neither run nor consume the armed Enter intent"
+        );
+        assert!(actions.borrow().is_empty());
+        let inspected = original.control_inspection_state().expect("focused exact owner");
+        let mut replacement = IconButton::new(test_icon()).on_click(Action::Copy);
+        replacement.set_control_inspection_key(Some("exact-author-button".to_owned()));
+        assert!(replacement.restore_control_inspection_state(&inspected));
+        assert_eq!(
+            replacement.event(
+                &UiEvent::KeyUp { key: KeyCode::Space, modifiers: Modifiers::none() },
+                &mut ctx
+            ),
+            EventResult::Ignored
+        );
+        assert!(actions.borrow().is_empty());
+        assert_eq!(
+            replacement.event(
+                &UiEvent::KeyUp { key: KeyCode::Enter, modifiers: Modifiers::shift() },
+                &mut ctx
+            ),
+            EventResult::Handled,
+            "matching release completes even when modifiers changed after press"
+        );
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::Copy],
+            "only the replacement's current callback executes"
+        );
+        assert_eq!(
+            replacement.event(
+                &UiEvent::KeyUp { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx
+            ),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::Copy],
+            "release consumes the intent once"
+        );
+    }
+
+    #[test]
+    fn icon_button_pointer_release_cannot_consume_keyboard_intent_and_pointer_press_cancels_it() {
+        let mut button = IconButton::new(test_icon()).on_click(Action::Play);
+        button.layout(Rect::new(0.0, 0.0, 28.0, 28.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        button.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        button.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        let up = UiEvent::MouseUp {
+            position: Point::new(12.0, 12.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        };
+        assert_eq!(
+            button.event(&up, &mut ctx),
+            EventResult::Ignored,
+            "an unrelated pointer release is not the keyboard's owned release"
+        );
+        assert!(actions.borrow().is_empty());
+        button.event(
+            &UiEvent::KeyUp { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(actions.borrow().as_slice(), &[Action::Play]);
+        actions.borrow_mut().clear();
+        button.event(
+            &UiEvent::KeyDown { key: KeyCode::Space, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        button.event(
+            &UiEvent::MouseDown {
+                position: Point::new(12.0, 12.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(
+            button.event(
+                &UiEvent::KeyUp { key: KeyCode::Space, modifiers: Modifiers::none() },
+                &mut ctx
+            ),
+            EventResult::Ignored,
+            "new pointer press cancels previous keyboard intent"
+        );
+        assert!(actions.borrow().is_empty());
+        assert_eq!(button.event(&up, &mut ctx), EventResult::Handled);
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::Play],
+            "ordinary pointer click remains one independent activation"
+        );
+    }
+
+    #[test]
+    fn icon_button_focus_loss_cancels_release_intent_before_same_owner_replacement() {
+        let mut original = IconButton::new(test_icon()).on_click(Action::Play);
+        original.set_control_inspection_key(Some("exact-author-button".to_owned()));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        original.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        original.event(
+            &UiEvent::KeyDown { key: KeyCode::Space, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        original.event(&UiEvent::FocusLost, &mut ctx);
+        let inspected = original
+            .control_inspection_state()
+            .expect("same inactive owner remains addressable");
+        let mut replacement = IconButton::new(test_icon()).on_click(Action::Copy);
+        replacement.set_control_inspection_key(Some("exact-author-button".to_owned()));
+        assert!(replacement.restore_control_inspection_state(&inspected));
+        replacement.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        assert_eq!(
+            replacement.event(
+                &UiEvent::KeyUp { key: KeyCode::Space, modifiers: Modifiers::none() },
+                &mut ctx
+            ),
+            EventResult::Ignored
+        );
+        assert!(
+            actions.borrow().is_empty(),
+            "later focus restoration cannot reanimate a canceled command"
+        );
+        replacement.event(
+            &UiEvent::KeyDown { key: KeyCode::Space, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        replacement.event(
+            &UiEvent::KeyUp { key: KeyCode::Space, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::Copy],
+            "a fresh complete activation is still admitted"
+        );
     }
 }

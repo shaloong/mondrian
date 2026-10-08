@@ -2543,7 +2543,7 @@ fn mode_for_app_state(state: &AppState) -> AppUiMode {
 }
 
 fn widget_tree_has_transient_interaction(widget: &dyn Widget) -> bool {
-    widget.accepts_text_input()
+    (widget.accepts_text_input() && !widget.can_inspect_text_draft())
         || widget.has_active_pointer_interaction()
         || widget.overlay_hit_test(Point::new(-1_000_000.0, -1_000_000.0))
         || (0..widget.child_count())
@@ -6234,7 +6234,10 @@ mod tests {
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
-            UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+            },
             UiEvent::MouseDown {
                 position: Point::new(230.0, 12.0),
                 button: MouseButton::Left,
@@ -6260,7 +6263,10 @@ mod tests {
                 "disabled Cut cannot activate"
             );
             router.route(
-                UiEvent::KeyDown { key: KeyCode::X, modifiers: Modifiers::ctrl() },
+                UiEvent::KeyDown {
+                    key: KeyCode::X,
+                    modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+                },
                 &mut WidgetTreeView::new(&mut root),
                 &dispatch,
             );
@@ -6337,7 +6343,10 @@ mod tests {
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
-            UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+            },
             UiEvent::TextInput("after🙂".into()),
             UiEvent::MouseDown {
                 position: Point::new(230.0, 12.0),
@@ -9957,6 +9966,3648 @@ mod tests {
         assert!(
             !host.ui_dirty.get(),
             "failed editor actions should refresh the root immediately"
+        );
+    }
+
+    fn inspection_host_fixture(
+        name: &str,
+    ) -> (
+        AppUiHost,
+        mondrian_core::AudioProcessingScopeId,
+        mondrian_core::AudioProcessorInstanceId,
+    ) {
+        use mondrian_timeline::audio::{AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID};
+        let mut state = workspace_app_state();
+        let sequence = state.active_sequence_mut_uncommitted().expect("Sequence");
+        let track_id = sequence.audio_tracks[0].id;
+        sequence
+            .add_media_audio_clip(
+                track_id,
+                Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("Clip"),
+                mondrian_core::AudioSourceComponentId::primary(),
+            )
+            .expect("Scope occurrence");
+        let clip = &mut sequence.audio_tracks[0].clips[0];
+        let clip_id = clip.id;
+        let edit = &mut clip.audio_components[0];
+        edit.processing.scope_in = TimelineTime::new(5, 1).expect("Scope offset");
+        let scope_id = edit.processing.scope_id;
+        let mut processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        processor
+            .parameters
+            .get_mut(&mondrian_core::ParameterId::new_static(
+                mondrian_timeline::audio::GAIN_DB_PARAMETER_ID,
+            ))
+            .expect("Gain parameter")
+            .automation
+            .default_value = -18.4;
+        let processor_id = processor.id;
+        sequence
+            .audio_program
+            .processing_scopes
+            .iter_mut()
+            .find(|scope| scope.id == scope_id)
+            .expect("Scope")
+            .processors
+            .processors
+            .push(processor);
+        state.selection.selected_clips =
+            vec![crate::app::SelectedClipRef { track_id, clip_id, is_video_track: false }];
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences {
+                locale_preference: crate::app_ui::localization::AppUiLocalePreference::ZhCn,
+                ..AppUiPreferences::default()
+            },
+            temp_preferences_path(name),
+        );
+        host.preview_service.shutdown();
+        host.preview_service = WindowPreviewAdapter::new_without_workers_for_test();
+        (host, scope_id, processor_id)
+    }
+
+    fn inspection_control(
+        widget: &dyn Widget,
+        in_inspector: bool,
+        role: mondrian_ui_core::AccessibilityRole,
+        name: Option<&str>,
+    ) -> Option<mondrian_ui_core::WidgetId> {
+        let in_inspector = in_inspector || widget.panel_kind() == Some(PanelKind::Inspector);
+        if in_inspector && widget.can_focus() && widget.accessibility().is_some_and(|node| {
+            node.role == role && match name {
+                Some(name) => node.name.as_deref() == Some(name),
+                None => matches!(node.value, Some(mondrian_ui_core::AccessibilityValue::Number { value, .. }) if (value - (-18.4_f32 + 60.0) / 72.0).abs() < 0.00001),
+            }
+        }) { return Some(widget.id()); }
+        (0..widget.child_count()).find_map(|index| {
+            widget
+                .child(index)
+                .and_then(|child| inspection_control(child, in_inspector, role, name))
+        })
+    }
+
+    fn inspection_focus_by_tab(
+        host: &mut AppUiHost,
+        router: &mut mondrian_ui_events::EventRouter,
+        target: mondrian_ui_core::WidgetId,
+        pending: &PendingUiActions,
+    ) {
+        use mondrian_ui_core::tree::WidgetTreeView;
+        for _ in 0..256 {
+            if router.focused() == Some(target) {
+                return;
+            }
+            router.route(
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Tab,
+                    modifiers: Modifiers::none(),
+                },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &|action| pending.push(action),
+            );
+        }
+        panic!("actual dock Tab traversal did not reach the fixture control");
+    }
+
+    fn inspection_scope_gain(
+        state: &AppState,
+        scope_id: mondrian_core::AudioProcessingScopeId,
+        processor_id: mondrian_core::AudioProcessorInstanceId,
+    ) -> f64 {
+        state
+            .active_sequence()
+            .expect("Sequence")
+            .audio_program
+            .processing_scopes
+            .iter()
+            .find(|scope| scope.id == scope_id)
+            .expect("Scope")
+            .processors
+            .processors
+            .iter()
+            .find(|processor| processor.id == processor_id)
+            .expect("Gain processor")
+            .parameters[&mondrian_core::ParameterId::new_static(
+            mondrian_timeline::audio::GAIN_DB_PARAMETER_ID,
+        )]
+            .automation
+            .default_value
+    }
+
+    #[test]
+    fn scope_rack_slider_continuous_keyboard_nudges_survive_real_host_refresh_and_undo() {
+        use mondrian_ui_core::tree::WidgetTreeView;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1600.0);
+        let (mut host, scope_id, processor_id) = inspection_host_fixture("scope-keyboard-slider");
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let slider_id = inspection_control(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Slider,
+            None,
+        )
+        .expect("actual Scope Gain slider");
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, slider_id, &pending);
+        let original = host.app_state().active_sequence().expect("original").clone();
+        let original_gain = inspection_scope_gain(&host.app_state(), scope_id, processor_id);
+        let mut snapshots = Vec::new();
+        let mut last_gain = original_gain;
+        for nudge in 0..2 {
+            router.route(
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &|action| pending.push(action),
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            let gain = inspection_scope_gain(&host.app_state(), scope_id, processor_id);
+            assert!(gain < last_gain, "nudge {nudge}: each consecutive keyboard nudge must reach the same canonical Scope parameter after actual Host refresh; before={last_gain}, after={gain}, router_focus={:?}", router.focused());
+            last_gain = gain;
+            snapshots.push(host.app_state().active_sequence().expect("nudge").clone());
+        }
+        assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo second nudge"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("Undo second")
+            .author_state_eq_ignoring_revision(&snapshots[0]));
+        assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo first nudge"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("Undo first")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(host.app_state.borrow_mut().redo_timeline().expect("Redo first"));
+        assert!(host.app_state.borrow_mut().redo_timeline().expect("Redo second"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("Redo both")
+            .author_state_eq_ignoring_revision(&snapshots[1]));
+    }
+
+    #[test]
+    fn scope_rack_bypass_continuous_keyboard_toggles_survive_real_host_refresh() {
+        use mondrian_ui_core::tree::WidgetTreeView;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1600.0);
+        let (mut host, scope_id, processor_id) = inspection_host_fixture("scope-keyboard-bypass");
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let localizer =
+            Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn).expect("catalog");
+        let checkbox_id = inspection_control(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Checkbox,
+            Some(&localizer.text("audio-rack-bypass")),
+        )
+        .expect("actual bypass checkbox");
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, checkbox_id, &pending);
+        let original = host.app_state().active_sequence().expect("original").clone();
+        for expected in [true, false] {
+            router.route(
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Space,
+                    modifiers: Modifiers::none(),
+                },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &|action| pending.push(action),
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            let state = host.app_state();
+            let processor = state
+                .active_sequence()
+                .expect("Sequence")
+                .audio_program
+                .processing_scopes
+                .iter()
+                .find(|scope| scope.id == scope_id)
+                .expect("Scope")
+                .processors
+                .processors
+                .iter()
+                .find(|processor| processor.id == processor_id)
+                .expect("processor");
+            assert_eq!(
+                processor.bypassed, expected,
+                "each keyboard activation must reach the same actual bypass control after refresh"
+            );
+            drop(state);
+            router.route(
+                UiEvent::KeyUp {
+                    key: mondrian_ui_core::KeyCode::Space,
+                    modifiers: Modifiers::none(),
+                },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &|action| pending.push(action),
+            );
+        }
+        assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo second bypass"));
+        assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo first bypass"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("Undo bypass")
+            .author_state_eq_ignoring_revision(&original));
+    }
+
+    #[test]
+    fn scope_rack_add_dropdown_keyboard_reopens_after_real_author_commit() {
+        use mondrian_ui_core::tree::WidgetTreeView;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1600.0);
+        let (mut host, scope_id, _) = inspection_host_fixture("scope-keyboard-dropdown");
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let localizer =
+            Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn).expect("catalog");
+        let dropdown_id = inspection_control(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Menu,
+            Some(&localizer.text("audio-rack-add-processor")),
+        )
+        .expect("actual Scope add Dropdown");
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, dropdown_id, &pending);
+        let original = host.app_state().active_sequence().expect("original").clone();
+        for key in [
+            mondrian_ui_core::KeyCode::Enter,
+            mondrian_ui_core::KeyCode::Home,
+            mondrian_ui_core::KeyCode::Enter,
+        ] {
+            router.route(
+                UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &|action| pending.push(action),
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        }
+        assert_eq!(
+            host.app_state()
+                .active_sequence()
+                .expect("Sequence")
+                .audio_program
+                .processing_scopes
+                .iter()
+                .find(|scope| scope.id == scope_id)
+                .expect("Scope")
+                .processors
+                .processors
+                .len(),
+            2,
+            "actual dropdown command inserts exactly one processor"
+        );
+        router.route(
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::Enter,
+                modifiers: Modifiers::none(),
+            },
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &|action| pending.push(action),
+        );
+        assert!(widget_tree_has_transient_interaction(host.active_root()), "Enter reopens the same semantic add control after the author commit rebuilt actual dock contents");
+        router.route(
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::Escape,
+                modifiers: Modifiers::none(),
+            },
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &|action| pending.push(action),
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo single insertion"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("Undo insertion")
+            .author_state_eq_ignoring_revision(&original));
+    }
+
+    fn inspection_native_host_fixture(
+        name: &str,
+    ) -> (
+        AppUiHost,
+        crate::app::product_action::AudioProcessorInputQueryPayload,
+        Arc<AtomicUsize>,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::SyncSender<()>,
+    ) {
+        let (mut state, queries, calls, started, release) =
+            crate::app::audio_input_observation::tests::observed_native_scope_fixture();
+        let query = queries[0];
+        // The shared fixture has already inspected one native metadata snapshot.
+        // Cancel its transient cache through the product action before testing a fresh query.
+        let mut cancel = query;
+        cancel.operation = crate::app::product_action::AudioProcessorInputQueryOperation::Cancel;
+        state
+            .dispatch_action(
+                ProductAction::Audio(AudioProductAction::QueryProcessorInputs(cancel))
+                    .into_external_action(),
+            )
+            .expect("clear setup observation");
+        let mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+            scope_id,
+            occurrence,
+        } = query.target
+        else {
+            panic!("native Scope fixture");
+        };
+        state
+            .active_sequence_mut_uncommitted()
+            .expect("Sequence")
+            .audio_program
+            .processing_scopes
+            .iter_mut()
+            .find(|scope| scope.id == scope_id)
+            .expect("Scope")
+            .processors
+            .processors
+            .iter_mut()
+            .find(|processor| processor.id == query.processor_id)
+            .expect("processor")
+            .parameters
+            .get_mut(&mondrian_core::ParameterId::new_static(
+                mondrian_timeline::audio::GAIN_DB_PARAMETER_ID,
+            ))
+            .expect("Gain parameter")
+            .automation
+            .default_value = -18.4;
+        state.selection.selected_clips = vec![crate::app::SelectedClipRef {
+            track_id: occurrence.track_id,
+            clip_id: occurrence.clip_id,
+            is_video_track: false,
+        }];
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences {
+                locale_preference: crate::app_ui::localization::AppUiLocalePreference::ZhCn,
+                ..AppUiPreferences::default()
+            },
+            temp_preferences_path(name),
+        );
+        host.preview_service.shutdown();
+        host.preview_service = WindowPreviewAdapter::new_without_workers_for_test();
+        (host, query, calls, started, release)
+    }
+
+    #[test]
+    fn scope_rack_keyboard_focus_cannot_outlive_deleted_locked_rebound_occurrence_or_session_owner()
+    {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1600.0);
+        for boundary in 0..5 {
+            let (mut host, query, _, _, _) =
+                inspection_native_host_fixture("scope-focus-owner-refusal");
+            let mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+                scope_id,
+                occurrence,
+            } = query.target
+            else {
+                panic!("Scope");
+            };
+            TreeWalker::layout(host.active_root_mut(), bounds);
+            let slider_id = inspection_control(
+                host.active_root(),
+                false,
+                mondrian_ui_core::AccessibilityRole::Slider,
+                None,
+            )
+            .expect("Scope Gain Slider");
+            let pending = PendingUiActions::default();
+            let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+            inspection_focus_by_tab(&mut host, &mut router, slider_id, &pending);
+            router.route(
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &|action| pending.push(action),
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            match boundary {
+                0 => host
+                    .app_state
+                    .borrow_mut()
+                    .dispatch_action(crate::app::ui_actions::audio_processor_rack_edit_action(
+                        mondrian_timeline::AudioProcessorRackEditRequest {
+                            address:
+                                mondrian_timeline::AudioProcessorRackAddress::ProcessingScope {
+                                    scope_id,
+                                },
+                            edit: mondrian_timeline::AudioProcessorRackEdit::Remove {
+                                processor_id: query.processor_id,
+                            },
+                        },
+                    ))
+                    .expect("Delete exact processor"),
+                1 => host
+                    .app_state
+                    .borrow_mut()
+                    .dispatch_action(crate::app::ui_actions::track_set_author_control_action(
+                        crate::app::product_action::TrackSetAuthorControlPayload {
+                            track_id: occurrence.track_id,
+                            control: crate::app::product_action::TrackAuthorControl::Lock,
+                            enabled: true,
+                        },
+                    ))
+                    .expect("Lock owning track"),
+                2 => {
+                    // Changed-binding ownership fixture; product Rebind still requires its native probe.
+                    let mut state = host.app_state.borrow_mut();
+                    let processor = state
+                        .active_sequence_mut_uncommitted()
+                        .expect("Sequence")
+                        .audio_program
+                        .processing_scopes
+                        .iter_mut()
+                        .find(|scope| scope.id == scope_id)
+                        .expect("Scope")
+                        .processors
+                        .processors
+                        .iter_mut()
+                        .find(|processor| processor.id == query.processor_id)
+                        .expect("processor");
+                    let mondrian_timeline::audio::AudioProcessorDefinitionRef::Clap {
+                        binary_sha256,
+                        ..
+                    } = &mut processor.definition
+                    else {
+                        panic!("CLAP fixture");
+                    };
+                    *binary_sha256 = Some([8; 32]);
+                }
+                3 => {
+                    let mut state = host.app_state.borrow_mut();
+                    let next = state.active_sequence().expect("Sequence").audio_tracks[0]
+                        .clips
+                        .iter()
+                        .find(|clip| clip.id != occurrence.clip_id)
+                        .expect("other materialization")
+                        .id;
+                    state.selection.selected_clips = vec![crate::app::SelectedClipRef {
+                        track_id: occurrence.track_id,
+                        clip_id: next,
+                        is_video_track: false,
+                    }];
+                }
+                4 => {
+                    let mut state = host.app_state.borrow_mut();
+                    let same_ids = state.active_sequence().expect("Sequence").clone();
+                    state.test_set_sequence(None);
+                    state.test_set_sequence(Some(same_ids));
+                }
+                _ => unreachable!(),
+            }
+            host.mark_dirty();
+            host.refresh_if_dirty(bounds);
+            assert!(
+                WidgetTreeView::new(host.active_root_mut()).get(slider_id).is_none(),
+                "boundary {boundary}: invalid old author control identity must disappear"
+            );
+            let before = host.app_state().active_sequence().expect("new owner").clone();
+            let history = host.app_state().authoring_history().expect("history").diagnostics();
+            router.route(
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &|action| pending.push(action),
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            assert!(
+                host.app_state()
+                    .active_sequence()
+                    .expect("after late key")
+                    .author_state_eq_ignoring_revision(&before),
+                "boundary {boundary}: late key must not edit old or replacement author content"
+            );
+            assert_eq!(
+                host.app_state().authoring_history().expect("history").diagnostics(),
+                history
+            );
+        }
+    }
+
+    #[test]
+    fn scope_rack_slider_keyboard_owner_survives_locale_refresh_without_author_side_effects() {
+        use mondrian_ui_core::tree::WidgetTreeView;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1600.0);
+        let (mut host, scope_id, processor_id) = inspection_host_fixture("scope-focus-locale");
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let slider_id = inspection_control(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Slider,
+            None,
+        )
+        .expect("Scope Gain");
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, slider_id, &pending);
+        router.route(
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &|action| pending.push(action),
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        for (preference, locale) in [
+            (
+                crate::app_ui::localization::AppUiLocalePreference::EnUs,
+                crate::app_ui::localization::AppUiLocale::EnUs,
+            ),
+            (
+                crate::app_ui::localization::AppUiLocalePreference::Pseudo,
+                crate::app_ui::localization::AppUiLocale::Pseudo,
+            ),
+            (
+                crate::app_ui::localization::AppUiLocalePreference::ZhCn,
+                crate::app_ui::localization::AppUiLocale::ZhCn,
+            ),
+        ] {
+            let before = host.app_state().active_sequence().expect("before locale").clone();
+            let history = host.app_state().authoring_history().expect("history").diagnostics();
+            let last_gain = inspection_scope_gain(&host.app_state(), scope_id, processor_id);
+            pending.push(
+                crate::app::ui_actions::app_shell_preferences_locale_changed_action(preference),
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("after locale")
+                .author_state_eq_ignoring_revision(&before));
+            assert_eq!(
+                host.app_state().authoring_history().expect("history").diagnostics(),
+                history
+            );
+            let localized = Localizer::new(locale).expect("catalog").text("audio-rack-bypass");
+            assert!(
+                inspection_control(
+                    host.active_root(),
+                    false,
+                    mondrian_ui_core::AccessibilityRole::Checkbox,
+                    Some(&localized)
+                )
+                .is_some(),
+                "locale changes must reach fresh actual panel labels"
+            );
+            router.route(
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &|action| pending.push(action),
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            assert!(inspection_scope_gain(&host.app_state(), scope_id, processor_id) < last_gain, "same actual Scope parameter accepts continued keyboard editing after locale refresh");
+            assert!(host
+                .app_state
+                .borrow_mut()
+                .undo_timeline()
+                .expect("Undo locale-following nudge"));
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("Undo nudge")
+                .author_state_eq_ignoring_revision(&before));
+        }
+        std::fs::remove_file(&host.preferences_path).ok();
+    }
+
+    #[test]
+    fn scope_rack_duplicate_projection_keys_refuse_ambiguous_keyboard_retargeting() {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1600.0);
+        let (mut host, _, _) = inspection_host_fixture("scope-focus-duplicate");
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let slider_id = inspection_control(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Slider,
+            None,
+        )
+        .expect("Scope Gain");
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, slider_id, &pending);
+        router.route(
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &|action| pending.push(action),
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        let mut models = crate::app_ui::panels::AppUiPanelModels::from_app_state(&host.app_state());
+        let same_rack = models.inspector.audio_processor_racks[0].clone();
+        models.inspector.audio_processor_racks.push(same_rack);
+        host.root.set_models(models);
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        assert!(
+            WidgetTreeView::new(host.active_root_mut()).get(slider_id).is_none(),
+            "two actual projected controls cannot both inherit one formerly unique input identity"
+        );
+        let before = host.app_state().active_sequence().expect("before late key").clone();
+        let history = host.app_state().authoring_history().expect("history").diagnostics();
+        router.route(
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &|action| pending.push(action),
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("after late key")
+            .author_state_eq_ignoring_revision(&before));
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            history
+        );
+    }
+
+    #[test]
+    fn scope_rack_modal_keyboard_scope_restores_only_a_live_enabled_author_owner() {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1600.0);
+        for lock_during_modal in [false, true] {
+            let (mut host, scope_id, processor_id) = inspection_host_fixture("scope-focus-modal");
+            TreeWalker::layout(host.active_root_mut(), bounds);
+            let slider_id = inspection_control(
+                host.active_root(),
+                false,
+                mondrian_ui_core::AccessibilityRole::Slider,
+                None,
+            )
+            .expect("Scope Gain");
+            let pending = PendingUiActions::default();
+            let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+            inspection_focus_by_tab(&mut host, &mut router, slider_id, &pending);
+            router.route(
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &|action| pending.push(action),
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            let gain_before_modal =
+                inspection_scope_gain(&host.app_state(), scope_id, processor_id);
+            pending.push(crate::app::ui_actions::app_shell_preferences_action());
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            let scope = host.active_root().keyboard_focus_scope().expect("actual modal scope");
+            let before_modal_keys =
+                host.app_state().active_sequence().expect("modal snapshot").clone();
+            for modifiers in [Modifiers::none(), Modifiers::shift(), Modifiers::none()] {
+                router.route(
+                    UiEvent::KeyDown { key: mondrian_ui_core::KeyCode::Tab, modifiers },
+                    &mut WidgetTreeView::new(host.active_root_mut()),
+                    &|action| pending.push(action),
+                );
+                let tree = WidgetTreeView::new(host.active_root_mut());
+                let mut focused = router.focused().expect("modal owns keyboard focus");
+                while focused != scope {
+                    focused =
+                        tree.parent_id(focused).expect("focus must be a descendant of the modal");
+                }
+            }
+            router.route(
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &|action| pending.push(action),
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("modal key")
+                .author_state_eq_ignoring_revision(&before_modal_keys));
+            if lock_during_modal {
+                let track_id =
+                    host.app_state().active_sequence().expect("Sequence").audio_tracks[0].id;
+                host.app_state
+                    .borrow_mut()
+                    .dispatch_action(crate::app::ui_actions::track_set_author_control_action(
+                        crate::app::product_action::TrackSetAuthorControlPayload {
+                            track_id,
+                            control: crate::app::product_action::TrackAuthorControl::Lock,
+                            enabled: true,
+                        },
+                    ))
+                    .expect("external owner lock during modal");
+            }
+            pending.push(crate::app::ui_actions::app_shell_close_modal_action());
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            let after_close = host.app_state().active_sequence().expect("closed modal").clone();
+            let history = host.app_state().authoring_history().expect("history").diagnostics();
+            router.route(
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &|action| pending.push(action),
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            if lock_during_modal {
+                assert!(host
+                    .app_state()
+                    .active_sequence()
+                    .expect("locked after close")
+                    .author_state_eq_ignoring_revision(&after_close));
+                assert_eq!(
+                    host.app_state().authoring_history().expect("history").diagnostics(),
+                    history
+                );
+            } else {
+                assert!(inspection_scope_gain(&host.app_state(), scope_id, processor_id) < gain_before_modal, "closing a modal restores continued editing only to the same live author control");
+            }
+        }
+    }
+
+    #[test]
+    fn scope_rack_slider_focus_survives_current_native_input_metadata_publication() {
+        use mondrian_ui_core::tree::WidgetTreeView;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1600.0);
+        let (mut host, query, calls, started, release) =
+            inspection_native_host_fixture("scope-focus-metadata");
+        let baseline_prepares = calls.load(Ordering::SeqCst);
+        let mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+            scope_id, ..
+        } = query.target
+        else {
+            panic!("Scope");
+        };
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let slider_id = inspection_control(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Slider,
+            None,
+        )
+        .expect("Scope Gain");
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, slider_id, &pending);
+        router.route(
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &|action| pending.push(action),
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        let before_query = host.app_state().active_sequence().expect("before query").clone();
+        let history = host.app_state().authoring_history().expect("history").diagnostics();
+        let gain = inspection_scope_gain(&host.app_state(), scope_id, query.processor_id);
+        pending.push(
+            ProductAction::Audio(AudioProductAction::QueryProcessorInputs(query))
+                .into_external_action(),
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        started.recv_timeout(Duration::from_secs(5)).expect("metadata query starts");
+        release.send(()).expect("release metadata query");
+        crate::app::audio_input_observation::tests::finish(&mut host.app_state.borrow_mut());
+        host.mark_dirty();
+        host.refresh_if_dirty(bounds);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            baseline_prepares + 1,
+            "one metadata preparation; refreshing controls never re-probes"
+        );
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("after query")
+            .author_state_eq_ignoring_revision(&before_query));
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            history
+        );
+        let add_source = Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn)
+            .expect("catalog")
+            .text("audio-sidechain-add-source");
+        assert!(
+            inspection_control(
+                host.active_root(),
+                false,
+                mondrian_ui_core::AccessibilityRole::Menu,
+                Some(&add_source)
+            )
+            .is_some(),
+            "current native metadata reaches actual newly built input menus"
+        );
+        router.route(
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &|action| pending.push(action),
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert!(
+            inspection_scope_gain(&host.app_state(), scope_id, query.processor_id) < gain,
+            "same canonical parameter keeps its keyboard owner across metadata row insertion"
+        );
+    }
+
+    #[test]
+    fn scope_rack_native_query_button_keyboard_can_cancel_and_requery_after_model_refresh() {
+        use mondrian_ui_core::tree::WidgetTreeView;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1600.0);
+        let (mut host, query, calls, started, release) =
+            inspection_native_host_fixture("scope-focus-query-button");
+        let baseline_prepares = calls.load(Ordering::SeqCst);
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let query_name = Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn)
+            .expect("catalog")
+            .text("audio-input-query");
+        let button_id = inspection_control(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Button,
+            Some(&query_name),
+        )
+        .expect("actual native Query Button");
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, button_id, &pending);
+        let before = host.app_state().active_sequence().expect("before query").clone();
+        let history = host.app_state().authoring_history().expect("history").diagnostics();
+        for activation in 0..2 {
+            router.route(
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Enter,
+                    modifiers: Modifiers::none(),
+                },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &|action| pending.push(action),
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            if activation == 0 {
+                started.recv_timeout(Duration::from_secs(5)).expect("query starts");
+            }
+            router.route(
+                UiEvent::KeyUp {
+                    key: mondrian_ui_core::KeyCode::Enter,
+                    modifiers: Modifiers::none(),
+                },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &|action| pending.push(action),
+            );
+        }
+        assert!(
+            matches!(
+                host.app_state().audio_processor_input_observation(query),
+                crate::app::audio_input_observation::AudioInputObservation::Unknown
+            ),
+            "second actual keyboard activation cancels the still-owned pending observation"
+        );
+        release.send(()).expect("release canceled worker");
+        crate::app::audio_input_observation::tests::finish(&mut host.app_state.borrow_mut());
+        host.mark_dirty();
+        host.refresh_if_dirty(bounds);
+        router.route(
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::Enter,
+                modifiers: Modifiers::none(),
+            },
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &|action| pending.push(action),
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        started.recv_timeout(Duration::from_secs(5)).expect("new actual query starts");
+        release.send(()).expect("release requery worker");
+        crate::app::audio_input_observation::tests::finish(&mut host.app_state.borrow_mut());
+        host.mark_dirty();
+        host.refresh_if_dirty(bounds);
+        assert!(
+            matches!(
+                host.app_state().audio_processor_input_observation(query),
+                crate::app::audio_input_observation::AudioInputObservation::Ready(_)
+            ),
+            "requery publishes actual current metadata"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            baseline_prepares + 2,
+            "only Query and Requery prepare metadata; Cancel does not"
+        );
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("query is read only")
+            .author_state_eq_ignoring_revision(&before));
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            history
+        );
+    }
+
+    fn inspection_keyboard_key(
+        host: &mut AppUiHost,
+        router: &mut mondrian_ui_events::EventRouter,
+        pending: &PendingUiActions,
+        bounds: Rect,
+        key: mondrian_ui_core::KeyCode,
+    ) {
+        use mondrian_ui_core::tree::WidgetTreeView;
+        router.route(
+            UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &|action| pending.push(action),
+        );
+        router.route(
+            UiEvent::KeyUp { key, modifiers: Modifiers::none() },
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &|action| pending.push(action),
+        );
+        host.drain_pending_actions(pending, bounds, &NoopPlatformService);
+    }
+
+    fn inspection_numeric_value_control(
+        widget: &dyn Widget,
+        in_inspector: bool,
+        value: f32,
+    ) -> Option<mondrian_ui_core::WidgetId> {
+        let in_inspector = in_inspector || widget.panel_kind() == Some(PanelKind::Inspector);
+        if in_inspector && widget.can_focus() && widget.accessibility().is_some_and(|node| node.role == mondrian_ui_core::AccessibilityRole::Slider && matches!(node.value, Some(mondrian_ui_core::AccessibilityValue::Number { value: current, .. }) if (current-value).abs()<0.00001)) { return Some(widget.id()); }
+        (0..widget.child_count()).find_map(|index| {
+            widget
+                .child(index)
+                .and_then(|child| inspection_numeric_value_control(child, in_inspector, value))
+        })
+    }
+
+    fn inspection_sidechain_host_fixture(
+        name: &str,
+    ) -> (
+        AppUiHost,
+        crate::app::product_action::AudioProcessorInputQueryPayload,
+        mondrian_core::AudioRouteId,
+    ) {
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1800.0);
+        let (mut host, query, _, started, release) = inspection_native_host_fixture(name);
+        let pending = PendingUiActions::default();
+        pending.push(
+            ProductAction::Audio(AudioProductAction::QueryProcessorInputs(query))
+                .into_external_action(),
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("controlled metadata query starts");
+        release.send(()).expect("release metadata");
+        crate::app::audio_input_observation::tests::finish(&mut host.app_state.borrow_mut());
+        let route_id = {
+            let mut state = host.app_state.borrow_mut();
+            let crate::app::audio_input_observation::AudioInputObservation::Ready(observed) =
+                state.audio_processor_input_observation(query)
+            else {
+                panic!("current native metadata");
+            };
+            let source_track = state.active_sequence().expect("Sequence").audio_tracks[1].id;
+            state
+                .dispatch_action(
+                    ProductAction::Audio(AudioProductAction::ConnectProcessorInput(
+                        crate::app::product_action::AudioProcessorInputConnectionPayload {
+                            binding: observed.binding,
+                            source: mondrian_timeline::audio::AudioRouteSource::Track {
+                                track_id: source_track,
+                                port:
+                                    mondrian_timeline::audio::AudioChannelStripOutputPort::PostMute,
+                            },
+                            bus_key: "detector.7".to_owned(),
+                        },
+                    ))
+                    .into_external_action(),
+                )
+                .expect("connect actual admitted native input");
+            let route_id = state
+                .active_sequence()
+                .expect("Sequence")
+                .audio_program
+                .sidechain_routes
+                .last()
+                .expect("new route")
+                .id;
+            state
+                .dispatch_action(crate::app::ui_actions::audio_routing_edit_action(
+                    mondrian_timeline::AudioRoutingEditRequest {
+                        edit: mondrian_timeline::AudioRoutingEdit::SetProcessorSidechainGainDb {
+                            route_id,
+                            value: -29.2,
+                        },
+                    },
+                ))
+                .expect("unique initial gain through canonical routing transaction");
+            route_id
+        };
+        host.mark_dirty();
+        host.refresh_if_dirty(bounds);
+        (host, query, route_id)
+    }
+
+    #[test]
+    fn scope_sidechain_gain_continuous_keyboard_edits_keep_exact_route_and_undo() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1800.0);
+        let (mut host, _, route_id) = inspection_sidechain_host_fixture("sidechain-keyboard-gain");
+        let slider_id =
+            inspection_numeric_value_control(host.active_root(), false, (-29.2_f32 + 60.0) / 72.0)
+                .expect("actual sidechain gain Slider");
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, slider_id, &pending);
+        let original = host.app_state().active_sequence().expect("original").clone();
+        let mut previous = -29.2;
+        for step in 0..2 {
+            inspection_keyboard_key(
+                &mut host,
+                &mut router,
+                &pending,
+                bounds,
+                mondrian_ui_core::KeyCode::Left,
+            );
+            let state = host.app_state();
+            let route = state
+                .active_sequence()
+                .expect("edit")
+                .audio_program
+                .sidechain_routes
+                .iter()
+                .find(|route| route.id == route_id)
+                .expect("same exact route");
+            assert!(
+                route.gain_db < previous,
+                "step {step}: each actual routed key must edit the retained canonical route"
+            );
+            previous = route.gain_db;
+        }
+        let committed = host.app_state().active_sequence().expect("committed").clone();
+        for _ in 0..2 {
+            assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo gain"));
+        }
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("restored")
+            .author_state_eq_ignoring_revision(&original));
+        for _ in 0..2 {
+            assert!(host.app_state.borrow_mut().redo_timeline().expect("Redo gain"));
+        }
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("redone")
+            .author_state_eq_ignoring_revision(&committed));
+    }
+
+    #[test]
+    fn scope_sidechain_enable_continuous_keyboard_edits_keep_exact_route_and_undo() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1800.0);
+        let (mut host, _, route_id) =
+            inspection_sidechain_host_fixture("sidechain-keyboard-enable");
+        let name = Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn)
+            .expect("catalog")
+            .text("mixer-pass-signal");
+        let checkbox_id = inspection_control(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Checkbox,
+            Some(&name),
+        )
+        .expect("actual sidechain enable Checkbox");
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, checkbox_id, &pending);
+        let original = host.app_state().active_sequence().expect("original").clone();
+        for expected in [false, true] {
+            inspection_keyboard_key(
+                &mut host,
+                &mut router,
+                &pending,
+                bounds,
+                mondrian_ui_core::KeyCode::Space,
+            );
+            assert_eq!(
+                host.app_state()
+                    .active_sequence()
+                    .expect("edit")
+                    .audio_program
+                    .sidechain_routes
+                    .iter()
+                    .find(|route| route.id == route_id)
+                    .expect("same exact route")
+                    .enabled,
+                expected,
+                "each actual Space must toggle the same retained author route"
+            );
+        }
+        for _ in 0..2 {
+            assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo enabled"));
+        }
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("restored")
+            .author_state_eq_ignoring_revision(&original));
+    }
+
+    #[test]
+    fn scope_sidechain_source_dropdown_reopens_with_fresh_expected_source_after_each_commit() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1800.0);
+        let (mut host, _, route_id) =
+            inspection_sidechain_host_fixture("sidechain-keyboard-source");
+        let source_name =
+            crate::app_ui::panels::AppUiPanelModels::from_app_state(&host.app_state())
+                .inspector
+                .audio_processor_racks[0]
+                .processors[0]
+                .sidechain_routes
+                .iter()
+                .find(|route| route.route_id == route_id)
+                .expect("source model")
+                .source_label
+                .clone();
+        let dropdown_id = inspection_control(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Menu,
+            Some(&source_name),
+        )
+        .expect("actual retained source Dropdown");
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, dropdown_id, &pending);
+        let original = host.app_state().active_sequence().expect("original").clone();
+        let mut previous = original
+            .audio_program
+            .sidechain_routes
+            .iter()
+            .find(|route| route.id == route_id)
+            .expect("route")
+            .source;
+        for edit in 0..2 {
+            for key in [
+                mondrian_ui_core::KeyCode::Enter,
+                mondrian_ui_core::KeyCode::Home,
+                mondrian_ui_core::KeyCode::Down,
+                mondrian_ui_core::KeyCode::Enter,
+            ] {
+                inspection_keyboard_key(&mut host, &mut router, &pending, bounds, key);
+            }
+            let state = host.app_state();
+            let route = state
+                .active_sequence()
+                .expect("source edit")
+                .audio_program
+                .sidechain_routes
+                .iter()
+                .find(|route| route.id == route_id)
+                .expect("retained identity");
+            assert_ne!(
+                route.source, previous,
+                "edit {edit}: reopened control must carry the newly current source fingerprint"
+            );
+            assert_eq!(route.gain_db, -29.2);
+            assert!(route.enabled);
+            previous = route.source;
+        }
+        for _ in 0..2 {
+            assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo source"));
+        }
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("restored")
+            .author_state_eq_ignoring_revision(&original));
+    }
+
+    #[test]
+    fn scope_sidechain_add_source_dropdown_keeps_keyboard_trigger_after_route_commit() {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1800.0);
+        let (mut host, _, _) = inspection_sidechain_host_fixture("sidechain-keyboard-add");
+        let name = Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn)
+            .expect("catalog")
+            .text("audio-sidechain-add-source");
+        let dropdown_id = inspection_control(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Menu,
+            Some(&name),
+        )
+        .expect("first actual input Add Source Dropdown");
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, dropdown_id, &pending);
+        let original = host.app_state().active_sequence().expect("original").clone();
+        for key in [
+            mondrian_ui_core::KeyCode::Enter,
+            mondrian_ui_core::KeyCode::Home,
+            mondrian_ui_core::KeyCode::Enter,
+        ] {
+            inspection_keyboard_key(&mut host, &mut router, &pending, bounds, key);
+        }
+        assert_eq!(
+            host.app_state()
+                .active_sequence()
+                .expect("new source")
+                .audio_program
+                .sidechain_routes
+                .len(),
+            original.audio_program.sidechain_routes.len() + 1
+        );
+        assert_eq!(
+            host.app_state()
+                .active_sequence()
+                .expect("new source")
+                .audio_program
+                .sidechain_routes
+                .last()
+                .expect("added route")
+                .bus_key,
+            "detector.11"
+        );
+        inspection_keyboard_key(
+            &mut host,
+            &mut router,
+            &pending,
+            bounds,
+            mondrian_ui_core::KeyCode::Enter,
+        );
+        assert!(
+            WidgetTreeView::new(host.active_root_mut())
+                .get(dropdown_id)
+                .and_then(|widget| widget.accessibility())
+                .is_some_and(|node| node.state.expanded == Some(true)),
+            "same canonical input trigger reopens after actual author commit"
+        );
+        inspection_keyboard_key(
+            &mut host,
+            &mut router,
+            &pending,
+            bounds,
+            mondrian_ui_core::KeyCode::Escape,
+        );
+        assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo source add"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("restored")
+            .author_state_eq_ignoring_revision(&original));
+    }
+
+    #[test]
+    fn scope_rack_move_icon_keyboard_repeats_until_disabled_and_never_transfers_to_another_processor(
+    ) {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1800.0);
+        let (mut host, scope_id, moving_id) = inspection_host_fixture("rack-keyboard-move");
+        let (first_id, second_id) = {
+            let mut state = host.app_state.borrow_mut();
+            let scope = state
+                .active_sequence_mut_uncommitted()
+                .expect("Sequence")
+                .audio_program
+                .processing_scopes
+                .iter_mut()
+                .find(|scope| scope.id == scope_id)
+                .expect("Scope");
+            let first = mondrian_timeline::audio::AudioProcessorInstance::built_in(
+                mondrian_timeline::audio::BUILTIN_SAMPLE_DELAY_DEFINITION_ID,
+                1,
+            );
+            let second = mondrian_timeline::audio::AudioProcessorInstance::built_in(
+                mondrian_timeline::audio::BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID,
+                1,
+            );
+            let ids = (first.id, second.id);
+            scope.processors.processors.insert(0, second);
+            scope.processors.processors.insert(0, first);
+            ids
+        };
+        host.mark_dirty();
+        host.refresh_if_dirty(bounds);
+        let tooltip = Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn)
+            .expect("catalog")
+            .text("audio-rack-move-up-tooltip");
+        let candidates = inspection_named_controls(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Button,
+            &tooltip,
+        );
+        let move_id = *candidates.last().expect("moving processor Up IconButton");
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, move_id, &pending);
+        let original = host.app_state().active_sequence().expect("original").clone();
+        for (activation, expected) in [
+            vec![first_id, moving_id, second_id],
+            vec![moving_id, first_id, second_id],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if activation == 0 {
+                // Flush initial Tab setup callbacks with one completed activation.
+                inspection_keyboard_key(
+                    &mut host,
+                    &mut router,
+                    &pending,
+                    bounds,
+                    mondrian_ui_core::KeyCode::Enter,
+                );
+            } else {
+                // Match the native window: route and drain each down/up event separately.
+                for event in [
+                    UiEvent::KeyDown {
+                        key: mondrian_ui_core::KeyCode::Enter,
+                        modifiers: Modifiers::none(),
+                    },
+                    UiEvent::KeyUp {
+                        key: mondrian_ui_core::KeyCode::Enter,
+                        modifiers: Modifiers::none(),
+                    },
+                ] {
+                    router.route(
+                        event,
+                        &mut WidgetTreeView::new(host.active_root_mut()),
+                        &|action| pending.push(action),
+                    );
+                    host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+                }
+            }
+            assert_eq!(
+                host.app_state()
+                    .active_sequence()
+                    .expect("moved")
+                    .audio_program
+                    .processing_scopes
+                    .iter()
+                    .find(|scope| scope.id == scope_id)
+                    .expect("Scope")
+                    .processors
+                    .processors
+                    .iter()
+                    .map(|processor| processor.id)
+                    .collect::<Vec<_>>(),
+                expected,
+                "continued activation moves the same stable processor"
+            );
+        }
+        assert!(
+            WidgetTreeView::new(host.active_root_mut()).get(move_id).is_none(),
+            "newly disabled Up control cannot keep its old live input identity"
+        );
+        let boundary = host.app_state().active_sequence().expect("boundary").clone();
+        let history = host.app_state().authoring_history().expect("history").diagnostics();
+        inspection_keyboard_key(
+            &mut host,
+            &mut router,
+            &pending,
+            bounds,
+            mondrian_ui_core::KeyCode::Enter,
+        );
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("late key")
+            .author_state_eq_ignoring_revision(&boundary));
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            history
+        );
+        for _ in 0..2 {
+            assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo move"));
+        }
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("restored")
+            .author_state_eq_ignoring_revision(&original));
+    }
+
+    fn inspection_named_controls(
+        widget: &dyn Widget,
+        in_inspector: bool,
+        role: mondrian_ui_core::AccessibilityRole,
+        name: &str,
+    ) -> Vec<mondrian_ui_core::WidgetId> {
+        let in_inspector = in_inspector || widget.panel_kind() == Some(PanelKind::Inspector);
+        let mut controls = Vec::new();
+        if in_inspector
+            && widget.can_focus()
+            && widget
+                .accessibility()
+                .is_some_and(|node| node.role == role && node.name.as_deref() == Some(name))
+        {
+            controls.push(widget.id());
+        }
+        for index in 0..widget.child_count() {
+            if let Some(child) = widget.child(index) {
+                controls.extend(inspection_named_controls(child, in_inspector, role, name));
+            }
+        }
+        controls
+    }
+
+    #[test]
+    fn scope_rack_remove_icon_keyboard_never_transfers_to_a_same_caption_replacement() {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1800.0);
+        let (mut host, scope_id, removed_id) = inspection_host_fixture("rack-keyboard-delete");
+        let retained_id = {
+            let mut state = host.app_state.borrow_mut();
+            let scope = state
+                .active_sequence_mut_uncommitted()
+                .expect("Sequence")
+                .audio_program
+                .processing_scopes
+                .iter_mut()
+                .find(|scope| scope.id == scope_id)
+                .expect("Scope");
+            let processor = mondrian_timeline::audio::AudioProcessorInstance::built_in(
+                mondrian_timeline::audio::BUILTIN_GAIN_DEFINITION_ID,
+                1,
+            );
+            let id = processor.id;
+            scope.processors.processors.push(processor);
+            id
+        };
+        host.mark_dirty();
+        host.refresh_if_dirty(bounds);
+        let tooltip = Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn)
+            .expect("catalog")
+            .text("audio-rack-remove-tooltip");
+        let button_id = inspection_control(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Button,
+            Some(&tooltip),
+        )
+        .expect("exact first processor remove IconButton");
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, button_id, &pending);
+        inspection_keyboard_key(
+            &mut host,
+            &mut router,
+            &pending,
+            bounds,
+            mondrian_ui_core::KeyCode::Enter,
+        );
+        let removed = host.app_state().active_sequence().expect("removed").clone();
+        assert!(!removed
+            .audio_program
+            .processing_scopes
+            .iter()
+            .find(|scope| scope.id == scope_id)
+            .expect("Scope")
+            .processors
+            .processors
+            .iter()
+            .any(|processor| processor.id == removed_id));
+        assert_eq!(
+            removed
+                .audio_program
+                .processing_scopes
+                .iter()
+                .find(|scope| scope.id == scope_id)
+                .expect("Scope")
+                .processors
+                .processors[0]
+                .id,
+            retained_id
+        );
+        assert!(WidgetTreeView::new(host.active_root_mut()).get(button_id).is_none());
+        let history = host.app_state().authoring_history().expect("history").diagnostics();
+        inspection_keyboard_key(
+            &mut host,
+            &mut router,
+            &pending,
+            bounds,
+            mondrian_ui_core::KeyCode::Enter,
+        );
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("late key")
+            .author_state_eq_ignoring_revision(&removed));
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            history
+        );
+    }
+
+    #[test]
+    fn scope_occurrence_selector_keeps_navigation_trigger_and_refuses_other_inspected_clip() {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1800.0);
+        let (mut host, scope_id, _) = inspection_host_fixture("scope-keyboard-occurrence");
+        let (track_id, clip_id, second_address, other_clip_id) = {
+            let mut state = host.app_state.borrow_mut();
+            let sequence = state.active_sequence_mut_uncommitted().expect("Sequence");
+            let track_id = sequence.audio_tracks[0].id;
+            let clip = &mut sequence.audio_tracks[0].clips[0];
+            let clip_id = clip.id;
+            let mut second = mondrian_timeline::audio::AudioComponentEdit::media(
+                mondrian_core::AudioSourceComponentId::new(),
+                scope_id,
+            );
+            second.processing.scope_in = TimelineTime::new(9, 1).expect("Scope offset");
+            let address =
+                mondrian_timeline::AudioComponentAddress { track_id, clip_id, edit_id: second.id };
+            clip.audio_components.push(second);
+            let mut other = clip.clone();
+            other.id = mondrian_core::ClipId::new();
+            for edit in &mut other.audio_components {
+                edit.id = mondrian_core::AudioComponentEditId::new();
+            }
+            let other_id = other.id;
+            sequence.audio_tracks[0].clips.push(other);
+            (track_id, clip_id, address, other_id)
+        };
+        host.mark_dirty();
+        host.refresh_if_dirty(bounds);
+        let choose = Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn)
+            .expect("catalog")
+            .text("audio-rack-occurrence-choose");
+        let dropdown_id = inspection_control(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Menu,
+            Some(&choose),
+        )
+        .expect("ambiguous same-Clip Scope occurrence selector");
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, dropdown_id, &pending);
+        let original = host.app_state().active_sequence().expect("original").clone();
+        let history = host.app_state().authoring_history().expect("history").diagnostics();
+        for key in [
+            mondrian_ui_core::KeyCode::Enter,
+            mondrian_ui_core::KeyCode::Home,
+            mondrian_ui_core::KeyCode::Down,
+            mondrian_ui_core::KeyCode::Enter,
+        ] {
+            inspection_keyboard_key(&mut host, &mut router, &pending, bounds, key);
+        }
+        assert_eq!(
+            host.app_state().selection.audio_scope_occurrences.get(&(original.id, scope_id)),
+            Some(&second_address)
+        );
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("navigation")
+            .author_state_eq_ignoring_revision(&original));
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            history
+        );
+        inspection_keyboard_key(
+            &mut host,
+            &mut router,
+            &pending,
+            bounds,
+            mondrian_ui_core::KeyCode::Enter,
+        );
+        assert!(
+            WidgetTreeView::new(host.active_root_mut())
+                .get(dropdown_id)
+                .and_then(|widget| widget.accessibility())
+                .is_some_and(|node| node.state.expanded == Some(true)),
+            "same Clip navigation trigger reopens across a changed chosen occurrence"
+        );
+        inspection_keyboard_key(
+            &mut host,
+            &mut router,
+            &pending,
+            bounds,
+            mondrian_ui_core::KeyCode::Escape,
+        );
+        host.app_state.borrow_mut().selection.selected_clips = vec![crate::app::SelectedClipRef {
+            track_id,
+            clip_id: other_clip_id,
+            is_video_track: false,
+        }];
+        host.mark_dirty();
+        host.refresh_if_dirty(bounds);
+        assert!(
+            WidgetTreeView::new(host.active_root_mut()).get(dropdown_id).is_none(),
+            "navigation owner includes the originally inspected outer Clip"
+        );
+        let replacement_id = inspection_control(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Menu,
+            Some(&choose),
+        )
+        .expect("fresh other-Clip selector");
+        inspection_keyboard_key(
+            &mut host,
+            &mut router,
+            &pending,
+            bounds,
+            mondrian_ui_core::KeyCode::Enter,
+        );
+        assert!(
+            WidgetTreeView::new(host.active_root_mut())
+                .get(replacement_id)
+                .and_then(|widget| widget.accessibility())
+                .is_some_and(|node| node.state.expanded == Some(false)),
+            "late key cannot open the other Clip's same-Scope selector"
+        );
+        assert_eq!(
+            host.app_state().selection.selected_clips[0].clip_id,
+            other_clip_id
+        );
+        assert_ne!(clip_id, other_clip_id);
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("late navigation")
+            .author_state_eq_ignoring_revision(&original));
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            history
+        );
+    }
+
+    #[test]
+    fn scope_sidechain_disconnect_keyboard_never_transfers_to_same_caption_other_route() {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1800.0);
+        let (mut host, query, removed_id) =
+            inspection_sidechain_host_fixture("sidechain-keyboard-disconnect");
+        let retained_id = {
+            let mut state = host.app_state.borrow_mut();
+            let crate::app::audio_input_observation::AudioInputObservation::Ready(observed) =
+                state.audio_processor_input_observation(query)
+            else {
+                panic!("current observation");
+            };
+            let source_track = state.active_sequence().expect("Sequence").audio_tracks[1].id;
+            state
+                .dispatch_action(
+                    ProductAction::Audio(AudioProductAction::ConnectProcessorInput(
+                        crate::app::product_action::AudioProcessorInputConnectionPayload {
+                            binding: observed.binding,
+                            source: mondrian_timeline::audio::AudioRouteSource::Track {
+                                track_id: source_track,
+                                port:
+                                    mondrian_timeline::audio::AudioChannelStripOutputPort::PreFader,
+                            },
+                            bus_key: "detector.7".to_owned(),
+                        },
+                    ))
+                    .into_external_action(),
+                )
+                .expect("second actual retained route");
+            state
+                .active_sequence()
+                .expect("Sequence")
+                .audio_program
+                .sidechain_routes
+                .last()
+                .expect("second route")
+                .id
+        };
+        host.mark_dirty();
+        host.refresh_if_dirty(bounds);
+        let name = Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn)
+            .expect("catalog")
+            .text("audio-sidechain-disconnect");
+        let button_id = inspection_control(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Button,
+            Some(&name),
+        )
+        .expect("first exact sidechain Disconnect Button");
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, button_id, &pending);
+        let original = host.app_state().active_sequence().expect("original").clone();
+        inspection_keyboard_key(
+            &mut host,
+            &mut router,
+            &pending,
+            bounds,
+            mondrian_ui_core::KeyCode::Enter,
+        );
+        let removed = host.app_state().active_sequence().expect("disconnected").clone();
+        assert!(!removed
+            .audio_program
+            .sidechain_routes
+            .iter()
+            .any(|route| route.id == removed_id));
+        assert!(removed
+            .audio_program
+            .sidechain_routes
+            .iter()
+            .any(|route| route.id == retained_id));
+        assert!(
+            WidgetTreeView::new(host.active_root_mut()).get(button_id).is_none(),
+            "deleted route trigger is never a shared caption owner"
+        );
+        let history = host.app_state().authoring_history().expect("history").diagnostics();
+        inspection_keyboard_key(
+            &mut host,
+            &mut router,
+            &pending,
+            bounds,
+            mondrian_ui_core::KeyCode::Enter,
+        );
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("late key")
+            .author_state_eq_ignoring_revision(&removed));
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            history
+        );
+        assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo disconnect"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("restored")
+            .author_state_eq_ignoring_revision(&original));
+    }
+
+    fn inspection_armed_move_host_fixture(
+        name: &str,
+    ) -> (
+        AppUiHost,
+        crate::app::product_action::AudioProcessorInputQueryPayload,
+        mondrian_ui_events::EventRouter,
+        PendingUiActions,
+    ) {
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1800.0);
+        let (mut host, query, _, _, _) = inspection_native_host_fixture(name);
+        let mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+            scope_id, ..
+        } = query.target
+        else {
+            panic!("Scope");
+        };
+        {
+            let mut state = host.app_state.borrow_mut();
+            let scope = state
+                .active_sequence_mut_uncommitted()
+                .expect("Sequence")
+                .audio_program
+                .processing_scopes
+                .iter_mut()
+                .find(|scope| scope.id == scope_id)
+                .expect("Scope");
+            scope.processors.processors.push(
+                mondrian_timeline::audio::AudioProcessorInstance::built_in(
+                    mondrian_timeline::audio::BUILTIN_SAMPLE_DELAY_DEFINITION_ID,
+                    1,
+                ),
+            );
+            scope.processors.processors.push(
+                mondrian_timeline::audio::AudioProcessorInstance::built_in(
+                    mondrian_timeline::audio::BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID,
+                    1,
+                ),
+            );
+        }
+        host.mark_dirty();
+        host.refresh_if_dirty(bounds);
+        let tooltip = Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn)
+            .expect("catalog")
+            .text("audio-rack-move-down-tooltip");
+        let target = inspection_named_controls(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Button,
+            &tooltip,
+        )[0];
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, target, &pending);
+        // One completed setup activation flushes the fixture's incidental Tab blur callbacks.
+        // Every tested held activation below drains each native-shaped event individually.
+        inspection_keyboard_key(
+            &mut host,
+            &mut router,
+            &pending,
+            bounds,
+            mondrian_ui_core::KeyCode::Enter,
+        );
+        assert_eq!(
+            host.app_state()
+                .active_sequence()
+                .expect("setup commit")
+                .audio_program
+                .processing_scopes
+                .iter()
+                .find(|scope| scope.id == scope_id)
+                .expect("Scope")
+                .processors
+                .processors[1]
+                .id,
+            query.processor_id,
+            "setup moves the exact native author once"
+        );
+        (host, query, router, pending)
+    }
+
+    fn inspection_key_event(
+        host: &mut AppUiHost,
+        router: &mut mondrian_ui_events::EventRouter,
+        pending: &PendingUiActions,
+        bounds: Rect,
+        event: UiEvent,
+    ) {
+        use mondrian_ui_core::tree::WidgetTreeView;
+        router.route(
+            event,
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &|action| pending.push(action),
+        );
+        host.drain_pending_actions(pending, bounds, &NoopPlatformService);
+    }
+
+    #[test]
+    fn scope_rack_release_activation_survives_live_locale_or_metadata_refresh() {
+        use mondrian_ui_core::tree::WidgetTreeView;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1800.0);
+        for metadata_refresh in [false, true] {
+            let (mut host, query, calls, started, release) =
+                inspection_native_host_fixture("rack-held-key-live");
+            let mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+                scope_id,
+                ..
+            } = query.target
+            else {
+                panic!("Scope");
+            };
+            {
+                let mut state = host.app_state.borrow_mut();
+                let scope = state
+                    .active_sequence_mut_uncommitted()
+                    .expect("Sequence")
+                    .audio_program
+                    .processing_scopes
+                    .iter_mut()
+                    .find(|scope| scope.id == scope_id)
+                    .expect("Scope");
+                scope.processors.processors.push(
+                    mondrian_timeline::audio::AudioProcessorInstance::built_in(
+                        mondrian_timeline::audio::BUILTIN_SAMPLE_DELAY_DEFINITION_ID,
+                        1,
+                    ),
+                );
+                scope.processors.processors.push(
+                    mondrian_timeline::audio::AudioProcessorInstance::built_in(
+                        mondrian_timeline::audio::BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID,
+                        1,
+                    ),
+                );
+            }
+            host.mark_dirty();
+            host.refresh_if_dirty(bounds);
+            let tooltip = Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn)
+                .expect("catalog")
+                .text("audio-rack-move-down-tooltip");
+            let target = inspection_named_controls(
+                host.active_root(),
+                false,
+                mondrian_ui_core::AccessibilityRole::Button,
+                &tooltip,
+            )[0];
+            let pending = PendingUiActions::default();
+            let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+            inspection_focus_by_tab(&mut host, &mut router, target, &pending);
+            inspection_keyboard_key(
+                &mut host,
+                &mut router,
+                &pending,
+                bounds,
+                mondrian_ui_core::KeyCode::Enter,
+            );
+            let before = host.app_state().active_sequence().expect("before held key").clone();
+            let history = host.app_state().authoring_history().expect("history").diagnostics();
+            let prepares = calls.load(Ordering::SeqCst);
+            assert_eq!(
+                before
+                    .audio_program
+                    .processing_scopes
+                    .iter()
+                    .find(|scope| scope.id == scope_id)
+                    .expect("Scope")
+                    .processors
+                    .processors[1]
+                    .id,
+                query.processor_id
+            );
+            inspection_key_event(
+                &mut host,
+                &mut router,
+                &pending,
+                bounds,
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Enter,
+                    modifiers: Modifiers::none(),
+                },
+            );
+            if metadata_refresh {
+                pending.push(
+                    ProductAction::Audio(AudioProductAction::QueryProcessorInputs(query))
+                        .into_external_action(),
+                );
+                host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+                started
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("actual query starts between keyboard press and release");
+                release.send(()).expect("release metadata");
+                crate::app::audio_input_observation::tests::finish(
+                    &mut host.app_state.borrow_mut(),
+                );
+                host.mark_dirty();
+                host.refresh_if_dirty(bounds);
+                assert_eq!(calls.load(Ordering::SeqCst), prepares + 1);
+                assert!(matches!(
+                    host.app_state().audio_processor_input_observation(query),
+                    crate::app::audio_input_observation::AudioInputObservation::Ready(_)
+                ));
+            } else {
+                pending.push(
+                    crate::app::ui_actions::app_shell_preferences_locale_changed_action(
+                        crate::app_ui::localization::AppUiLocalePreference::EnUs,
+                    ),
+                );
+                host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+                let english = Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs)
+                    .expect("catalog")
+                    .text("audio-rack-bypass");
+                assert!(
+                    inspection_control(
+                        host.active_root(),
+                        false,
+                        mondrian_ui_core::AccessibilityRole::Checkbox,
+                        Some(&english)
+                    )
+                    .is_some(),
+                    "legitimate refresh changed actual projected labels"
+                );
+            }
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("refresh read only")
+                .author_state_eq_ignoring_revision(&before));
+            assert_eq!(
+                host.app_state().authoring_history().expect("history").diagnostics(),
+                history
+            );
+            router.route(
+                UiEvent::KeyUp {
+                    key: mondrian_ui_core::KeyCode::Enter,
+                    modifiers: Modifiers::none(),
+                },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &|action| pending.push(action),
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            assert_eq!(host.app_state().active_sequence().expect("actual release").audio_program.processing_scopes.iter().find(|scope|scope.id==scope_id).expect("Scope").processors.processors[2].id,query.processor_id,"same enabled semantic owner must execute exactly once on actual release after refresh");
+            let committed = host.app_state().active_sequence().expect("commit").clone();
+            let committed_history =
+                host.app_state().authoring_history().expect("history").diagnostics();
+            inspection_key_event(
+                &mut host,
+                &mut router,
+                &pending,
+                bounds,
+                UiEvent::KeyUp {
+                    key: mondrian_ui_core::KeyCode::Enter,
+                    modifiers: Modifiers::none(),
+                },
+            );
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("duplicate release")
+                .author_state_eq_ignoring_revision(&committed));
+            assert_eq!(
+                host.app_state().authoring_history().expect("history").diagnostics(),
+                committed_history
+            );
+            assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo release activation"));
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("restored")
+                .author_state_eq_ignoring_revision(&before));
+            std::fs::remove_file(&host.preferences_path).ok();
+        }
+    }
+
+    #[test]
+    fn scope_rack_release_activation_refuses_deleted_locked_rebound_other_occurrence_or_new_session_owner(
+    ) {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1800.0);
+        for boundary in 0..5 {
+            let (mut host, query, mut router, pending) =
+                inspection_armed_move_host_fixture("rack-held-key-refusal");
+            let mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+                scope_id,
+                occurrence,
+            } = query.target
+            else {
+                panic!("Scope");
+            };
+            inspection_key_event(
+                &mut host,
+                &mut router,
+                &pending,
+                bounds,
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Enter,
+                    modifiers: Modifiers::none(),
+                },
+            );
+            match boundary {
+                0 => host
+                    .app_state
+                    .borrow_mut()
+                    .dispatch_action(crate::app::ui_actions::audio_processor_rack_edit_action(
+                        mondrian_timeline::AudioProcessorRackEditRequest {
+                            address:
+                                mondrian_timeline::AudioProcessorRackAddress::ProcessingScope {
+                                    scope_id,
+                                },
+                            edit: mondrian_timeline::AudioProcessorRackEdit::Remove {
+                                processor_id: query.processor_id,
+                            },
+                        },
+                    ))
+                    .expect("delete exact armed owner"),
+                1 => host
+                    .app_state
+                    .borrow_mut()
+                    .dispatch_action(crate::app::ui_actions::track_set_author_control_action(
+                        crate::app::product_action::TrackSetAuthorControlPayload {
+                            track_id: occurrence.track_id,
+                            control: crate::app::product_action::TrackAuthorControl::Lock,
+                            enabled: true,
+                        },
+                    ))
+                    .expect("lock exact owner"),
+                2 => {
+                    let mut state = host.app_state.borrow_mut();
+                    let processor = state
+                        .active_sequence_mut_uncommitted()
+                        .expect("Sequence")
+                        .audio_program
+                        .processing_scopes
+                        .iter_mut()
+                        .find(|scope| scope.id == scope_id)
+                        .expect("Scope")
+                        .processors
+                        .processors
+                        .iter_mut()
+                        .find(|processor| processor.id == query.processor_id)
+                        .expect("native processor");
+                    let mondrian_timeline::audio::AudioProcessorDefinitionRef::Clap {
+                        binary_sha256,
+                        ..
+                    } = &mut processor.definition
+                    else {
+                        panic!("native fixture");
+                    };
+                    *binary_sha256 = Some([8; 32]);
+                }
+                3 => {
+                    let mut state = host.app_state.borrow_mut();
+                    let other = state.active_sequence().expect("Sequence").audio_tracks[0]
+                        .clips
+                        .iter()
+                        .find(|clip| clip.id != occurrence.clip_id)
+                        .expect("other occurrence")
+                        .id;
+                    state.selection.selected_clips = vec![crate::app::SelectedClipRef {
+                        track_id: occurrence.track_id,
+                        clip_id: other,
+                        is_video_track: false,
+                    }];
+                }
+                4 => {
+                    let mut state = host.app_state.borrow_mut();
+                    let same_ids = state.active_sequence().expect("Sequence").clone();
+                    state.test_set_sequence(None);
+                    state.test_set_sequence(Some(same_ids));
+                }
+                _ => unreachable!(),
+            }
+            host.mark_dirty();
+            host.refresh_if_dirty(bounds);
+            let before = host.app_state().active_sequence().expect("new owner").clone();
+            let history = host.app_state().authoring_history().expect("history").diagnostics();
+            inspection_key_event(
+                &mut host,
+                &mut router,
+                &pending,
+                bounds,
+                UiEvent::KeyUp {
+                    key: mondrian_ui_core::KeyCode::Enter,
+                    modifiers: Modifiers::none(),
+                },
+            );
+            assert!(host.app_state().active_sequence().expect("late release").author_state_eq_ignoring_revision(&before),"boundary {boundary}: release cannot transfer intent to an invalid/replacement owner");
+            assert_eq!(
+                host.app_state().authoring_history().expect("history").diagnostics(),
+                history
+            );
+        }
+    }
+
+    #[test]
+    fn scope_rack_release_activation_cancels_on_modal_boundary_even_without_an_intervening_router_event(
+    ) {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1800.0);
+        for route_modal_tab in [false, true] {
+            let (mut host, _, mut router, pending) =
+                inspection_armed_move_host_fixture("rack-held-key-modal");
+            inspection_key_event(
+                &mut host,
+                &mut router,
+                &pending,
+                bounds,
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Enter,
+                    modifiers: Modifiers::none(),
+                },
+            );
+            let before = host.app_state().active_sequence().expect("before modal").clone();
+            let history = host.app_state().authoring_history().expect("history").diagnostics();
+            pending.push(crate::app::ui_actions::app_shell_preferences_action());
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            assert!(host.active_root().keyboard_focus_scope().is_some());
+            if route_modal_tab {
+                inspection_key_event(
+                    &mut host,
+                    &mut router,
+                    &pending,
+                    bounds,
+                    UiEvent::KeyDown {
+                        key: mondrian_ui_core::KeyCode::Tab,
+                        modifiers: Modifiers::none(),
+                    },
+                );
+            }
+            pending.push(crate::app::ui_actions::app_shell_close_modal_action());
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            assert!(host.active_root().keyboard_focus_scope().is_none());
+            inspection_key_event(
+                &mut host,
+                &mut router,
+                &pending,
+                bounds,
+                UiEvent::KeyUp {
+                    key: mondrian_ui_core::KeyCode::Enter,
+                    modifiers: Modifiers::none(),
+                },
+            );
+            assert!(host.app_state().active_sequence().expect("modal canceled release").author_state_eq_ignoring_revision(&before),"entering modal cancels an armed author command even if the modal closes before Router next runs");
+            assert_eq!(
+                host.app_state().authoring_history().expect("history").diagnostics(),
+                history
+            );
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct NumericTextClipboardPlatform {
+        state: Arc<std::sync::Mutex<NumericTextClipboardState>>,
+    }
+
+    #[derive(Default)]
+    struct NumericTextClipboardState {
+        text: Option<String>,
+        writes: Vec<String>,
+        reads: usize,
+        fail_write: bool,
+        fail_read: bool,
+    }
+
+    impl PlatformService for NumericTextClipboardPlatform {
+        fn clipboard_copy(&self, text: &str) -> Result<(), ClipboardError> {
+            let mut state = self.state.lock().expect("recording clipboard");
+            state.writes.push(text.to_owned());
+            if state.fail_write {
+                return Err(ClipboardError::WriteFailed);
+            }
+            state.text = Some(text.to_owned());
+            Ok(())
+        }
+
+        fn clipboard_paste(&self) -> Result<Option<String>, ClipboardError> {
+            let mut state = self.state.lock().expect("recording clipboard");
+            state.reads += 1;
+            if state.fail_read {
+                return Err(ClipboardError::ReadFailed);
+            }
+            Ok(state.text.clone())
+        }
+
+        fn open_file_dialog(
+            &self,
+            title: &str,
+            filters: &[FileFilter],
+        ) -> Result<FileDialogOutcome<Vec<PathBuf>>, FileDialogError> {
+            NoopPlatformService.open_file_dialog(title, filters)
+        }
+
+        fn save_file_dialog(
+            &self,
+            title: &str,
+            default_name: &str,
+            filters: &[FileFilter],
+        ) -> Result<FileDialogOutcome<PathBuf>, FileDialogError> {
+            NoopPlatformService.save_file_dialog(title, default_name, filters)
+        }
+
+        fn reveal_in_file_manager(&self, path: &Path) -> Result<(), FileRevealError> {
+            NoopPlatformService.reveal_in_file_manager(path)
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct NumericTextMenuContext<'a> {
+        pending: &'a PendingUiActions,
+        platform: &'a NumericTextClipboardPlatform,
+        emitted: &'a std::cell::RefCell<Vec<Action>>,
+        bounds: Rect,
+    }
+
+    fn numeric_text_menu_event(
+        host: &mut AppUiHost,
+        router: &mut mondrian_ui_events::EventRouter,
+        context: &NumericTextMenuContext<'_>,
+        event: UiEvent,
+    ) -> EventResult {
+        let NumericTextMenuContext { pending, platform, emitted, bounds } = *context;
+        let result = router.route(
+            event,
+            &mut mondrian_ui_core::tree::WidgetTreeView::new(host.active_root_mut()),
+            &|action: Action| {
+                emitted.borrow_mut().push(action.clone());
+                pending.push(action);
+            },
+        );
+        host.drain_pending_actions(pending, bounds, platform);
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        result
+    }
+
+    fn numeric_text_edit_menu(
+        host: &mut AppUiHost,
+        router: &mut mondrian_ui_events::EventRouter,
+        context: &NumericTextMenuContext<'_>,
+        entry: mondrian_ui_core::WidgetId,
+        command: mondrian_ui_core::widget::EditCommand,
+        available: bool,
+    ) {
+        let emitted = context.emitted;
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        use mondrian_ui_core::{AccessibilityRole, KeyCode};
+        fn edit_menu(widget: &dyn Widget) -> Option<mondrian_ui_core::WidgetId> {
+            if widget.accessibility().is_some_and(|node| {
+                node.role == AccessibilityRole::Menu
+                    && matches!(node.name.as_deref(), Some("编辑" | "Edit"))
+            }) {
+                return Some(widget.id());
+            }
+            (0..widget.child_count()).find_map(|i| widget.child(i).and_then(edit_menu))
+        }
+        assert_eq!(
+            router.focused(),
+            Some(entry),
+            "exact numeric owner before menu"
+        );
+        let menu_id = edit_menu(host.active_root()).expect("actual root Edit menu");
+        let menu_bounds = host.root().menu_bar_bounds_for_test();
+        let trigger = {
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let menu = tree.get(menu_id).expect("Edit trigger");
+            (menu_bounds.x.floor() as i32..(menu_bounds.x + menu_bounds.width).ceil() as i32)
+                .map(|x| Point::new(x as f32 + 0.5, menu_bounds.center().y))
+                .find(|point| menu.hit_test(*point))
+                .expect("laid out Edit trigger")
+        };
+        let click = |position| {
+            [
+                UiEvent::MouseDown {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::MouseUp {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+            ]
+        };
+        for event in click(trigger) {
+            assert_eq!(
+                numeric_text_menu_event(host, router, context, event),
+                EventResult::Handled
+            );
+        }
+        let rows = crate::app_ui::menu_bar::default_menu_items()
+            .into_iter()
+            .find(|(label, _)| *label == "编辑")
+            .expect("semantic Edit model")
+            .1;
+        let index = rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    &row.command,
+                    mondrian_ui_widgets::menu::MenuItemCommand::Focused(actual) if *actual == command
+                )
+            })
+            .expect("exact focused edit command row");
+        {
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let menu = tree.get(menu_id).expect("open actual Edit menu");
+            assert_eq!(
+                menu.accessibility().expect("menu").state.expanded,
+                Some(true)
+            );
+            let mut matching = Vec::new();
+            menu.visit_accessibility_nodes(&mut |node| {
+                if node.role == AccessibilityRole::MenuItem
+                    && node.name.as_deref() == Some(rows[index].label.as_str())
+                {
+                    matching.push(node.state.disabled);
+                }
+            });
+            assert_eq!(
+                matching,
+                vec![!available],
+                "actual numeric text command availability: {command:?}"
+            );
+        }
+        let theme = current_theme();
+        let spacing = &theme.spacing;
+        let row_point = Point::new(
+            trigger.x + spacing.menu_row_padding_x,
+            menu_bounds.y
+                + menu_bounds.height
+                + spacing.menu_popup_gap
+                + spacing.menu_popup_padding
+                + spacing.menu_item_height * (index as f32 + 0.5),
+        );
+        drop(theme);
+        for event in click(row_point) {
+            assert_eq!(
+                numeric_text_menu_event(host, router, context, event),
+                EventResult::Handled
+            );
+        }
+        if !available {
+            numeric_text_menu_event(
+                host,
+                router,
+                context,
+                UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            );
+        }
+        assert_eq!(
+            router.focused(),
+            Some(entry),
+            "Edit menu restores exact numeric text owner"
+        );
+        assert!(
+            !emitted
+                .borrow()
+                .iter()
+                .any(|action| matches!(action, Action::Cut | Action::Copy | Action::Paste)),
+            "numeric text commands must never fall through to Clip edit actions"
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum NumericTextMenuScenario {
+        CopyCutPaste,
+        CopyCutPasteThenEscape,
+        ClipboardFailure,
+        UnavailableSelectionAndEmptyPaste,
+    }
+
+    fn assert_numeric_text_menu_ownership(scenario: NumericTextMenuScenario) {
+        use mondrian_ui_core::{widget::EditCommand, KeyCode};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1800.0);
+        let (mut host, scope_id, processor_id) = inspection_host_fixture("numeric-text-menu");
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let entry = inspection_scope_numeric_entry_id(&mut host);
+        let platform = NumericTextClipboardPlatform::default();
+        let pending = PendingUiActions::default();
+        let emitted = std::cell::RefCell::new(Vec::new());
+        let context = NumericTextMenuContext {
+            pending: &pending,
+            platform: &platform,
+            emitted: &emitted,
+            bounds,
+        };
+        let mut router = mondrian_ui_events::EventRouter::with_platform(
+            host.active_root().id(),
+            Box::new(platform.clone()),
+        );
+        inspection_focus_by_tab(&mut host, &mut router, entry, &pending);
+        host.drain_pending_actions(&pending, bounds, &platform);
+        let before = host.app_state().active_sequence().expect("original").clone();
+        let history = host.app_state().authoring_history().expect("history").diagnostics();
+        let key = |key, modifiers| UiEvent::KeyDown { key, modifiers };
+        for event in [
+            key(
+                KeyCode::A,
+                crate::app_ui::test_utils::primary_text_modifiers(),
+            ),
+            UiEvent::TextInput("-20.125".to_owned()),
+        ] {
+            numeric_text_menu_event(&mut host, &mut router, &context, event);
+        }
+        if matches!(
+            scenario,
+            NumericTextMenuScenario::UnavailableSelectionAndEmptyPaste
+        ) {
+            for command in [EditCommand::Copy, EditCommand::Cut] {
+                numeric_text_edit_menu(&mut host, &mut router, &context, entry, command, false);
+            }
+            let clipboard = platform.state.lock().expect("clipboard");
+            assert!(
+                clipboard.writes.is_empty(),
+                "disabled commands cannot contact clipboard"
+            );
+            drop(clipboard);
+        }
+        for event in [
+            key(KeyCode::Home, Modifiers::none()),
+            key(KeyCode::Right, Modifiers::none()),
+            key(KeyCode::Right, Modifiers::shift()),
+        ] {
+            numeric_text_menu_event(&mut host, &mut router, &context, event);
+        }
+        match scenario {
+            NumericTextMenuScenario::CopyCutPaste
+            | NumericTextMenuScenario::CopyCutPasteThenEscape => {
+                for command in [EditCommand::Copy, EditCommand::Cut] {
+                    numeric_text_edit_menu(&mut host, &mut router, &context, entry, command, true);
+                    assert_eq!(
+                        platform.state.lock().expect("clipboard").text.as_deref(),
+                        Some("2")
+                    );
+                }
+                platform.state.lock().expect("clipboard").text = Some("3".to_owned());
+            }
+            NumericTextMenuScenario::ClipboardFailure => {
+                let mut clipboard = platform.state.lock().expect("clipboard");
+                clipboard.text = Some("unchanged external clipboard".to_owned());
+                clipboard.fail_write = true;
+                clipboard.fail_read = true;
+                drop(clipboard);
+                numeric_text_edit_menu(
+                    &mut host,
+                    &mut router,
+                    &context,
+                    entry,
+                    EditCommand::Cut,
+                    true,
+                );
+            }
+            NumericTextMenuScenario::UnavailableSelectionAndEmptyPaste => {
+                platform.state.lock().expect("clipboard").text = Some(String::new());
+            }
+        }
+        numeric_text_edit_menu(
+            &mut host,
+            &mut router,
+            &context,
+            entry,
+            EditCommand::Paste,
+            true,
+        );
+        if !matches!(
+            scenario,
+            NumericTextMenuScenario::CopyCutPaste | NumericTextMenuScenario::CopyCutPasteThenEscape
+        ) {
+            numeric_text_menu_event(
+                &mut host,
+                &mut router,
+                &context,
+                UiEvent::TextInput("3".to_owned()),
+            );
+        }
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("unconfirmed text")
+            .author_state_eq_ignoring_revision(&before));
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            history
+        );
+        assert_eq!(
+            host.app_state().active_clipboard_kind(),
+            None,
+            "text clipboard cannot create an author Clip clipboard"
+        );
+        {
+            let clipboard = platform.state.lock().expect("clipboard");
+            assert_eq!(clipboard.reads, 1);
+            let expected_writes: &[&str] = match scenario {
+                NumericTextMenuScenario::CopyCutPaste
+                | NumericTextMenuScenario::CopyCutPasteThenEscape => &["2", "2"],
+                NumericTextMenuScenario::ClipboardFailure => &["2"],
+                NumericTextMenuScenario::UnavailableSelectionAndEmptyPaste => &[],
+            };
+            assert_eq!(
+                clipboard.writes.iter().map(String::as_str).collect::<Vec<_>>(),
+                expected_writes
+            );
+            if matches!(scenario, NumericTextMenuScenario::ClipboardFailure) {
+                assert_eq!(
+                    clipboard.text.as_deref(),
+                    Some("unchanged external clipboard")
+                );
+            }
+        }
+        if matches!(scenario, NumericTextMenuScenario::CopyCutPasteThenEscape) {
+            use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            assert_eq!(
+                tree.get(entry)
+                    .expect("exact numeric draft owner")
+                    .accessibility()
+                    .expect("numeric text semantics")
+                    .value,
+                Some(mondrian_ui_core::AccessibilityValue::Text(
+                    "-30.125".to_owned()
+                )),
+                "actual text clipboard operations modify only the owned draft before Escape"
+            );
+            numeric_text_menu_event(
+                &mut host,
+                &mut router,
+                &context,
+                key(KeyCode::Escape, Modifiers::none()),
+            );
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("Escape")
+                .author_state_eq_ignoring_revision(&before));
+            assert_eq!(
+                host.app_state().authoring_history().expect("history").diagnostics(),
+                history
+            );
+            inspection_focus_by_tab(&mut host, &mut router, entry, &pending);
+            numeric_text_menu_event(
+                &mut host,
+                &mut router,
+                &context,
+                key(KeyCode::Enter, Modifiers::none()),
+            );
+            assert_eq!(
+                inspection_scope_gain(&host.app_state(), scope_id, processor_id),
+                -18.4
+            );
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("unchanged confirmation")
+                .author_state_eq_ignoring_revision(&before));
+            assert_eq!(
+                host.app_state().authoring_history().expect("history").diagnostics(),
+                history
+            );
+            return;
+        }
+        for confirmation in 0..2 {
+            numeric_text_menu_event(
+                &mut host,
+                &mut router,
+                &context,
+                key(KeyCode::Enter, Modifiers::none()),
+            );
+            assert_eq!(inspection_scope_gain(&host.app_state(), scope_id, processor_id), -30.125,
+                "correct local Cut/Paste selection survives menu focus suspension, clipboard failure and empty Paste: {scenario:?}, confirmation={confirmation}");
+            assert_eq!(
+                host.app_state()
+                    .authoring_history()
+                    .expect("history")
+                    .diagnostics()
+                    .undo_entries,
+                history.undo_entries + 1
+            );
+        }
+        assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo numeric commit"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("Undo")
+            .author_state_eq_ignoring_revision(&before));
+    }
+
+    #[test]
+    fn scope_rack_numeric_edit_menu_copy_cut_paste_owns_local_text_and_commits_once() {
+        assert_numeric_text_menu_ownership(NumericTextMenuScenario::CopyCutPaste);
+    }
+
+    #[test]
+    fn scope_rack_numeric_edit_menu_clipboard_failure_preserves_selection_without_clip_fallback() {
+        assert_numeric_text_menu_ownership(NumericTextMenuScenario::ClipboardFailure);
+    }
+
+    #[test]
+    fn scope_rack_numeric_edit_menu_disables_unselected_copy_cut_and_empty_paste_preserves_selection(
+    ) {
+        assert_numeric_text_menu_ownership(
+            NumericTextMenuScenario::UnavailableSelectionAndEmptyPaste,
+        );
+    }
+
+    #[test]
+    fn scope_rack_numeric_edit_menu_escape_after_text_cut_paste_has_no_author_history() {
+        assert_numeric_text_menu_ownership(NumericTextMenuScenario::CopyCutPasteThenEscape);
+    }
+
+    fn inspection_scope_numeric_entry_id(host: &mut AppUiHost) -> mondrian_ui_core::WidgetId {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        let slider = inspection_control(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Slider,
+            None,
+        )
+        .expect("unique fixture Scope parameter Slider");
+        let tree = WidgetTreeView::new(host.active_root_mut());
+        let compound = tree
+            .get(tree.parent_id(slider).expect("numeric compound"))
+            .expect("numeric compound exists");
+        assert_eq!(
+            compound.child_count(),
+            2,
+            "actual numeric compound has a Slider and exact NumberInput"
+        );
+        let controls = (0..compound.child_count())
+            .filter_map(|index| compound.child(index))
+            .filter(|child| child.id() != slider && child.can_focus())
+            .map(|child| child.id())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            controls.len(),
+            1,
+            "identify exact sibling for test setup without production label/value identity"
+        );
+        controls[0]
+    }
+
+    fn inspection_numeric_draft_refresh_check(metadata_refresh: bool, cancel: bool) {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1800.0);
+        let (mut host, query, calls, started, release) =
+            inspection_native_host_fixture("scope-numeric-draft-refresh");
+        let mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+            scope_id, ..
+        } = query.target
+        else {
+            panic!("Scope");
+        };
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let entry = inspection_scope_numeric_entry_id(&mut host);
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, entry, &pending);
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        let before = host.app_state().active_sequence().expect("before draft").clone();
+        let history = host.app_state().authoring_history().expect("history").diagnostics();
+        let prepares = calls.load(Ordering::SeqCst);
+        for event in [
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+            },
+            UiEvent::TextInput("-20.125".to_owned()),
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::Home,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::Right,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::Right,
+                modifiers: Modifiers::shift(),
+            },
+        ] {
+            inspection_key_event(&mut host, &mut router, &pending, bounds, event);
+        }
+        assert!(
+            host.app_state()
+                .active_sequence()
+                .expect("local draft")
+                .author_state_eq_ignoring_revision(&before),
+            "typed text and caret/selection remain local until explicit confirmation"
+        );
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            history
+        );
+        if metadata_refresh {
+            pending.push(
+                ProductAction::Audio(AudioProductAction::QueryProcessorInputs(query))
+                    .into_external_action(),
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            started
+                .recv_timeout(Duration::from_secs(5))
+                .expect("actual bounded metadata work starts while a numeric draft owns focus");
+            release.send(()).expect("publish fresh input metadata");
+            crate::app::audio_input_observation::tests::finish(&mut host.app_state.borrow_mut());
+            host.mark_dirty();
+            host.refresh_if_dirty(bounds);
+            assert_eq!(calls.load(Ordering::SeqCst), prepares + 1);
+            assert!(matches!(
+                host.app_state().audio_processor_input_observation(query),
+                crate::app::audio_input_observation::AudioInputObservation::Ready(_)
+            ));
+            let add_source = Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn)
+                .expect("catalog")
+                .text("audio-sidechain-add-source");
+            assert!(inspection_control(host.active_root(),false,mondrian_ui_core::AccessibilityRole::Menu,Some(&add_source)).is_some(),"fresh Ready metadata is projected while the numeric draft remains focused; focus cannot indefinitely defer model refresh");
+        } else {
+            pending.push(
+                crate::app::ui_actions::app_shell_preferences_locale_changed_action(
+                    crate::app_ui::localization::AppUiLocalePreference::EnUs,
+                ),
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            let english = Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs)
+                .expect("catalog")
+                .text("audio-rack-bypass");
+            assert!(
+                inspection_control(
+                    host.active_root(),
+                    false,
+                    mondrian_ui_core::AccessibilityRole::Checkbox,
+                    Some(&english)
+                )
+                .is_some(),
+                "actual localized projection changed"
+            );
+        }
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("refresh")
+            .author_state_eq_ignoring_revision(&before));
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            history,
+            "metadata/locale refresh is not an author edit"
+        );
+        if cancel {
+            assert!(
+                WidgetTreeView::new(host.active_root_mut())
+                    .get(entry)
+                    .is_some_and(|widget| widget.accepts_text_input()),
+                "the exact enabled numeric owner must still hold its local draft before Escape"
+            );
+            inspection_key_event(
+                &mut host,
+                &mut router,
+                &pending,
+                bounds,
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Escape,
+                    modifiers: Modifiers::none(),
+                },
+            );
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("Escape")
+                .author_state_eq_ignoring_revision(&before));
+            assert_eq!(
+                host.app_state().authoring_history().expect("history").diagnostics(),
+                history,
+                "Escape discards retained draft without history"
+            );
+            inspection_focus_by_tab(&mut host, &mut router, entry, &pending);
+            inspection_key_event(
+                &mut host,
+                &mut router,
+                &pending,
+                bounds,
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Enter,
+                    modifiers: Modifiers::none(),
+                },
+            );
+            assert!(
+                host.app_state()
+                    .active_sequence()
+                    .expect("fresh baseline")
+                    .author_state_eq_ignoring_revision(&before),
+                "Escape restored the canonical baseline; a later unchanged Enter is a no-op"
+            );
+            assert_eq!(
+                host.app_state().authoring_history().expect("history").diagnostics(),
+                history
+            );
+        } else {
+            inspection_key_event(
+                &mut host,
+                &mut router,
+                &pending,
+                bounds,
+                UiEvent::TextInput("3".to_owned()),
+            );
+            inspection_key_event(
+                &mut host,
+                &mut router,
+                &pending,
+                bounds,
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Enter,
+                    modifiers: Modifiers::none(),
+                },
+            );
+            assert_eq!(inspection_scope_gain(&host.app_state(),scope_id,query.processor_id),-30.125,"refresh retained the raw draft, Home/Right caret and Shift+Right selection; replacing selected 2 with 3 commits exact authored precision");
+            assert_eq!(
+                host.app_state()
+                    .authoring_history()
+                    .expect("history")
+                    .diagnostics()
+                    .undo_entries,
+                history.undo_entries + 1,
+                "one confirmed numeric edit creates one history entry"
+            );
+            inspection_key_event(
+                &mut host,
+                &mut router,
+                &pending,
+                bounds,
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Enter,
+                    modifiers: Modifiers::none(),
+                },
+            );
+            assert_eq!(
+                host.app_state()
+                    .authoring_history()
+                    .expect("history")
+                    .diagnostics()
+                    .undo_entries,
+                history.undo_entries + 1,
+                "repeated Enter cannot repeat confirmation"
+            );
+            assert!(host
+                .app_state
+                .borrow_mut()
+                .undo_timeline()
+                .expect("Undo one numeric confirmation"));
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("Undo")
+                .author_state_eq_ignoring_revision(&before));
+            assert_eq!(host.app_state().authoring_history().expect("history").diagnostics().undo_entries,history.undo_entries,"Undo consumed only the confirmed edit; refresh and drafting created no extra history");
+        }
+    }
+
+    #[test]
+    fn scope_rack_numeric_draft_survives_locale_refresh_and_commits_once() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        inspection_numeric_draft_refresh_check(false, false);
+    }
+
+    #[test]
+    fn scope_rack_numeric_draft_survives_native_input_metadata_publication_and_commits_once() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        inspection_numeric_draft_refresh_check(true, false);
+    }
+
+    #[test]
+    fn scope_rack_numeric_draft_escape_after_locale_or_metadata_refresh_has_no_author_history() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        for metadata in [false, true] {
+            inspection_numeric_draft_refresh_check(metadata, true);
+        }
+    }
+
+    #[test]
+    fn scope_rack_numeric_draft_refuses_changed_baseline_schema_deleted_locked_rebound_occurrence_or_session(
+    ) {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1800.0);
+        for boundary in 0..7 {
+            let (mut host, query, _, _, _) =
+                inspection_native_host_fixture("scope-numeric-draft-refusal");
+            let mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+                scope_id,
+                occurrence,
+            } = query.target
+            else {
+                panic!("Scope");
+            };
+            TreeWalker::layout(host.active_root_mut(), bounds);
+            let entry = inspection_scope_numeric_entry_id(&mut host);
+            let pending = PendingUiActions::default();
+            let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+            inspection_focus_by_tab(&mut host, &mut router, entry, &pending);
+            for event in [
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::A,
+                    modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+                },
+                UiEvent::TextInput("-42.125".to_owned()),
+            ] {
+                inspection_key_event(&mut host, &mut router, &pending, bounds, event);
+            }
+            match boundary {
+                0 => host
+                    .app_state
+                    .borrow_mut()
+                    .dispatch_action(crate::app::ui_actions::audio_processor_rack_edit_action(
+                        mondrian_timeline::AudioProcessorRackEditRequest {
+                            address:
+                                mondrian_timeline::AudioProcessorRackAddress::ProcessingScope {
+                                    scope_id,
+                                },
+                            edit:
+                                mondrian_timeline::AudioProcessorRackEdit::SetParameterStaticValue {
+                                    processor_id: query.processor_id,
+                                    parameter_id: mondrian_core::ParameterId::new_static(
+                                        mondrian_timeline::audio::GAIN_DB_PARAMETER_ID,
+                                    ),
+                                    value: -11.0,
+                                },
+                        },
+                    ))
+                    .expect("external canonical value edit"),
+                1 => {
+                    // Changed schema fixture; draft admission must use canonical schema identity.
+                    let mut state = host.app_state.borrow_mut();
+                    state
+                        .active_sequence_mut_uncommitted()
+                        .expect("Sequence")
+                        .audio_program
+                        .processing_scopes
+                        .iter_mut()
+                        .find(|scope| scope.id == scope_id)
+                        .expect("Scope")
+                        .processors
+                        .processors
+                        .iter_mut()
+                        .find(|processor| processor.id == query.processor_id)
+                        .expect("processor")
+                        .parameters
+                        .get_mut(&mondrian_core::ParameterId::new_static(
+                            mondrian_timeline::audio::GAIN_DB_PARAMETER_ID,
+                        ))
+                        .expect("parameter")
+                        .schema
+                        .schema_version += 1;
+                }
+                2 => host
+                    .app_state
+                    .borrow_mut()
+                    .dispatch_action(crate::app::ui_actions::audio_processor_rack_edit_action(
+                        mondrian_timeline::AudioProcessorRackEditRequest {
+                            address:
+                                mondrian_timeline::AudioProcessorRackAddress::ProcessingScope {
+                                    scope_id,
+                                },
+                            edit: mondrian_timeline::AudioProcessorRackEdit::Remove {
+                                processor_id: query.processor_id,
+                            },
+                        },
+                    ))
+                    .expect("delete exact draft owner"),
+                3 => host
+                    .app_state
+                    .borrow_mut()
+                    .dispatch_action(crate::app::ui_actions::track_set_author_control_action(
+                        crate::app::product_action::TrackSetAuthorControlPayload {
+                            track_id: occurrence.track_id,
+                            control: crate::app::product_action::TrackAuthorControl::Lock,
+                            enabled: true,
+                        },
+                    ))
+                    .expect("lock exact owner"),
+                4 => {
+                    // Changed native binding fixture; actual rebind admission remains native-probe owned.
+                    let mut state = host.app_state.borrow_mut();
+                    let processor = state
+                        .active_sequence_mut_uncommitted()
+                        .expect("Sequence")
+                        .audio_program
+                        .processing_scopes
+                        .iter_mut()
+                        .find(|scope| scope.id == scope_id)
+                        .expect("Scope")
+                        .processors
+                        .processors
+                        .iter_mut()
+                        .find(|processor| processor.id == query.processor_id)
+                        .expect("processor");
+                    let mondrian_timeline::audio::AudioProcessorDefinitionRef::Clap {
+                        binary_sha256,
+                        ..
+                    } = &mut processor.definition
+                    else {
+                        panic!("CLAP fixture");
+                    };
+                    *binary_sha256 = Some([8; 32]);
+                }
+                5 => {
+                    let mut state = host.app_state.borrow_mut();
+                    let other = state.active_sequence().expect("Sequence").audio_tracks[0]
+                        .clips
+                        .iter()
+                        .find(|clip| clip.id != occurrence.clip_id)
+                        .expect("other materialization")
+                        .id;
+                    state.selection.selected_clips = vec![crate::app::SelectedClipRef {
+                        track_id: occurrence.track_id,
+                        clip_id: other,
+                        is_video_track: false,
+                    }];
+                }
+                6 => {
+                    let mut state = host.app_state.borrow_mut();
+                    let same_ids = state.active_sequence().expect("Sequence").clone();
+                    state.test_set_sequence(None);
+                    state.test_set_sequence(Some(same_ids));
+                }
+                _ => unreachable!(),
+            }
+            host.mark_dirty();
+            host.refresh_if_dirty(bounds);
+            assert!(
+                WidgetTreeView::new(host.active_root_mut()).get(entry).is_none(),
+                "boundary {boundary}: invalid draft cannot keep the old input identity"
+            );
+            let after_boundary = host.app_state().active_sequence().expect("live owner").clone();
+            let history = host.app_state().authoring_history().expect("history").diagnostics();
+            inspection_key_event(
+                &mut host,
+                &mut router,
+                &pending,
+                bounds,
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Enter,
+                    modifiers: Modifiers::none(),
+                },
+            );
+            assert!(host.app_state().active_sequence().expect("late confirmation").author_state_eq_ignoring_revision(&after_boundary),"boundary {boundary}: late Enter cannot overwrite a current value or transfer the draft");
+            assert_eq!(
+                host.app_state().authoring_history().expect("history").diagnostics(),
+                history
+            );
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum NumericLocalHistoryScenario {
+        ConfirmThenAuthorUndo,
+        Escape,
+        LocaleRefresh,
+        MetadataRefresh,
+    }
+
+    fn numeric_local_history_text(
+        host: &mut AppUiHost,
+        owner: mondrian_ui_core::WidgetId,
+    ) -> String {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        let tree = WidgetTreeView::new(host.active_root_mut());
+        let value = tree
+            .get(owner)
+            .expect("exact live numeric history owner")
+            .accessibility()
+            .expect("numeric text accessibility")
+            .value;
+        let Some(mondrian_ui_core::AccessibilityValue::Text(text)) = value else {
+            panic!("numeric text value");
+        };
+        text
+    }
+
+    fn assert_numeric_local_history(scenario: NumericLocalHistoryScenario) {
+        use mondrian_ui_core::{shortcut::ShortcutBinding, KeyCode};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1800.0);
+        let refresh = matches!(
+            scenario,
+            NumericLocalHistoryScenario::LocaleRefresh
+                | NumericLocalHistoryScenario::MetadataRefresh
+        );
+        let (mut host, scope_id, processor_id, metadata) = if refresh {
+            let (host, query, calls, started, release) =
+                inspection_native_host_fixture("numeric-local-history-refresh");
+            let mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+                scope_id,
+                ..
+            } = query.target
+            else {
+                panic!("Scope")
+            };
+            (
+                host,
+                scope_id,
+                query.processor_id,
+                Some((query, calls, started, release)),
+            )
+        } else {
+            let (host, scope_id, processor_id) =
+                inspection_host_fixture("numeric-local-history-confirm");
+            (host, scope_id, processor_id, None)
+        };
+        if !refresh {
+            let clip_id = host.app_state().selection.selected_clips[0].clip_id;
+            host.app_state
+                .borrow_mut()
+                .dispatch_action(Action::NudgeClip { clip_id, delta_frames: 1 })
+                .expect("seed an unrelated real Clip edit before numeric text ownership");
+            host.mark_dirty();
+            host.refresh_if_dirty(bounds);
+        }
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let entry = inspection_scope_numeric_entry_id(&mut host);
+        let platform = NumericTextClipboardPlatform::default();
+        let pending = PendingUiActions::default();
+        let emitted = std::cell::RefCell::new(Vec::new());
+        let context = NumericTextMenuContext {
+            pending: &pending,
+            platform: &platform,
+            emitted: &emitted,
+            bounds,
+        };
+        let mut router = mondrian_ui_events::EventRouter::with_platform(
+            host.active_root().id(),
+            Box::new(platform.clone()),
+        );
+        let primary = crate::app_ui::test_utils::primary_text_modifiers();
+        let redo = Modifiers { shift: true, ..primary };
+        router
+            .shortcut_manager_mut()
+            .register_global(ShortcutBinding::new(KeyCode::Z, primary), Action::Undo);
+        router
+            .shortcut_manager_mut()
+            .register_global(ShortcutBinding::new(KeyCode::Z, redo), Action::Redo);
+        inspection_focus_by_tab(&mut host, &mut router, entry, &pending);
+        host.drain_pending_actions(&pending, bounds, &platform);
+        let before = host.app_state().active_sequence().expect("before local typing").clone();
+        let generation = host.app_state().project_author_generation();
+        let history = host.app_state().authoring_history().expect("history").diagnostics();
+        let baseline = numeric_local_history_text(&mut host, entry);
+        let key = |key, modifiers| UiEvent::KeyDown { key, modifiers };
+        for event in [
+            key(KeyCode::A, primary),
+            UiEvent::TextInput("-20.125".to_owned()),
+        ] {
+            numeric_text_menu_event(&mut host, &mut router, &context, event);
+        }
+        assert_eq!(numeric_local_history_text(&mut host, entry), "-20.125");
+        if refresh {
+            if matches!(scenario, NumericLocalHistoryScenario::MetadataRefresh) {
+                let (query, calls, started, release) =
+                    metadata.as_ref().expect("native refresh fixture");
+                let prepares = calls.load(Ordering::SeqCst);
+                pending.push(
+                    ProductAction::Audio(AudioProductAction::QueryProcessorInputs(*query))
+                        .into_external_action(),
+                );
+                host.drain_pending_actions(&pending, bounds, &platform);
+                started
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("actual metadata request starts with local text history");
+                release.send(()).expect("complete metadata query");
+                crate::app::audio_input_observation::tests::finish(
+                    &mut host.app_state.borrow_mut(),
+                );
+                host.mark_dirty();
+                host.refresh_if_dirty(bounds);
+                assert_eq!(calls.load(Ordering::SeqCst), prepares + 1);
+                let add = Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn)
+                    .expect("catalog")
+                    .text("audio-sidechain-add-source");
+                assert!(
+                    inspection_control(
+                        host.active_root(),
+                        false,
+                        mondrian_ui_core::AccessibilityRole::Menu,
+                        Some(&add)
+                    )
+                    .is_some(),
+                    "fresh metadata is actually projected while owned local history is retained"
+                );
+            } else {
+                pending.push(
+                    crate::app::ui_actions::app_shell_preferences_locale_changed_action(
+                        crate::app_ui::localization::AppUiLocalePreference::EnUs,
+                    ),
+                );
+                host.drain_pending_actions(&pending, bounds, &platform);
+                let bypass = Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs)
+                    .expect("catalog")
+                    .text("audio-rack-bypass");
+                assert!(
+                    inspection_control(
+                        host.active_root(),
+                        false,
+                        mondrian_ui_core::AccessibilityRole::Checkbox,
+                        Some(&bypass)
+                    )
+                    .is_some(),
+                    "the actual current projection has changed locale"
+                );
+            }
+            TreeWalker::layout(host.active_root_mut(), bounds);
+        }
+        for (modifiers, expected) in [
+            (primary, baseline.as_str()),
+            (redo, "-20.125"),
+            (primary, baseline.as_str()),
+            (redo, "-20.125"),
+        ] {
+            assert_eq!(
+                numeric_text_menu_event(
+                    &mut host,
+                    &mut router,
+                    &context,
+                    key(KeyCode::Z, modifiers)
+                ),
+                EventResult::Handled
+            );
+            assert!(host.app_state().active_sequence().expect("local Undo/Redo").author_state_eq_ignoring_revision(&before), "local Undo/Redo cannot commit a numeric draft or undo the prior Clip edit: {scenario:?}");
+            assert_eq!(host.app_state().project_author_generation(), generation, "a commit followed by author Undo would conceal a wrong value but advance author generation");
+            assert_eq!(
+                host.app_state().authoring_history().expect("local history").diagnostics(),
+                history
+            );
+            assert!(
+                !emitted
+                    .borrow()
+                    .iter()
+                    .any(|action| matches!(action, Action::Undo | Action::Redo)),
+                "owned text history must not emit author Undo/Redo"
+            );
+            assert_eq!(numeric_local_history_text(&mut host, entry), expected);
+        }
+        if matches!(scenario, NumericLocalHistoryScenario::Escape) {
+            numeric_text_menu_event(
+                &mut host,
+                &mut router,
+                &context,
+                key(KeyCode::Escape, Modifiers::none()),
+            );
+            inspection_focus_by_tab(&mut host, &mut router, entry, &pending);
+            numeric_text_menu_event(
+                &mut host,
+                &mut router,
+                &context,
+                key(KeyCode::Enter, Modifiers::none()),
+            );
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("Escape")
+                .author_state_eq_ignoring_revision(&before));
+            assert_eq!(host.app_state().project_author_generation(), generation);
+            assert_eq!(
+                host.app_state().authoring_history().expect("Escape").diagnostics(),
+                history
+            );
+            assert_eq!(
+                inspection_scope_gain(&host.app_state(), scope_id, processor_id),
+                -18.4
+            );
+            return;
+        }
+        for _ in 0..2 {
+            numeric_text_menu_event(
+                &mut host,
+                &mut router,
+                &context,
+                key(KeyCode::Enter, Modifiers::none()),
+            );
+            assert_eq!(
+                inspection_scope_gain(&host.app_state(), scope_id, processor_id),
+                -20.125
+            );
+            assert_eq!(host.app_state().project_author_generation(), generation + 1);
+            assert_eq!(
+                host.app_state()
+                    .authoring_history()
+                    .expect("confirmed")
+                    .diagnostics()
+                    .undo_entries,
+                history.undo_entries + 1
+            );
+        }
+        numeric_text_menu_event(&mut host, &mut router, &context, key(KeyCode::Z, primary));
+        assert!(host.app_state().active_sequence().expect("author Undo after Enter").author_state_eq_ignoring_revision(&before), "confirmed numeric entry creates exactly one author Undo and retains the prior Clip edit");
+        assert_eq!(host.app_state().project_author_generation(), generation + 2);
+        assert_eq!(
+            host.app_state()
+                .authoring_history()
+                .expect("author Undo")
+                .diagnostics()
+                .undo_entries,
+            history.undo_entries
+        );
+        assert_eq!(
+            emitted.borrow().iter().filter(|action| matches!(action, Action::Undo)).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn scope_rack_numeric_local_history_does_not_undo_clip_and_enter_releases_author_undo() {
+        assert_numeric_local_history(NumericLocalHistoryScenario::ConfirmThenAuthorUndo);
+    }
+    #[test]
+    fn scope_rack_numeric_local_history_escape_discards_draft_without_author_history() {
+        assert_numeric_local_history(NumericLocalHistoryScenario::Escape);
+    }
+    #[test]
+    fn scope_rack_numeric_local_history_survives_actual_locale_projection() {
+        assert_numeric_local_history(NumericLocalHistoryScenario::LocaleRefresh);
+    }
+    #[test]
+    fn scope_rack_numeric_local_history_survives_actual_native_metadata_projection() {
+        assert_numeric_local_history(NumericLocalHistoryScenario::MetadataRefresh);
+    }
+
+    #[test]
+    fn scope_rack_numeric_keyboard_unselected_clipboard_chords_own_draft_with_global_bindings() {
+        use mondrian_ui_core::{shortcut::ShortcutBinding, widget::EditCommand, KeyCode};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1800.0);
+        for customized in [false, true] {
+            let (mut host, scope_id, processor_id) =
+                inspection_host_fixture("numeric-unselected-clipboard");
+            TreeWalker::layout(host.active_root_mut(), bounds);
+            let entry = inspection_scope_numeric_entry_id(&mut host);
+            let clip_id = host.app_state().selection.selected_clips[0].clip_id;
+            let pending = PendingUiActions::default();
+            let platform = NumericTextClipboardPlatform::default();
+            let emitted = std::cell::RefCell::new(Vec::new());
+            let context = NumericTextMenuContext {
+                pending: &pending,
+                platform: &platform,
+                emitted: &emitted,
+                bounds,
+            };
+            let primary = crate::app_ui::test_utils::primary_text_modifiers();
+            let mut router = mondrian_ui_events::EventRouter::with_platform(
+                host.active_root().id(),
+                Box::new(platform.clone()),
+            );
+            for (key, action) in [(KeyCode::C, Action::Copy), (KeyCode::X, Action::Cut)] {
+                let action = if customized {
+                    Action::NudgeClip { clip_id, delta_frames: 1 }
+                } else {
+                    action
+                };
+                router
+                    .shortcut_manager_mut()
+                    .register_global(ShortcutBinding::new(key, primary), action);
+            }
+            inspection_focus_by_tab(&mut host, &mut router, entry, &pending);
+            host.drain_pending_actions(&pending, bounds, &platform);
+            let before =
+                host.app_state().active_sequence().expect("before keyboard text copy").clone();
+            let generation = host.app_state().project_author_generation();
+            let history = host.app_state().authoring_history().expect("history").diagnostics();
+            for event in [
+                UiEvent::KeyDown { key: KeyCode::A, modifiers: primary },
+                UiEvent::TextInput("-20.125".to_owned()),
+            ] {
+                numeric_text_menu_event(&mut host, &mut router, &context, event);
+            }
+            for key in [KeyCode::C, KeyCode::X] {
+                assert_eq!(
+                    numeric_text_menu_event(
+                        &mut host,
+                        &mut router,
+                        &context,
+                        UiEvent::KeyDown { key, modifiers: primary }
+                    ),
+                    EventResult::Handled
+                );
+                assert!(host.app_state().active_sequence().expect("no-op text clipboard").author_state_eq_ignoring_revision(&before), "focused unselected text copy/cut must not confirm the draft or operate on the selected Clip, customized={customized}");
+                assert_eq!(host.app_state().project_author_generation(), generation);
+                assert_eq!(
+                    host.app_state().authoring_history().expect("no-op text command").diagnostics(),
+                    history
+                );
+                assert_eq!(
+                    inspection_scope_gain(&host.app_state(), scope_id, processor_id),
+                    -18.4
+                );
+                assert!(emitted.borrow().is_empty(), "the primitive must consume its exact text chord before any parent or global binding");
+            }
+            use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let input = tree.get(entry).expect("still focused numeric owner");
+            assert_eq!(input.edit_command_available(EditCommand::Copy), Some(false));
+            assert_eq!(input.edit_command_available(EditCommand::Cut), Some(false));
+            assert!(platform.state.lock().expect("clipboard").writes.is_empty());
+            assert_eq!(host.app_state().active_clipboard_kind(), None);
+        }
+    }
+
+    #[test]
+    fn scope_rack_numeric_large_paste_history_exhaustion_keeps_draft_owned_until_confirmation() {
+        use mondrian_ui_core::{shortcut::ShortcutBinding, KeyCode};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 1800.0);
+        let (mut host, scope_id, processor_id) =
+            inspection_host_fixture("numeric-large-paste-history");
+        let clip_id = host.app_state().selection.selected_clips[0].clip_id;
+        host.app_state
+            .borrow_mut()
+            .dispatch_action(Action::NudgeClip { clip_id, delta_frames: 1 })
+            .expect("seed real prior Clip Undo");
+        host.mark_dirty();
+        host.refresh_if_dirty(bounds);
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let entry = inspection_scope_numeric_entry_id(&mut host);
+        let pending = PendingUiActions::default();
+        let platform = NumericTextClipboardPlatform::default();
+        let emitted = std::cell::RefCell::new(Vec::new());
+        let context = NumericTextMenuContext {
+            pending: &pending,
+            platform: &platform,
+            emitted: &emitted,
+            bounds,
+        };
+        let primary = crate::app_ui::test_utils::primary_text_modifiers();
+        let key = |key| UiEvent::KeyDown { key, modifiers: primary };
+        let mut router = mondrian_ui_events::EventRouter::with_platform(
+            host.active_root().id(),
+            Box::new(platform.clone()),
+        );
+        router
+            .shortcut_manager_mut()
+            .register_global(ShortcutBinding::new(KeyCode::Z, primary), Action::Undo);
+        inspection_focus_by_tab(&mut host, &mut router, entry, &pending);
+        host.drain_pending_actions(&pending, bounds, &platform);
+        let before = host.app_state().active_sequence().expect("before Paste").clone();
+        let generation = host.app_state().project_author_generation();
+        let history = host
+            .app_state()
+            .authoring_history()
+            .expect("before Paste history")
+            .diagnostics();
+        // Twenty real 512 KiB replacement Pasts require more than 16 MiB of full
+        // before/after history but keep the live text field itself only 512 KiB.
+        let suffix = "x".repeat(512 * 1024);
+        for index in 0..20 {
+            let draft = format!("paste {index:02}:{suffix}");
+            platform.state.lock().expect("clipboard").text = Some(draft.clone());
+            numeric_text_menu_event(&mut host, &mut router, &context, key(KeyCode::A));
+            numeric_text_menu_event(&mut host, &mut router, &context, key(KeyCode::V));
+            assert_eq!(
+                numeric_local_history_text(&mut host, entry),
+                draft,
+                "memory policy must not truncate the current text draft"
+            );
+        }
+        {
+            use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+            let tree = WidgetTreeView::new(host.active_root_mut());
+            let retained = tree
+                .get(entry)
+                .expect("same enabled draft owner")
+                .control_inspection_state()
+                .expect("admitted draft");
+            let numeric = retained.numeric_input.expect("numeric history");
+            let history = &numeric.draft.history;
+            assert!(
+                history.entries.len() < 20,
+                "the byte budget, independently of the 100-entry budget, evicts oldest snapshots"
+            );
+            assert!(
+                history.entries.len() <= mondrian_ui_core::widget::TEXT_INPUT_HISTORY_MAX_ENTRIES
+            );
+            assert!(
+                history
+                    .entries
+                    .iter()
+                    .map(|entry| entry.text_before.capacity() + entry.text_after.capacity())
+                    .sum::<usize>()
+                    <= mondrian_ui_core::widget::TEXT_INPUT_HISTORY_MAX_BYTES
+            );
+            assert!(
+                history.owns_input,
+                "history eviction must preserve local key ownership"
+            );
+        }
+        for _ in 0..25 {
+            numeric_text_menu_event(&mut host, &mut router, &context, key(KeyCode::Z));
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("owned Undo")
+                .author_state_eq_ignoring_revision(&before));
+            assert_eq!(host.app_state().project_author_generation(), generation);
+            assert_eq!(
+                host.app_state().authoring_history().expect("no author Undo").diagnostics(),
+                history
+            );
+            assert!(
+                emitted.borrow().is_empty(),
+                "eviction/exhaustion cannot transfer local Undo to Clip history"
+            );
+        }
+        numeric_text_menu_event(&mut host, &mut router, &context, key(KeyCode::A));
+        numeric_text_menu_event(
+            &mut host,
+            &mut router,
+            &context,
+            UiEvent::TextInput("-20.125".to_owned()),
+        );
+        numeric_text_menu_event(
+            &mut host,
+            &mut router,
+            &context,
+            UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+        );
+        assert_eq!(
+            inspection_scope_gain(&host.app_state(), scope_id, processor_id),
+            -20.125
+        );
+        assert_eq!(host.app_state().project_author_generation(), generation + 1);
+        numeric_text_menu_event(&mut host, &mut router, &context, key(KeyCode::Z));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("confirmed author Undo")
+            .author_state_eq_ignoring_revision(&before));
+        assert_eq!(host.app_state().project_author_generation(), generation + 2);
+        assert_eq!(
+            emitted.borrow().iter().filter(|action| matches!(action, Action::Undo)).count(),
+            1
         );
     }
 }

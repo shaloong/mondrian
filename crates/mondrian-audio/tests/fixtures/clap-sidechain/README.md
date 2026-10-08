@@ -23,3 +23,20 @@ cargo test -p mondrian-audio --lib installed_clap_sidechain -- --ignored --test-
 
 Build the current product first. This fixture does not qualify arbitrary vendor
 plugins, other layouts, MIDI, native editors or other platforms.
+
+Render and thread lifecycle qualification: states 0–2 retain their exact original
+ports, gain and three-frame delay. State 3 exposes realtime gain/delay unchanged,
+and offline gain multiplied by 1.5 with five-frame latency/tail. State 4 declares
+a hard realtime requirement; state 5 declines offline mode. The fixture requires
+the standard host thread-check extension and validates init, state, ports, render,
+activation, latency, tail, callback, reset, start, process, stop and deactivation
+roles. A background query is performed during main initialization; processing
+never creates or joins threads. The fixture's render mode is an execution fact
+and is not persisted in its five-byte authored state.
+
+Transport state 6 retains default ports/latency and modulates gain by the signed
+timeline coordinate before the delay: `gain + ((sample % 251) / 1024)`. Silence
+stays silent and the finite tail remains valid. It requires seconds timeline validity only, absent steady counter,
+and zero unavailable musical, loop and transport fields. It independently
+decodes CLAP's 2^31 seconds factor to the prepared integer sample grid; no
+product converter is linked. Other states 0–5 retain their original meaning.

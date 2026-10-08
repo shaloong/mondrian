@@ -962,3 +962,12 @@ macro. App mints it when a control result enters the bounded observation cache;
 it is not a persisted author or archive identity. A connection action carries a
 closed session/Sequence/rack/processor/observation binding. Repeated cache reads
 retain its ID; refresh/replacement obtains a new ID even when the author is equal.
+
+
+The OpenFX adapter supplies one actual native host to optional OfxSetHost before
+enumeration, with module/host owners lasting through their legal callbacks. Its
+CPU Filter admission names Float32 depth and refuses a plugin that disables CPU
+rendering at descriptor, creation or change time. Progressive fields and
+PAR-scaled canonical project geometry are explicit; both Rust and native input
+validation reject nonrepresentable extents. These additions do not advertise
+all OpenFX contexts, GPU/interact support or a universal performance result.

@@ -53,6 +53,7 @@ use geometry::{
 /// keyboard navigation skips disabled items and separators.
 pub struct Dropdown {
     id: WidgetId,
+    inspection_identity: crate::control_inspection::ControlInspectionIdentity,
     label: String,
     items: Vec<MenuItem>,
     accessibility_ids: OnceCell<Vec<MenuAccessibilityIds>>,
@@ -78,9 +79,16 @@ pub struct Dropdown {
 }
 
 impl Dropdown {
+    /// Address this control independently of labels, ordering and current value.
+    pub fn with_control_inspection_key(mut self, key: Option<String>) -> Self {
+        self.inspection_identity.set_key(key);
+        self
+    }
+
     pub fn new(label: impl Into<String>, items: Vec<MenuItem>) -> Self {
         Self {
             id: WidgetId::new(),
+            inspection_identity: crate::control_inspection::ControlInspectionIdentity::default(),
             label: label.into(),
             items,
             accessibility_ids: OnceCell::new(),
@@ -836,6 +844,38 @@ impl Widget for Dropdown {
                 visitor,
             );
         }
+    }
+
+    fn set_control_inspection_key(&mut self, key: Option<String>) -> bool {
+        self.inspection_identity.set_key(key);
+        true
+    }
+
+    fn control_inspection_state(&self) -> Option<mondrian_ui_core::ControlInspectionState> {
+        self.inspection_identity.inspect(
+            self.id,
+            AccessibilityRole::Menu,
+            self.focused,
+            self.focus_visible,
+            self.enabled && !self.open,
+        )
+    }
+
+    fn restore_control_inspection_state(
+        &mut self,
+        state: &mondrian_ui_core::ControlInspectionState,
+    ) -> bool {
+        let Some((id, focused, focus_visible)) = self.inspection_identity.restore(
+            state,
+            AccessibilityRole::Menu,
+            self.enabled && !self.open,
+        ) else {
+            return false;
+        };
+        self.id = id;
+        self.focused = focused;
+        self.focus_visible = focus_visible;
+        true
     }
 
     fn accessibility(&self) -> Option<AccessibilityNode> {

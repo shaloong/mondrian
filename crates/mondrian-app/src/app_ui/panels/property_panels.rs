@@ -1578,6 +1578,52 @@ pub(super) fn audio_scope_occurrence_control(
     Dropdown::new(selector.selected_label.clone(), items).with_max_visible_items(8)
 }
 
+#[derive(serde::Serialize)]
+enum AudioRackControlSubject<'a> {
+    Rack,
+    Parameter(&'a mondrian_core::automation::ParameterSchema),
+    InputBus(&'a str),
+    Route(mondrian_core::AudioRouteId),
+}
+
+fn audio_rack_control_inspection_key(
+    rack: &AudioProcessorRackModel,
+    processor: Option<&crate::app_ui::audio_processor_rack::AudioProcessorInstanceModel>,
+    role: &str,
+    subject: AudioRackControlSubject<'_>,
+) -> Option<String> {
+    serde_json::to_string(&(
+        "audio-rack-control",
+        rack.address,
+        rack.input_inspection_target,
+        processor.map(|processor| (processor.processor_id, &processor.definition)),
+        role,
+        subject,
+    ))
+    .ok()
+}
+
+fn assign_numeric_control_inspection_key(widget: &mut dyn Widget, key: Option<String>) {
+    if let Some(node) = widget.accessibility() {
+        match node.role {
+            mondrian_ui_core::AccessibilityRole::Slider => {
+                widget.set_control_inspection_key(key);
+                return;
+            }
+            mondrian_ui_core::AccessibilityRole::TextInput => {
+                widget.set_control_inspection_key(key.map(|key| format!("{key}:numeric-entry")));
+                return;
+            }
+            _ => {}
+        }
+    }
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child_mut(index) {
+            assign_numeric_control_inspection_key(child, key.clone());
+        }
+    }
+}
+
 pub(super) fn with_audio_processor_rack_sections(
     mut panel: PropertyPanel,
     racks: &[AudioProcessorRackModel],
@@ -1625,6 +1671,12 @@ pub(super) fn with_audio_processor_rack_sections(
                 localizer.text("audio-rack-add-row"),
                 Box::new(
                     Dropdown::new(localizer.text("audio-rack-add-processor"), insert_items)
+                        .with_control_inspection_key(audio_rack_control_inspection_key(
+                            rack,
+                            None,
+                            "add-processor",
+                            AudioRackControlSubject::Rack,
+                        ))
                         .with_max_visible_items(8)
                         .enabled(rack_can_edit),
                 ),
@@ -1632,7 +1684,18 @@ pub(super) fn with_audio_processor_rack_sections(
         if let Some(selector) = &rack.scope_occurrence_selector {
             rack_section = rack_section.with_row(PropertyRow::new(
                 localizer.text("audio-rack-occurrence-row"),
-                Box::new(audio_scope_occurrence_control(selector)),
+                Box::new({
+                    let mut control = audio_scope_occurrence_control(selector);
+                    control.set_control_inspection_key(
+                        serde_json::to_string(&(
+                            "audio-scope-occurrence-navigation",
+                            rack.address,
+                            selector.clip_id,
+                        ))
+                        .ok(),
+                    );
+                    control
+                }),
             ));
         }
         if let Some(reason) = &rack.edit_disabled_reason {
@@ -1675,6 +1738,45 @@ pub(super) fn with_audio_processor_rack_sections(
             } else {
                 audio_processor_move_to_end_action(rack, processor)
             };
+            let mut move_up_control = effect_icon_button(
+                AppIcon::CaretUp,
+                localizer.text("audio-rack-move-up"),
+                localizer.text("audio-rack-move-up-tooltip"),
+                can_move_up,
+                Some(move_up),
+            );
+            move_up_control.set_control_inspection_key(audio_rack_control_inspection_key(
+                rack,
+                Some(processor),
+                "move-up",
+                AudioRackControlSubject::Rack,
+            ));
+            let mut move_down_control = effect_icon_button(
+                AppIcon::CaretDown,
+                localizer.text("audio-rack-move-down"),
+                localizer.text("audio-rack-move-down-tooltip"),
+                can_move_down,
+                Some(move_down),
+            );
+            move_down_control.set_control_inspection_key(audio_rack_control_inspection_key(
+                rack,
+                Some(processor),
+                "move-down",
+                AudioRackControlSubject::Rack,
+            ));
+            let mut remove_control = effect_icon_button(
+                AppIcon::Trash,
+                localizer.text("audio-rack-remove"),
+                localizer.text("audio-rack-remove-tooltip"),
+                rack_can_edit,
+                Some(audio_processor_remove_action(rack, processor)),
+            );
+            remove_control.set_control_inspection_key(audio_rack_control_inspection_key(
+                rack,
+                Some(processor),
+                "remove",
+                AudioRackControlSubject::Rack,
+            ));
             let mut section =
                 PropertySection::new(processor.label.clone()).with_row(PropertyRow::new(
                     localizer.text("mixer-controls"),
@@ -1686,6 +1788,12 @@ pub(super) fn with_audio_processor_rack_sections(
                                         localizer.text("audio-rack-bypass"),
                                         processor.bypassed,
                                     )
+                                    .with_control_inspection_key(audio_rack_control_inspection_key(
+                                        rack,
+                                        Some(processor),
+                                        "bypass",
+                                        AudioRackControlSubject::Rack,
+                                    ))
                                     .enabled(rack_can_edit)
                                     .on_change(
                                         move |bypassed| {
@@ -1699,27 +1807,9 @@ pub(super) fn with_audio_processor_rack_sections(
                                 ),
                                 1.0,
                             ),
-                            FlexChild::fixed(effect_icon_button(
-                                AppIcon::CaretUp,
-                                localizer.text("audio-rack-move-up"),
-                                localizer.text("audio-rack-move-up-tooltip"),
-                                can_move_up,
-                                Some(move_up),
-                            )),
-                            FlexChild::fixed(effect_icon_button(
-                                AppIcon::CaretDown,
-                                localizer.text("audio-rack-move-down"),
-                                localizer.text("audio-rack-move-down-tooltip"),
-                                can_move_down,
-                                Some(move_down),
-                            )),
-                            FlexChild::fixed(effect_icon_button(
-                                AppIcon::Trash,
-                                localizer.text("audio-rack-remove"),
-                                localizer.text("audio-rack-remove-tooltip"),
-                                rack_can_edit,
-                                Some(audio_processor_remove_action(rack, processor)),
-                            )),
+                            FlexChild::fixed(move_up_control),
+                            FlexChild::fixed(move_down_control),
+                            FlexChild::fixed(remove_control),
                         ])
                         .with_gap(8.0),
                     ),
@@ -1730,6 +1820,12 @@ pub(super) fn with_audio_processor_rack_sections(
                     localizer.text("audio-rack-plugin-binding"),
                     Box::new(
                         Button::new(localizer.text("audio-rack-rebind-installed"))
+                            .with_control_inspection_key(audio_rack_control_inspection_key(
+                                rack,
+                                Some(processor),
+                                "rebind",
+                                AudioRackControlSubject::Rack,
+                            ))
                             .enabled(rebind.is_some())
                             .on_click(rebind),
                     ),
@@ -1744,7 +1840,16 @@ pub(super) fn with_audio_processor_rack_sections(
                 .into_external_action();
                 section = section.with_row(PropertyRow::new(
                     localizer.text("audio-input-row"),
-                    Box::new(Button::new(query.button_label.clone()).on_click(Some(action))),
+                    Box::new(
+                        Button::new(query.button_label.clone())
+                            .with_control_inspection_key(audio_rack_control_inspection_key(
+                                rack,
+                                Some(processor),
+                                "input-query",
+                                AudioRackControlSubject::Rack,
+                            ))
+                            .on_click(Some(action)),
+                    ),
                 ));
                 section = section.with_row(PropertyRow::new(
                     localizer.text("audio-input-status"),
@@ -1786,6 +1891,12 @@ pub(super) fn with_audio_processor_rack_sections(
                         },
                     );
                     let reset = Button::new(localizer.text("parameter-reset-to-default"))
+                        .with_control_inspection_key(audio_rack_control_inspection_key(
+                            rack,
+                            Some(processor),
+                            "parameter-reset",
+                            AudioRackControlSubject::Parameter(&parameter.schema),
+                        ))
                         .minimal()
                         .enabled(can_reset)
                         .on_click(Some(reset_action));
@@ -1837,6 +1948,12 @@ pub(super) fn with_audio_processor_rack_sections(
                     input.label.clone(),
                     Box::new(
                         Dropdown::new(localizer.text("audio-sidechain-add-source"), items)
+                            .with_control_inspection_key(audio_rack_control_inspection_key(
+                                rack,
+                                Some(processor),
+                                "sidechain-add-source",
+                                AudioRackControlSubject::InputBus(&input.bus_key),
+                            ))
                             .with_max_visible_items(12),
                     ),
                 ));
@@ -1857,6 +1974,12 @@ pub(super) fn with_audio_processor_rack_sections(
                     localizer.text("audio-sidechain-source"),
                     Box::new(
                         Dropdown::new(route.source_label.clone(), items)
+                            .with_control_inspection_key(audio_rack_control_inspection_key(
+                                rack,
+                                Some(processor),
+                                "sidechain-source",
+                                AudioRackControlSubject::Route(route.route_id),
+                            ))
                             .with_max_visible_items(12)
                             .enabled(route.is_editable && !route.rewire_options.is_empty()),
                     ),
@@ -1866,6 +1989,12 @@ pub(super) fn with_audio_processor_rack_sections(
                     route.label.clone(),
                     Box::new(
                         Checkbox::new(localizer.text("mixer-pass-signal"), route.enabled)
+                            .with_control_inspection_key(audio_rack_control_inspection_key(
+                                rack,
+                                Some(processor),
+                                "sidechain-enabled",
+                                AudioRackControlSubject::Route(route.route_id),
+                            ))
                             .enabled(route.is_editable)
                             .on_change(move |enabled| {
                                 crate::app_ui::audio_sidechain::enabled_action(
@@ -1877,21 +2006,31 @@ pub(super) fn with_audio_processor_rack_sections(
                 ));
                 if let Some(value) = route.static_gain {
                     let gain_route = route.clone();
+                    let mut gain_control = numeric_slider_input_control_with_hard_range(
+                        value,
+                        -60.0,
+                        12.0,
+                        AUDIO_GAIN_DB_MIN,
+                        AUDIO_GAIN_DB_MAX,
+                        Some(0.1),
+                        1,
+                        route.is_editable,
+                        move |value| {
+                            crate::app_ui::audio_sidechain::gain_action(&gain_route, value)
+                        },
+                    );
+                    assign_numeric_control_inspection_key(
+                        gain_control.as_mut(),
+                        audio_rack_control_inspection_key(
+                            rack,
+                            Some(processor),
+                            "sidechain-gain",
+                            AudioRackControlSubject::Route(route.route_id),
+                        ),
+                    );
                     section = section.with_row(PropertyRow::new(
                         localizer.text("audio-sidechain-level"),
-                        numeric_slider_input_control_with_hard_range(
-                            value,
-                            -60.0,
-                            12.0,
-                            AUDIO_GAIN_DB_MIN,
-                            AUDIO_GAIN_DB_MAX,
-                            Some(0.1),
-                            1,
-                            route.is_editable,
-                            move |value| {
-                                crate::app_ui::audio_sidechain::gain_action(&gain_route, value)
-                            },
-                        ),
+                        gain_control,
                     ));
                 } else {
                     section = section.with_row(PropertyRow::new(
@@ -1925,6 +2064,12 @@ pub(super) fn with_audio_processor_rack_sections(
                     localizer.text("audio-sidechain-controls"),
                     Box::new(
                         Button::new(localizer.text("audio-sidechain-disconnect"))
+                            .with_control_inspection_key(audio_rack_control_inspection_key(
+                                rack,
+                                Some(processor),
+                                "sidechain-disconnect",
+                                AudioRackControlSubject::Route(route.route_id),
+                            ))
                             .enabled(action.is_some())
                             .on_click(action),
                     ),
@@ -2199,7 +2344,7 @@ pub(super) fn audio_processor_static_parameter_control(
         )
     };
     let enabled = can_edit && parameter.is_static_editable();
-    if parameter.schema.value_type == PropertyValueType::Int {
+    let mut control = if parameter.schema.value_type == PropertyValueType::Int {
         use crate::app_ui::audio_processor_rack::MAX_EXACT_AUDIO_INTEGER;
         let hard_min = numeric.hard_range.min.ceil().max(-MAX_EXACT_AUDIO_INTEGER) as i64;
         let hard_max = numeric.hard_range.max.floor().min(MAX_EXACT_AUDIO_INTEGER) as i64;
@@ -2229,7 +2374,17 @@ pub(super) fn audio_processor_static_parameter_control(
             enabled,
             action,
         )
-    }
+    };
+    assign_numeric_control_inspection_key(
+        control.as_mut(),
+        audio_rack_control_inspection_key(
+            rack,
+            Some(processor),
+            "parameter-slider",
+            AudioRackControlSubject::Parameter(&parameter.schema),
+        ),
+    );
+    control
 }
 
 pub(super) fn numeric_slider_input_control<T: mondrian_ui_widgets::NumberInputValue, R>(

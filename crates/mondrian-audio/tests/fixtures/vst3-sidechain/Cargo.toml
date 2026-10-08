@@ -9,6 +9,6 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-vst3 = { git = "https://github.com/coupler-rs/vst3-rs.git", rev = "b2a45f2d40e602eff5a224b41613735388868590" }
+vst3 = { path = "../../../../../vendor/vst3-sdk" }
 
 [workspace]

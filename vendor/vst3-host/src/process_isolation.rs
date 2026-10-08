@@ -494,8 +494,12 @@ pub enum HostCommand {
         /// Sample offset within the next processed block.
         offset: i32,
     },
-    /// Set the transport tempo (BPM) advertised in the plugin's host `ProcessContext`, taking
-    /// effect on the next processed block.
+    /// Install canonical signal timeline facts and clear unavailable optional fields.
+    SetProcessTimelineContext {
+        /// Exact signal position and rate for the next process block.
+        context: crate::audio::ProcessTimelineContext,
+    },
+    /// Set the configured transport tempo.
     SetTempo {
         /// Transport tempo in beats per minute (validated `> 0` on the host side).
         #[serde(with = "lossless_f64")]
@@ -2801,5 +2805,28 @@ pub mod crash_protection {
                 "Plugin panicked with unknown error".to_string()
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod canonical_timeline_wire_tests {
+    use super::*;
+    #[test]
+    fn signed_timeline_facts_round_trip_without_float_sample_conversion() {
+        for sample_position in [i64::MIN, -17, 0, 991, i64::MAX] {
+            let context = crate::audio::ProcessTimelineContext {
+                sample_position,
+                sample_rate: 44_100,
+            };
+            let encoded =
+                serde_json::to_string(&HostCommand::SetProcessTimelineContext { context })
+                    .expect("encode");
+            match serde_json::from_str::<HostCommand>(&encoded).expect("decode") {
+                HostCommand::SetProcessTimelineContext { context: decoded } => {
+                    assert_eq!(decoded, context)
+                }
+                _ => panic!("wrong timeline command"),
+            }
+        }
     }
 }

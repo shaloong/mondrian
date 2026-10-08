@@ -1,12 +1,12 @@
 //! Bounded out-of-process discovery of installed CLAP descriptors.
 
-use super::clap_worker::{ClapHost, ClapHostShared};
+use super::clap_worker::{configure_render_mode, ClapHost, ClapHostShared};
 use super::protocol::{auxiliary_from_wire, auxiliary_to_wire, AuxiliaryBusWire};
 use super::ClapPluginRegistration;
 use crate::{
-    AudioProcessorAuxiliaryInputBusContract, AudioProcessorAuxiliaryInputContract,
-    AudioProcessorExecutionContract, AudioProcessorHostError, AudioProcessorTail,
-    AudioRenderContract,
+    AudioProcessingMode, AudioProcessorAuxiliaryInputBusContract,
+    AudioProcessorAuxiliaryInputContract, AudioProcessorExecutionContract, AudioProcessorHostError,
+    AudioProcessorTail, AudioRenderContract,
 };
 use clack_extensions::audio_ports::{
     AudioPortFlags, AudioPortInfoBuffer, AudioPortType, PluginAudioPorts,
@@ -169,6 +169,7 @@ enum DiscoveryOperation {
         sample_rate: u32,
         channel_layout: AudioChannelLayout,
         max_block_frames: usize,
+        offline: bool,
         state: Option<Vec<u8>>,
         capture_default_state: bool,
     },
@@ -185,6 +186,7 @@ struct DiscoveryResponse {
 pub(super) struct ProbeResult {
     plugin_id: String,
     pub(super) latency_frames: u32,
+    offline: bool,
     tail: ProbeTail,
     parameters: Vec<ClapParameterDescriptor>,
     pub(super) auxiliary_buses: Vec<AuxiliaryBusWire>,
@@ -261,6 +263,7 @@ pub(super) fn probe_clap_plugin_registration_with_state(
             sample_rate: render_contract.sample_rate,
             channel_layout: render_contract.channel_layout,
             max_block_frames: render_contract.max_block_frames,
+            offline: render_contract.processing_mode == AudioProcessingMode::Offline,
             state: state.map(ToOwned::to_owned),
             capture_default_state,
         },
@@ -274,7 +277,9 @@ pub(super) fn probe_clap_plugin_registration_with_state(
         ));
     }
     let probe = response.probe.ok_or_else(|| invalid("CLAP probe response is missing"))?;
-    if probe.plugin_id != plugin_id {
+    if probe.plugin_id != plugin_id
+        || probe.offline != (render_contract.processing_mode == AudioProcessingMode::Offline)
+    {
         return Err(invalid("CLAP probe response changed plugin identity"));
     }
     validate_parameters(&probe.parameters)?;
@@ -299,8 +304,8 @@ pub(super) fn probe_clap_plugin_registration_with_state(
         probe.latency_frames as usize,
         tail,
         true,
-        true,
-        true,
+        render_contract.processing_mode == AudioProcessingMode::Realtime,
+        render_contract.processing_mode == AudioProcessingMode::Offline,
         0,
     )?;
     Ok((
@@ -416,6 +421,7 @@ pub fn run_clap_discovery_worker() -> Result<(), AudioProcessorHostError> {
             sample_rate,
             channel_layout,
             max_block_frames,
+            offline,
             state,
             capture_default_state,
         } => DiscoveryResponse {
@@ -423,9 +429,19 @@ pub fn run_clap_discovery_worker() -> Result<(), AudioProcessorHostError> {
             probe: Some(probe_loaded(
                 &entry,
                 &plugin_id,
-                sample_rate,
-                channel_layout,
-                max_block_frames,
+                AudioRenderContract {
+                    sample_rate,
+                    channel_layout,
+                    max_block_frames,
+                    processing_mode: if offline {
+                        AudioProcessingMode::Offline
+                    } else {
+                        AudioProcessingMode::Realtime
+                    },
+                    processor_session_scratch_budget_bytes: usize::MAX,
+                    public_output_lookahead_budget_frames: usize::MAX,
+                    compensation_delay_scratch_budget_bytes: usize::MAX,
+                },
                 state.as_deref(),
                 capture_default_state,
             )?),
@@ -473,17 +489,15 @@ fn list_loaded(entry: &PluginEntry) -> Result<Vec<ClapPluginDescriptor>, AudioPr
 pub(super) fn probe_loaded(
     entry: &PluginEntry,
     plugin_id: &str,
-    sample_rate: u32,
-    channel_layout: AudioChannelLayout,
-    max_block_frames: usize,
+    render_contract: AudioRenderContract,
     state: Option<&[u8]>,
     capture_default_state: bool,
 ) -> Result<ProbeResult, AudioProcessorHostError> {
-    let max_frames = u32::try_from(max_block_frames)
+    let max_frames = u32::try_from(render_contract.max_block_frames)
         .ok()
         .filter(|frames| *frames > 0)
         .ok_or_else(|| invalid("CLAP probe block extent is invalid"))?;
-    if sample_rate == 0 {
+    if render_contract.sample_rate == 0 {
         return Err(invalid("CLAP probe sample rate is invalid"));
     }
     let plugin_c_id =
@@ -528,6 +542,8 @@ pub(super) fn probe_loaded(
             .map_err(|error| unavailable(format!("CLAP probe state restore failed: {error}")))?;
         shared.service_callbacks(&mut instance)?;
     }
+    configure_render_mode(&instance.plugin_handle(), render_contract.processing_mode)?;
+    shared.service_callbacks(&mut instance)?;
     let handle = instance.plugin_handle();
     let parameters = list_parameters(&handle)?;
     let captured_state = if capture_default_state && state.is_none() {
@@ -545,9 +561,9 @@ pub(super) fn probe_loaded(
     } else {
         None
     };
-    let auxiliary_inputs = inspect_audio_inputs(&handle, channel_layout)?.contract;
+    let auxiliary_inputs = inspect_audio_inputs(&handle, render_contract.channel_layout)?.contract;
     let configuration = PluginAudioConfiguration {
-        sample_rate: f64::from(sample_rate),
+        sample_rate: f64::from(render_contract.sample_rate),
         min_frames_count: 1,
         max_frames_count: max_frames,
     };
@@ -560,12 +576,16 @@ pub(super) fn probe_loaded(
         .get_extension::<PluginLatency>()
         .map(|extension| extension.get(&handle))
         .unwrap_or(0);
-    let tail = processor
-        .plugin_handle()
-        .get_extension::<PluginTail>()
-        .map(|extension| extension.get(&processor.plugin_handle()))
-        .unwrap_or(TailLength::Finite(0));
-    processor.ensure_processing_stopped();
+    let tail = {
+        let _audio_role = shared.enter_audio_thread();
+        let tail = processor
+            .plugin_handle()
+            .get_extension::<PluginTail>()
+            .map(|extension| extension.get(&processor.plugin_handle()))
+            .unwrap_or(TailLength::Finite(0));
+        processor.ensure_processing_stopped();
+        tail
+    };
     drop(processor);
     instance
         .try_deactivate()
@@ -578,6 +598,7 @@ pub(super) fn probe_loaded(
     };
     Ok(ProbeResult {
         plugin_id: plugin_id.to_owned(),
+        offline: render_contract.processing_mode == AudioProcessingMode::Offline,
         latency_frames,
         tail,
         parameters,
@@ -850,9 +871,15 @@ mod tests {
             probe_loaded(
                 &entry,
                 "org.mondrian.discovery-fixture",
-                48_000,
-                AudioChannelLayout::Stereo,
-                512,
+                AudioRenderContract {
+                    sample_rate: 48_000,
+                    channel_layout: AudioChannelLayout::Stereo,
+                    max_block_frames: 512,
+                    processing_mode: AudioProcessingMode::Offline,
+                    processor_session_scratch_budget_bytes: usize::MAX,
+                    public_output_lookahead_budget_frames: usize::MAX,
+                    compensation_delay_scratch_budget_bytes: usize::MAX
+                },
                 None,
                 false,
             ),

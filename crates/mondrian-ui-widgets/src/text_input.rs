@@ -33,7 +33,9 @@ mod commands;
 mod composition;
 mod edit;
 mod geometry;
+mod history;
 mod ime;
+mod keymap;
 mod multiline;
 mod multiline_commands;
 mod multiline_geometry;
@@ -48,7 +50,9 @@ use geometry::{
     compute_text_geometry, scroll_offset_after_cursor,
     text_x_from_pointer as pointer_text_x_from_geometry, TextInputGeometry,
 };
+use history::{TextUndoEntry, TextUndoStack};
 use ime::{classify_ime_key, request_disabled_ime, request_enabled_ime, ImeKeyDisposition};
+use keymap::PlatformKeymap;
 pub use multiline::{MultilineTextEditState, TextPosition, TextSelection};
 pub use multiline_commands::TabBehavior;
 pub use multiline_widget::MultilineTextInput;
@@ -156,6 +160,7 @@ enum EmptyTextCommitPolicy {
 pub struct TextInput {
     id: WidgetId,
     edit: TextEditState,
+    undo_stack: TextUndoStack<TextEditState>,
     placeholder: String,
     bounds: Rect,
     enabled: bool,
@@ -178,6 +183,7 @@ impl TextInput {
         Self {
             id: WidgetId::new(),
             edit: TextEditState::default(),
+            undo_stack: TextUndoStack::new(),
             placeholder: placeholder.into(),
             bounds: Rect::ZERO,
             enabled: true,
@@ -195,6 +201,8 @@ impl TextInput {
 
     pub fn with_text(mut self, text: impl Into<String>) -> Self {
         self.edit = TextEditState::with_text(text.into());
+        self.clear_local_history();
+        self.sync_edit_session_origin_to_programmatic_text();
         self
     }
 
@@ -241,6 +249,159 @@ impl TextInput {
         self.placeholder = placeholder.into();
     }
 
+    pub(crate) fn can_inspect_draft(&self) -> bool {
+        self.enabled && self.focused && !self.mouse_down && !self.composition.is_active()
+    }
+
+    pub(crate) fn inspection_draft(
+        &self,
+    ) -> Option<mondrian_ui_core::TextInputDraftInspectionState> {
+        self.can_inspect_draft()
+            .then(|| mondrian_ui_core::TextInputDraftInspectionState {
+                text: self.edit.text.clone(),
+                cursor: self.edit.cursor,
+                selection_anchor: self.edit.selection_start,
+                history: mondrian_ui_core::TextInputHistoryInspectionState {
+                    entries: self
+                        .undo_stack
+                        .entries
+                        .iter()
+                        .map(|entry| mondrian_ui_core::TextInputHistoryInspectionEntry {
+                            text_before: entry.text_before.clone(),
+                            text_after: entry.text_after.clone(),
+                            cursor_before: entry.cursor_before,
+                            cursor_after: entry.cursor_after,
+                            anchor_before: entry.anchor_before,
+                            anchor_after: entry.anchor_after,
+                        })
+                        .collect(),
+                    position: self.undo_stack.position,
+                    owns_input: self.undo_stack.owns_input(),
+                },
+            })
+    }
+
+    pub(crate) fn restore_numeric_input_inspection(
+        &mut self,
+        id: WidgetId,
+        focused: bool,
+        draft: Option<&mondrian_ui_core::TextInputDraftInspectionState>,
+    ) -> bool {
+        if !self.enabled || self.mouse_down || self.composition.is_active() {
+            return false;
+        }
+        if let Some(draft) = draft {
+            let count = TextEditState::grapheme_count(&draft.text);
+            if !focused
+                || draft.cursor > count
+                || draft.selection_anchor.is_some_and(|anchor| anchor > count)
+                || normalize_single_line_input(&draft.text).as_ref() != draft.text.as_str()
+            {
+                return false;
+            }
+            let history = &draft.history;
+            if history.entries.len() > mondrian_ui_core::widget::TEXT_INPUT_HISTORY_MAX_ENTRIES
+                || history.position > history.entries.len()
+                || (!history.owns_input && !history.entries.is_empty())
+                || history
+                    .entries
+                    .iter()
+                    .try_fold(0usize, |bytes, entry| {
+                        bytes
+                            .checked_add(entry.text_before.capacity())?
+                            .checked_add(entry.text_after.capacity())
+                    })
+                    .is_none_or(|bytes| {
+                        bytes > mondrian_ui_core::widget::TEXT_INPUT_HISTORY_MAX_BYTES
+                    })
+                || history.entries.iter().any(|entry| {
+                    !Self::valid_history_snapshot(
+                        &entry.text_before,
+                        entry.cursor_before,
+                        entry.anchor_before,
+                    ) || !Self::valid_history_snapshot(
+                        &entry.text_after,
+                        entry.cursor_after,
+                        entry.anchor_after,
+                    )
+                })
+                || history.entries.windows(2).any(|pair| pair[0].text_after != pair[1].text_before)
+                || (!history.entries.is_empty()
+                    && draft.text.as_str()
+                        != if history.position == 0 {
+                            history.entries[0].text_before.as_str()
+                        } else {
+                            history.entries[history.position - 1].text_after.as_str()
+                        })
+            {
+                return false;
+            }
+            let entries = history
+                .entries
+                .iter()
+                .map(|entry| TextUndoEntry {
+                    text_before: entry.text_before.clone(),
+                    text_after: entry.text_after.clone(),
+                    cursor_before: entry.cursor_before,
+                    cursor_after: entry.cursor_after,
+                    anchor_before: entry.anchor_before,
+                    anchor_after: entry.anchor_after,
+                })
+                .collect();
+            let Some(restored_history) =
+                TextUndoStack::from_inspection(entries, history.position, history.owns_input)
+            else {
+                return false;
+            };
+            self.undo_stack = restored_history;
+            self.edit = TextEditState {
+                text: draft.text.clone(),
+                cursor: draft.cursor,
+                selection_start: draft.selection_anchor,
+            };
+        }
+        self.id = id;
+        self.focused = focused;
+        self.cursor_visible.set(focused);
+        self.last_blink.set(Instant::now());
+        self.update_scroll(TextInputMetrics::current());
+        true
+    }
+
+    fn valid_history_snapshot(text: &str, cursor: usize, anchor: Option<usize>) -> bool {
+        let count = TextEditState::grapheme_count(text);
+        cursor <= count
+            && anchor.is_none_or(|anchor| anchor <= count)
+            && normalize_single_line_input(text).as_ref() == text
+    }
+    pub(crate) fn owns_local_history(&self) -> bool {
+        self.undo_stack.owns_input()
+    }
+    pub(crate) fn clear_local_history(&mut self) {
+        self.undo_stack = TextUndoStack::new();
+    }
+    pub(crate) fn is_local_history_chord(key: KeyCode, modifiers: Modifiers) -> bool {
+        matches!(
+            classify_key_command(key, modifiers, PlatformKeymap::current()),
+            Some(TextInputKeyCommand::Undo | TextInputKeyCommand::Redo)
+        )
+    }
+    fn save_local_history(&mut self, before: TextEditState, coalesce: bool) {
+        if before.text == self.edit.text {
+            return;
+        }
+        self.undo_stack.push(
+            TextUndoEntry {
+                text_before: before.text,
+                text_after: self.edit.text.clone(),
+                cursor_before: before.cursor,
+                cursor_after: self.edit.cursor,
+                anchor_before: before.selection_start,
+                anchor_after: self.edit.selection_start,
+            },
+            coalesce,
+        );
+    }
     /// Whether an IME preedit owns keyboard input before committing text.
     pub fn is_composing(&self) -> bool {
         self.composition.is_active()
@@ -253,6 +414,7 @@ impl TextInput {
     /// user edit.
     pub fn set_text(&mut self, text: String) {
         self.edit.set_text(text);
+        self.clear_local_history();
         self.sync_edit_session_origin_to_programmatic_text();
         self.update_scroll(TextInputMetrics::current());
     }
@@ -298,17 +460,12 @@ impl TextInput {
 
     pub fn clear(&mut self) {
         self.edit.clear();
+        self.clear_local_history();
         self.sync_edit_session_origin_to_programmatic_text();
         self.update_scroll(TextInputMetrics::current());
     }
 
     // ── Grapheme helpers ──────────────────────────────────────────────────
-
-    /// Byte offset of the grapheme at `g_idx`. Returns `text.len()` if index
-    /// is past the end.
-    fn grapheme_byte_idx(&self, g_idx: usize) -> usize {
-        self.edit.grapheme_byte_idx(g_idx)
-    }
 
     /// Total grapheme count of the text.
     fn len_graphemes(&self) -> usize {
@@ -355,16 +512,40 @@ impl TextInput {
         )
     }
 
+    #[cfg(test)]
     fn visible_width(&self) -> f32 {
-        self.text_geometry(TextInputMetrics::current()).visible_width
+        compute_text_geometry(
+            self.bounds,
+            self.scroll_x.get(),
+            0.0,
+            None,
+            TextInputMetrics::current(),
+        )
+        .visible_width
     }
 
+    #[cfg(test)]
     fn content_left(&self) -> f32 {
-        self.text_geometry(TextInputMetrics::current()).content_left
+        compute_text_geometry(
+            self.bounds,
+            self.scroll_x.get(),
+            0.0,
+            None,
+            TextInputMetrics::current(),
+        )
+        .content_left
     }
 
+    #[cfg(test)]
     fn content_right(&self) -> f32 {
-        self.text_geometry(TextInputMetrics::current()).content_right
+        compute_text_geometry(
+            self.bounds,
+            self.scroll_x.get(),
+            0.0,
+            None,
+            TextInputMetrics::current(),
+        )
+        .content_right
     }
 
     fn cursor_text_x(&self, metrics: TextInputMetrics) -> f32 {
@@ -385,23 +566,39 @@ impl TextInput {
 
     fn text_x_from_pointer(&self, position: Point) -> f32 {
         let metrics = TextInputMetrics::current();
+        let Some(line) = self.edit.line_geometry(metrics.font_size, None) else {
+            return 0.0;
+        };
+        let geometry = compute_text_geometry(
+            self.bounds,
+            self.scroll_x.get(),
+            line.caret_x,
+            None,
+            metrics,
+        );
         pointer_text_x_from_geometry(
             position,
-            self.content_left(),
-            self.content_right(),
+            geometry.content_left,
+            geometry.content_right,
             self.scroll_x.get(),
-            measure_text_width(self.edit.text(), metrics.font_size),
+            line.width,
         )
     }
 
     fn update_scroll(&self, metrics: TextInputMetrics) {
-        let text_w = if self.edit.text().is_empty() {
-            0.0
-        } else {
-            measure_text_width(self.edit.text(), metrics.font_size)
+        let Some(line) = self.edit.line_geometry(metrics.font_size, None) else {
+            return;
         };
-        let visible_w = self.visible_width();
-        let cursor_x = self.cursor_text_x(metrics);
+        let text_w = line.width;
+        let geometry = compute_text_geometry(
+            self.bounds,
+            self.scroll_x.get(),
+            line.caret_x,
+            None,
+            metrics,
+        );
+        let visible_w = geometry.visible_width;
+        let cursor_x = line.caret_x;
         self.scroll_x.set(scroll_offset_after_cursor(
             self.scroll_x.get(),
             text_w,
@@ -433,6 +630,7 @@ impl TextInput {
 
         let before_text = self.edit.text.clone();
         self.delete_selection();
+        self.clear_selection();
         if !normalized.is_empty() {
             self.insert_normalized_at_cursor(&normalized);
         }
@@ -473,6 +671,9 @@ impl TextInput {
     }
 
     fn commit_edit_session(&mut self, ctx: &mut EventContext) {
+        if self.on_commit.is_some() {
+            self.clear_local_history();
+        }
         let changed =
             self.edit_session_origin.take().is_some_and(|origin| origin != self.edit.text);
         if changed
@@ -484,6 +685,7 @@ impl TextInput {
     }
 
     fn cancel_edit_session(&mut self) -> bool {
+        self.clear_local_history();
         let Some(origin) = self.edit_session_origin.take() else {
             return false;
         };
@@ -522,6 +724,40 @@ impl TextInput {
         ctx: &mut EventContext,
     ) -> EventResult {
         match command {
+            TextInputKeyCommand::Undo | TextInputKeyCommand::Redo => {
+                let restored = if command == TextInputKeyCommand::Undo {
+                    self.undo_stack.undo(&self.edit)
+                } else {
+                    self.undo_stack.redo()
+                };
+                if let Some(restored) = restored {
+                    self.edit = restored;
+                    self.update_scroll(TextInputMetrics::current());
+                }
+                EventResult::Handled
+            }
+            TextInputKeyCommand::DeleteWordBackward => {
+                if !self.delete_selection() {
+                    let target = self.prev_word_boundary(self.edit.cursor);
+                    if target != self.edit.cursor {
+                        self.move_cursor_with_selection(target, true);
+                        self.delete_selection();
+                    }
+                }
+                self.update_scroll(TextInputMetrics::current());
+                EventResult::Handled
+            }
+            TextInputKeyCommand::DeleteWordForward => {
+                if !self.delete_selection() {
+                    let target = self.next_word_boundary(self.edit.cursor);
+                    if target != self.edit.cursor {
+                        self.move_cursor_with_selection(target, true);
+                        self.delete_selection();
+                    }
+                }
+                self.update_scroll(TextInputMetrics::current());
+                EventResult::Handled
+            }
             TextInputKeyCommand::SelectAll => {
                 self.move_cursor_to(self.len_graphemes());
                 self.edit.selection_start = Some(0);
@@ -532,7 +768,7 @@ impl TextInput {
                     let _ = ctx.platform.clipboard_copy(&self.edit.text()[start..end]);
                     EventResult::Handled
                 } else {
-                    EventResult::Ignored
+                    EventResult::Handled
                 }
             }
             TextInputKeyCommand::Paste => {
@@ -548,7 +784,7 @@ impl TextInput {
                     }
                     EventResult::Handled
                 } else {
-                    EventResult::Ignored
+                    EventResult::Handled
                 }
             }
             TextInputKeyCommand::MoveLeft { word, extend_selection } => {
@@ -759,14 +995,20 @@ impl Widget for TextInput {
                     return EventResult::Handled;
                 }
 
-                let before_text = self.edit.text.clone();
-                let result = classify_key_command(*key, *modifiers)
-                    .map_or(EventResult::Ignored, |command| {
-                        self.execute_key_command(command, ctx)
-                    });
+                let before = self.edit.clone();
+                let command = classify_key_command(*key, *modifiers, PlatformKeymap::current());
+                let result = command.map_or(EventResult::Ignored, |command| {
+                    self.execute_key_command(command, ctx)
+                });
                 if result == EventResult::Handled {
                     self.refresh_ime_area(ctx);
-                    if self.edit.text != before_text {
+                    if self.edit.text != before.text {
+                        if !matches!(
+                            command,
+                            Some(TextInputKeyCommand::Undo | TextInputKeyCommand::Redo)
+                        ) {
+                            self.save_local_history(before, false);
+                        }
                         self.dispatch_change(ctx);
                     }
                     ctx.request_repaint();
@@ -775,22 +1017,26 @@ impl Widget for TextInput {
             }
             // ── Text input ─────────────────────────────────────────────
             UiEvent::TextInput(ch) if self.focused => {
+                let before = self.edit.clone();
                 let text_changed =
                     self.commit_text_at_cursor(ch, EmptyTextCommitPolicy::ReplaceSelection);
                 self.composition.clear();
                 self.refresh_ime_area(ctx);
                 if text_changed {
+                    self.save_local_history(before, true);
                     self.dispatch_change(ctx);
                 }
                 ctx.request_repaint();
                 EventResult::Handled
             }
             UiEvent::ImeCommit(ch) if self.focused => {
+                let before = self.edit.clone();
                 self.composition.clear();
                 let text_changed =
                     self.commit_text_at_cursor(ch, EmptyTextCommitPolicy::ReplaceSelection);
                 self.refresh_ime_area(ctx);
                 if text_changed {
+                    self.save_local_history(before, false);
                     self.dispatch_change(ctx);
                 }
                 ctx.request_repaint();
@@ -827,7 +1073,15 @@ impl Widget for TextInput {
 
     fn paint(&self, ctx: &mut PaintContext) {
         let metrics = TextInputMetrics::from_theme(ctx.theme);
-        let geometry = self.text_geometry(metrics);
+        let selection = self.edit.selection_geometry(metrics.font_size);
+        let caret_text_x = selection.as_ref().map_or(0.0, |selection| selection.line.caret_x);
+        let geometry = compute_text_geometry(
+            self.bounds,
+            self.scroll_x.get(),
+            caret_text_x,
+            self.composition.is_active().then(|| self.composition.preedit()),
+            metrics,
+        );
         let mut cursor_visible = self.cursor_visible.get();
         if self.enabled && self.focused {
             let now = Instant::now();
@@ -850,8 +1104,10 @@ impl Widget for TextInput {
                 has_selection: self.has_selection(),
                 text: self.edit.text(),
                 placeholder: &self.placeholder,
-                selection_byte_range: self.selection_byte_range(),
-                cursor_prefix_byte: self.grapheme_byte_idx(self.edit.cursor),
+                selection_spans: selection
+                    .as_ref()
+                    .map_or(&[], |selection| selection.spans.as_slice()),
+                caret_text_x,
                 preedit: self.composition.is_active().then(|| self.composition.preedit()),
             },
         );
@@ -887,10 +1143,11 @@ impl Widget for TextInput {
             EditCommand::Copy => TextInputKeyCommand::Copy,
             EditCommand::Paste => TextInputKeyCommand::Paste,
         };
-        let before = self.edit.text.clone();
+        let before = self.edit.clone();
         self.execute_key_command(command, ctx);
         self.refresh_ime_area(ctx);
-        if self.edit.text != before {
+        if self.edit.text != before.text {
+            self.save_local_history(before, false);
             self.dispatch_change(ctx);
         }
         ctx.request_repaint();
@@ -1000,8 +1257,23 @@ mod tests {
             ctx,
         );
     }
-    fn kd_ctrl(ti: &mut TextInput, key: KeyCode, ctx: &mut EventContext) {
-        ti.event(&UiEvent::KeyDown { key, modifiers: Modifiers::ctrl() }, ctx);
+    fn kd_primary(ti: &mut TextInput, key: KeyCode, ctx: &mut EventContext) {
+        ti.event(
+            &UiEvent::KeyDown {
+                key,
+                modifiers: crate::test_utils::primary_text_modifiers(),
+            },
+            ctx,
+        );
+    }
+    fn kd_word(ti: &mut TextInput, key: KeyCode, ctx: &mut EventContext) {
+        ti.event(
+            &UiEvent::KeyDown {
+                key,
+                modifiers: crate::test_utils::word_text_modifiers(),
+            },
+            ctx,
+        );
     }
     fn kd_mod(ti: &mut TextInput, key: KeyCode, modifiers: Modifiers, ctx: &mut EventContext) {
         ti.event(&UiEvent::KeyDown { key, modifiers }, ctx);
@@ -1543,7 +1815,7 @@ mod tests {
             requests: &mut requests,
         };
 
-        kd_ctrl(&mut ti, KeyCode::V, &mut ctx);
+        kd_primary(&mut ti, KeyCode::V, &mut ctx);
 
         assert_eq!(ti.text(), "before first second third");
         assert_eq!(
@@ -1574,7 +1846,7 @@ mod tests {
             requests: &mut requests,
         };
 
-        kd_ctrl(&mut ti, KeyCode::V, &mut ctx);
+        kd_primary(&mut ti, KeyCode::V, &mut ctx);
 
         assert_eq!(ti.text(), "before after");
         assert_eq!(ti.selection_byte_range(), Some((7, 12)));
@@ -1603,7 +1875,7 @@ mod tests {
             requests: &mut requests,
         };
 
-        kd_ctrl(&mut ti, KeyCode::V, &mut ctx);
+        kd_primary(&mut ti, KeyCode::V, &mut ctx);
 
         assert_eq!(ti.text(), "before after");
         assert_eq!(ti.selection_byte_range(), Some((7, 12)));
@@ -1688,7 +1960,7 @@ mod tests {
             (KeyCode::Delete, Modifiers::none()),
             (KeyCode::Left, Modifiers::none()),
             (KeyCode::Right, Modifiers::none()),
-            (KeyCode::A, Modifiers::ctrl()),
+            (KeyCode::A, crate::test_utils::primary_text_modifiers()),
         ] {
             assert_eq!(
                 ti.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
@@ -1992,7 +2264,7 @@ mod tests {
     // ── Word navigation ──────────────────────────────────────────────────
 
     #[test]
-    fn ctrl_left_word() {
+    fn native_word_left() {
         let mut ti = TextInput::new("ph").with_text("hello world foo");
         ti.focused = true;
         // "hello world foo" = 15 graphemes: hello(5) + space(1) + world(5) + space(1) + foo(3)
@@ -2001,16 +2273,16 @@ mod tests {
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
-        kd_ctrl(&mut ti, KeyCode::Left, &mut ctx);
+        kd_word(&mut ti, KeyCode::Left, &mut ctx);
         assert_eq!(ti.edit.cursor, 12); // start of "foo"
-        kd_ctrl(&mut ti, KeyCode::Left, &mut ctx);
+        kd_word(&mut ti, KeyCode::Left, &mut ctx);
         assert_eq!(ti.edit.cursor, 6); // start of "world"
-        kd_ctrl(&mut ti, KeyCode::Left, &mut ctx);
+        kd_word(&mut ti, KeyCode::Left, &mut ctx);
         assert_eq!(ti.edit.cursor, 0); // start of "hello"
     }
 
     #[test]
-    fn ctrl_right_word() {
+    fn native_word_right() {
         let mut ti = TextInput::new("ph").with_text("hello world");
         ti.focused = true;
         // "hello world" = 11 graphemes: hello(5) + space(1) + world(5)
@@ -2019,14 +2291,14 @@ mod tests {
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
-        kd_ctrl(&mut ti, KeyCode::Right, &mut ctx);
+        kd_word(&mut ti, KeyCode::Right, &mut ctx);
         assert_eq!(ti.edit.cursor, 6); // past "hello" + space, at "world" start
-        kd_ctrl(&mut ti, KeyCode::Right, &mut ctx);
+        kd_word(&mut ti, KeyCode::Right, &mut ctx);
         assert_eq!(ti.edit.cursor, 11); // past "world", at end
     }
 
     #[test]
-    fn ctrl_shift_word_navigation_extends_selection() {
+    fn native_word_navigation_extends_selection() {
         let mut ti = TextInput::new("ph").with_text("hello world");
         ti.focused = true;
         ti.edit.cursor = 11;
@@ -2038,7 +2310,10 @@ mod tests {
         kd_mod(
             &mut ti,
             KeyCode::Left,
-            Modifiers { ctrl: true, shift: true, ..Default::default() },
+            Modifiers {
+                shift: true,
+                ..crate::test_utils::word_text_modifiers()
+            },
             &mut ctx,
         );
 
@@ -2048,7 +2323,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_word_navigation_uses_unicode_whitespace_boundaries() {
+    fn native_word_navigation_uses_unicode_whitespace_boundaries() {
         let mut ti = TextInput::new("ph").with_text("alpha\tbeta\n\u{00A0}gamma");
         ti.focused = true;
         ti.edit.cursor = ti.len_graphemes();
@@ -2057,14 +2332,14 @@ mod tests {
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
 
-        kd_ctrl(&mut ti, KeyCode::Left, &mut ctx);
+        kd_word(&mut ti, KeyCode::Left, &mut ctx);
         assert_eq!(ti.edit.cursor, 12);
-        kd_ctrl(&mut ti, KeyCode::Left, &mut ctx);
+        kd_word(&mut ti, KeyCode::Left, &mut ctx);
         assert_eq!(ti.edit.cursor, 6);
-        kd_ctrl(&mut ti, KeyCode::Home, &mut ctx);
-        kd_ctrl(&mut ti, KeyCode::Right, &mut ctx);
+        kd(&mut ti, KeyCode::Home, &mut ctx);
+        kd_word(&mut ti, KeyCode::Right, &mut ctx);
         assert_eq!(ti.edit.cursor, 6);
-        kd_ctrl(&mut ti, KeyCode::Right, &mut ctx);
+        kd_word(&mut ti, KeyCode::Right, &mut ctx);
         assert_eq!(ti.edit.cursor, 12);
     }
 
@@ -2147,20 +2422,20 @@ mod tests {
     // ── Ctrl shortcuts ───────────────────────────────────────────────────
 
     #[test]
-    fn ctrl_a_select_all() {
+    fn primary_a_select_all() {
         let mut ti = TextInput::new("ph").with_text("hello");
         ti.focused = true;
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
-        kd_ctrl(&mut ti, KeyCode::A, &mut ctx);
+        kd_primary(&mut ti, KeyCode::A, &mut ctx);
         assert_eq!(ti.edit.cursor, 5);
         assert_eq!(ti.edit.selection_start, Some(0));
     }
 
     #[test]
-    fn ctrl_x_cuts() {
+    fn primary_x_cuts() {
         let platform = ClipboardPlatform::with_text("");
         let mut ti = TextInput::new("ph").with_text("hello");
         ti.focused = true;
@@ -2182,14 +2457,14 @@ mod tests {
             platform: &platform,
             requests: &mut requests,
         };
-        kd_ctrl(&mut ti, KeyCode::X, &mut ctx);
+        kd_primary(&mut ti, KeyCode::X, &mut ctx);
         assert_eq!(ti.text(), "ho");
         assert_eq!(ti.edit.cursor, 1);
         assert!(!ti.has_selection());
     }
 
     #[test]
-    fn ctrl_x_preserves_selection_when_clipboard_copy_fails() {
+    fn primary_x_preserves_selection_when_clipboard_copy_fails() {
         let platform = ClipboardPlatform::copy_failure();
         let mut ti = TextInput::new("ph").with_text("hello").on_change(change_action);
         ti.focused = true;
@@ -2211,7 +2486,10 @@ mod tests {
         };
 
         let result = ti.event(
-            &UiEvent::KeyDown { key: KeyCode::X, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::X,
+                modifiers: crate::test_utils::primary_text_modifiers(),
+            },
             &mut ctx,
         );
 
@@ -2275,7 +2553,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_without_selection_is_ignored_for_global_copy() {
+    fn primary_c_without_selection_is_owned_noop() {
         let mut ti = TextInput::new("ph").with_text("hello");
         ti.focused = true;
         let mut f = DummyFocus;
@@ -2284,10 +2562,13 @@ mod tests {
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
 
         let result = ti.event(
-            &UiEvent::KeyDown { key: KeyCode::C, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::C,
+                modifiers: crate::test_utils::primary_text_modifiers(),
+            },
             &mut ctx,
         );
-        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(result, EventResult::Handled);
     }
 
     #[test]
@@ -2329,10 +2610,21 @@ mod tests {
                 KeyCode::X,
                 Modifiers { ctrl: true, alt: true, ..Default::default() },
             ),
-            (KeyCode::Left, Modifiers { alt: true, ..Default::default() }),
+            (
+                KeyCode::Left,
+                Modifiers {
+                    ctrl: cfg!(target_os = "macos"),
+                    alt: !cfg!(target_os = "macos"),
+                    ..Default::default()
+                },
+            ),
             (
                 KeyCode::Right,
-                Modifiers { meta: true, ..Default::default() },
+                Modifiers {
+                    ctrl: cfg!(target_os = "macos"),
+                    meta: true,
+                    ..Default::default()
+                },
             ),
             (
                 KeyCode::Home,
@@ -2340,15 +2632,28 @@ mod tests {
             ),
             (
                 KeyCode::End,
-                Modifiers { meta: true, shift: true, ..Default::default() },
+                Modifiers {
+                    ctrl: cfg!(target_os = "macos"),
+                    meta: true,
+                    shift: true,
+                    ..Default::default()
+                },
             ),
             (
                 KeyCode::Backspace,
-                Modifiers { alt: true, ..Default::default() },
+                Modifiers {
+                    ctrl: cfg!(target_os = "macos"),
+                    alt: !cfg!(target_os = "macos"),
+                    ..Default::default()
+                },
             ),
             (
                 KeyCode::Delete,
-                Modifiers { meta: true, ..Default::default() },
+                Modifiers {
+                    ctrl: cfg!(target_os = "macos"),
+                    meta: true,
+                    ..Default::default()
+                },
             ),
         ] {
             assert_eq!(
@@ -2734,5 +3039,454 @@ mod tests {
             .expect("paint should emit long text");
         assert!(text_pos.x < 0.0);
         assert_eq!(encoder.clips[0], Rect::new(8.0, 0.0, 64.0, 28.0));
+    }
+
+    #[test]
+    fn local_single_line_undo_redo_restores_replacement_selection_and_owns_empty_history() {
+        let mut input = TextInput::new("Text").with_text("旧值 👩‍💻e\u{301}");
+        layout(&mut input);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = mk_ctx(&mut focus, &mut shortcut, &mut tooltip);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        let undo = UiEvent::KeyDown {
+            key: KeyCode::Z,
+            modifiers: crate::test_utils::primary_text_modifiers(),
+        };
+        let redo = UiEvent::KeyDown {
+            key: KeyCode::Z,
+            modifiers: Modifiers {
+                shift: true,
+                ..crate::test_utils::primary_text_modifiers()
+            },
+        };
+        assert_eq!(
+            input.event(&undo, &mut ctx),
+            EventResult::Handled,
+            "even an empty text history must not undo a selected Clip"
+        );
+        kd_primary(&mut input, KeyCode::A, &mut ctx);
+        tp(&mut input, "replacement", &mut ctx);
+        assert_eq!(input.event(&undo, &mut ctx), EventResult::Handled);
+        assert_eq!(input.text(), "旧值 👩‍💻e\u{301}");
+        assert_eq!(
+            input.selection_byte_range(),
+            Some((0, input.text().len())),
+            "local Undo restores the user's original replacement selection"
+        );
+        assert_eq!(input.event(&redo, &mut ctx), EventResult::Handled);
+        assert_eq!(input.text(), "replacement");
+        assert!(!input.has_selection());
+        assert_eq!(input.event(&undo, &mut ctx), EventResult::Handled);
+        tp(&mut input, "new branch", &mut ctx);
+        input.event(&redo, &mut ctx);
+        assert_eq!(
+            input.text(),
+            "new branch",
+            "new typing after Undo truncates the abandoned local Redo branch"
+        );
+    }
+
+    #[test]
+    fn local_single_line_word_delete_is_grapheme_safe_selection_first_and_atomic() {
+        let mut input = TextInput::new("Text").with_text("alpha\u{2003}👩‍💻e\u{301} omega");
+        layout(&mut input);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = mk_ctx(&mut focus, &mut shortcut, &mut tooltip);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        let undo = UiEvent::KeyDown {
+            key: KeyCode::Z,
+            modifiers: crate::test_utils::primary_text_modifiers(),
+        };
+        let word_delete = |key| UiEvent::KeyDown {
+            key,
+            modifiers: crate::test_utils::word_text_modifiers(),
+        };
+        assert_eq!(
+            input.event(&word_delete(KeyCode::Backspace), &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(input.text(), "alpha\u{2003}👩‍💻e\u{301} ");
+        assert_eq!(input.event(&undo, &mut ctx), EventResult::Handled);
+        assert_eq!(
+            input.text(),
+            "alpha\u{2003}👩‍💻e\u{301} omega",
+            "one Undo reverses the whole word deletion"
+        );
+        kd(&mut input, KeyCode::Home, &mut ctx);
+        assert_eq!(
+            input.event(&word_delete(KeyCode::Delete), &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(
+            input.text(),
+            "👩‍💻e\u{301} omega",
+            "Unicode whitespace and composite graphemes remain intact"
+        );
+        input.event(&undo, &mut ctx);
+        kd(&mut input, KeyCode::Home, &mut ctx);
+        assert_eq!(
+            input.event(&word_delete(KeyCode::Backspace), &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(
+            input.text(),
+            "alpha\u{2003}👩‍💻e\u{301} omega",
+            "empty boundary is a consumed no-op"
+        );
+        kd(&mut input, KeyCode::End, &mut ctx);
+        kd_shift(&mut input, KeyCode::Left, &mut ctx);
+        assert_eq!(
+            input.event(&word_delete(KeyCode::Backspace), &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(
+            input.text(),
+            "alpha\u{2003}👩‍💻e\u{301} omeg",
+            "a selected grapheme wins over the word boundary"
+        );
+        input.event(&undo, &mut ctx);
+        assert_eq!(
+            input.selection_byte_range().map(|(a, b)| &input.text()[a..b]),
+            Some("a")
+        );
+    }
+
+    #[test]
+    fn local_single_line_external_model_replacement_clears_undo_and_redo() {
+        let mut input = TextInput::new("Text").with_text("original");
+        layout(&mut input);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = mk_ctx(&mut focus, &mut shortcut, &mut tooltip);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        tp(&mut input, " draft", &mut ctx);
+        kd_primary(&mut input, KeyCode::Z, &mut ctx);
+        input.set_text("fresh canonical model".to_owned());
+        for modifiers in [
+            crate::test_utils::primary_text_modifiers(),
+            Modifiers {
+                shift: true,
+                ..crate::test_utils::primary_text_modifiers()
+            },
+        ] {
+            assert_eq!(
+                input.event(&UiEvent::KeyDown { key: KeyCode::Z, modifiers }, &mut ctx),
+                EventResult::Handled
+            );
+            assert_eq!(input.text(), "fresh canonical model");
+        }
+    }
+
+    #[test]
+    fn local_single_line_empty_replacement_selection_is_cleared_before_typing() {
+        let mut input = TextInput::new("Text");
+        layout(&mut input);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = mk_ctx(&mut focus, &mut shortcut, &mut tooltip);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        kd_primary(&mut input, KeyCode::A, &mut ctx);
+        tp(&mut input, "e\u{301}👩‍💻", &mut ctx);
+        assert!(
+            !input.has_selection(),
+            "typing into an empty replacement selection must not select the newly inserted text"
+        );
+        kd(&mut input, KeyCode::Backspace, &mut ctx);
+        assert_eq!(
+            input.text(),
+            "e\u{301}",
+            "ordinary Backspace deletes only the last composite grapheme"
+        );
+        kd(&mut input, KeyCode::Home, &mut ctx);
+        kd_word(&mut input, KeyCode::Backspace, &mut ctx);
+        tp(&mut input, "x", &mut ctx);
+        assert_eq!(input.text(), "xe\u{301}");
+        assert!(!input.has_selection(), "a word-delete no-op must not create a zero-length selection that expands during later typing");
+    }
+
+    #[test]
+    fn complete_rtl_line_end_caret_is_at_visible_left_edge() {
+        let mut input = TextInput::new("Text").with_text("שלום");
+        input.layout(Rect::new(0.0, 0.0, 240.0, 28.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = mk_ctx(&mut focus, &mut shortcut, &mut tooltip);
+        assert_eq!(
+            input.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
+            EventResult::Handled
+        );
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        input.paint(&mut PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 300.0, 80.0),
+        });
+        let caret = encoder.rects.last().expect("focused editor must paint its caret");
+        assert!(
+            (caret.x - encoder.clips[0].x).abs() <= 0.1,
+            "logical end of a complete RTL line is its left edge: {caret:?}"
+        );
+        assert_eq!(input.text(), "שלום");
+    }
+
+    #[test]
+    fn clicking_visible_left_of_rtl_line_inserts_at_logical_end() {
+        let mut input = TextInput::new("Text").with_text("שלום");
+        input.layout(Rect::new(0.0, 0.0, 240.0, 28.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = mk_ctx(&mut focus, &mut shortcut, &mut tooltip);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        input.event(
+            &UiEvent::MouseDown {
+                position: Point::new(8.1, 14.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        input.event(
+            &UiEvent::MouseUp {
+                position: Point::new(8.1, 14.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        input.event(&UiEvent::TextInput("!".into()), &mut ctx);
+        assert_eq!(
+            input.text(),
+            "שלום!",
+            "pixel hit must preserve complete RTL logical coordinates"
+        );
+        assert!(!input.has_selection());
+    }
+
+    // Pixel reference: the public complete advanced TextLayout, including its
+    // actual font fallback and visual glyph coordinates. This is deliberately
+    // independent of TextInput's prefix/substring measurements and new APIs.
+    fn complete_selection_reference(
+        text: &str,
+        font_size: f32,
+        glyph_byte_start: usize,
+        from_x: f32,
+    ) -> (f32, f32, Vec<(f32, f32)>) {
+        let attrs_owner = mondrian_ui_text::font::FontManager::new();
+        let mut font_owner = mondrian_ui_text::font::FontManager::new();
+        let layout = mondrian_ui_text::layout::TextLayout::new_single_line(
+            &mut font_owner.font_system,
+            text,
+            attrs_owner.default_attrs(),
+            font_size,
+        );
+        let runs = layout.runs();
+        assert_eq!(
+            runs.len(),
+            1,
+            "the public fixture must be a single complete line"
+        );
+        let run = &runs[0];
+        let glyph = run
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.start == glyph_byte_start)
+            .expect("reference must have the requested complete shaped glyph");
+        assert!(
+            glyph.level.is_rtl() && glyph.w > 0.0,
+            "pixel fixture requires an actual positive RTL glyph advance"
+        );
+        let left_hit_x = glyph.x + glyph.w * 0.1;
+        let right_hit_x = glyph.x + glyph.w * 0.9;
+        let start = layout
+            .buffer()
+            .hit(
+                if from_x == f32::MAX {
+                    right_hit_x
+                } else {
+                    from_x
+                },
+                layout.line_height() * 0.5,
+            )
+            .expect("reference start hit");
+        let end = layout
+            .buffer()
+            .hit(left_hit_x, layout.line_height() * 0.5)
+            .expect("reference end hit");
+        let spans = run.highlight(start.min(end), start.max(end)).collect();
+        (left_hit_x, right_hit_x, spans)
+    }
+
+    fn paint_complete_selection(input: &TextInput) -> RecordingEncoder {
+        input.cursor_visible.set(true);
+        input.last_blink.set(Instant::now());
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        input.paint(&mut PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 400.0, 100.0),
+        });
+        encoder
+    }
+
+    fn assert_complete_selection_pixels(input: &TextInput, spans: &[(f32, f32)]) {
+        let encoder = paint_complete_selection(input);
+        let text_origin = encoder
+            .texts
+            .iter()
+            .find(|(text, _)| text == input.text())
+            .expect("the complete committed text must still be painted")
+            .1;
+        // Two background rectangles precede the clip; a focused caret follows
+        // text. Every intervening rectangle is an actual selection span.
+        assert_eq!(
+            encoder.rects.len(),
+            spans.len() + 3,
+            "selection must paint exactly its complete shaped visual spans"
+        );
+        for (actual, (x, width)) in encoder.rects[2..encoder.rects.len() - 1].iter().zip(spans) {
+            assert!(
+                (actual.x - (text_origin.x + x)).abs() <= 0.1,
+                "actual selection starts at {actual:?}; complete shaped span starts at {x}"
+            );
+            assert!(
+                (actual.width - width).abs() <= 0.1,
+                "actual selection width {actual:?}; complete shaped width {width}"
+            );
+        }
+        assert_eq!(encoder.clips.len(), 1);
+        assert_eq!(
+            encoder.ops.iter().filter(|op| **op == PaintOp::PopClip).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn complete_selection_partial_rtl_highlight_matches_full_shaped_pixels() {
+        let text = "שלום";
+        let metrics = TextInputMetrics::current();
+        let (left_x, _, expected) =
+            complete_selection_reference(text, metrics.font_size, 0, f32::MAX);
+        assert_eq!(expected.len(), 1);
+        assert!(
+            expected[0].0 > 0.0,
+            "first logical RTL character occupies the visual right"
+        );
+        let mut input = TextInput::new("Text").with_text(text);
+        input.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = mk_ctx(&mut focus, &mut shortcut, &mut tooltip);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        kd(&mut input, KeyCode::Home, &mut ctx);
+        md_shift(&mut input, metrics.padding_x + left_x, 14.0, &mut ctx);
+        mu(&mut input, &mut ctx);
+        assert_eq!(input.selection_byte_range(), Some((0, "ש".len())));
+        assert_complete_selection_pixels(&input, &expected);
+        assert_eq!(input.text(), text);
+    }
+
+    #[test]
+    fn complete_selection_mixed_bidi_paints_disjoint_full_shaped_pixels() {
+        let text = "abc אבג xyz";
+        let metrics = TextInputMetrics::current();
+        let (left_x, _, expected) =
+            complete_selection_reference(text, metrics.font_size, "abc ".len(), -100.0);
+        assert_eq!(expected.len(), 2,
+            "selected LTR prefix and first logical RTL glyph are separated by unselected visual ink");
+        let mut input = TextInput::new("Text").with_text(text);
+        input.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = mk_ctx(&mut focus, &mut shortcut, &mut tooltip);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        kd(&mut input, KeyCode::Home, &mut ctx);
+        md_shift(&mut input, metrics.padding_x + left_x, 14.0, &mut ctx);
+        mu(&mut input, &mut ctx);
+        assert_eq!(input.selection_byte_range(), Some((0, "abc א".len())));
+        assert_complete_selection_pixels(&input, &expected);
+    }
+
+    #[test]
+    fn complete_selection_rtl_preedit_uses_complete_caret_pixel_origin() {
+        let text = "שלום";
+        let mut input = TextInput::new("Text").with_text(text);
+        input.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = mk_ctx(&mut focus, &mut shortcut, &mut tooltip);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        kd(&mut input, KeyCode::End, &mut ctx);
+        input.event(&UiEvent::ImePreedit("ni".into()), &mut ctx);
+        let encoder = paint_complete_selection(&input);
+        let committed_origin =
+            encoder.texts.iter().find(|(s, _)| s == text).expect("complete text").1;
+        let preedit_origin = encoder.texts.iter().find(|(s, _)| s == "ni").expect("preedit").1;
+        assert!(
+            (preedit_origin.x - committed_origin.x).abs() <= 0.1,
+            "logical RTL end composition belongs at the same complete shaped left edge"
+        );
+        assert!(input.undo_stack.entries.is_empty());
+        assert_eq!(input.text(), text);
+    }
+
+    #[test]
+    fn complete_selection_reverse_pointer_selection_is_not_an_edit_and_undo_restores_it() {
+        let text = "שלום";
+        let metrics = TextInputMetrics::current();
+        let (left_x, right_x, _) =
+            complete_selection_reference(text, metrics.font_size, 0, f32::MAX);
+        let mut input = TextInput::new("Text").with_text(text).on_change(change_action);
+        input.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        md(&mut input, metrics.padding_x + left_x, 14.0, &mut ctx);
+        mu(&mut input, &mut ctx);
+        md_shift(&mut input, metrics.padding_x + right_x, 14.0, &mut ctx);
+        mu(&mut input, &mut ctx);
+        assert_eq!(input.edit.cursor, 0);
+        assert_eq!(input.edit.selection_start, Some(1));
+        assert!(
+            actions.borrow().is_empty(),
+            "navigation/selection dispatches no text edit callback"
+        );
+        assert!(
+            input.undo_stack.entries.is_empty(),
+            "selection creates no text Undo entry"
+        );
+        tp(&mut input, "X", &mut ctx);
+        assert_eq!(input.text(), "Xלום");
+        assert_eq!(actions.borrow().len(), 1);
+        assert_eq!(input.undo_stack.entries.len(), 1);
+        kd_primary(&mut input, KeyCode::Z, &mut ctx);
+        assert_eq!(input.text(), text);
+        assert_eq!(input.edit.cursor, 0);
+        assert_eq!(
+            input.edit.selection_start,
+            Some(1),
+            "Undo restores the actual reverse anchor"
+        );
+        assert_eq!(
+            actions.borrow().len(),
+            2,
+            "live TextInput Undo retains the existing on_change contract"
+        );
     }
 }

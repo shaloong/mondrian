@@ -14,6 +14,23 @@ enum {
   MONDRIAN_OPENFX_MAX_PARAMETER_STRING_BYTES = 1024 * 1024
 };
 
+// A supervised worker owns one ImageEffect host callback binding. Creating
+// a second owner returns immediately; it never waits for an active owner to die.
+enum { MONDRIAN_OPENFX_HOST_BUSY = 9 };
+
+// Discovery owns the same native host descriptor as selected rendering.
+// The handle remains borrowed until the selected library has been unloaded.
+int mondrian_openfx_discovery_host_create(void** owner, const void** handle)
+#ifdef __cplusplus
+    noexcept
+#endif
+    ;
+void mondrian_openfx_discovery_host_destroy(void* owner)
+#ifdef __cplusplus
+    noexcept
+#endif
+    ;
+
 struct MondrianOpenFxQueryResult {
   double value[4];
   const char* string_value;
@@ -114,12 +131,22 @@ int mondrian_openfx_session_create(
 #endif
     ;
 
+// A successful render returns the representation negotiated by clip preferences.
+// Pixels remain in that representation until the Rust adapter boundary.
+enum MondrianOpenFxOutputAlpha {
+    MONDRIAN_OPENFX_ALPHA_INVALID = -1,
+    MONDRIAN_OPENFX_ALPHA_STRAIGHT = 0,
+    MONDRIAN_OPENFX_ALPHA_PREMULTIPLIED = 1,
+    MONDRIAN_OPENFX_ALPHA_OPAQUE = 2
+};
+
 // Output is caller-owned staging storage, valid only when status is zero.
 // Native actions may modify staging on failure; publication belongs to Rust.
 int mondrian_openfx_session_render(
     struct MondrianOpenFxSession* session, const void* input, void* output,
     size_t frame_bytes, const struct MondrianOpenFxFrameInfo* frame_info,
-    const struct MondrianOpenFxParameter* parameters, int parameter_count)
+    const struct MondrianOpenFxParameter* parameters, int parameter_count,
+    int* output_alpha)
 #ifdef __cplusplus
     noexcept
 #endif

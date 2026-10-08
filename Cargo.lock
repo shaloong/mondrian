@@ -800,7 +800,6 @@ dependencies = [
 [[package]]
 name = "com-scrape-types"
 version = "0.1.1"
-source = "git+https://github.com/coupler-rs/vst3-rs.git?rev=b2a45f2d40e602eff5a224b41613735388868590#b2a45f2d40e602eff5a224b41613735388868590"
 
 [[package]]
 name = "combine"
@@ -1720,8 +1719,6 @@ dependencies = [
 [[package]]
 name = "harfrust"
 version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9da2e5ae821f6e96664977bf974d6d6a2d6682f9ccee23e62ec1d134246845f9"
 dependencies = [
  "bitflags 2.12.1",
  "bytemuck",
@@ -2506,6 +2503,7 @@ dependencies = [
  "clack-extensions",
  "clack-host",
  "clack-plugin",
+ "libloading",
  "memmap2",
  "mondrian-core",
  "mondrian-timeline",
@@ -2516,6 +2514,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "uuid",
+ "vst3",
  "vst3-host",
 ]
 
@@ -2890,6 +2889,7 @@ dependencies = [
  "mondrian-ui-renderer",
  "mondrian-ui-theme",
  "pollster",
+ "unicode-segmentation",
  "wgpu",
 ]
 
@@ -5400,7 +5400,6 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vst3"
 version = "0.3.0"
-source = "git+https://github.com/coupler-rs/vst3-rs.git?rev=b2a45f2d40e602eff5a224b41613735388868590#b2a45f2d40e602eff5a224b41613735388868590"
 dependencies = [
  "com-scrape-types",
 ]

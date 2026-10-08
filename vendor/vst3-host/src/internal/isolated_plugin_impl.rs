@@ -262,6 +262,22 @@ impl IsolatedPluginImpl {
 }
 
 impl PluginInternal for IsolatedPluginImpl {
+    fn set_process_timeline_context(
+        &mut self,
+        context: crate::audio::ProcessTimelineContext,
+    ) -> Result<()> {
+        // Per-block audio work must never respawn/reload inline after a crash.
+        match self.send_command_once(HostCommand::SetProcessTimelineContext { context })? {
+            HostResponse::Success { .. } => Ok(()),
+            HostResponse::Error { message } => {
+                Err(Error::ProcessError(format!("signal timeline: {message}")))
+            }
+            _ => Err(Error::ProcessError(
+                "unexpected signal timeline response".to_string(),
+            )),
+        }
+    }
+
     fn set_parameter(&mut self, id: u32, value: f64) -> Result<()> {
         self.expect_success(HostCommand::SetParameter { id, value }, "SetParameter")
     }

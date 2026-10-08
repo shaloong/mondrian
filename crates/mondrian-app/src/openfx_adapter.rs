@@ -1,7 +1,8 @@
 //! Isolated OpenFX binary identity discovery.
 //!
 //! This is an ABI entry-point inspection boundary, not image-effect admission:
-//! discovery never calls `setHost`, `OfxActionLoad`, or a render action. Native
+//! discovery calls the optional early `OfxSetHost` with the actual native host,
+//! then inspects headers without `OfxActionLoad` or a render action. Native
 //! code runs only in the supervised child dispatched by the product executable.
 
 use std::collections::BTreeSet;
@@ -24,7 +25,6 @@ const RESPONSE_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_DISCOVERY_RESPONSE";
 const DEADLINE: Duration = Duration::from_secs(10);
 const MAX_MESSAGE_BYTES: u64 = 256 * 1024;
 const MAX_PLUGINS: c_int = 1024;
-const MAX_API_BYTES: usize = 64;
 const MAX_IDENTIFIER_BYTES: usize = 256;
 const IMAGE_EFFECT_API: &str = "OfxImageEffectPluginAPI";
 
@@ -269,6 +269,50 @@ pub fn run_openfx_discovery_worker() -> Result<(), OpenFxDiscoveryError> {
         .map_err(|error| unavailable(format!("OpenFX response write failed: {error}")))
 }
 
+unsafe extern "C" {
+    fn mondrian_openfx_discovery_host_create(
+        owner: *mut *mut c_void,
+        handle: *mut *const c_void,
+    ) -> c_int;
+    fn mondrian_openfx_discovery_host_destroy(owner: *mut c_void);
+}
+
+struct NativeDiscoveryHost {
+    owner: std::ptr::NonNull<c_void>,
+    handle: std::ptr::NonNull<c_void>,
+}
+
+impl NativeDiscoveryHost {
+    fn create() -> Result<Self, OpenFxDiscoveryError> {
+        let mut owner = std::ptr::null_mut();
+        let mut handle = std::ptr::null();
+        // SAFETY: Writable output pointers stay live; the native host never runs
+        // installed code and returns one owned descriptor or clears both outputs.
+        let status = unsafe { mondrian_openfx_discovery_host_create(&mut owner, &mut handle) };
+        if status != 0 {
+            return Err(unavailable(format!(
+                "native discovery host failed ({status})"
+            )));
+        }
+        let owner = std::ptr::NonNull::new(owner)
+            .ok_or_else(|| unavailable("native discovery host has no owner"))?;
+        let Some(handle) = std::ptr::NonNull::new(handle.cast_mut()) else {
+            // SAFETY: The successful native call transferred this exact owner.
+            unsafe { mondrian_openfx_discovery_host_destroy(owner.as_ptr()) };
+            return Err(unavailable("native discovery host has no descriptor"));
+        };
+        Ok(Self { owner, handle })
+    }
+}
+
+impl Drop for NativeDiscoveryHost {
+    fn drop(&mut self) {
+        // SAFETY: The guard exclusively owns this exact allocation and is dropped
+        // after the selected library, including on every failed bootstrap path.
+        unsafe { mondrian_openfx_discovery_host_destroy(self.owner.as_ptr()) };
+    }
+}
+
 fn inspect_loaded_binary(
     request: &DiscoveryRequest,
 ) -> Result<Vec<OpenFxPluginDescriptor>, OpenFxDiscoveryError> {
@@ -286,6 +330,7 @@ fn inspect_loaded_binary(
     // All exported pointers remain borrowed while `library` is alive. A bad
     // plugin can still crash this process; the parent supervises that failure.
     let plugins = unsafe {
+        let host = NativeDiscoveryHost::create()?;
         let library = Library::new(&path)
             .map_err(|error| unavailable(format!("OpenFX binary load failed: {error}")))?;
         let count = library
@@ -294,7 +339,18 @@ fn inspect_loaded_binary(
         let get_plugin = library
             .get::<unsafe extern "C" fn(c_int) -> *const OfxPlugin>(b"OfxGetPlugin\0")
             .map_err(|error| invalid(format!("OpenFX descriptor export is missing: {error}")))?;
-        let count = count();
+        // The optional export precedes all enumeration calls. A not-for-host
+        // response is a successful empty discovery, not a native loading fault.
+        let admitted =
+            match library.get::<unsafe extern "C" fn(*const c_void) -> c_int>(b"OfxSetHost\0") {
+                Ok(bootstrap) => match bootstrap(host.handle.as_ptr().cast_const()) {
+                    0 => true,
+                    1 => false,
+                    status => return Err(invalid(format!("OpenFX bootstrap failed ({status})"))),
+                },
+                Err(_) => true,
+            };
+        let count = if admitted { count() } else { 0 };
         if !(0..=MAX_PLUGINS).contains(&count) {
             return Err(invalid("OpenFX plugin count is outside the admitted range"));
         }
@@ -305,8 +361,7 @@ fn inspect_loaded_binary(
                 return Err(invalid(format!("OpenFX plugin {index} has no descriptor")));
             }
             let header = &*pointer;
-            let api = read_ascii(header.plugin_api, MAX_API_BYTES)?;
-            if api != IMAGE_EFFECT_API || header.api_version != 1 {
+            if header.api_version != 1 || !is_image_effect_api(header.plugin_api) {
                 continue;
             }
             let identifier = read_ascii(header.plugin_identifier, MAX_IDENTIFIER_BYTES)?;
@@ -344,6 +399,23 @@ struct OfxPlugin {
     main_entry: Option<
         unsafe extern "C" fn(*const c_char, *const c_void, *mut c_void, *mut c_void) -> c_int,
     >,
+}
+
+// Compare only the one admitted API, including its terminator. Unknown APIs
+// have no product string-size/ASCII requirement and need no owned allocation.
+unsafe fn is_image_effect_api(pointer: *const c_char) -> bool {
+    if pointer.is_null() {
+        return false;
+    }
+    for (index, expected) in IMAGE_EFFECT_API.bytes().chain(std::iter::once(0)).enumerate() {
+        // SAFETY: A legal header contains a terminated C string. Stop at the
+        // first differing byte (including an early NUL), so a short string is
+        // never read beyond its terminator. Malformed plugins remain supervised.
+        if unsafe { *pointer.add(index) } as u8 != expected {
+            return false;
+        }
+    }
+    true
 }
 
 unsafe fn read_ascii(
@@ -465,5 +537,117 @@ mod tests {
             resolve_openfx_binary(&bundle),
             Err(OpenFxDiscoveryError::Invalid(_))
         ));
+    }
+    #[test]
+    #[ignore = "requires the owned SessionProbe native bundle"]
+    fn native_discovery_skips_long_unknown_apis_before_descriptor_validation() {
+        const TEST: &str = "openfx_adapter::tests::native_discovery_skips_long_unknown_apis_before_descriptor_validation";
+        if !crate::openfx_host::shared_frame_tests::qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "mixed_api_long")],
+        ) {
+            return;
+        }
+        let path = resolve_openfx_binary(&PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY")
+                .expect("owned SessionProbe binary"),
+        ))
+        .expect("probe path");
+        let request = DiscoveryRequest {
+            binary_path: path.clone(),
+            binary_sha256: sha256_file(&path).expect("probe fingerprint"),
+        };
+        for _ in 0..3 {
+            let plugins = inspect_loaded_binary(&request)
+                .expect("skip unknown long API without applying known-API metadata bounds");
+            assert_eq!(plugins.len(), 1);
+            assert_eq!(plugins[0].identifier, "uk.co.thefoundry.BasicGainPlugin");
+            assert_eq!(plugins[0].api_version, 1);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the owned SessionProbe native bundle"]
+    fn native_discovery_bootstrap_owns_image_memory_and_releases_host_binding() {
+        const TEST: &str = "openfx_adapter::tests::native_discovery_bootstrap_owns_image_memory_and_releases_host_binding";
+        if !crate::openfx_host::shared_frame_tests::qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "bootstrap_memory")],
+        ) {
+            return;
+        }
+        let path = resolve_openfx_binary(&PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY")
+                .expect("owned SessionProbe binary"),
+        ))
+        .expect("probe path");
+        let request = DiscoveryRequest {
+            binary_path: path.clone(),
+            binary_sha256: sha256_file(&path).expect("probe fingerprint"),
+        };
+        for _ in 0..3 {
+            let plugins = inspect_loaded_binary(&request)
+                .expect("host-owned image memory must work during early bootstrap");
+            assert_eq!(plugins.len(), 1);
+            assert_eq!(plugins[0].identifier, "uk.co.thefoundry.BasicGainPlugin");
+        }
+        // Sequential owners must fully release the native singleton binding.
+        // The test uses the existing constructor, without exporting a test-only
+        // global accessor or introducing another native bootstrap owner path.
+        let first = NativeDiscoveryHost::create().expect("fresh owner after repeated bootstrap");
+        drop(first);
+        let second = NativeDiscoveryHost::create().expect("binding released before next owner");
+        drop(second);
+    }
+
+    #[test]
+    #[ignore = "requires the owned SessionProbe native bundle"]
+    fn native_discovery_refuses_busy_owners_without_waiting_or_switching_host_callbacks() {
+        const TEST: &str = "openfx_adapter::tests::native_discovery_refuses_busy_owners_without_waiting_or_switching_host_callbacks";
+        if !crate::openfx_host::shared_frame_tests::qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "bootstrap_memory")],
+        ) {
+            return;
+        }
+        let path = resolve_openfx_binary(&PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY")
+                .expect("owned SessionProbe binary"),
+        ))
+        .expect("probe path");
+        let first = NativeDiscoveryHost::create().expect("first host owner");
+        assert!(
+            matches!(NativeDiscoveryHost::create(),
+            Err(OpenFxDiscoveryError::Unavailable(reason)) if reason.ends_with("(9)")),
+            "same-thread second owner must return native HostBusy immediately"
+        );
+        let other = std::thread::spawn(|| {
+            matches!(NativeDiscoveryHost::create(),
+            Err(OpenFxDiscoveryError::Unavailable(reason)) if reason.ends_with("(9)"))
+        });
+        assert!(
+            other.join().expect("second owner thread"),
+            "cross-thread owner must return HostBusy, without waiting for first drop"
+        );
+        crate::openfx_host::shared_frame_tests::native_canonical_geometry_overflow_refuses_before_binary_loading();
+        // The first owner's live suite must remain usable after both refused
+        // attempts. The fixture performs allocation/lock/write/read/free through
+        // the exposed suite, rather than inspecting a vendor global pointer.
+        // SAFETY: Library and its export remain live until after bootstrap; the
+        // first owner remains live until the library has been unloaded.
+        unsafe {
+            let library = Library::new(path).expect("bootstrap fixture library");
+            let bootstrap = library
+                .get::<unsafe extern "C" fn(*const c_void) -> c_int>(b"OfxSetHost\0")
+                .expect("owned optional bootstrap");
+            assert_eq!(
+                bootstrap(first.handle.as_ptr().cast_const()),
+                0,
+                "refused owners must not replace the first host's image-memory binding"
+            );
+        }
+        drop(first);
+        let next = NativeDiscoveryHost::create().expect("owner after first complete teardown");
+        drop(next);
     }
 }

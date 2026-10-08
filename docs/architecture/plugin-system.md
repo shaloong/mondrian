@@ -50,55 +50,45 @@ the product advertises VST3 support. Vendor
 editors and auxiliary buses require separate qualified slices. Unbound
 definitions record `null` and cannot authorize native execution.
 
-OpenFX has a supervised binary-header discovery boundary in
-`mondrian-app::openfx_adapter`. The app's hidden discovery child alone loads a
-selected native binary, calls `OfxGetNumberOfPlugins` and `OfxGetPlugin`, and
-returns bounded image-effect API v1 identifiers/versions. The parent pins the
-canonical binary path and full SHA-256 before and after the child, validates
-unique descriptors, and enforces a deadline; native failure never loads the
-binary in the editor process. A selected `.ofx.bundle` resolves through the
-current platform's `Contents/<architecture>` directory only when exactly one
-regular `.ofx` binary is present. Discovery does not invoke `setHost`, image-effect
-description, instance creation, or render. An independently built official
-Float32 Basic example provides the local ABI discovery qualification fixture;
-its binary stays outside the shipped product.
+OpenFX discovery in `mondrian-app::openfx_adapter` loads installed binaries only
+in a supervised child. An optional exported OfxSetHost receives the actual native
+host before OfxGetNumberOfPlugins and OfxGetPlugin. Discovery returns bounded
+image-effect API v1 headers; it does not issue per-plugin setHost, Describe,
+CreateInstance or Render actions. The parent pins the canonical binary path and
+full SHA-256 before/after the child and validates unique descriptors/deadlines.
+A selected bundle resolves through its platform Contents/architecture directory
+only when exactly one regular native binary is present.
 
-The application builds a selected-binary Float32 filter host on Windows,
-Linux, and macOS using vendored BSD-3-Clause OpenFX HostSupport source and separate supervised
-description/render children. The description child runs DescribeInContext for
-one selected Filter and returns bounded Double/Boolean/Integer defaults, labels, hints,
-numeric hard/display ranges, and animation/visibility flags. Plain and Scale
-Double semantics are admitted; other parameter kinds and spatial Double
-semantics receive an explicit unsupported result. The caller supplies a pinned
-binary inspection, explicit frame time/rate/range/PAR, RGBA Float32
-straight-alpha working-frame pixels, and
-Double/Boolean/Integer parameter values. The parent checks binary identity, bounded
-request/output sizes, finite input and output pixels, and a render deadline;
-a native crash remains in the child. Frame transfer uses one exact-sized,
-file-backed shared memory mapping with disjoint input/output ranges in native
-Float32 byte order. The parent retains the backing file until child termination
-and reaping, and reads output only after successful completion. The child
-validates the complete mapping extent before native loading; the synchronous
-native ABI receives bounded memory buffers instead of pixel file paths. This
-removes explicit full-frame file writes/reads and the intermediate encoded input
-vector, but remains a per-render process with OS-backed mapping allocation.
-Resident instances and a reused transport still require lifecycle work. The host advertises only the Filter context and RGBA,
-does not advertise tiles or temporal clip access, rejects unsupported
-parameter types and authored Double values outside the plugin's hard range,
-rejects parameter access at a different frame instead of returning the current
-value as animated history, and pairs each successful BeginRender with EndRender even on
-render failure. A real official Basic Gain filter qualification covers all
-pixels in a nonuniform 4x4 frame at an authored gain of 1.5. Its reference
-binary remains outside the product tree. The host ABI uses OpenFX bottom-left
-pixel coordinates with negative row bytes over Mondrian's top-row-first frame.
-`tests/openfx_reference` builds that pinned upstream Basic source without
-Conan or vendoring the plugin. It checks the upstream commit at configure time
-and emits a platform bundle outside the product tree for the ignored real-host
-pixel test. Windows MinGW-built Basic passed the selected-binary host and
-compiled-graph comparison. The reference test also exercises per-component
-controls at a later frame with non-square pixels and unclamped Float32 HDR
-and alpha values; macOS and Linux still require their own built
-fixture and native qualification run.
+The application builds the selected Filter host on Windows, Linux and macOS from
+BSD-3-Clause OpenFX HostSupport and product adapters. Separate description and
+resident execution children run real native actions. Description preserves
+Double/Integer scalars, numeric 2D/3D tuples, RGB/RGBA, Boolean, Choice, StrChoice
+and String defaults, labels, hints, numeric bounds and animation/visibility.
+Plain/Scale Double semantics are admitted; spatial Double, custom/parametric,
+label and rich-text authoring need additional contracts. Numeric curve queries
+come from the canonical author evaluator; constants and current-frame samples
+retain distinct native query authority rather than pretending to be history.
+
+The parent supplies pinned binary identity, explicit time/rate/range/PAR and
+straight-alpha Float32 RGBA pixels. Resident instances reuse supervised workers
+and exact-sized paired shared mappings, with strict sequenced control packets
+and borrowed cancellation/deadline authority. Native code borrows mapped rasters
+only during legal actions; failed/unfetched output cannot publish an old frame.
+No plugin binary is loaded into the editor, and ordinary renders neither launch
+a process nor serialize frame files. The graph executor owns native factory
+instances and charges controlled shared/executor storage; arbitrary private
+plugin allocations are not a bounded-RSS promise.
+
+This is the CPU Float32/RGBA Filter/current-frame subset. Tiles, temporal access,
+GPU execution, other contexts and custom/overlay interactions remain unavailable.
+The untouched pinned official Basic and the separately owned SessionProbe
+qualify actual pixels, automation, instance reuse, edits/seeks, cancellation,
+failure isolation and selected contracts. A successful Basic run cannot qualify
+all vendors, features, platforms or throughput. Bottom-left native coordinates
+use negative row bytes over the product's top-row-first raster; canonical
+project/clip geometry includes PAR while image bounds remain pixel coordinates.
+`tests/openfx_reference` builds external licensed fixtures without shipping them.
+
 `mondrian-app::openfx_effect` can now register one explicitly selected and
 described Filter as a Float32 CPU definition in the shared compiled visual
 effect graph. Stable parameter IDs derive from the plugin identifier and OFX
@@ -131,7 +121,8 @@ project does not embed native plugin binaries.
 
 Broader product admission still needs plugin page/group layout and dynamic
 control enablement in Inspector metadata, representative vendor-plugin
-qualification, and a resident worker to avoid one process launch per frame.
+qualification, native interactions and measured performance across supported
+capabilities. Resident execution and worker reuse are already implemented.
 
 Broader image-effect support needs qualified property, parameter, clip/image,
 memory, progress, threading, and render suites across vendor plugins.
@@ -319,7 +310,7 @@ and license notices, and review the trademark rules before using VST branding.
 
 The admitted OpenFX Adapter runs a user-installed CPU Filter behind a separate
 supervised worker, with frame timing, pixel aspect, Float32 RGBA, and authored
-scalar parameters lowered into the canonical Effect graph. The official Basic
+typed parameter values and canonical curve sources lowered into the Effect graph. The official Basic
 Gain reference plugin passed direct host and graph pixel comparison on Windows
 at the pinned upstream source revision above. Broader depth/component/
 premultiplication, render-scale, temporal, region-of-definition, and
@@ -352,20 +343,35 @@ Format and license references: [CLAP](https://github.com/free-audio/clap),
 ### Native OpenFX session ownership
 
 The C ABI creates, renders and destroys an opaque session exclusively inside a
-supervised child. A session owns frame facts and the input buffer, host, local
-PluginCache, ImageEffect API handler, selected binary and effect instance in
-that lifetime order. Destruction reverses the order. Neither selected rendering
+supervised child. A session owns frame facts, host, local PluginCache, ImageEffect
+API handler, bootstrap module reference, selected binary and effect instance in
+that lifetime order. Source/Output borrow the owner's mapped frame ranges. Destruction reverses the order. Neither selected rendering
 nor description registers stack-owned handlers in the process-global cache.
-Clips and scalar parameters read their owning instance's frame facts; no global
+Clips and typed parameters read their owning instance's frame facts; no global
 mutable raster or timing variables remain.
 
-Reuse binds the exact raster extent. Every request applies a complete scalar
-snapshot; omitted controls revert to descriptor defaults. Validation precedes
+Reuse binds the exact raster extent. Every request applies a complete typed
+parameter/query-source snapshot; omitted controls revert to descriptor defaults. Validation precedes
 parameter mutation. Changed values are assigned before callbacks and bracketed
 with BeginInstanceChanged/InstanceChanged/EndInstanceChanged. Time changes use
 ChangeTime; edits at the same instant use ChangeUserEdited. Clip metadata changes
-also notify Source/Output and refresh preferences. Unsupported negotiated pixel
-contracts fail. The current independently evaluable route rejects required
+also notify Source/Output and refresh preferences. Output clip/image metadata
+reports its negotiated Straight, Premultiplied or Opaque representation; Source
+continues to report the caller's Straight representation. Successful native C ABI
+and resident responses carry `ColorFrameAlpha` through a typed result. The Rust
+adapter alone converts output to public Straight pixels while reading staging:
+Opaque preserves RGB and forces alpha one; normalized Premultiplied coverage
+uses the existing `mondrian-effects::straight_rgba_from_premultiplied` primitive.
+Finite raw Straight channels remain unchanged, including signed/over-one alpha.
+Premultiplied alpha outside [0, 1] is explicitly unsupported by the canonical
+coverage boundary, rather than being clamped and silently changing RGB. This is
+an adapter limitation, not an OFX float-alpha requirement. Nonfinite raw/output
+channels and division overflow fail before publication and retire the worker.
+Zero-alpha output with nonzero RGB can carry emission and is explicitly refused
+at this finite Straight-coverage adapter boundary rather than silently erased.
+Zero coverage with zero RGB canonicalizes to zero; every representable positive coverage is
+unassociated without an arbitrary epsilon. Unknown negotiated metadata fails
+before Render. Unsupported negotiated pixel contracts fail. The current independently evaluable route rejects required
 sequential rendering and temporal clip access at description, creation and
 render admission; optional sequential optimization remains legal. Begin/render/
 end actions explicitly report nonsequential execution during edits and seeks.
@@ -373,11 +379,10 @@ The output allocation is reused and cleared, with a per-render
 fetch flag preventing publication of a previous frame. Native failures poison
 the handle; subsequent calls fail until the owner retires and recreates it.
 
-The executable now exposes the resident native session protocol described below.
-The standalone single-frame API uses that protocol and retires its session after
-one frame. Definition callbacks still call that standalone API until factory
-binding, execution cancellation and coordinated native grants are integrated.
-Combined memory admission and vendor sequential-state support remain required.
+The standalone single-frame API uses the resident protocol and retires after
+one frame. Authored graph execution uses prepared native factory instances with
+session reuse, borrowed execution control and coordinated frame-memory grants.
+Vendor sequential/temporal-state support remains a separate contract.
 The official Basic Gain child qualification
 covers repeated edits, seeks, changed input and pixel aspect, omitted defaults,
 nonfinite input, extent rejection and repeated native destruction/recreation.
@@ -833,3 +838,67 @@ also passed; complete Golden passed 3/3 at the same source. See
 Sidechain GUI controls, broader layouts, MIDI/editor/vendor/platform and
 performance qualification remain open. Earlier ae3c78f/3b44084 product and
 Golden receipts retain their named source scope.
+
+
+### OpenFX CPU admission and canonical geometry
+
+The product host explicitly advertises Float32/RGBA Filter and CPU rendering.
+The supported-depth array is populated before any plugin bootstrap or Describe
+call. The 1.5.1 CPU property is registered on descriptors; an instance starts with
+its descriptor value and owns subsequent overrides. Unsupported CPU capabilities
+are refused during description, instance creation and after change/preference
+actions before rendering. The API version remains 1.4 with capability discovery
+for implemented additions; this is not a claim of all OpenFX 1.5.1 features.
+
+An optional exported OfxSetHost receives that same native host before plugin
+count and header enumeration. Failed is a successful empty discovery and no
+further enumeration/action is called; other non-success statuses are errors.
+Discovery owns an opaque native host until library unload. Selected description
+and sessions retain an extra module reference across bootstrap and HostSupport
+enumeration; the instance and selected binary die before that reference and host.
+No generic vendor cache or process-global bootstrap owner is introduced.
+
+Progressive rendering passes FieldNone. Project size/extent and clip RoD/ROI use
+canonical X = pixel width times PAR, while image bounds and render windows stay
+in pixel coordinates. Rust request admission and the native C seam both refuse
+nonrepresentable canonical extents without imposing an arbitrary PAR maximum.
+These constant-time checks add no steady-state bootstrap calls or raster copies.
+GPU, temporal/other contexts, interact/author callbacks, colour negotiation and
+whole-host throughput qualification remain separate unfinished work.
+
+### Selected OpenFX binary API admission
+
+The product-owned `SelectedPluginBinary` uses the existing platform binary loader,
+HostSupport plugin factories and handle ownership. It enumerates at most 1024
+headers after the optional early host bootstrap and admits only registered API
+versions. Other APIs and future image-effect API versions receive no `setHost` or
+actions. Admitted plugins retain their original export index, so later handle
+creation cannot address another plugin after skipped entries. All-unsupported
+binaries produce an empty discovery; malformed supported headers fail within the
+supervised worker. The generic vendored filesystem/XML scanner is unchanged.
+
+### OpenFX early host ownership and exact API matching
+
+Discovery owns a Host followed by an ImageEffect cache before loading/calling
+the optional early bootstrap. This provides a live host for exposed host-only
+ImageEffect image-memory calls, including a null instance handle. The same
+product-owned cache lifetime binding is used by description and resident owners.
+Its product-owned lease uses immediate acquisition and returns native HostBusy
+for a concurrent owner or same-thread reentry. No caller waits for another session
+to be dropped. Render callbacks take no additional lease lock.
+The cache is constructed after the lease and destroyed before it. The lease clears
+the vendor host callback pointer
+before its Host dies; the supervised process admits one native host at a time.
+Plugins and their DLL teardown still occur before the binding is released.
+This adds no multihost or native multithread capability claim.
+Native session admission validates complete frame geometry, alignment, finite
+samples, exact storage and parameter-array/count transport before host ownership,
+so invalid transport returns its own error even while another owner is active.
+Private Rust owners are neither Send nor Sync and are destroyed on their owning
+thread. Semantic parameter validation remains tied to the selected descriptor.
+
+Rust/native enumeration compare only the admitted ImageEffect API v1 literal
+including NUL before examining identifier/callback metadata. Unknown API names
+receive no arbitrary product 64-byte/ASCII restriction, callback or owned string
+allocation. Current known-API identifier/resource limits remain unchanged.
+Original export indices are retained. Unknown-version entries remain skipped.

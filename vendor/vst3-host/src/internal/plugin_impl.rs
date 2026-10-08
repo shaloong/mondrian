@@ -963,6 +963,7 @@ impl PluginImpl {
                 IProcessContextRequirements_::Flags_::kNeedTempo as u32,
             ) {
                 data.process_context.tempo = bpm;
+                data.process_context.state |= ProcessContext_::StatesAndFlags_::kTempoValid as u32;
             }
         }
     }
@@ -980,6 +981,8 @@ impl PluginImpl {
             ) {
                 data.process_context.timeSigNumerator = numerator;
                 data.process_context.timeSigDenominator = denominator;
+                data.process_context.state |=
+                    ProcessContext_::StatesAndFlags_::kTimeSigValid as u32;
             }
         }
     }
@@ -989,8 +992,11 @@ impl PluginImpl {
     fn update_playing(&mut self, playing: bool) {
         self.playing = playing;
         if let Some(ref mut data) = self.process_data {
-            data.process_context.state =
-                process_context_state(data.process_context_requirements, playing);
+            data.process_context.state = process_context_state(
+                data.process_context_requirements,
+                playing,
+                data.process_context.state,
+            );
         }
     }
 
@@ -1888,8 +1894,21 @@ impl PluginImpl {
                 data.process_context.timeSigNumerator = self.time_sig_numerator;
                 data.process_context.timeSigDenominator = self.time_sig_denominator;
             }
-            data.process_context.state =
-                process_context_state(self.process_context_requirements, self.playing);
+            data.process_context.state = process_context_state(
+                self.process_context_requirements,
+                self.playing,
+                PROCESS_CONTEXT_STATE
+                    | if self.process_context_requirements.is_some()
+                        && process_context_needs(
+                            self.process_context_requirements,
+                            IProcessContextRequirements_::Flags_::kNeedSystemTime as u32,
+                        )
+                    {
+                        ProcessContext_::StatesAndFlags_::kSystemTimeValid as u32
+                    } else {
+                        0
+                    },
+            );
 
             // Set up process data
             data.process_data.processMode = self.vst_process_mode();
@@ -2192,7 +2211,6 @@ impl PluginImpl {
                 // at the new sample position.
                 advance_process_context(
                     &mut data.process_context,
-                    data.process_context_requirements,
                     data.transport_tempo,
                     frames as i64,
                 );
@@ -2383,6 +2401,29 @@ impl PluginImpl {
 }
 
 impl PluginInternal for PluginImpl {
+    fn set_process_timeline_context(
+        &mut self,
+        context: crate::audio::ProcessTimelineContext,
+    ) -> Result<()> {
+        if !self.is_processing {
+            return Err(Error::NotProcessing);
+        }
+        if context.sample_rate == 0 || f64::from(context.sample_rate) != self.sample_rate {
+            return Err(Error::InvalidParameter(
+                "signal timeline rate differs from prepared processing".to_string(),
+            ));
+        }
+        let data = self.process_data.as_mut().ok_or(Error::NotProcessing)?;
+        // Assignment keeps the SDK pointer to this field stable. This adapter
+        // owns no second timeline: optional author facts are unavailable here.
+        data.process_context = unsafe { std::mem::zeroed() };
+        data.process_context.sampleRate = f64::from(context.sample_rate);
+        data.process_context.projectTimeSamples = context.sample_position;
+        data.process_context.state =
+            process_context_state(data.process_context_requirements, false, 0);
+        Ok(())
+    }
+
     fn set_parameter(&mut self, id: u32, value: f64) -> Result<()> {
         self.set_parameter_at(id, value, 0)
     }
@@ -4799,15 +4840,15 @@ fn process_context_needs(requirements: Option<u32>, flag: u32) -> bool {
     }
 }
 
-/// Compute the validity flags for the fields the processor requested. Processors predating
-/// IProcessContextRequirements retain the host's complete legacy transport context.
+/// Advertise only requested fields with supplied values. Processors without
+/// IProcessContextRequirements receive all available fields, never invented facts.
 #[allow(clippy::unnecessary_cast)]
-fn process_context_state(requirements: Option<u32>, playing: bool) -> u32 {
+fn process_context_state(requirements: Option<u32>, playing: bool, available: u32) -> u32 {
     let Some(requirements) = requirements else {
         return if playing {
-            PROCESS_CONTEXT_STATE | PROCESS_CONTEXT_PLAYING
+            available | PROCESS_CONTEXT_PLAYING
         } else {
-            PROCESS_CONTEXT_STATE & !PROCESS_CONTEXT_PLAYING
+            available & !PROCESS_CONTEXT_PLAYING
         };
     };
 
@@ -4833,7 +4874,7 @@ fn process_context_state(requirements: Option<u32>, playing: bool) -> u32 {
     ];
     let mut state = mappings
         .iter()
-        .filter(|(required, _)| requirements & required != 0)
+        .filter(|(required, valid)| requirements & required != 0 && available & valid != 0)
         .fold(0, |state, (_, valid)| state | valid);
     if playing && requirements & R::kNeedTransportState as u32 != 0 {
         state |= S::kPlaying as u32;
@@ -4852,26 +4893,17 @@ fn current_system_time_nanos() -> i64 {
 /// Keeps `continousTimeSamples`/`projectTimeSamples` (and the musical playhead derived from
 /// the current tempo) moving so tempo-synced plugins don't see a frozen time-0.
 #[allow(clippy::unnecessary_cast)]
-fn advance_process_context(
-    ctx: &mut ProcessContext,
-    requirements: Option<u32>,
-    transport_tempo: f64,
-    frames: i64,
-) {
-    use IProcessContextRequirements_::Flags_ as R;
+fn advance_process_context(ctx: &mut ProcessContext, transport_tempo: f64, frames: i64) {
+    use ProcessContext_::StatesAndFlags_ as S;
     ctx.projectTimeSamples = ctx.projectTimeSamples.wrapping_add(frames);
-    if process_context_needs(requirements, R::kNeedContinousTimeSamples as u32) {
+    if ctx.state & S::kContTimeValid as u32 != 0 {
         ctx.continousTimeSamples = ctx.continousTimeSamples.wrapping_add(frames);
     }
-    if requirements.is_some()
-        && process_context_needs(requirements, R::kNeedSystemTime as u32)
-        && ctx.sampleRate > 0.0
-    {
+    if ctx.state & S::kSystemTimeValid as u32 != 0 && ctx.sampleRate > 0.0 {
         let nanos = (frames as f64 * 1_000_000_000.0 / ctx.sampleRate).round() as i64;
         ctx.systemTime = ctx.systemTime.saturating_add(nanos);
     }
-    if process_context_needs(requirements, R::kNeedProjectTimeMusic as u32) && ctx.sampleRate > 0.0
-    {
+    if ctx.state & S::kProjectTimeMusicValid as u32 != 0 && ctx.sampleRate > 0.0 {
         // Quarter notes elapsed = seconds * (BPM / 60).
         let secs = ctx.projectTimeSamples as f64 / ctx.sampleRate;
         ctx.projectTimeMusic = secs * (transport_tempo / 60.0);
@@ -5100,8 +5132,8 @@ mod transport_tests {
     #[allow(clippy::unnecessary_cast)] // `as u32` needed where the constants are i32 (Windows)
     fn process_context_state_toggles_playing_without_disturbing_validity() {
         use ProcessContext_::StatesAndFlags_ as F;
-        let playing = process_context_state(None, true);
-        let stopped = process_context_state(None, false);
+        let playing = process_context_state(None, true, PROCESS_CONTEXT_STATE);
+        let stopped = process_context_state(None, false, PROCESS_CONTEXT_STATE);
         // kPlaying tracks the playing flag.
         assert_ne!(playing & F::kPlaying as u32, 0);
         assert_eq!(stopped & F::kPlaying as u32, 0);
@@ -5122,10 +5154,11 @@ mod transport_tests {
         let mut ctx: ProcessContext = unsafe { std::mem::zeroed() };
         ctx.sampleRate = 48_000.0;
         ctx.tempo = 120.0;
+        ctx.state = PROCESS_CONTEXT_STATE;
         // One second of audio at 48 kHz in 512-sample blocks.
         let blocks = 48_000 / 512;
         for _ in 0..blocks {
-            advance_process_context(&mut ctx, None, 120.0, 512);
+            advance_process_context(&mut ctx, 120.0, 512);
         }
         let advanced = (blocks * 512) as i64;
         assert_eq!(ctx.projectTimeSamples, advanced);
@@ -5136,11 +5169,28 @@ mod transport_tests {
 
     #[test]
     #[allow(clippy::unnecessary_cast)]
+    fn unavailable_context_fields_remain_invalid_after_advance() {
+        use IProcessContextRequirements_::Flags_ as R;
+        let requirements = R::kNeedTempo as u32 | R::kNeedContinousTimeSamples as u32;
+        assert_eq!(process_context_state(Some(requirements), false, 0), 0);
+        let mut ctx: ProcessContext = unsafe { std::mem::zeroed() };
+        ctx.sampleRate = 48_000.0;
+        ctx.projectTimeSamples = -17;
+        advance_process_context(&mut ctx, 120.0, 4);
+        assert_eq!(ctx.projectTimeSamples, -13);
+        assert_eq!(ctx.state, 0);
+        assert_eq!(ctx.continousTimeSamples, 0);
+        assert_eq!(ctx.projectTimeMusic, 0.0);
+        assert_eq!(ctx.tempo, 0.0);
+    }
+
+    #[test]
+    #[allow(clippy::unnecessary_cast)]
     fn explicit_requirements_advertise_only_requested_fields() {
         use IProcessContextRequirements_::Flags_ as R;
         use ProcessContext_::StatesAndFlags_ as S;
         let requirements = R::kNeedTempo as u32 | R::kNeedContinousTimeSamples as u32;
-        let state = process_context_state(Some(requirements), true);
+        let state = process_context_state(Some(requirements), true, PROCESS_CONTEXT_STATE);
         assert_ne!(state & S::kTempoValid as u32, 0);
         assert_ne!(state & S::kContTimeValid as u32, 0);
         assert_eq!(state & S::kPlaying as u32, 0);

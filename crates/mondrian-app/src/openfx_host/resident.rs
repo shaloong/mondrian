@@ -5,10 +5,10 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::Child;
 
 /// Hidden executable mode for a resident native Filter session.
-pub const OPENFX_RESIDENT_WORKER_ARGUMENT: &str = "--internal-openfx-session-v1";
+pub const OPENFX_RESIDENT_WORKER_ARGUMENT: &str = "--internal-openfx-session-v2";
 const ENDPOINT_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_ENDPOINT";
 const NONCE_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_NONCE";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 const POLL: Duration = Duration::from_millis(20);
 const RETIRE: Duration = Duration::from_millis(100);
 
@@ -40,9 +40,22 @@ enum Request {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Response {
-    Connected { version: u16, nonce: String },
-    Ready { version: u16, nonce: String },
-    Rendered { sequence: u64, status: i32 },
+    Connected {
+        version: u16,
+        nonce: String,
+    },
+    Ready {
+        version: u16,
+        nonce: String,
+    },
+    Rendered {
+        sequence: u64,
+        alpha: mondrian_renderer::ColorFrameAlpha,
+    },
+    Rejected {
+        sequence: u64,
+        status: i32,
+    },
     Closed {},
 }
 
@@ -304,9 +317,9 @@ impl OpenFxFilterSession {
         let mut checkpoint = || self.process.check(owner_checkpoint, deadline);
         write_packet(&mut self.control, &request, &mut checkpoint)?;
         let response: Response = read_packet(&mut self.control, &mut checkpoint)?;
-        match response {
-            Response::Rendered { sequence, status: 0 } if sequence == self.sequence => {}
-            Response::Rendered { sequence, status } if sequence == self.sequence => {
+        let alpha = match response {
+            Response::Rendered { sequence, alpha } if sequence == self.sequence => alpha,
+            Response::Rejected { sequence, status } if sequence == self.sequence => {
                 return Err(OpenFxHostError::WorkerFailed(format!(
                     "native status {status}"
                 )))
@@ -316,7 +329,7 @@ impl OpenFxFilterSession {
                     "native session response sequence does not match",
                 ))
             }
-        }
+        };
         checkpoint()?;
         if sha256_file(&self.inspection.binary_path)? != self.inspection.binary_sha256 {
             return Err(invalid("OpenFX binary changed during render"));
@@ -324,7 +337,7 @@ impl OpenFxFilterSession {
         let mut pixels = Vec::with_capacity(frame.pixels.len());
         for block in self.shared[self.frame_bytes..].chunks(1024 * 1024) {
             checkpoint()?;
-            pixels.extend(block.chunks_exact(16).map(|pixel| {
+            for pixel in block.chunks_exact(16) {
                 let channel = |index| {
                     f32::from_ne_bytes([
                         pixel[index],
@@ -333,11 +346,11 @@ impl OpenFxFilterSession {
                         pixel[index + 3],
                     ])
                 };
-                [channel(0), channel(4), channel(8), channel(12)]
-            }));
-        }
-        if pixels.iter().flatten().any(|channel| !channel.is_finite()) {
-            return Err(unavailable("render output contains a nonfinite channel"));
+                pixels.push(normalize_native_output_sample(
+                    [channel(0), channel(4), channel(8), channel(12)],
+                    alpha,
+                )?);
+            }
         }
         checkpoint()?;
         Ok(OpenFxFloatFrame { width: self.width, height: self.height, pixels })
@@ -685,7 +698,7 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
                     last_frame: timing.last_frame,
                     pixel_aspect_ratio: timing.pixel_aspect_ratio,
                 };
-                let status = if let Some(instance) = session.as_mut() {
+                let result = if let Some(instance) = session.as_mut() {
                     instance.render(&input, &mut output, &info, &native)
                 } else {
                     match NativeSession::create(
@@ -697,30 +710,165 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
                         &native,
                     ) {
                         Ok(mut instance) => {
-                            let status = instance.render(&input, &mut output, &info, &native);
+                            let result = instance.render(&input, &mut output, &info, &native);
                             session = Some(instance);
-                            status
+                            result
                         }
-                        Err(status) => status,
+                        Err(status) => Err(status),
                     }
                 };
-                if status != 0 {
-                    // Both old and candidate contexts survive failure teardown,
-                    // even if native publication stopped between callbacks.
-                    drop(session.take());
-                    write_response(&mut control, &Response::Rendered { sequence, status })?;
-                    return Ok(());
-                }
+                let alpha = match result {
+                    Ok(alpha) => alpha,
+                    Err(status) => {
+                        // Both old and candidate contexts survive failure teardown,
+                        // even if native publication stopped between callbacks.
+                        drop(session.take());
+                        write_response(&mut control, &Response::Rejected { sequence, status })?;
+                        return Ok(());
+                    }
+                };
                 curves = candidate_curves;
-                write_response(&mut control, &Response::Rendered { sequence, status })?;
+                write_response(&mut control, &Response::Rendered { sequence, alpha })?;
             }
         }
     }
 }
 
+// Native OFX Float alpha may exceed [0, 1]. The public raw Straight contract
+// preserves that data. Canonical premultiplied coverage conversion has a
+// narrower explicit domain; reject values outside it instead of clamping RGB.
+fn normalize_native_output_sample(
+    sample: [f32; 4],
+    alpha: mondrian_renderer::ColorFrameAlpha,
+) -> Result<[f32; 4], OpenFxHostError> {
+    use mondrian_renderer::ColorFrameAlpha;
+    if sample.iter().any(|channel| !channel.is_finite()) {
+        return Err(unavailable("render output contains a nonfinite channel"));
+    }
+    let normalized = match alpha {
+        ColorFrameAlpha::StraightCoverage => sample,
+        ColorFrameAlpha::Opaque => [sample[0], sample[1], sample[2], 1.0],
+        ColorFrameAlpha::PremultipliedCoverage => {
+            if !(0.0..=1.0).contains(&sample[3]) {
+                return Err(unavailable(
+                    "premultiplied OpenFX output alpha is outside the canonical coverage domain [0, 1]",
+                ));
+            }
+            if sample[3] == 0.0 && sample[..3].iter().any(|channel| *channel != 0.0) {
+                return Err(unavailable(
+                    "zero-alpha emission in premultiplied OpenFX output cannot be represented by canonical Straight coverage",
+                ));
+            }
+            mondrian_effects::straight_rgba_from_premultiplied(sample)
+        }
+    };
+    if normalized.iter().any(|channel| !channel.is_finite()) {
+        return Err(unavailable(
+            "premultiplied OpenFX output cannot be represented as finite Straight pixels",
+        ));
+    }
+    Ok(normalized)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_output_alpha_conversion_preserves_finite_hdr_and_raw_straight_values() {
+        use mondrian_renderer::ColorFrameAlpha;
+        for alpha in [-0.5, 0.0, 0.5, 1.5] {
+            let raw = [-2.0, 4.0, 0.25, alpha];
+            assert_eq!(
+                normalize_native_output_sample(raw, ColorFrameAlpha::StraightCoverage)
+                    .expect("raw Straight"),
+                raw
+            );
+            assert_eq!(
+                normalize_native_output_sample(raw, ColorFrameAlpha::Opaque).expect("Opaque"),
+                [-2.0, 4.0, 0.25, 1.0]
+            );
+        }
+        assert_eq!(
+            normalize_native_output_sample(
+                [-0.5, 2.0, 0.125, 0.25],
+                ColorFrameAlpha::PremultipliedCoverage
+            )
+            .expect("HDR coverage"),
+            [-2.0, 8.0, 0.5, 0.25]
+        );
+        assert_eq!(
+            normalize_native_output_sample([0.0; 4], ColorFrameAlpha::PremultipliedCoverage)
+                .expect("zero coverage"),
+            [0.0; 4]
+        );
+        let tiny = f32::MIN_POSITIVE;
+        assert_eq!(
+            normalize_native_output_sample(
+                [tiny * 2.0, -tiny * 4.0, tiny * 8.0, tiny],
+                ColorFrameAlpha::PremultipliedCoverage
+            )
+            .expect("tiny positive coverage"),
+            [2.0, -4.0, 8.0, tiny]
+        );
+    }
+
+    #[test]
+    fn native_output_alpha_conversion_rejects_nonfinite_and_unrepresentable_pixels() {
+        use mondrian_renderer::ColorFrameAlpha;
+        for representation in [
+            ColorFrameAlpha::StraightCoverage,
+            ColorFrameAlpha::PremultipliedCoverage,
+            ColorFrameAlpha::Opaque,
+        ] {
+            for channel in 0..4 {
+                for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                    let mut sample = [0.25; 4];
+                    sample[channel] = value;
+                    assert!(normalize_native_output_sample(sample, representation).is_err());
+                }
+            }
+        }
+        for alpha in [-0.5, 1.5] {
+            assert!(normalize_native_output_sample(
+                [0.25, 0.5, 1.0, alpha],
+                ColorFrameAlpha::PremultipliedCoverage
+            )
+            .is_err());
+        }
+        assert!(
+            normalize_native_output_sample(
+                [f32::MAX, 0.5, 1.0, f32::MIN_POSITIVE],
+                ColorFrameAlpha::PremultipliedCoverage
+            )
+            .is_err(),
+            "finite input division can overflow"
+        );
+        assert!(
+            normalize_native_output_sample(
+                [7.0, -3.0, 11.0, 0.0],
+                ColorFrameAlpha::PremultipliedCoverage
+            )
+            .is_err(),
+            "zero-alpha emission must not silently disappear"
+        );
+    }
+
+    #[test]
+    fn successful_native_response_requires_exact_typed_alpha_metadata() {
+        for representation in ["straight_coverage", "premultiplied_coverage", "opaque"] {
+            let packet =
+                format!(r#"{{"kind":"rendered","sequence":7,"alpha":"{representation}"}}"#);
+            assert!(serde_json::from_str::<Response>(&packet).is_ok());
+        }
+        for packet in [
+            r#"{"kind":"rendered","sequence":7}"#,
+            r#"{"kind":"rendered","sequence":7,"alpha":"unknown"}"#,
+            r#"{"kind":"rendered","sequence":7,"alpha":"opaque","status":0}"#,
+        ] {
+            assert!(serde_json::from_str::<Response>(packet).is_err());
+        }
+    }
 
     fn pair() -> (TcpStream, TcpStream) {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("listener");
@@ -734,8 +882,11 @@ mod tests {
     fn partial_packets_survive_poll_timeouts_without_losing_bytes() {
         let (mut sender, mut receiver) = pair();
         let writer = thread::spawn(move || {
-            let body =
-                serde_json::to_vec(&Response::Rendered { sequence: 17, status: 0 }).expect("body");
+            let body = serde_json::to_vec(&Response::Rendered {
+                sequence: 17,
+                alpha: mondrian_renderer::ColorFrameAlpha::StraightCoverage,
+            })
+            .expect("body");
             let header = (body.len() as u32).to_be_bytes();
             sender.write_all(&header[..2]).expect("partial header");
             thread::sleep(POLL * 2);
@@ -756,7 +907,10 @@ mod tests {
         .expect("complete fragmented response");
         assert!(matches!(
             response,
-            Response::Rendered { sequence: 17, status: 0 }
+            Response::Rendered {
+                sequence: 17,
+                alpha: mondrian_renderer::ColorFrameAlpha::StraightCoverage
+            }
         ));
         writer.join().expect("writer");
     }

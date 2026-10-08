@@ -725,6 +725,10 @@ pub struct Plugin {
 
 // Internal trait for hiding implementation details
 pub(crate) trait PluginInternal: Send {
+    fn set_process_timeline_context(
+        &mut self,
+        context: crate::audio::ProcessTimelineContext,
+    ) -> Result<()>;
     fn set_parameter(&mut self, id: u32, value: f64) -> Result<()>;
     /// Schedule a parameter change at a sample offset within the next process block.
     /// Defaults to a block-start change (ignores the offset) for implementations that don't
@@ -1383,6 +1387,23 @@ impl Plugin {
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .set_time_signature(numerator, denominator)
+    }
+
+    /// Install absolute signal time for the next block, clearing unavailable
+    /// optional transport values and flags. Call after start_processing and
+    /// before process_audio/process_bus_audio for each externally timed block.
+    /// The exact rate must match the active native processing configuration.
+    pub fn set_process_timeline_context(
+        &mut self,
+        context: crate::audio::ProcessTimelineContext,
+    ) -> Result<()> {
+        if !self.is_processing {
+            return Err(Error::NotProcessing);
+        }
+        self.internal
+            .as_mut()
+            .ok_or(Error::NotProcessing)?
+            .set_process_timeline_context(context)
     }
 
     /// Toggle the transport playing state advertised to the plugin in the host

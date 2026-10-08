@@ -1,6 +1,6 @@
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::measure_text_width;
+use crate::text_metrics::{single_line_geometry, single_line_selection_geometry};
 
 fn grapheme_is_whitespace(grapheme: &str) -> bool {
     grapheme.chars().all(char::is_whitespace)
@@ -104,28 +104,37 @@ impl TextEditState {
         true
     }
 
+    pub(super) fn line_geometry(
+        &self,
+        font_size: f32,
+        pointer_x: Option<f32>,
+    ) -> Option<mondrian_ui_text::SingleLineTextGeometry> {
+        single_line_geometry(&self.text, font_size, self.cursor_byte_idx(), pointer_x)
+    }
+
+    pub(super) fn selection_geometry(
+        &self,
+        font_size: f32,
+    ) -> Option<mondrian_ui_text::SingleLineTextSelectionGeometry> {
+        single_line_selection_geometry(
+            &self.text,
+            font_size,
+            self.cursor_byte_idx(),
+            self.selection_byte_range().map(|(start, end)| start..end),
+        )
+    }
+
     pub(super) fn set_cursor_from_text_x(&mut self, pixel_x: f32, font_size: f32) {
-        let mut best = 0;
-        let mut best_dist = f32::MAX;
-        let total = self.len_graphemes();
-        for i in 0..=total {
-            let prefix_byte = self.grapheme_byte_idx(i);
-            let w = measure_text_width(&self.text[..prefix_byte], font_size);
-            let dist = (pixel_x - w).abs();
-            if dist < best_dist {
-                best_dist = dist;
-                best = i;
-            }
+        if let Some(byte_index) = self
+            .line_geometry(font_size, Some(pixel_x))
+            .and_then(|line| line.hit_byte_index)
+        {
+            self.cursor = Self::grapheme_count(&self.text[..byte_index]);
         }
-        self.cursor = best;
     }
 
     pub(super) fn cursor_text_x(&self, font_size: f32) -> f32 {
-        if self.text.is_empty() {
-            0.0
-        } else {
-            measure_text_width(&self.text[..self.cursor_byte_idx()], font_size)
-        }
+        self.line_geometry(font_size, None).map_or(0.0, |line| line.caret_x)
     }
 
     /// Delete one grapheme before the cursor (for Backspace).
@@ -224,5 +233,25 @@ impl TextEditState {
             }
         }
         i
+    }
+}
+
+impl super::history::TextHistoryState for TextEditState {
+    type Position = usize;
+    fn history_text(&self) -> &str {
+        &self.text
+    }
+    fn history_cursor(&self) -> usize {
+        self.cursor
+    }
+    fn history_anchor(&self) -> Option<usize> {
+        self.selection_start
+    }
+    fn history_restore(text: &str, cursor: usize, anchor: Option<usize>) -> Self {
+        Self {
+            text: text.to_owned(),
+            cursor,
+            selection_start: anchor,
+        }
     }
 }

@@ -30,6 +30,69 @@ pub(crate) fn measure_single_line_at_size(text: &str, font_size: f32) -> (f32, f
     TEXT_MEASURER.with_borrow_mut(|renderer| renderer.measure_text(text, font_size))
 }
 
+/// Complete advanced line geometry from the same shared font owner as widget measurements.
+pub(crate) fn single_line_geometry(
+    text: &str,
+    font_size: f32,
+    cursor_byte_index: usize,
+    pointer_x: Option<f32>,
+) -> Option<mondrian_ui_text::SingleLineTextGeometry> {
+    if !text.is_char_boundary(cursor_byte_index) || !font_size.is_finite() || font_size <= 0.0 {
+        return None;
+    }
+    if text.is_empty() {
+        return Some(mondrian_ui_text::SingleLineTextGeometry {
+            width: 0.0,
+            height: 0.0,
+            caret_x: 0.0,
+            hit_byte_index: pointer_x.map(|_| 0),
+        });
+    }
+    TEXT_MEASURER.with_borrow_mut(|renderer| {
+        renderer.single_line_geometry(text, font_size, cursor_byte_index, pointer_x)
+    })
+}
+
+/// Complete selected spans and caret from one shared advanced line layout.
+pub(crate) fn single_line_selection_geometry(
+    text: &str,
+    font_size: f32,
+    cursor_byte_index: usize,
+    selection_byte_range: Option<std::ops::Range<usize>>,
+) -> Option<mondrian_ui_text::SingleLineTextSelectionGeometry> {
+    if !text.is_char_boundary(cursor_byte_index)
+        || !font_size.is_finite()
+        || font_size <= 0.0
+        || selection_byte_range.as_ref().is_some_and(|range| {
+            range.start > range.end
+                || !text.is_char_boundary(range.start)
+                || !text.is_char_boundary(range.end)
+        })
+    {
+        return None;
+    }
+    if text.is_empty() {
+        return Some(mondrian_ui_text::SingleLineTextSelectionGeometry {
+            line: mondrian_ui_text::SingleLineTextGeometry {
+                width: 0.0,
+                height: 0.0,
+                caret_x: 0.0,
+                hit_byte_index: None,
+            },
+            spans: Vec::new(),
+        });
+    }
+    TEXT_MEASURER.with_borrow_mut(|renderer| {
+        renderer.single_line_selection_geometry(
+            text,
+            font_size,
+            cursor_byte_index,
+            None,
+            selection_byte_range,
+        )
+    })
+}
+
 pub(crate) fn measure_text_box(text: &str, font_size: f32, max_width: f32) -> (f32, f32) {
     if text.is_empty() {
         return (0.0, 0.0);
@@ -104,5 +167,40 @@ mod tests {
             .join()
             .expect("widget font-owner regression thread failed");
         }
+    }
+
+    #[test]
+    fn invalid_single_line_geometry_does_not_initialize_font_owner() {
+        std::thread::spawn(|| {
+            assert!(single_line_geometry("你", 14.0, 1, Some(2.0)).is_none());
+            assert!(single_line_geometry("x", 0.0, 0, None).is_none());
+            assert!(single_line_geometry("", 14.0, 1, None).is_none());
+            assert_eq!(MEASURER_INITIALIZATIONS.with(|count| count.get()), 0);
+            let geometry =
+                single_line_geometry("", 14.0, 0, Some(0.0)).expect("valid empty geometry");
+            assert_eq!(geometry.width, 0.0);
+            assert_eq!(geometry.hit_byte_index, Some(0));
+            assert_eq!(MEASURER_INITIALIZATIONS.with(|count| count.get()), 0);
+        })
+        .join()
+        .expect("geometry admission regression thread failed");
+    }
+
+    #[test]
+    fn complete_selection_geometry_invalid_or_empty_does_not_initialize_font_owner() {
+        std::thread::spawn(|| {
+            assert!(single_line_selection_geometry("你", 14.0, 0, Some(1..3)).is_none());
+            assert!(single_line_selection_geometry("x", 14.0, 0, Some(0..2)).is_none());
+            assert!(single_line_selection_geometry("", 14.0, 0, Some(0..1)).is_none());
+            assert!(single_line_selection_geometry("", 0.0, 0, None).is_none());
+            assert_eq!(MEASURER_INITIALIZATIONS.with(|count| count.get()), 0);
+            let empty = single_line_selection_geometry("", 14.0, 0, Some(0..0))
+                .expect("valid empty selection");
+            assert!(empty.spans.is_empty());
+            assert_eq!(empty.line.width, 0.0);
+            assert_eq!(MEASURER_INITIALIZATIONS.with(|count| count.get()), 0);
+        })
+        .join()
+        .expect("selection admission regression thread failed");
     }
 }

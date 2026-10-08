@@ -243,6 +243,14 @@ fn handle(
                 Err(e) => err("SetParameterAt", e),
             })
         }
+        HostCommand::SetProcessTimelineContext { context } => {
+            with(plugin, |p| match p.set_process_timeline_context(context) {
+                Ok(()) => HostResponse::Success {
+                    message: "signal timeline set".to_string(),
+                },
+                Err(e) => err("SetProcessTimelineContext", e),
+            })
+        }
         HostCommand::SetTempo { bpm } => with(plugin, |p| match p.set_tempo(bpm) {
             Ok(()) => HostResponse::Success {
                 message: "tempo set".to_string(),

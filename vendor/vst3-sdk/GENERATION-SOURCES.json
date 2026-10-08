@@ -1,0 +1,594 @@
+{
+  "schema": 1,
+  "sdk_commit": "3cdf9ca5d1f5b1b21e0a86832aa4abe55607bd96",
+  "pluginterfaces_commit": "4f547e8e102b47de4a8b8aaf343c73b700786372",
+  "binding_commit": "b2a45f2d40e602eff5a224b41613735388868590",
+  "sources": [
+    {
+      "role": "official-license",
+      "path": "LICENSE.txt",
+      "git_blob_sha1": "abfd1b721d2c9f3b8065ddff01b565a6be21cc73",
+      "sha256": "e86d79e19e4a33ebc442d2e0d083887dfc75a2a8de9fe17eeddedb84810ad74e"
+    },
+    {
+      "role": "official-source",
+      "path": "README.md",
+      "git_blob_sha1": "8a864b60a0cc4290d59d8135858d7659f5f4817c",
+      "sha256": "87e47d23f12d5dcadd0d80ad1b6d017ae630ae6c755d726e6af53d4431324d74"
+    },
+    {
+      "role": "official-source",
+      "path": "base/conststringtable.cpp",
+      "git_blob_sha1": "29e453aedce2453bd91139a5fe7dec2ec70b6f32",
+      "sha256": "7f28f8362d49c280a2a259bb36b1d776164dba0b8293da5d4020d2c32f48865f"
+    },
+    {
+      "role": "official-header",
+      "path": "base/conststringtable.h",
+      "git_blob_sha1": "f9450222ba7add303f4bcf91f9f41962538eaa36",
+      "sha256": "d081dd449e46059f75d3f47fb922d975611b13f6148fba58790f785d22b9b819"
+    },
+    {
+      "role": "official-source",
+      "path": "base/coreiids.cpp",
+      "git_blob_sha1": "95d59aed499e7a5836ce396a17f63399f878ad61",
+      "sha256": "45e398efdbef5f791209be17bd463951596a18e30901912dfcdd727246c73a28"
+    },
+    {
+      "role": "official-header",
+      "path": "base/doc.h",
+      "git_blob_sha1": "4c29289d6678731fbfbd0b789364ff648b926251",
+      "sha256": "57a85aaa01666863b0bb76e4ab449942333197f078f2cbf09782f5a32735c869"
+    },
+    {
+      "role": "official-header",
+      "path": "base/falignpop.h",
+      "git_blob_sha1": "d8b9e7c291e8babe6a18558f58549e6de79d530a",
+      "sha256": "c612b740f92c0d7426723af12d09083f26009e40a7cafe985801e6f3f706b60b"
+    },
+    {
+      "role": "official-header",
+      "path": "base/falignpush.h",
+      "git_blob_sha1": "6a2b37263d75465a8e6e97bc6af1d85a0423bd2c",
+      "sha256": "464d603bf4ece2d09e0f59a6830eac2d34c2cd66ad42a872831c5f30ae86675b"
+    },
+    {
+      "role": "official-header",
+      "path": "base/fplatform.h",
+      "git_blob_sha1": "45937b8fbb169a3b594ab84aecd95e041c760945",
+      "sha256": "436bc9370183fe97c7bef6bd50edd77fd03c4dd900c036bb0a6c4f714a4e36f1"
+    },
+    {
+      "role": "official-header",
+      "path": "base/fstrdefs.h",
+      "git_blob_sha1": "42bb0b91d50fcc28bf7192cf32ef9f2a21232658",
+      "sha256": "c13810a921cfba8a2f20531b60b831f17e67c978ac368b7c2060ef976f5cd18e"
+    },
+    {
+      "role": "official-header",
+      "path": "base/ftypes.h",
+      "git_blob_sha1": "8568fae8b2df00f2eac4869bbaef1d003494e266",
+      "sha256": "2a9273012944c30ff6bf2975066057cdba39464afffdc5d65a9bff5cd6264fd9"
+    },
+    {
+      "role": "official-source",
+      "path": "base/funknown.cpp",
+      "git_blob_sha1": "d796780e2c958bef790b0769abc10c92077b4bf8",
+      "sha256": "387d49c2b711aa1ad58c7a911992333e3a86f6fb709ba70cec85a95766a9e766"
+    },
+    {
+      "role": "official-header",
+      "path": "base/funknown.h",
+      "git_blob_sha1": "3f6de83b104484e09097411417b37bcd28a46a1c",
+      "sha256": "e0d9609224fe15491c9ccd1463d964c303f1d5a6149fabf849e87f2c14be1951"
+    },
+    {
+      "role": "official-header",
+      "path": "base/funknownimpl.h",
+      "git_blob_sha1": "cc08a7bbfc88090fde8519c88c09dbdfab857fc3",
+      "sha256": "b68596dc656cb922ccb35041b68f7d0db0e5a69d81d95f7100556c979266d730"
+    },
+    {
+      "role": "official-header",
+      "path": "base/futils.h",
+      "git_blob_sha1": "38eaa333a96c3d3674cf4a0bc3fd425520af9b56",
+      "sha256": "968163112dd84c6094c20a8a1e9a4042ffcd3187f4caf4203dd2365eb1ea6f3c"
+    },
+    {
+      "role": "official-header",
+      "path": "base/fvariant.h",
+      "git_blob_sha1": "01bb450e958689cbc7b41e021aa1ab9f506792eb",
+      "sha256": "85a7b2a3d3ed556ee31ca2c04668317fae38146469e603fdb337cb789e92900d"
+    },
+    {
+      "role": "official-header",
+      "path": "base/geoconstants.h",
+      "git_blob_sha1": "c55f06481b33e9fb2de0cf00dead81a0f55d4128",
+      "sha256": "885f5bde3e9b7f2356a245d3857bd5493ff6879a2e2f5665986097f0b3ff1f4b"
+    },
+    {
+      "role": "official-header",
+      "path": "base/ibstream.h",
+      "git_blob_sha1": "f25fd78bd296db33002e1918f33e17f5d13d7fe8",
+      "sha256": "9530d37a36ceab42f7b03771f78337d5892e3328e805a9ff4e219409a1766c1e"
+    },
+    {
+      "role": "official-header",
+      "path": "base/icloneable.h",
+      "git_blob_sha1": "5bdad5a9959d063b99aac343235f1ed9729865b5",
+      "sha256": "85db7f9ea1ae17b519dfa7df2770eb5ac5a6dcd2d1f3ad1f8ddc124e9ae463cb"
+    },
+    {
+      "role": "official-header",
+      "path": "base/ierrorcontext.h",
+      "git_blob_sha1": "476b4eddceff0ce0aeed5eecf170e9934c462b3b",
+      "sha256": "f44813787b20588e46db4bf5103129eb899dce6c5128164475d6e8125080a23b"
+    },
+    {
+      "role": "official-header",
+      "path": "base/ipersistent.h",
+      "git_blob_sha1": "792bf08eccc0221966a39c27f866eb158a5c9178",
+      "sha256": "d9c94cb04cb90d27efa20b94501aa50bd8bf15bd4c4b72e9767c4af75a62e3b6"
+    },
+    {
+      "role": "official-header",
+      "path": "base/ipluginbase.h",
+      "git_blob_sha1": "859424bfc7f14b61df4b209a85c09d413513127a",
+      "sha256": "e10e9a4b9b0811c392af5758542e1f72875b56ebe7e1673d5075bc1160d9fd0b"
+    },
+    {
+      "role": "official-header",
+      "path": "base/iplugincompatibility.h",
+      "git_blob_sha1": "d3f67e9b86eba82d74d316cfba78d8fa7a7a58b0",
+      "sha256": "7db596b736d226a09102b73fa7dd44b7d518d51aac0a2119a4a13261da85ff4b"
+    },
+    {
+      "role": "official-header",
+      "path": "base/istringresult.h",
+      "git_blob_sha1": "8d48266614d50bfbec33b75b7c7cc40d6bf40eea",
+      "sha256": "7c02de61122a0830f1429a1a2fc7cd855f6061d513b6a88c2dc6bf4858fa313e"
+    },
+    {
+      "role": "official-header",
+      "path": "base/iupdatehandler.h",
+      "git_blob_sha1": "ed28b2ba17dab2f5e334dcdfa753b73f99e84015",
+      "sha256": "c8f75a049d72f3112c1d9f391c23dba88cdf838bbee7edebda5b68c83f7ced64"
+    },
+    {
+      "role": "official-header",
+      "path": "base/keycodes.h",
+      "git_blob_sha1": "2941bb07476adfb19a14b67ca9b3a61c7d964774",
+      "sha256": "ca1101c96ac48b13bfc85d9f743547611147ef535b382827535216c685644d01"
+    },
+    {
+      "role": "official-header",
+      "path": "base/pluginbasefwd.h",
+      "git_blob_sha1": "3de6bcf04d268177f8ce966bb9ffc385ee6a9466",
+      "sha256": "e6f141de4f68b75fdc6b98d2c3d588ed0ddb223ab8913b175e89398f6057cc39"
+    },
+    {
+      "role": "official-header",
+      "path": "base/smartpointer.h",
+      "git_blob_sha1": "ca64ae8f6260abc4225869bcb55ef6b27f3f3abf",
+      "sha256": "f690163a2d5fa71e76cce1909ae719561031b897f79342ddf38190b2ed9613b3"
+    },
+    {
+      "role": "official-header",
+      "path": "base/typesizecheck.h",
+      "git_blob_sha1": "46bb0deeb3862a9823d8bb1f37f08a2366872714",
+      "sha256": "99288a4b2191e3edb48f1a365ef2ba29b5c8211b57b08a93ae2ed9416bbdf74e"
+    },
+    {
+      "role": "official-header",
+      "path": "base/ucolorspec.h",
+      "git_blob_sha1": "9c7cfc908b153dd126aef4c2de5b1f8836ee0430",
+      "sha256": "390263cb59398c751dc247ca404a560f3d049cf0fde95fb72b686cf8ca51633f"
+    },
+    {
+      "role": "official-source",
+      "path": "base/ustring.cpp",
+      "git_blob_sha1": "24a412f7e2b1492f90e96b5de9bb3bda27874b34",
+      "sha256": "df5f579d3baef86ad8ce94e3e266b2b253d6999e4157698f1601a049096f3681"
+    },
+    {
+      "role": "official-header",
+      "path": "base/ustring.h",
+      "git_blob_sha1": "2d890eec9e0d9598a207c3bfa3df26d7c174e416",
+      "sha256": "6bf846f939a0a944576e543b2455e9153fad616f781d26673f4eed14d03ae844"
+    },
+    {
+      "role": "official-header",
+      "path": "gui/iplugview.h",
+      "git_blob_sha1": "e0e759862fa81b580098b01e99c8dfd90b3c22e3",
+      "sha256": "024e6c4ea59ba6961bc45431ead6b2a8c60231250b2c181a6de99d62a1cfdc11"
+    },
+    {
+      "role": "official-header",
+      "path": "gui/iplugviewcontentscalesupport.h",
+      "git_blob_sha1": "988f64ff09e7a8c48e79df2d2109d5a92e496b9c",
+      "sha256": "70061e5c86a18e7b922e6a725565dad93f197b85e3e1e8171d064dbb8818e228"
+    },
+    {
+      "role": "official-header",
+      "path": "gui/iwaylandframe.h",
+      "git_blob_sha1": "42a18b2981430b5f4bb13d4ac1609985d2288dbe",
+      "sha256": "8a87839aeb42fd43efd9878abb4bc82bae6cc321b13ea58779fa3f4683f084c1"
+    },
+    {
+      "role": "official-header",
+      "path": "test/itest.h",
+      "git_blob_sha1": "17a8ac1b1e00f3fd2fb18df3800ea1dbb55a3726",
+      "sha256": "fe25c998cc82898862901a581abba2ee0e951b2d9ea3f0eed39b1622c4409452"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstattributes.h",
+      "git_blob_sha1": "e8097e92319095580f5f540d97fbab50ee105216",
+      "sha256": "61b70959f234145033c986847e1bdd45c45a8f244c927b2eb48d838c2e6054b3"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstaudioprocessor.h",
+      "git_blob_sha1": "2a5428ceb3fd532a1e509a4a6a6dae4cda5191a3",
+      "sha256": "6289b19c8300fb381da7688414fae52d5ca139371f910830532204b860bd6549"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstautomationstate.h",
+      "git_blob_sha1": "3bba6f5c79b534aa75ee88865e139ac18b3582d2",
+      "sha256": "1da7e6b9a355b55650718f771df0b00d9d34f2f02b06cf83cf6f9b508929691b"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstchannelcontextinfo.h",
+      "git_blob_sha1": "d92a1472234e2c1b128d1e709acd69084b7569ce",
+      "sha256": "1e3cd5b992e92d1cf58d87060443fa12dd539cfea41e5db9ffa0ebab8d6a93c0"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstcomponent.h",
+      "git_blob_sha1": "e20ef5f429349bdccf55367d45051fcdb0ff97c5",
+      "sha256": "cc587e34c009388d4187948c14a651df1481a01920abe895023094ca5b13faee"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstcontextmenu.h",
+      "git_blob_sha1": "1272d63b1bc0446ec8a28fc55777661de8b19283",
+      "sha256": "63a9e753aeb6fc513d9e0cccde0206d0e431a31a3966082e9a373375820b9365"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstdataexchange.h",
+      "git_blob_sha1": "9b90daaef10ec402793690257a72849685a37368",
+      "sha256": "3430c45e23feb2571bee3c84a96fbf5724b29abf53478267213da582f68474b9"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivsteditcontroller.h",
+      "git_blob_sha1": "889ae6e04a20dc8481d228299a902bebf4f742af",
+      "sha256": "a1aba69d8d411fdae6f7bee422fa9eb747a312a9fb517ff3436ee06d45a4e051"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstevents.h",
+      "git_blob_sha1": "16cbbfcbcaad9c5051b0ba8daf33e5c40d1d3261",
+      "sha256": "3650f62d7152a4e5e8b4912c95d28a55a265da08c04b0a347e4132a8d5c8134d"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivsthostapplication.h",
+      "git_blob_sha1": "1818efe85a6674bf706fd8f8040e28cb329fbe27",
+      "sha256": "b7ef5b02f24c103e952e18b3e974e97b3c23d19c870a46c7c3aad36af8832332"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstinterappaudio.h",
+      "git_blob_sha1": "add78bab42f16ecd4284a2b38f1b576fd4f6df2b",
+      "sha256": "61960f26f399a39a5ce75d831e815fd057bc5329e92eeab5bfca6fe3830eff98"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstmessage.h",
+      "git_blob_sha1": "ca3a6674af45f4c52000641aab5929c8ebaeac5c",
+      "sha256": "cbd141fbd77264fa623b8de43aff795059599ead17c70a0ac4349c9647b42b64"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstmidicontrollers.h",
+      "git_blob_sha1": "a10e435a89a590d0f1710a93dbc2769758274cbc",
+      "sha256": "327b0b822e17577537d09b98f4de80ce1591ebde87f95a0b9976584326808170"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstmidilearn.h",
+      "git_blob_sha1": "2f2e263b57beb4b44751538456ed5987c94f44c1",
+      "sha256": "8d5fe7fdbbe359daa228b3244216e73daccdabdd993e2796eb8276d8abed2709"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstmidimapping2.h",
+      "git_blob_sha1": "2b9c880ca5406b0437719fb0c6342854b149fbde",
+      "sha256": "1b30ed031ccb161ece2de4b5cc1df10293b492b54bfc19a9a65472debc4ef59e"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstnoteexpression.h",
+      "git_blob_sha1": "640cb8d30d36f73719a82faae208d34fd9d3dae1",
+      "sha256": "18efe1d025e3c10c9e062e9b53fa1726198e77b9eaba1819ae78e6cead1a4ccd"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstnoteonorchestralarticulationinfo.h",
+      "git_blob_sha1": "5c88bdec8cf137abc5724f15a6d3576d66f11bd3",
+      "sha256": "ea21e899f970ca0b9b3811981bffadf86c49d6c3a55e0a649877c89b5e59a455"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstparameterchanges.h",
+      "git_blob_sha1": "1b33cc0365c6f698b372de00492f1e895a79ee23",
+      "sha256": "4f177d8f9e207fc4f247fde5aebfbdf863d02bced08a6c2d21d759f043eea3dd"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstparameterfunctionname.h",
+      "git_blob_sha1": "8785940b16f0fdcbbe273118dd50a59af5e469bd",
+      "sha256": "31a01936c5a34867d2dcc3cdab7c266b4f8ade0a1305ae5862f953a8b59f80e7"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstphysicalui.h",
+      "git_blob_sha1": "c0f402a3dd9a69cbebe410a49c363e1a878c5736",
+      "sha256": "2d131c1800b6c371a58a471cf33f4ce517a16ad4d6c1afebc5c4570ce0ec60a9"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstpluginterfacesupport.h",
+      "git_blob_sha1": "fa97220c3af7d397bedef9f3ae02c47ddafc8f5d",
+      "sha256": "753a7b6c9a1d55906f8c7cf061b98ab1a28f4934f31c05aae30bb5dc2151788d"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstplugview.h",
+      "git_blob_sha1": "7a76bc7149f1e838fc595f9207515f063b5cc044",
+      "sha256": "0fa888b0d6afa0c424e0b7121f50f6b91781b582bb0540424512f39b9480894e"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstprefetchablesupport.h",
+      "git_blob_sha1": "e5e28a527d3844a0567a622f06e7cd4362bb5b82",
+      "sha256": "18f04b2104d64c201217ed4ed927131d4e3f7d73508c81b15da5021bfbe1e982"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstprocesscontext.h",
+      "git_blob_sha1": "f05bcdfc8e1836e7d078a2754440eef35db4455a",
+      "sha256": "51ca6f48b56f5f57cde4b03a6923689cf6a5c412c9ea7941fc04f934df9a4c0d"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstremapparamid.h",
+      "git_blob_sha1": "696d7a5b8527b0b350e952c9b5aa6bb7653a5a51",
+      "sha256": "8305c23704578d9e9fcf324ed5801d1f807849468f58d530bf50f313557b8cff"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstrepresentation.h",
+      "git_blob_sha1": "c21a114260a06691bb36f709dad5917f89b2432f",
+      "sha256": "1daaa3678e75762cba13ba7f2f6834d48e6521b4cd8081fdb3e4843fe37781fc"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivsttestplugprovider.h",
+      "git_blob_sha1": "e72157ff4d81a2c49fd167f243d7cd34f52bd831",
+      "sha256": "72b0644427623fc3887ff501d8b9c02f2f3618ddc78617f7dcb381ee8a26ee6f"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivsttransportcontrol.h",
+      "git_blob_sha1": "aa98175e2ef8b1233714837c73c959ab843069dd",
+      "sha256": "13fdf59566d3bc061c4b0815cf40a15121192b33c178bf8195cfc410e9fce637"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/ivstunits.h",
+      "git_blob_sha1": "51b81446b2c379d7f2f38981342c1f15938c4a57",
+      "sha256": "035db2155bb7065b534bd7b5265cdfdddb4c6e6513df9fdc60658cba3e089a75"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/vstpresetkeys.h",
+      "git_blob_sha1": "46b2292fa9e46cfea668ad126449e803a2c33264",
+      "sha256": "95f1ec6fb881669ac309116a7d952f49beebb11c707469873434a0643b7961e4"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/vstpshpack4.h",
+      "git_blob_sha1": "2ac96e78fcc4133f5993ad5290e0fe1ad8e3838b",
+      "sha256": "b3f7b437dba9075c76bf0c6311b2ef008a3a8c4e2f22e616da64c4d5444685a3"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/vstspeaker.h",
+      "git_blob_sha1": "ee46d4a3d67492a81bfbdb6065e3de9f95916a14",
+      "sha256": "f7942918bc52e78c2f061f77d2d28761f8a7b38a364cc3985bc22da21c8418d4"
+    },
+    {
+      "role": "official-header",
+      "path": "vst/vsttypes.h",
+      "git_blob_sha1": "ec4ff4021a4afd960d061d5e0ba32e0618136a9f",
+      "sha256": "46594b67f42c9c61f37c64846719549e983962854a363725cf98268d34f2d1e2"
+    },
+    {
+      "role": "upstream-runtime",
+      "path": "Cargo.toml",
+      "sha256": "698c4854dbdbe1928e546d61985e83a4763eab125063414bc9d0a7a024f9861d",
+      "git_blob_sha1": "764dacc9feef1df74b92329aee83b91592d0b094"
+    },
+    {
+      "role": "upstream-runtime",
+      "path": "README.md",
+      "sha256": "ce903ed77e13982a52add20b2f8a8487b19e758ebfb15cb269824935755bde0f",
+      "git_blob_sha1": "59122f216ebe7a2ab9fbb9a64ee55fd1b80c4a0a"
+    },
+    {
+      "role": "upstream-runtime",
+      "path": "LICENSE-MIT",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "git_blob_sha1": "31aa79387f27e730e33d871925e152e35e428031"
+    },
+    {
+      "role": "upstream-runtime",
+      "path": "LICENSE-APACHE",
+      "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594",
+      "git_blob_sha1": "f433b1a53f5b830a205fd2df78e2b34974656c7b"
+    },
+    {
+      "role": "upstream-runtime",
+      "path": "src/lib.rs",
+      "sha256": "c78a30c2090c71921e602fbc875ad0ba27aaf7bb6002dee8ba34363ac9d5065a",
+      "git_blob_sha1": "a6622faec53fda8c8fa1b53768db74adfd74cb26"
+    },
+    {
+      "role": "upstream-runtime",
+      "path": "src/support.rs",
+      "sha256": "fece4ff714d965f85f35c8858f1f138416ffb3789d5277ecf61dc05409a94e4e",
+      "git_blob_sha1": "bd23ddd1cb780964ece75db055955cf33980fe17"
+    },
+    {
+      "role": "upstream-runtime",
+      "path": "examples/gain.rs",
+      "sha256": "22bb7b9cc2ce3645a1d23c09e1f5d0f3399f65c520bc439ac63faf8e389a4c1c",
+      "git_blob_sha1": "61c1ff6ea1d3ef29e2b0fb1a45bf48e9643c90cc"
+    },
+    {
+      "role": "upstream-generator",
+      "path": "generate/Cargo.toml",
+      "sha256": "0db754a13470505a6592847e22b6e692edfe13408182a86db1658ee62ff46731",
+      "git_blob_sha1": "01b3ca463051a329b987d4c7a10d22e3741884a4"
+    },
+    {
+      "role": "upstream-generator",
+      "path": "generate/CHANGELOG.md",
+      "sha256": "102cbd049c0c5a7908851ea24a97d8fa0189339b5f4f913b2cc6034d8b6ff88e",
+      "git_blob_sha1": "17d13f6f2b6513deee7af0eb201adf2cbf367002"
+    },
+    {
+      "role": "upstream-generator",
+      "path": "generate/README.md",
+      "sha256": "8c93136300c2270644976feffacedb764fdc9463152fc06c62d3e7f76008d17f",
+      "git_blob_sha1": "b1aa8d1a53693c20c83b7c0612f75de472dedbb6"
+    },
+    {
+      "role": "upstream-generator",
+      "path": "generate/src/main.rs",
+      "sha256": "27bb118329d1220cfd72aff296491cd05b2e2e2598bc8ec4d5fd75bc4a3152d8",
+      "git_blob_sha1": "7d9beb7d76d7fb4f7aa1cbcc5a5a8770f9e3d38a"
+    },
+    {
+      "role": "upstream-generator",
+      "path": "com-scrape/build.rs",
+      "sha256": "bc53609f242184ce6b167ced37734a1dc2284f632afbdc56e73cbf11f2d0146a",
+      "git_blob_sha1": "361c50ffb8a1cb3cc818946640011251700ac051"
+    },
+    {
+      "role": "upstream-generator",
+      "path": "com-scrape/Cargo.toml",
+      "sha256": "3676cb51ce6fe46cbd2d978daacddfb349c7d5b20fc14bbd211f1178a9e6f5df",
+      "git_blob_sha1": "4c5c0f0b9a80df8dd433b6098765c584f963fce1"
+    },
+    {
+      "role": "upstream-generator",
+      "path": "com-scrape/CHANGELOG.md",
+      "sha256": "2fff3ff8685e4156478a37d35a04927269207c9cd694c262398c254af26d194a",
+      "git_blob_sha1": "e660bc6ef65bdf570e9f6ab9212151c73043b397"
+    },
+    {
+      "role": "upstream-generator",
+      "path": "com-scrape/README.md",
+      "sha256": "09f8e8ba6e68d7666aaaf305e773e8e7e3dcd9d29c41e3c910b03c0cf254403c",
+      "git_blob_sha1": "8a7b599588a77b9b6a1258c6a8ebe0b86a3124d3"
+    },
+    {
+      "role": "upstream-generator",
+      "path": "com-scrape/src/clang.rs",
+      "sha256": "af017f7ecb6623ee5a17a1b646abb99cf6092b6fbc7be108c2dbee634e047e19",
+      "git_blob_sha1": "1215072951496ed2905c7460d3a4fe33f0a3920a"
+    },
+    {
+      "role": "upstream-generator",
+      "path": "com-scrape/src/generator.rs",
+      "sha256": "8fa89a66c03eb8a407514b23a4222191ec2a49bf4f422ad43b0c88dac2572a83",
+      "git_blob_sha1": "f858a41792ef45e76e24163d6904712e822e54fb"
+    },
+    {
+      "role": "upstream-generator",
+      "path": "com-scrape/src/lib.rs",
+      "sha256": "6b7edb9b9fb82481c78993f11a3ba7688ba9451752e3d3aed7b3f0d9b1939449",
+      "git_blob_sha1": "e0e364737866889ac670a5f47979c394e01fe8d2"
+    },
+    {
+      "role": "upstream-generator",
+      "path": "com-scrape/src/parse.rs",
+      "sha256": "cbdea63ea95d63912bac16265f7398df7e73e20ca4f5615d004c1d95a0f07b7b",
+      "git_blob_sha1": "40342f012f31434488ce1345c59ea9b5bd2475c4"
+    },
+    {
+      "role": "upstream-generator",
+      "path": "com-scrape/src/print.rs",
+      "sha256": "0c4f26b7515aabcb8f686fe12a4619f40ea2ad1f89cb9701d82c7b51d5650b06",
+      "git_blob_sha1": "648e56bb9341e8a4fa0d5401d8b96493472f62ed"
+    },
+    {
+      "role": "upstream-generator",
+      "path": "com-scrape-types/Cargo.toml",
+      "sha256": "333fc4645913e98c6fa699c258f93055fc7f9f04447c2e115ceda8824dfe4626",
+      "git_blob_sha1": "007aba1f107ee7fa1115460e27841be89f64a86e"
+    },
+    {
+      "role": "upstream-generator",
+      "path": "com-scrape-types/CHANGELOG.md",
+      "sha256": "d31fca102a6558c0300ec2c12be5f33336f868feeac7943765b8b0446a5e5948",
+      "git_blob_sha1": "b753eafbc3187d5c60cc41e7837f4e2d6da37a44"
+    },
+    {
+      "role": "upstream-generator",
+      "path": "com-scrape-types/README.md",
+      "sha256": "bfa07002343e50620dd25aab32a693f2b4600b36ab3bdeca6591fb0b772dbb9e",
+      "git_blob_sha1": "8cddbd4d79d0ae4161080b2aa99785ff41a13ffe"
+    },
+    {
+      "role": "upstream-generator",
+      "path": "com-scrape-types/src/class.rs",
+      "sha256": "0b29ca9a6c3cef45f7b6bbe770ce35933ab85881ffaf1929c7ecfe628891d0f6",
+      "git_blob_sha1": "372af6034ad0e59aea26e1e40c9cf889b43aa11f"
+    },
+    {
+      "role": "upstream-generator",
+      "path": "com-scrape-types/src/lib.rs",
+      "sha256": "51da8e7aa748ac38b64514fab0b1fcea7b9b3eee0d0152fed84107b6531a97fa",
+      "git_blob_sha1": "f0358de3348eaa38d78229600ddfd32e703a5aab"
+    },
+    {
+      "role": "upstream-generator",
+      "path": "com-scrape-types/src/ptr.rs",
+      "sha256": "01b665e625134968f7c427875d361c84cab6f600133a0ebb08951b1c6bc8f648",
+      "git_blob_sha1": "b86c217ba0262077696cd777576a3383a9dc40a5"
+    },
+    {
+      "role": "upstream-generator",
+      "path": "com-scrape-types/src/tests.rs",
+      "sha256": "f2c0e0029a2a347c5170a1c9c3026429fbd980251543de705cc883cc07d4965d",
+      "git_blob_sha1": "3787f63ffa77210b08235b28e1b6f168b1a3cb27"
+    },
+    {
+      "role": "deterministic-generator",
+      "path": "generate/src/main.rs",
+      "sha256": "e8b228eb3ea4a7cdde67921636d2c01dd98ae615c9cf8cb9ce0e2a2cdaccc0c8",
+      "change": "sort header paths before generation; no ABI declarations added"
+    }
+  ],
+  "runtime_dependency": "com-scrape-types 0.1.1 from the same pinned upstream source",
+  "generated_bindings": "Output is independently recorded in the completed root generation transcript; this manifest records source inputs only.",
+  "official_full_tree_receipt_sha256": "eaac51b06d30cbecc2303a9c981bb7104c1fbf984867ff46ad05df3952d4037a",
+  "official_file_count": 69
+}

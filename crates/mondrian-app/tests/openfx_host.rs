@@ -1988,3 +1988,820 @@ fn unknown_plugin_interpolation_is_rejected_before_registration() {
         "{error}"
     );
 }
+
+fn cpu_contract_probe(mode: &str) -> mondrian_app::openfx_adapter::OpenFxBinaryInspection {
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
+        mode
+    );
+    let binary = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe binary"),
+    );
+    inspect_openfx_binary(product_executable(), &binary).expect("inspect CPU contract probe")
+}
+
+fn cpu_contract_input() -> OpenFxFloatFrame {
+    OpenFxFloatFrame {
+        width: 3,
+        height: 5,
+        pixels: (0..15)
+            .map(|index| {
+                let value = index as f32;
+                [
+                    -0.5 + value / 16.0,
+                    0.125 + value / 32.0,
+                    2.0 - value / 64.0,
+                    0.25 + value / 32.0,
+                ]
+            })
+            .collect(),
+    }
+}
+
+fn cpu_contract_timing(par: f64) -> OpenFxRenderTiming {
+    OpenFxRenderTiming {
+        frame: 0.0,
+        frame_rate: 24.0,
+        first_frame: 0.0,
+        last_frame: 100.0,
+        pixel_aspect_ratio: par,
+    }
+}
+
+fn assert_cpu_contract_pixels(
+    actual: &[[f32; 4]],
+    input: &OpenFxFloatFrame,
+    gain: f32,
+    par: Option<f64>,
+) {
+    assert_eq!(actual.len(), input.pixels.len());
+    for (index, (actual, source)) in actual.iter().zip(&input.pixels).enumerate() {
+        let x = index % input.width as usize;
+        let y = input.height as usize - 1 - index / input.width as usize;
+        let offsets = par.map_or([0.0; 4], |par| {
+            [
+                ((x as f64 + 0.5) * par / 32.0) as f32,
+                (y as f32 + 0.5) / 64.0,
+                0.0,
+                0.0,
+            ]
+        });
+        for channel in 0..4 {
+            let expected = source[channel] * gain + offsets[channel];
+            assert!(
+                (actual[channel] - expected).abs() < 1e-6,
+                "pixel {index} channel {channel}: {} != {expected}",
+                actual[channel]
+            );
+        }
+    }
+}
+
+fn qualify_cpu_contract_resident_and_graph(mode: &str, coordinate_output: bool) {
+    let inspection = cpu_contract_probe(mode);
+    assert_eq!(inspection.plugins.len(), 1);
+    let identifier = "uk.co.thefoundry.BasicGainPlugin";
+    let description = describe_openfx_filter(product_executable(), &inspection, identifier)
+        .expect("native capabilities admit the probe");
+    let scale = description
+        .parameters
+        .iter()
+        .find(|parameter| parameter.name == "scale")
+        .expect("gain control");
+    let input = cpu_contract_input();
+    let cancellation = mondrian_core::ExecutionCancellationToken::new();
+    for _ in 0..2 {
+        let mut session = OpenFxFilterSession::prepare(
+            product_executable(),
+            &inspection,
+            identifier,
+            input.width,
+            input.height,
+            &mut checkpoint(&cancellation),
+        )
+        .expect("exclusive native session");
+        let worker = session.worker_process_id();
+        for (frame, par, gain) in [
+            (0.0, 2.0, 0.5_f32),
+            (0.0, 2.0, 0.75),
+            (42.0, 0.5, 1.5),
+            (0.0, 2.0, 0.5),
+        ] {
+            let timing = OpenFxRenderTiming { frame, ..cpu_contract_timing(par) };
+            let parameters = constant_parameters([(
+                "scale".to_owned(),
+                OpenFxParameterValue::Double(f64::from(gain)),
+            )]);
+            let output = session
+                .render(&timing, &parameters, &input, &mut checkpoint(&cancellation))
+                .expect("progressive exact-PAR native output");
+            assert_eq!(session.worker_process_id(), worker);
+            assert_cpu_contract_pixels(
+                &output.pixels,
+                &input,
+                gain,
+                coordinate_output.then_some(par),
+            );
+        }
+        let invalid = cpu_contract_timing(f64::MAX);
+        assert!(matches!(
+            session.render(
+                &invalid,
+                &BTreeMap::new(),
+                &input,
+                &mut checkpoint(&cancellation)
+            ),
+            Err(OpenFxHostError::Invalid(_))
+        ));
+        let valid = cpu_contract_timing(2.0);
+        let parameters =
+            constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(0.5))]);
+        let output = session
+            .render(&valid, &parameters, &input, &mut checkpoint(&cancellation))
+            .expect("invalid geometry did not mutate or retire the valid session");
+        assert_eq!(session.worker_process_id(), worker);
+        assert_cpu_contract_pixels(
+            &output.pixels,
+            &input,
+            0.5,
+            coordinate_output.then_some(2.0),
+        );
+        session.shutdown().expect("retire and reap native session");
+    }
+    let effect_type =
+        register_selected_openfx_filter(product_executable(), &inspection, identifier)
+            .expect("register native contract probe");
+    let mut effect =
+        instantiate_effect_node(effect_type).expect("canonical authored native effect");
+    let parameter = effect
+        .properties
+        .iter()
+        .find(|(_, property)| property.descriptor.display_name == scale.label)
+        .expect("native gain author parameter")
+        .1
+        .descriptor
+        .parameter_id()
+        .clone();
+    effect
+        .set_static_value_by_parameter(&parameter, PropertyValue::Double(0.5))
+        .expect("author gain");
+    let frame_context = EffectFrameContext::new(
+        Rational::FPS_24,
+        SampleAspectRatio::new(2, 1).expect("non-square samples"),
+        TimelineTimeRange::new(
+            TimelineTime::ZERO,
+            TimelineTime::new(101, 24).expect("duration"),
+        )
+        .expect("source range"),
+    )
+    .expect("canonical effect frame context");
+    let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+        &[effect],
+        &[],
+        &[],
+        &[],
+        WorkingColorSpace::LinearRec709,
+        frame_context,
+        &LutPreparationCache::uncached(),
+    )
+    .expect("shared effect compilation");
+    let graph = program
+        .evaluate(TimelineTime::new(42, 24).expect("seek time"))
+        .expect("exact native graph frame");
+    let output =
+        apply_compiled_effect_graph_rgba_f32(&input.pixels, input.width, input.height, &graph, 991)
+            .expect("canonical compiled graph output");
+    assert_cpu_contract_pixels(&output, &input, 0.5, coordinate_output.then_some(2.0));
+}
+
+#[test]
+#[ignore = "requires current product and SessionProbe mode host_capabilities"]
+fn product_worker_advertises_actual_float_cpu_capabilities() {
+    qualify_cpu_contract_resident_and_graph("host_capabilities", false);
+}
+
+#[test]
+#[ignore = "requires current product and SessionProbe mode canonical_progressive"]
+fn product_worker_preserves_par_canonical_coordinates_and_progressive_fields() {
+    qualify_cpu_contract_resident_and_graph("canonical_progressive", true);
+}
+
+#[test]
+#[ignore = "requires current product and SessionProbe mode bootstrap_required"]
+fn product_worker_bootstraps_host_before_enumeration_and_native_actions() {
+    qualify_cpu_contract_resident_and_graph("bootstrap_required", false);
+}
+
+#[test]
+#[ignore = "requires current product and SessionProbe mode bootstrap_skip"]
+fn product_discovery_silently_skips_plugins_declining_the_host() {
+    let inspection = cpu_contract_probe("bootstrap_skip");
+    assert!(inspection.plugins.is_empty());
+    assert!(matches!(
+        describe_openfx_filter(
+            product_executable(),
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin"
+        ),
+        Err(OpenFxHostError::Invalid(_))
+    ));
+    assert!(register_selected_openfx_filter(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin"
+    )
+    .is_err());
+}
+
+#[test]
+#[ignore = "requires current product and SessionProbe mode bootstrap_error"]
+fn product_discovery_rejects_non_successful_host_bootstrap() {
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
+        "bootstrap_error"
+    );
+    let binary =
+        PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));
+    assert!(
+        matches!(inspect_openfx_binary(product_executable(), &binary),
+        Err(mondrian_app::openfx_adapter::OpenFxDiscoveryError::Unavailable(reason))
+            if reason.contains("bootstrap failed"))
+    );
+}
+
+#[test]
+#[ignore = "requires current product and SessionProbe mode cpu_unsupported_descriptor"]
+fn product_worker_refuses_gpu_only_descriptor_before_registration() {
+    let inspection = cpu_contract_probe("cpu_unsupported_descriptor");
+    assert!(
+        matches!(describe_openfx_filter(product_executable(), &inspection,
+        "uk.co.thefoundry.BasicGainPlugin"), Err(OpenFxHostError::WorkerFailed(reason))
+            if reason.contains("native status 7"))
+    );
+    assert!(register_selected_openfx_filter(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin"
+    )
+    .is_err());
+}
+
+#[test]
+#[ignore = "requires current product and SessionProbe mode cpu_unsupported_create"]
+fn product_worker_refuses_cpu_disabled_instance_before_rendering() {
+    let inspection = cpu_contract_probe("cpu_unsupported_create");
+    describe_openfx_filter(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+    )
+    .expect("descriptor still supports CPU");
+    let output = render_openfx_filter_frame(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+        &cpu_contract_timing(1.0),
+        &BTreeMap::new(),
+        &cpu_contract_input(),
+    );
+    assert!(
+        matches!(output, Err(OpenFxHostError::WorkerFailed(reason)) if reason.contains("native status 7"))
+    );
+}
+
+#[test]
+#[ignore = "requires current product and SessionProbe mode cpu_unsupported_change"]
+fn product_worker_refuses_cpu_disabled_changed_instance_without_stale_output() {
+    let inspection = cpu_contract_probe("cpu_unsupported_change");
+    let input = cpu_contract_input();
+    let cancellation = mondrian_core::ExecutionCancellationToken::new();
+    let mut session = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+        input.width,
+        input.height,
+        &mut checkpoint(&cancellation),
+    )
+    .expect("prepare CPU session");
+    let timing = cpu_contract_timing(1.0);
+    let initial = constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(0.5))]);
+    let output = session
+        .render(&timing, &initial, &input, &mut checkpoint(&cancellation))
+        .expect("first frame supports CPU");
+    assert_cpu_contract_pixels(&output.pixels, &input, 0.5, None);
+    let changed = constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(0.75))]);
+    assert!(
+        matches!(session.render(&timing, &changed, &input, &mut checkpoint(&cancellation)),
+        Err(OpenFxHostError::WorkerFailed(reason)) if reason.contains("native status 7"))
+    );
+    assert!(
+        session
+            .render(&timing, &initial, &input, &mut checkpoint(&cancellation))
+            .is_err(),
+        "a retired instance cannot publish a prior valid frame"
+    );
+}
+
+#[test]
+#[ignore = "requires SessionProbe mode mixed_api and current product"]
+fn product_worker_skips_unsupported_apis_and_preserves_original_export_indices() {
+    // The supported Filter is export index 2, with an unknown API, an unknown
+    // image-effect API version and another unknown API around it. Their callback
+    // guards abort if any unsupported entry receives setHost or effect actions.
+    qualify_cpu_contract_resident_and_graph("mixed_api", false);
+}
+
+#[test]
+#[ignore = "requires SessionProbe mode unsupported_api and current product"]
+fn product_discovery_admits_an_empty_supported_api_intersection() {
+    let inspection = cpu_contract_probe("unsupported_api");
+    assert!(inspection.plugins.is_empty());
+    assert!(describe_openfx_filter(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin"
+    )
+    .is_err());
+}
+
+fn output_alpha_input() -> OpenFxFloatFrame {
+    OpenFxFloatFrame {
+        width: 2,
+        height: 4,
+        pixels: vec![
+            [-0.25, 0.5, 2.0, 0.0],
+            [2.0, -4.0, 8.0, f32::MIN_POSITIVE],
+            [-0.5, 0.75, 4.0, 0.25],
+            [1.0, -2.0, 0.5, 1.0],
+            [4.0, 2.0, -1.0, 0.5],
+            [-2.0, 8.0, 1.0, 0.125],
+            [0.125, -0.25, 2.0, 1.0 / 65536.0],
+            [0.5, 4.0, -8.0, 0.75],
+        ],
+    }
+}
+
+fn assert_negotiated_alpha_pixels(
+    actual: &[[f32; 4]],
+    input: &OpenFxFloatFrame,
+    mode: i32,
+    gain: f32,
+) {
+    assert_eq!(actual.len(), input.pixels.len());
+    for (index, (actual, source)) in actual.iter().zip(&input.pixels).enumerate() {
+        let expected = if mode == 1 && source[3] == 0.0 {
+            [0.0; 4]
+        } else {
+            [
+                source[0] * gain,
+                source[1] * gain,
+                source[2] * gain,
+                if mode == 2 { 1.0 } else { source[3] * gain },
+            ]
+        };
+        for channel in 0..4 {
+            assert!(actual[channel].is_finite());
+            assert!(
+                (actual[channel] - expected[channel]).abs() < 1e-6,
+                "pixel {index}, channel {channel}: {} != {}",
+                actual[channel],
+                expected[channel]
+            );
+        }
+        if index == 1 && mode == 1 {
+            assert_eq!(
+                *actual, expected,
+                "positive tiny coverage must not be discarded or clamped"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and MONDRIAN_OPENFX_SESSION_PROBE_MODE=output_alpha"]
+fn product_negotiates_native_output_alpha_for_resident_and_compiled_graph() {
+    let inspection = cpu_contract_probe("output_alpha");
+    let identifier = "uk.co.thefoundry.BasicGainPlugin";
+    let description = describe_openfx_filter(product_executable(), &inspection, identifier)
+        .expect("describe negotiated alpha choice");
+    let input = output_alpha_input();
+    for _ in 0..2 {
+        let mut session = OpenFxFilterSession::prepare(
+            product_executable(),
+            &inspection,
+            identifier,
+            input.width,
+            input.height,
+            &mut || Ok(()),
+        )
+        .expect("resident alpha host");
+        let worker = session.worker_process_id();
+        for (frame, mode, gain) in [
+            (0.0, 0, 0.5_f32),
+            (0.0, 1, 0.5),
+            (42.0, 2, 0.75),
+            (0.0, 1, 0.75),
+            (0.0, 0, 0.5),
+        ] {
+            let timing = OpenFxRenderTiming { frame, ..cpu_contract_timing(2.0) };
+            let parameters = constant_parameters([
+                (
+                    "scale".into(),
+                    OpenFxParameterValue::Double(f64::from(gain)),
+                ),
+                ("alphaMode".into(), OpenFxParameterValue::Choice(mode)),
+            ]);
+            let output = session
+                .render(&timing, &parameters, &input, &mut || Ok(()))
+                .expect("native output normalized at adapter boundary");
+            assert_eq!(session.worker_process_id(), worker);
+            assert_negotiated_alpha_pixels(&output.pixels, &input, mode, gain);
+        }
+        // Float Straight output remains raw finite OFX data, including signed
+        // and over-one alpha. This is not premultiplied coverage normalization.
+        let mut raw = input.clone();
+        raw.pixels[2][3] = -0.5;
+        raw.pixels[3][3] = 2.5;
+        let output = session
+            .render(
+                &cpu_contract_timing(2.0),
+                &constant_parameters([
+                    ("scale".into(), OpenFxParameterValue::Double(0.5)),
+                    ("alphaMode".into(), OpenFxParameterValue::Choice(0)),
+                ]),
+                &raw,
+                &mut || Ok(()),
+            )
+            .expect("raw Straight alpha range");
+        assert_negotiated_alpha_pixels(&output.pixels, &raw, 0, 0.5);
+        session.shutdown().expect("alpha session teardown");
+    }
+    let kind = register_selected_openfx_filter(product_executable(), &inspection, identifier)
+        .expect("register alpha negotiation");
+    for mode in 0..3 {
+        let mut effect = instantiate_effect_node(kind.clone()).expect("canonical author effect");
+        for (name, value) in [
+            ("scale", PropertyValue::Double(0.5)),
+            (
+                "alphaMode",
+                PropertyValue::Enum(
+                    description
+                        .parameters
+                        .iter()
+                        .find(|parameter| parameter.name == "alphaMode")
+                        .expect("alpha choice")
+                        .choices[mode]
+                        .key
+                        .clone(),
+                ),
+            ),
+        ] {
+            let label = &description
+                .parameters
+                .iter()
+                .find(|parameter| parameter.name == name)
+                .expect("native parameter")
+                .label;
+            let id = effect
+                .properties
+                .iter()
+                .find(|(_, property)| &property.descriptor.display_name == label)
+                .expect("canonical parameter")
+                .1
+                .descriptor
+                .parameter_id()
+                .clone();
+            effect.set_static_value_by_parameter(&id, value).expect("author alpha controls");
+        }
+        let context = EffectFrameContext::new(
+            Rational::FPS_24,
+            SampleAspectRatio::new(2, 1).expect("PAR"),
+            TimelineTimeRange::new(
+                TimelineTime::ZERO,
+                TimelineTime::new(101, 24).expect("duration"),
+            )
+            .expect("range"),
+        )
+        .expect("canonical frame context");
+        let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+            &[effect],
+            &[],
+            &[],
+            &[],
+            WorkingColorSpace::LinearRec709,
+            context,
+            &LutPreparationCache::uncached(),
+        )
+        .expect("compile graph");
+        let graph = program
+            .evaluate(TimelineTime::new(42, 24).expect("seek"))
+            .expect("evaluate graph");
+        let output = apply_compiled_effect_graph_rgba_f32(
+            &input.pixels,
+            input.width,
+            input.height,
+            &graph,
+            977,
+        )
+        .expect("one canonical graph execution");
+        assert_negotiated_alpha_pixels(&output, &input, mode as i32, 0.5);
+    }
+}
+
+#[test]
+#[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and MONDRIAN_OPENFX_SESSION_PROBE_MODE=output_alpha"]
+fn product_rejects_invalid_or_unrepresentable_native_alpha_without_publishing_output() {
+    let inspection = cpu_contract_probe("output_alpha");
+    let input = output_alpha_input();
+    for mode in 3..9 {
+        let mut session = OpenFxFilterSession::prepare(
+            product_executable(),
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+            input.width,
+            input.height,
+            &mut || Ok(()),
+        )
+        .expect("resident failure probe");
+        let parameters = constant_parameters([
+            ("scale".into(), OpenFxParameterValue::Double(0.5)),
+            ("alphaMode".into(), OpenFxParameterValue::Choice(mode)),
+        ]);
+        assert!(
+            session
+                .render(&cpu_contract_timing(1.0), &parameters, &input, &mut || Ok(
+                    ()
+                ))
+                .is_err(),
+            "invalid or unsupported alpha mode {mode} published an output"
+        );
+        assert!(
+            session
+                .render(
+                    &cpu_contract_timing(1.0),
+                    &constant_parameters([("alphaMode".into(), OpenFxParameterValue::Choice(0)),]),
+                    &input,
+                    &mut || Ok(())
+                )
+                .is_err(),
+            "failed alpha worker must remain retired"
+        );
+        session.shutdown().expect("reap failed alpha worker");
+    }
+}
+
+#[test]
+#[ignore = "requires release product, official Basic bundle and explicit OpenFX perf receipt/budget"]
+fn official_basic_production_resident_steady_frame_performance_gate() {
+    use sha2::Digest;
+    use std::time::Instant;
+
+    if cfg!(debug_assertions) {
+        panic!("frame-budget qualification requires --release");
+    }
+    assert!(
+        std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_MODE").is_none(),
+        "use untouched official Basic, with no SessionProbe behavior"
+    );
+    let integer = |name: &str| -> u32 { std::env::var(name).expect(name).parse().expect(name) };
+    let width = integer("MONDRIAN_OPENFX_PERF_WIDTH");
+    let height = integer("MONDRIAN_OPENFX_PERF_HEIGHT");
+    OpenFxFilterSession::required_frame_storage(width, height)
+        .expect("dimensions must be admitted before source allocation");
+    let rate_num = integer("MONDRIAN_OPENFX_PERF_FPS_NUM");
+    let rate_den = integer("MONDRIAN_OPENFX_PERF_FPS_DEN");
+    let stage_percent = integer("MONDRIAN_OPENFX_PERF_STAGE_BUDGET_PERCENT");
+    let count = integer("MONDRIAN_OPENFX_PERF_FRAMES");
+    let warmup = integer("MONDRIAN_OPENFX_PERF_WARMUP");
+    assert!(rate_num > 0 && rate_den > 0 && (1..=100).contains(&stage_percent));
+    assert!((200..=10_000).contains(&count) && (16..=1000).contains(&warmup));
+    let frame_budget_ns = 1_000_000_000_u64 * u64::from(rate_den) / u64::from(rate_num);
+    let stage_budget_ns =
+        u64::try_from(u128::from(frame_budget_ns) * u128::from(stage_percent) / 100)
+            .expect("stage budget must be representable");
+    assert!(stage_budget_ns > 0);
+    let machine_path = PathBuf::from(
+        std::env::var_os("MONDRIAN_NATIVE_PERF_CONTEXT").expect("machine/build receipt path"),
+    );
+    let context: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&machine_path).expect("read machine/build receipt"))
+            .expect("machine/build receipt JSON");
+    assert_eq!(context["schema_version"], 1);
+    assert_eq!(context["machine"]["cpu_identity_and_ram_available"], true);
+    assert_eq!(context["build"]["profile"], "release");
+    assert!(context["build"]["commands"]
+        .as_array()
+        .is_some_and(|commands| !commands.is_empty()));
+    assert!(context["build"]["rustc_verbose"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    let hash = |path: &Path| -> String {
+        format!(
+            "{:x}",
+            sha2::Sha256::digest(std::fs::read(path).expect("receipt identity"))
+        )
+    };
+    let worktree =
+        PathBuf::from(std::env::var_os("MONDRIAN_PERF_WORKTREE").expect("receipt worktree"));
+    assert!(worktree.is_absolute() && worktree.is_dir());
+    assert_eq!(
+        hash(&worktree.join("Cargo.lock")),
+        context["build"]["cargo_lock_sha256"]
+    );
+    let transcript =
+        Path::new(context["build"]["transcript"]["path"].as_str().expect("build transcript path"));
+    assert_eq!(hash(transcript), context["build"]["transcript"]["sha256"]);
+    let sources = context["source_receipts"].as_array().expect("source receipts");
+    assert!(!sources.is_empty());
+    for source in sources {
+        let path = Path::new(source["path"].as_str().expect("relative source path"));
+        assert!(
+            path.components().all(|part| matches!(part, std::path::Component::Normal(_))),
+            "source receipt must stay inside the worktree"
+        );
+        assert_eq!(
+            hash(&worktree.join(path)),
+            source["sha256"],
+            "source changed after the build receipt"
+        );
+    }
+    for required in [
+        "crates/mondrian-app/src/openfx_host.rs",
+        "crates/mondrian-app/src/openfx_host/resident.rs",
+        "crates/mondrian-app/native/openfx/host/render.cpp",
+        "crates/mondrian-app/tests/openfx_host.rs",
+    ] {
+        assert!(
+            sources.iter().any(|source| source["path"] == required),
+            "source receipt missing {required}"
+        );
+    }
+    if let Some(external) = context["external_source_receipts"].as_array() {
+        for source in external {
+            let path = Path::new(source["path"].as_str().expect("external source path"));
+            assert!(path.is_absolute(), "external receipt path must be explicit");
+            assert_eq!(
+                hash(path),
+                source["sha256"],
+                "reference source changed after the build receipt"
+            );
+        }
+    }
+    let binary = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_REFERENCE_BINARY").expect("official Basic binary"),
+    );
+    let test_executable = std::env::current_exe().expect("current test executable");
+    let artifacts = context["artifacts"].as_array().expect("artifact receipts");
+    for (role, actual) in [
+        ("openfx_worker", product_executable()),
+        ("openfx_reference", binary.as_path()),
+        ("openfx_test_executable", test_executable.as_path()),
+    ] {
+        let entries = artifacts.iter().filter(|entry| entry["role"] == role).collect::<Vec<_>>();
+        assert_eq!(
+            entries.len(),
+            1,
+            "artifact identity missing or ambiguous: {role}"
+        );
+        let recorded = Path::new(entries[0]["path"].as_str().expect("artifact path"));
+        assert_eq!(
+            std::fs::canonicalize(recorded).expect("recorded artifact"),
+            std::fs::canonicalize(actual).expect("actual artifact"),
+            "wrong artifact selected: {role}"
+        );
+        assert_eq!(
+            hash(actual),
+            entries[0]["sha256"],
+            "artifact changed: {role}"
+        );
+    }
+    let setup = Instant::now();
+    let inspection = inspect_openfx_binary(product_executable(), &binary).expect("inspect Basic");
+    let gain = constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(0.5))]);
+    let pixels = usize::try_from(u64::from(width) * u64::from(height)).expect("pixel count");
+    let mut input = OpenFxFloatFrame {
+        width,
+        height,
+        pixels: (0..pixels)
+            .map(|index| {
+                let x = (index % width as usize) as f32 / width as f32;
+                let y = (index / width as usize) as f32 / height as f32;
+                [-0.25 + x, 0.5 + y, 2.0 - x, 0.25 + y / 4.0]
+            })
+            .collect(),
+    };
+    let mut session = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+        width,
+        height,
+        &mut || Ok(()),
+    )
+    .expect("prepare real production resident worker");
+    let pid = session.worker_process_id();
+    let setup_ns = u64::try_from(setup.elapsed().as_nanos()).expect("setup duration");
+    let mut timing = OpenFxRenderTiming {
+        frame: 0.0,
+        frame_rate: f64::from(rate_num) / f64::from(rate_den),
+        first_frame: 0.0,
+        last_frame: f64::from(count + warmup),
+        pixel_aspect_ratio: 1.0,
+    };
+    let mut durations = Vec::with_capacity(count as usize);
+    let mut errors = Vec::new();
+    for index in 0..(warmup + count) {
+        timing.frame = f64::from(index);
+        // Vary a deterministic source pixel so retained output cannot masquerade
+        // as completed native work. Correctness is checked outside the timer.
+        input.pixels[0][0] = -0.25 + index as f32 / 65536.0;
+        let begin = Instant::now();
+        let result = session.render(&timing, &gain, &input, &mut || Ok(()));
+        let elapsed = u64::try_from(begin.elapsed().as_nanos()).expect("render duration");
+        if index >= warmup {
+            durations.push(elapsed);
+        }
+        match result {
+            Ok(output) => {
+                if session.worker_process_id() != pid {
+                    errors.push("steady execution respawned a worker".into());
+                    break;
+                }
+                let correct = output.pixels.len() == input.pixels.len()
+                    && output.pixels.iter().zip(&input.pixels).all(|(actual, source)| {
+                        (0..4).all(|channel| {
+                            actual[channel].is_finite()
+                                && (actual[channel] - source[channel] * 0.5).abs() < 1e-6
+                        })
+                    });
+                if !correct {
+                    errors.push(format!("independent gain oracle failed at frame {index}"));
+                    break;
+                }
+            }
+            Err(error) => {
+                errors.push(error.to_string());
+                break;
+            }
+        }
+    }
+    let shutdown = Instant::now();
+    let shutdown_result = session.shutdown();
+    let shutdown_ns = u64::try_from(shutdown.elapsed().as_nanos()).expect("shutdown duration");
+    if let Err(error) = shutdown_result {
+        errors.push(error.to_string());
+    }
+    let mut sorted = durations.clone();
+    sorted.sort_unstable();
+    let percentile = |percent: usize| -> Option<u64> {
+        sorted.get((sorted.len() * percent).div_ceil(100).saturating_sub(1)).copied()
+    };
+    let missed_frames = durations.iter().filter(|&&nanos| nanos > frame_budget_ns).count();
+    let missed_stage_budget = durations.iter().filter(|&&nanos| nanos > stage_budget_ns).count();
+    let worker_hash = format!(
+        "{:x}",
+        sha2::Sha256::digest(
+            std::fs::read(product_executable()).expect("actual product worker identity")
+        )
+    );
+    let receipt = serde_json::json!({ "gate": "openfx_production_resident_cpu_frame_v1",
+        "context": context, "context_sha256": hash(&machine_path),
+        "fixture_sha256": inspection.binary_sha256,
+        "worker_sha256": worker_hash, "width": width, "height": height,
+        "fps_num": rate_num, "fps_den": rate_den, "stage_budget_percent": stage_percent,
+        "frame_budget_ns": frame_budget_ns, "stage_budget_ns": stage_budget_ns,
+        "warmup_excluded": warmup, "samples_requested": count, "samples": durations.len(),
+        "setup_ns": setup_ns, "shutdown_ns": shutdown_ns, "p50_ns": percentile(50),
+        "p95_ns": percentile(95), "p99_ns": percentile(99), "max_ns": sorted.last(),
+        "frame_budget_misses": missed_frames, "stage_budget_misses": missed_stage_budget,
+        "render_ns": durations, "errors": errors,
+        "oracle": "independent asymmetric HDR/negative/alpha gain on every output; timed render excludes oracle",
+        "timed_boundary": "public OpenFxFilterSession::render including validation, hashes, copies, IPC, native work and output allocation" });
+    let output_path = PathBuf::from(
+        std::env::var_os("MONDRIAN_PERF_OUTPUT").expect("qualification JSON output path"),
+    );
+    std::fs::write(
+        output_path,
+        serde_json::to_vec_pretty(&receipt).expect("serialize receipt"),
+    )
+    .expect("write qualification receipt before budget verdict");
+    assert!(errors.is_empty(), "native work failed: {errors:?}");
+    assert_eq!(sorted.len(), count as usize);
+    assert_eq!(
+        missed_stage_budget, 0,
+        "real resident frame exceeded declared NLE stage budget: {receipt}"
+    );
+}
+
+#[test]
+#[ignore = "requires SessionProbe mode mixed_api_long and current product"]
+fn product_skips_long_unsupported_api_names_and_preserves_original_selected_index() {
+    qualify_cpu_contract_resident_and_graph("mixed_api_long", false);
+}
+
+#[test]
+#[ignore = "requires SessionProbe mode bootstrap_memory and current product"]
+fn product_bootstrap_image_memory_uses_a_live_host_in_discovery_and_resident_execution() {
+    qualify_cpu_contract_resident_and_graph("bootstrap_memory", false);
+}

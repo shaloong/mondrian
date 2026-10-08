@@ -1,5 +1,38 @@
 # Audio pipeline
 
+## CLAP render admission and symbolic thread roles
+
+The CLAP discovery request includes the consumer's explicit realtime/offline
+mode. After restoring native state while deactivated, discovery and execution
+use the same render-extension admission helper. An optional extension is set
+to the requested mode before activation; hard realtime requirements and declined
+offline selection are refused. A plugin without that extension uses its default
+realtime algorithm for either consumer. The resulting execution contract admits
+only the actually probed mode, and activated latency/tail are validated again in
+the prepared worker. Realtime and offline may legitimately have different
+latency/tail; no mode-independent scheduling facts are inferred. Definition
+identity and authored opaque state remain independent of the execution mode.
+
+The isolated worker implements CLAP's thread-check extension with one fixed
+main OS-thread identity and an instance-owned symbolic audio-role guard.
+Reset, tail queries, start/process and stop are the only marked audio call
+intervals. The same OS thread may correctly report both main and audio during
+those intervals. Other instances and plugin-created background threads do not
+inherit the role. Main callbacks, activation, state, ports, latency,
+deactivation and destruction execute outside it. Borrowed RAII guards restore
+the enclosing role after errors and unwind without locks or per-call allocation.
+The guard is neither Send nor Sync, so it can only be released on its owner
+thread. Nested markers preserve role state; they do not detect processor reentry.
+Stop completes inside the audio role before main-thread deactivation.
+
+Owned fixtures define independent realtime/offline gain and delay oracles,
+hard realtime and declined-mode refusals, lifecycle thread identities,
+partition/reset behavior and failure teardown. Existing sidechain states 0–2
+retain their original ports, gain and three-frame delay; state 3 selects an
+offline quality mode with a distinct gain and five-frame delay. These fixtures
+exercise the named lifecycle contract. Full native GUI/MIDI/transport/vendor
+and measured native realtime performance remain separate acceptance work.
+
 Clean source `9f0183a` qualifies stage-aware main/auxiliary compensation with
 122 source audio regressions, actual CLAP/VST3 late-detector Undo/save/reopen
 PCM and three complete Golden rounds. The native late detector increases public
@@ -1989,3 +2022,85 @@ Successful input observations are stored as shared immutable snapshots. Cache
 reads clone the `Arc`, preserving the result identity without copying port
 vectors or allocating another boxed payload. Only successful publication mints
 an observation ID; no identity is needed for a failed control result.
+
+## Native plugin signal timeline
+
+The canonical `AudioProcessorProcessContext` carries the signed input-signal
+sample position after processor-path latency compensation and the prepared exact
+sample rate. Isolated worker commands already carry these facts; native adapters
+consume them for every block and state-entry seek, without a second playhead.
+
+CLAP receives a stack-owned transport event with seconds timeline validity only.
+Signed samples become the ABI's 2^31 fixed-point seconds using checked integer
+nearest rounding, ties away from zero; unrepresentable positions fail explicitly.
+The independent steady counter is unavailable (`-1`), rather than derived from
+the sequence playhead. No tempo, time signature, beat/loop or playing state is
+invented from realtime/offline mode.
+
+VST3 receives a typed per-block `ProcessTimelineContext`. The active prepared
+sample rate is verified, projectTimeSamples is absolute and signed, and optional
+values/validity flags are cleared. SDK requirements select available facts;
+requests alone do not make a field valid. Native chunking advances only valid
+optional coordinates, preserving the absolute position and unavailable fields.
+The typed setter is allocation-free on the product's in-process vendor adapter
+inside the supervised Mondrian child; it does not add a second product IPC call.
+
+Owned independent time-dependent PCM fixtures cover realtime/offline, 44.1/48 kHz,
+nonzero starts, negative latency-adjusted starts, forward/backward seeks, reset
+history and uneven partitions. Existing sidechain/render fixture state meanings
+are retained. Musical maps and actual playing/recording/loop facts still require
+canonical authoring and playback contracts before those optional fields can be
+advertised. Fixture correctness does not qualify arbitrary vendor plugins.
+
+Native SDK ABI qualification is a workspace-owned audio integration test using
+the exact same `vst3` dependency and lock as production. Its independent C++
+oracle compiles unmodified pinned official SDK headers and reports actual
+layouts and target-encoded interface identifiers. Runtime output, include-tree
+provenance, compiler and executable hashes are required; an excluded vendor
+workspace with independent registry resolution is not qualification evidence.
+
+
+### Canonical VST3 SDK runtime
+
+The workspace, vendored host's independent Cargo entry and both owned VST3
+fixtures resolve one local `vendor/vst3-sdk` package and one original
+`com-scrape-types` COM runtime. The runtime binding surface is generated from the
+verified complete official VST3 3.8.1 tree at immutable commits using the original
+upstream generator; only header enumeration is sorted. The original generator's
+SDK test-interface and C++ helper exclusions are recorded in provenance. No ABI
+definitions or compatibility shim are handwritten.
+The three license texts, verified generation source manifest, independent
+generator lock and shipped-file hashes are retained. The reproducible preparation
+tool verifies Git blob and SHA256 for every input and uses a fresh separate
+generation directory/Cargo home. Current generation used Windows GNU and LLVM
+18.1.8 after MSVC's installed STL rejected that Clang version; native MSVC and
+macOS ABI validation remain separate required gates.
+
+The audio workspace ABI test checks independent official C++ sizes, alignments,
+field offsets, target-encoded GUIDs and compile-time method signatures for
+IMidiMapping2, IMidiLearn2, ITransportControl and orchestral articulation IInfo.
+New interface availability does not advertise optional host implementation,
+MIDI2 event routing or vendor-plugin qualification. Native performance receipts
+include the entire canonical SDK source/provenance/license tree and explicit
+immutable SDK/generator identity because a path dependency has no Git source in
+Cargo.lock. Generator/package/source changes invalidate prior performance proof.
+
+
+### Independent VST3 COM call-through
+
+An independent C++ helper built against unmodified pinned official SDK headers
+queries a real canonical Rust `ComWrapper` for IMidiMapping2, IMidiLearn2,
+ITransportControl and orchestral articulation IInfo, then invokes every one of
+the nine actual virtual methods. Oracles cover MIDI2 by-value byte payload,
+MIDI1/MIDI2 mutable mapping output arrays, signed samples and quarter-note
+transport union discrimination, nullable transport position, 17-by-16
+articulation output, cross-interface pointer adjustment, canonical FUnknown
+identity and balanced foreign reference lifetime through final Rust destruction.
+No replacement VST3 interface/vtable or compatibility shim is declared.
+
+The ignored workspace integration test verifies current source/helper hashes,
+actual compiler transcript/dependency artifacts and the entire 69-file official
+include tree before loading the helper. Its receipt collector only records a
+completed build. This is execution evidence for the selected ABI slice on the
+actual platform/compiler pair; it does not implement optional host features or
+qualify third-party plugin behavior. Separate native MSVC/macOS runs are required.

@@ -43,6 +43,7 @@ pub(crate) struct SidechainRewireOption {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SidechainInputModel {
+    pub(crate) bus_key: String,
     pub(crate) label: String,
     pub(crate) options: Vec<SidechainCreateOption>,
 }
@@ -150,6 +151,7 @@ pub(crate) fn input_options(
         .buses
         .iter()
         .map(|bus| SidechainInputModel {
+            bus_key: bus.bus_key.clone(),
             label: localizer.format_text(
                 "audio-sidechain-input",
                 "identity",

@@ -341,3 +341,84 @@ Undo, saves the undone state retaining live Redo, and reopens both Unicode
 archives in fresh sessions. Rebuild product and fixture and explicitly execute
 the ignored test before claiming qualification; the four group sibling probes
 must remain green.
+
+
+The CPU admission/geometry probe modes are `host_capabilities`,
+`canonical_progressive`, `cpu_unsupported_descriptor`, `cpu_unsupported_create`,
+`cpu_unsupported_change`, `bootstrap_required`, `bootstrap_skip`, and
+`bootstrap_error`. They inspect actual host/native action properties and enforce
+bootstrap ordering, progressive fields, non-square canonical project coordinates
+and refusal before CPU rendering. Coordinate-sensitive asymmetric HDR/alpha
+pixels are compared with an independent reference through resident and compiled
+graph execution. The untouched official Basic has no OfxSetHost export and
+continues to qualify optional-export absence independently. These probes do not
+claim the full GPU/context/vendor/performance matrix.
+
+## Mixed API binary admission
+
+`mixed_api` exposes unknown API entries around image API v2 and the actual Filter
+at original export index 2. Unsupported callbacks abort if reached. Run
+`product_worker_skips_unsupported_apis_and_preserves_original_export_indices`
+with this mode to qualify discovery, native description, repeated resident
+teardown, same-frame edits/seeks and the sole compiled graph against the
+independent gain oracle. `unsupported_api` exposes only unsupported entries;
+`product_discovery_admits_an_empty_supported_api_intersection` qualifies a
+successful empty discovery and refusal to describe a nonexistent supported Filter.
+
+## Negotiated output alpha
+
+The owned `output_alpha` wrapper defines a static Choice that negotiates Straight,
+Premultiplied and Opaque output through GetClipPreferences. Source metadata must
+stay Straight; Output clip and fetched image metadata must match the preference.
+The resident/compiled-graph test exercises same-frame representation edits,
+seeks, repeated session teardown, negative/HDR RGB, zero coverage and positive
+tiny alpha against an independent pixel oracle. Raw Straight signed/over-one
+alpha is preserved. Separate failure modes require refusal of invalid metadata,
+nonfinite output, finite division overflow, zero-alpha emission and Premultiplied alpha outside the
+canonical normalized-coverage domain; this last domain is a product adapter
+limitation, not a normative OFX Float restriction. Any error retires the worker
+without exposing staging output. These tests are not a performance receipt.
+
+## Actual resident CPU performance gate
+
+`official_basic_production_resident_steady_frame_performance_gate` is an ignored
+release-only test against the actual product resident worker and untouched
+official Basic bundle. It requires explicit dimensions, FPS numerator/denominator,
+per-effect frame-budget percentage, excluded warmup and sample count. Its public
+render timer includes validation, fingerprints, copies, native work, IPC and
+returned raster allocation; setup/shutdown are separately recorded. Every frame
+has an independent asymmetric HDR/negative/alpha gain oracle outside the timer,
+and a changing source pixel prevents stale-output success. Record raw samples,
+p50/p95/p99/max and require zero stage-budget misses and zero render/oracle errors.
+
+Use the sole `scripts/validation/collect-native-perf-context.py` schema-v1 receipt
+with the actual OpenFX worker/reference/test-executable triple, completed release
+build commands/transcript and optional external official Basic source receipt.
+Set `MONDRIAN_NATIVE_PERF_CONTEXT`, `MONDRIAN_PERF_WORKTREE`,
+`MONDRIAN_OPENFX_REFERENCE_BINARY`, `MONDRIAN_OPENFX_PERF_WIDTH`,
+`MONDRIAN_OPENFX_PERF_HEIGHT`, `MONDRIAN_OPENFX_PERF_FPS_NUM`,
+`MONDRIAN_OPENFX_PERF_FPS_DEN`, `MONDRIAN_OPENFX_PERF_STAGE_BUDGET_PERCENT`,
+`MONDRIAN_OPENFX_PERF_FRAMES`, `MONDRIAN_OPENFX_PERF_WARMUP` and a unique
+`MONDRIAN_PERF_OUTPUT`. Do not set any SessionProbe mode. Current source hashes,
+Cargo.lock/build transcript and selected artifact hashes must match the receipt.
+
+This is a hot-buffer public-host baseline, not uninterrupted transport throughput:
+the complete correctness oracle touches both buffers between samples. Full NLE
+performance acceptance also needs paced decode/effects/composite/present, sustained
+memory/CPU and seek/cancellation latency on declared hardware. A 100% stage share
+reserves no frame budget for other pipeline stages. No measurement is established
+by adding this ignored test, a debug build or a changed budget after a failure.
+
+## Early image memory and unknown long API qualification
+
+`bootstrap_memory` calls the actual exposed ImageEffect suite during OfxSetHost,
+allocates host-owned image memory with a null instance handle, locks/writes/checks/
+unlocks/frees it, then follows the normal bootstrap count/get sequence. The source
+test repeats fresh inspection/teardown in a supervised child; public integration
+also checks native resident and sole compiled graph parity. `mixed_api_long`
+exports an unsupported printable API name longer than 63 bytes at index 0, an
+unsupported ImageEffect API version at 1 and the real Filter at original index 2.
+All unsupported callbacks abort if reached. The fixture has distinct identifiers.
+Source inspection and final public native/graph tests must remain GREEN after
+the original API bound/native-header rejection RED. UTF-8 API naming is not
+asserted as a normative requirement by this fixture.

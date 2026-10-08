@@ -91,6 +91,7 @@ impl AudioProcessorParameterModel {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AudioProcessorInstanceModel {
+    pub(crate) definition: AudioProcessorDefinitionRef,
     pub(crate) processor_id: AudioProcessorInstanceId,
     pub(crate) label: String,
     pub(crate) bypassed: bool,
@@ -117,6 +118,7 @@ pub(crate) struct AudioProcessorRackModel {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AudioScopeOccurrenceSelectorModel {
+    pub(crate) clip_id: mondrian_core::ClipId,
     pub(crate) selected_label: String,
     pub(crate) options: Vec<AudioScopeOccurrenceOptionModel>,
 }
@@ -227,6 +229,7 @@ pub(crate) fn clip_processing_scope_racks(
             );
             if options.len() > 1 {
                 rack.scope_occurrence_selector = Some(AudioScopeOccurrenceSelectorModel {
+                    clip_id: clip.id,
                     selected_label: options
                         .iter()
                         .find(|option| Some(option.intent.address) == occurrence)
@@ -505,6 +508,7 @@ fn project_processor(
         AudioProcessorDefinitionRef::Vst3 { .. } | AudioProcessorDefinitionRef::Clap { .. } => None,
     };
     AudioProcessorInstanceModel {
+        definition: processor.definition.clone(),
         input_query: None,
         sidechain_routes: super::audio_sidechain::retained_routes(
             sequence,

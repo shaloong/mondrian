@@ -7,6 +7,7 @@
 // ofx
 #include "ofxCore.h"
 #include "ofxImageEffect.h"
+#include "ofxGPURender.h"
 #include "ofxPixels.h"
 
 // ofx host
@@ -35,6 +36,11 @@ namespace MondrianOpenFx {
                                      const std::string& context, FrameState& frameState)
                                      : OFX::Host::ImageEffect::Instance(plugin,desc,context,false), _frameState(frameState)
   {
+    // An instance starts with its descriptor's capability. Plugin changes must
+    // remain instance-local rather than changing the chained descriptor.
+    const auto& cpu = desc.getProps().getStringProperty(kOfxImageEffectPropCPURenderSupported);
+    getProps().createProperty({kOfxImageEffectPropCPURenderSupported,
+                              OFX::Host::Property::eString, 1, false, cpu.c_str()});
   }
 
   // class member function implementation
@@ -82,7 +88,7 @@ namespace MondrianOpenFx {
 
   void FilterEffectInstance::getProjectSize(double& xSize, double& ySize) const
   {
-    xSize = _frameState.info.width;
+    xSize = _frameState.info.width * _frameState.info.pixel_aspect_ratio;
     ySize = _frameState.info.height;
   }
 
@@ -95,7 +101,7 @@ namespace MondrianOpenFx {
 
   void FilterEffectInstance::getProjectExtent(double& xSize, double& ySize) const
   {
-    xSize = _frameState.info.width;
+    xSize = _frameState.info.width * _frameState.info.pixel_aspect_ratio;
     ySize = _frameState.info.height;
   }
 

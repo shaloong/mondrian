@@ -1243,7 +1243,7 @@ impl AppUiAppRoot {
                 } else {
                     (None, Vec::new())
                 };
-            self.modal = Some(ShellModal::Resource(Box::new(ResourceDialog::new(
+            self.show_modal(ShellModal::Resource(Box::new(ResourceDialog::new(
                 draft,
                 property.label.clone(),
                 assets,
@@ -1697,9 +1697,14 @@ impl AppUiAppRoot {
         self.asset_folder_id = folder_id;
     }
 
+    fn show_modal(&mut self, modal: ShellModal) {
+        cancel_keyboard_activations(self);
+        self.modal = Some(modal);
+    }
+
     /// Show the pending-close confirmation modal.
     pub fn show_pending_close_dialog(&mut self, action: PendingCloseDialogAction) {
-        self.modal = Some(ShellModal::pending_close(
+        self.show_modal(ShellModal::pending_close(
             action,
             self.preferences_model.locale,
         ));
@@ -1782,10 +1787,17 @@ impl AppUiAppRoot {
             self.modal = None;
         }
 
-        let curve_states = if self.models.curve_author_scope.is_some()
-            && self.models.curve_author_scope == models.curve_author_scope
+        let curve_states = if self.models.author_control_scope.is_some()
+            && self.models.author_control_scope == models.author_control_scope
         {
             collect_curve_view_state(&self.dock)
+        } else {
+            Vec::new()
+        };
+        let control_states = if self.models.author_control_scope.is_some()
+            && self.models.author_control_scope == models.author_control_scope
+        {
+            collect_control_inspection_state(&self.dock)
         } else {
             Vec::new()
         };
@@ -1804,6 +1816,7 @@ impl AppUiAppRoot {
         );
         self.dock.restore_layout(&layout);
         restore_curve_view_state(&mut self.dock, &curve_states);
+        restore_control_inspection_state(&mut self.dock, &control_states);
         restore_dock_panel_state(&mut self.dock, &dock_panel_state);
         restore_asset_grid_state(&mut self.dock, &asset_grid_state);
         restore_panel_list_state(&mut self.dock, &panel_list_state);
@@ -2278,7 +2291,7 @@ impl AppUiAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_NEW_PROJECT_DIALOG =>
             {
-                self.modal = Some(ShellModal::new_project_with_locale(
+                self.show_modal(ShellModal::new_project_with_locale(
                     AppUiNewProjectDraft::for_locale(self.preferences_model.locale),
                     self.preferences_model.locale,
                 ));
@@ -2351,7 +2364,7 @@ impl AppUiAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PROJECT_SETTINGS =>
             {
-                self.modal = Some(ShellModal::project_settings_with_locale(
+                self.show_modal(ShellModal::project_settings_with_locale(
                     AppUiProjectSettingsDraft::new(
                         self.project_color_environment.engine().clone(),
                         self.project_sequence_color_contracts.clone(),
@@ -2398,7 +2411,7 @@ impl AppUiAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_ABOUT =>
             {
-                self.modal = Some(ShellModal::about(self.localizer.locale()));
+                self.show_modal(ShellModal::about(self.localizer.locale()));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
                 }
@@ -2407,7 +2420,7 @@ impl AppUiAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PREFERENCES =>
             {
-                self.modal = Some(ShellModal::preferences(self.preferences_model()));
+                self.show_modal(ShellModal::preferences(self.preferences_model()));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
                 }
@@ -2454,7 +2467,7 @@ impl AppUiAppRoot {
                     payload.auto_interpretation,
                 )
                 .with_input_diagnostics(payload.video_signal, payload.input_pipeline);
-                self.modal = Some(ShellModal::interpret_asset(draft, self.localizer.locale()));
+                self.show_modal(ShellModal::interpret_asset(draft, self.localizer.locale()));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
                 }
@@ -2498,7 +2511,7 @@ impl AppUiAppRoot {
                     )
                 });
                 if let Some(draft) = draft {
-                    self.modal = Some(ShellModal::sequence_settings_with_locale(
+                    self.show_modal(ShellModal::sequence_settings_with_locale(
                         draft,
                         self.preferences_model.locale,
                     ));
@@ -2567,7 +2580,7 @@ impl AppUiAppRoot {
                 if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {
                     dialog.set_active_tab(tab);
                 } else {
-                    self.modal = Some(ShellModal::preferences_with_tab(
+                    self.show_modal(ShellModal::preferences_with_tab(
                         self.preferences_model(),
                         tab,
                     ));
@@ -2797,6 +2810,88 @@ fn restore_dock_panel_state(widget: &mut dyn Widget, states: &[DockPanelState]) 
             restore_dock_panel_state(child, states);
         }
     }
+}
+
+fn cancel_keyboard_activations(widget: &mut dyn Widget) {
+    widget.cancel_keyboard_activation();
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child_mut(index) {
+            cancel_keyboard_activations(child);
+        }
+    }
+}
+
+fn collect_control_inspection_state(
+    widget: &dyn Widget,
+) -> Vec<(PanelKind, mondrian_ui_core::ControlInspectionState)> {
+    fn visit(
+        widget: &dyn Widget,
+        panel: Option<PanelKind>,
+        states: &mut Vec<(PanelKind, mondrian_ui_core::ControlInspectionState)>,
+    ) {
+        let panel = widget.panel_kind().or(panel);
+        if let Some(panel) = panel
+            && let Some(state) = widget.control_inspection_state()
+        {
+            states.push((panel, state));
+        }
+        for index in 0..widget.child_count() {
+            if let Some(child) = widget.child(index) {
+                visit(child, panel, states);
+            }
+        }
+    }
+    let mut states = Vec::new();
+    visit(widget, None, &mut states);
+    states
+}
+
+fn restore_control_inspection_state(
+    widget: &mut dyn Widget,
+    states: &[(PanelKind, mondrian_ui_core::ControlInspectionState)],
+) {
+    fn counts(
+        states: &[(PanelKind, mondrian_ui_core::ControlInspectionState)],
+    ) -> std::collections::HashMap<(PanelKind, &str), usize> {
+        let mut counts = std::collections::HashMap::new();
+        for (panel, state) in states {
+            *counts.entry((*panel, state.key.as_str())).or_insert(0) += 1;
+        }
+        counts
+    }
+    let replacements = collect_control_inspection_state(widget);
+    let previous_counts = counts(states);
+    let replacement_counts = counts(&replacements);
+    let unambiguous = states
+        .iter()
+        .filter_map(|(panel, state)| {
+            let key = (*panel, state.key.as_str());
+            (previous_counts.get(&key) == Some(&1) && replacement_counts.get(&key) == Some(&1))
+                .then_some((key, state))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    fn visit(
+        widget: &mut dyn Widget,
+        panel: Option<PanelKind>,
+        states: &std::collections::HashMap<
+            (PanelKind, &str),
+            &mondrian_ui_core::ControlInspectionState,
+        >,
+    ) {
+        let panel = widget.panel_kind().or(panel);
+        if let Some(panel) = panel
+            && let Some(current) = widget.control_inspection_state()
+            && let Some(state) = states.get(&(panel, current.key.as_str()))
+        {
+            widget.restore_control_inspection_state(state);
+        }
+        for index in 0..widget.child_count() {
+            if let Some(child) = widget.child_mut(index) {
+                visit(child, panel, states);
+            }
+        }
+    }
+    visit(widget, None, &unambiguous);
 }
 
 fn collect_curve_view_state(

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-exclude = ["vendor/vst3-host"]
+exclude = ["vendor/vst3-host", "vendor/vst3-sdk", "vendor/vst3-sdk/com-scrape-types", "vendor/harfrust"]
 members = [
     "crates/mondrian-storage",
     "crates/mondrian-validation-launcher",
@@ -173,7 +173,9 @@ libloading       = "0.8.9"
 memmap2          = "0.9.11"
 clack-host       = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d" }
 clack-plugin     = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d" }
-clack-extensions = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d", features = ["clack-host", "audio-ports", "latency", "tail", "state", "params"] }
+clack-extensions = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d", features = ["clack-host", "audio-ports", "latency", "tail", "state", "params", "render", "thread-check"] }
+# Canonical ABI package; the root patch pins its immutable source.
+vst3 = { path = "vendor/vst3-sdk" }
 vst3-host = { path = "vendor/vst3-host", default-features = false }
 
 # ---- 颜色管理 ----
@@ -188,8 +190,8 @@ zip              = "0.6"
 zstd             = "0.11"
 
 [patch.crates-io]
+harfrust = { path = "vendor/harfrust" }
 clap-sys = { git = "https://github.com/micahrj/clap-sys.git", rev = "25d7f53fdb6363ad63fbd80049cb7a42a97ac156" }
-vst3 = { git = "https://github.com/coupler-rs/vst3-rs.git", rev = "b2a45f2d40e602eff5a224b41613735388868590" }
 
 [profile.dev]
 opt-level = 1          # 适度优化，加快媒体解码调试体验

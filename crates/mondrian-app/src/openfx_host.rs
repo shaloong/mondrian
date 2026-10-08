@@ -459,6 +459,7 @@ unsafe extern "C" {
         frame_info: *const NativeFrameInfo,
         parameters: *const NativeParameter,
         parameter_count: c_int,
+        output_alpha: *mut c_int,
     ) -> c_int;
     fn mondrian_openfx_session_destroy(session: *mut c_void);
 
@@ -505,14 +506,15 @@ impl NativeSession {
         output: &mut [u8],
         info: &NativeFrameInfo,
         parameters: &[NativeParameter],
-    ) -> c_int {
+    ) -> Result<mondrian_renderer::ColorFrameAlpha, c_int> {
         if output.len() != input.len() {
-            return 2;
+            return Err(2);
         }
+        let mut alpha = -1;
         // SAFETY: The exclusive live handle serializes native actions. Disjoint
-        // input/output slices remain live and the host validates the exact extent
-        // before reading or writing. Parameter names outlive this synchronous call.
-        unsafe {
+        // input/output slices and output metadata remain live for this call.
+        // Native validation checks exact extents before reading or writing.
+        let status = unsafe {
             mondrian_openfx_session_render(
                 self.0.as_ptr(),
                 input.as_ptr().cast(),
@@ -521,7 +523,17 @@ impl NativeSession {
                 info,
                 parameters.as_ptr(),
                 parameters.len() as c_int,
+                &mut alpha,
             )
+        };
+        if status != 0 {
+            return Err(status);
+        }
+        match alpha {
+            0 => Ok(mondrian_renderer::ColorFrameAlpha::StraightCoverage),
+            1 => Ok(mondrian_renderer::ColorFrameAlpha::PremultipliedCoverage),
+            2 => Ok(mondrian_renderer::ColorFrameAlpha::Opaque),
+            _ => Err(6),
         }
     }
 }
@@ -958,6 +970,11 @@ fn validate_render_request(
         return Err(invalid("OpenFX input contains a nonfinite channel"));
     }
     validate_timing(timing)?;
+    if !(f64::from(frame.width) * timing.pixel_aspect_ratio).is_finite() {
+        return Err(invalid(
+            "OpenFX canonical frame extent is not representable",
+        ));
+    }
     validate_parameters(parameters)
 }
 
@@ -1266,8 +1283,55 @@ fn unavailable(reason: impl Into<String>) -> OpenFxHostError {
 }
 
 #[cfg(test)]
-mod shared_frame_tests {
+/// Shared bounded child qualification for native adapter tests.
+pub(crate) mod shared_frame_tests {
     use super::*;
+
+    #[test]
+    fn canonical_geometry_overflow_is_rejected_before_worker_admission() {
+        let frame = OpenFxFloatFrame { width: 3, height: 2, pixels: vec![[0.0; 4]; 6] };
+        let timing = OpenFxRenderTiming {
+            frame: 0.0,
+            frame_rate: 24.0,
+            first_frame: 0.0,
+            last_frame: 1.0,
+            pixel_aspect_ratio: f64::MAX,
+        };
+        assert!(matches!(
+            validate_render_request(&timing, &BTreeMap::new(), &frame),
+            Err(OpenFxHostError::Invalid(_))
+        ));
+        let finite = OpenFxRenderTiming { pixel_aspect_ratio: f64::MAX / 4.0, ..timing };
+        validate_render_request(&finite, &BTreeMap::new(), &frame)
+            .expect("very large finite geometry has no arbitrary PAR cutoff");
+    }
+
+    #[test]
+    /// Refuse invalid native geometry before module loading or host ownership.
+    pub(crate) fn native_canonical_geometry_overflow_refuses_before_binary_loading() {
+        let binary = CString::new("missing-geometry-fixture.ofx").expect("binary");
+        let bundle = CString::new("missing-geometry-fixture.ofx.bundle").expect("bundle");
+        let identifier = CString::new("test.geometry").expect("identifier");
+        let input = [[0.0_f32; 4]; 6];
+        // SAFETY: This aligned array is borrowed as its exact byte extent only
+        // during the synchronous native validation call; no binary is available.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(input.as_ptr().cast(), std::mem::size_of_val(&input))
+        };
+        let info = NativeFrameInfo {
+            width: 3,
+            height: 2,
+            frame: 0.0,
+            frame_rate: 24.0,
+            first_frame: 0.0,
+            last_frame: 1.0,
+            pixel_aspect_ratio: f64::MAX,
+        };
+        assert_eq!(
+            NativeSession::create(&binary, &bundle, &identifier, bytes, &info, &[]).err(),
+            Some(2)
+        );
+    }
 
     #[test]
     fn compound_descriptors_preserve_shapes_and_reject_invalid_sibling_channels() {
@@ -1621,7 +1685,8 @@ mod shared_frame_tests {
 
     // Each native qualification runs in its own bounded child; test threads never
     // change process-wide environment or load a native plugin in the supervisor.
-    fn qualification_child(test: &str, environment: &[(&str, &str)]) -> bool {
+    /// Run one named native qualification in a bounded child process.
+    pub(crate) fn qualification_child(test: &str, environment: &[(&str, &str)]) -> bool {
         const CHILD: &str = "MONDRIAN_OPENFX_QUALIFICATION_CHILD";
         if std::env::var(CHILD).ok().as_deref() == Some(test) {
             return true;
@@ -1812,18 +1877,24 @@ mod shared_frame_tests {
             NativeSession::create(&binary, &bundle, &identifier, &input, &info, &parameters)
                 .expect("complete native tuple instance");
         let mut output = vec![0xa5; input.len()];
-        assert_eq!(session.render(&input, &mut output, &info, &parameters), 0);
+        assert_eq!(
+            session.render(&input, &mut output, &info, &parameters),
+            Ok(mondrian_renderer::ColorFrameAlpha::StraightCoverage)
+        );
         assert_eq!(output, input);
         let mut invalid = parameters;
         invalid[0].value[0] = 0.5;
         invalid[5].value[1] = 5.0;
         let mut unchanged = vec![0xa5; input.len()];
-        assert_ne!(session.render(&input, &mut unchanged, &info, &invalid), 0);
+        assert!(session.render(&input, &mut unchanged, &info, &invalid).is_err());
         assert_eq!(unchanged, vec![0xa5; input.len()]);
         let mut recovered = vec![0xa5; input.len()];
         invalid[0].value[0] = 0.12500000000000003;
         invalid[5].value[1] = 0.0;
-        assert_eq!(session.render(&input, &mut recovered, &info, &invalid), 0);
+        assert_eq!(
+            session.render(&input, &mut recovered, &info, &invalid),
+            Ok(mondrian_renderer::ColorFrameAlpha::StraightCoverage)
+        );
         assert_eq!(recovered, input);
     }
 
@@ -1918,19 +1989,19 @@ mod shared_frame_tests {
                 let source_before = input.clone();
                 assert_eq!(
                     session.render(&input, &mut output, &info, &parameters(1.5)),
-                    5
+                    Err(5)
                 );
                 assert_eq!(input, source_before);
                 assert_eq!(
                     session.render(&input, &mut output, &info, &parameters(1.5)),
-                    2
+                    Err(2)
                 );
                 return;
             }
 
             assert_eq!(
                 session.render(&input, &mut output, &info, &parameters(1.5)),
-                0
+                Ok(mondrian_renderer::ColorFrameAlpha::StraightCoverage)
             );
             assert_eq!(
                 output,
@@ -1939,14 +2010,17 @@ mod shared_frame_tests {
             output.fill(0xa5);
             let status = session.render(&input, &mut output, &info, &parameters(2.0));
             if matches!(mode.as_str(), "unfetched" | "become_required") {
-                assert_eq!(status, if mode == "unfetched" { 5 } else { 7 });
+                assert_eq!(status, Err(if mode == "unfetched" { 5 } else { 7 }));
                 assert_eq!(output, vec![0xa5; input.len()]);
                 assert_eq!(
                     session.render(&input, &mut output, &info, &parameters(1.0)),
-                    2
+                    Err(2)
                 );
             } else {
-                assert_eq!(status, 0);
+                assert_eq!(
+                    status,
+                    Ok(mondrian_renderer::ColorFrameAlpha::StraightCoverage)
+                );
                 assert_eq!(
                     output,
                     [0.5_f32; 4].iter().flat_map(|value| value.to_ne_bytes()).collect::<Vec<_>>()
@@ -2027,7 +2101,7 @@ mod shared_frame_tests {
                 let mut output = vec![0xa5; input.len()];
                 assert_eq!(
                     session.render(&input, &mut output, &info, &parameters(gain)),
-                    0
+                    Ok(mondrian_renderer::ColorFrameAlpha::StraightCoverage)
                 );
                 let expected = original.map(|mut pixel| {
                     for channel in &mut pixel {
@@ -2041,19 +2115,18 @@ mod shared_frame_tests {
             let replacement = [[0.5_f32, -1.0, 3.0, 0.75]; 6];
             let changed_input = encode(&replacement);
             let mut output = vec![0xa5; changed_input.len()];
-            assert_eq!(session.render(&changed_input, &mut output, &info, &[]), 0);
+            assert_eq!(
+                session.render(&changed_input, &mut output, &info, &[]),
+                Ok(mondrian_renderer::ColorFrameAlpha::StraightCoverage)
+            );
             assert_eq!(output, changed_input);
             info.width = 3;
             let mut output = vec![0xa5; input.len()];
-            assert_ne!(
-                session.render(&input, &mut output, &info, &parameters(1.0)),
-                0
-            );
+            assert!(session.render(&input, &mut output, &info, &parameters(1.0)).is_err());
             assert_eq!(output, vec![0xa5; input.len()]);
             info.width = 2;
-            assert_ne!(
-                session.render(&input, &mut output, &info, &parameters(1.0)),
-                0,
+            assert!(
+                session.render(&input, &mut output, &info, &parameters(1.0)).is_err(),
                 "failed instance is retired"
             );
         }
@@ -2068,5 +2141,195 @@ mod shared_frame_tests {
             &parameters(1.0)
         )
         .is_err());
+    }
+    #[test]
+    #[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY to the owned output_alpha wrapper"]
+    fn native_session_output_alpha_reports_negotiated_clip_and_image_metadata() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_session_output_alpha_reports_negotiated_clip_and_image_metadata";
+        if !qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "output_alpha")],
+        ) {
+            return;
+        }
+        let path = resolve_openfx_binary(&PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY")
+                .expect("owned alpha probe binary"),
+        ))
+        .expect("probe binary");
+        let bundle_path = path
+            .ancestors()
+            .find(|path| path.extension().is_some_and(|extension| extension == "bundle"))
+            .expect("probe bundle");
+        let binary = native_string(&path).expect("binary");
+        let bundle = native_string(bundle_path).expect("bundle");
+        let identifier = CString::new("uk.co.thefoundry.BasicGainPlugin").expect("identifier");
+        let scale = CString::new("scale").expect("scale");
+        let alpha = CString::new("alphaMode").expect("alpha mode");
+        let original = [
+            [-0.25_f32, 0.5, 2.0, 0.0],
+            [2.0, -4.0, 8.0, f32::MIN_POSITIVE],
+            [-0.5, 0.75, 4.0, 0.25],
+            [1.0, -2.0, 0.5, 1.0],
+        ];
+        let encode = |pixels: &[[f32; 4]]| {
+            pixels
+                .iter()
+                .flat_map(|pixel| pixel.iter().flat_map(|channel| channel.to_ne_bytes()))
+                .collect::<Vec<_>>()
+        };
+        let input = encode(&original);
+        let parameters = |choice: i32, gain: f64| {
+            [
+                NativeParameter {
+                    name: scale.as_ptr(),
+                    kind: 1,
+                    value: [gain, 0.0, 0.0, 0.0],
+                    query: None,
+                    query_context: std::ptr::null(),
+                    query_revision: 0,
+                    query_mode: 0,
+                    string_value: std::ptr::null(),
+                    string_length: 0,
+                },
+                NativeParameter {
+                    name: alpha.as_ptr(),
+                    kind: 4,
+                    value: [f64::from(choice), 0.0, 0.0, 0.0],
+                    query: None,
+                    query_context: std::ptr::null(),
+                    query_revision: 0,
+                    query_mode: 0,
+                    string_value: std::ptr::null(),
+                    string_length: 0,
+                },
+            ]
+        };
+        let mut info = NativeFrameInfo {
+            width: 2,
+            height: 2,
+            frame: 0.0,
+            frame_rate: 24.0,
+            first_frame: 0.0,
+            last_frame: 100.0,
+            pixel_aspect_ratio: 2.0,
+        };
+        for _ in 0..2 {
+            let mut session = NativeSession::create(
+                &binary,
+                &bundle,
+                &identifier,
+                &input,
+                &info,
+                &parameters(0, 0.5),
+            )
+            .expect("create owned alpha session");
+            for (frame, choice, gain) in [
+                (0.0, 0, 0.5_f64),
+                (0.0, 1, 0.5),
+                (42.0, 2, 0.75),
+                (0.0, 8, 0.5),
+                (0.0, 1, 0.75),
+                (0.0, 0, 0.5),
+            ] {
+                info.frame = frame;
+                let mut output = vec![0xa5; input.len()];
+                assert_eq!(session.render(&input, &mut output, &info, &parameters(choice, gain)), Ok(match choice {
+                        0 => mondrian_renderer::ColorFrameAlpha::StraightCoverage,
+                        2 => mondrian_renderer::ColorFrameAlpha::Opaque,
+                        _ => mondrian_renderer::ColorFrameAlpha::PremultipliedCoverage,
+                    }),
+                    "probe independently checks Source Straight and negotiated Output clip/image metadata");
+                let expected = original.map(|source| {
+                    let mut pixel = source.map(|value| value * gain as f32);
+                    if choice == 1 || choice == 8 {
+                        pixel[0] *= pixel[3];
+                        pixel[1] *= pixel[3];
+                        pixel[2] *= pixel[3];
+                        if choice == 8 && pixel[3] == 0.0 {
+                            pixel[0] = 7.0;
+                            pixel[1] = -3.0;
+                            pixel[2] = 11.0;
+                        }
+                    } else if choice == 2 {
+                        pixel[3] = 123.0;
+                    }
+                    pixel
+                });
+                assert_eq!(
+                    output,
+                    encode(&expected),
+                    "direct native staging must retain the requested representation"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY to the owned output_alpha wrapper"]
+    fn native_session_output_alpha_rejects_unknown_preference_before_render() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_session_output_alpha_rejects_unknown_preference_before_render";
+        if !qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "output_alpha")],
+        ) {
+            return;
+        }
+        let path = resolve_openfx_binary(&PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY")
+                .expect("owned alpha probe binary"),
+        ))
+        .expect("probe binary");
+        let bundle_path = path
+            .ancestors()
+            .find(|path| path.extension().is_some_and(|extension| extension == "bundle"))
+            .expect("probe bundle");
+        let binary = native_string(&path).expect("binary");
+        let bundle = native_string(bundle_path).expect("bundle");
+        let identifier = CString::new("uk.co.thefoundry.BasicGainPlugin").expect("identifier");
+        let name = CString::new("alphaMode").expect("alpha mode");
+        let parameters = [NativeParameter {
+            name: name.as_ptr(),
+            kind: 4,
+            value: [3.0, 0.0, 0.0, 0.0],
+            query: None,
+            query_context: std::ptr::null(),
+            query_revision: 0,
+            query_mode: 0,
+            string_value: std::ptr::null(),
+            string_length: 0,
+        }];
+        let info = NativeFrameInfo {
+            width: 1,
+            height: 1,
+            frame: 0.0,
+            frame_rate: 24.0,
+            first_frame: 0.0,
+            last_frame: 100.0,
+            pixel_aspect_ratio: 1.0,
+        };
+        let input = [0.25_f32; 4]
+            .iter()
+            .flat_map(|channel| channel.to_ne_bytes())
+            .collect::<Vec<_>>();
+        let mut session =
+            NativeSession::create(&binary, &bundle, &identifier, &input, &info, &parameters)
+                .expect("preference negotiation is deferred until render");
+        let mut output = vec![0xa5; input.len()];
+        // The owned fixture aborts if Render is called for this invalid request.
+        assert_eq!(
+            session.render(&input, &mut output, &info, &parameters),
+            Err(7)
+        );
+        assert_eq!(
+            output,
+            vec![0xa5; input.len()],
+            "refusal precedes any staging fetch/write"
+        );
+        assert_eq!(
+            session.render(&input, &mut output, &info, &parameters),
+            Err(2),
+            "unsupported negotiated instance remains poisoned"
+        );
     }
 }
