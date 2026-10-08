@@ -1,5 +1,75 @@
 # Modal, resource and LUT acceptance
 
+## Native input names and current modal/resource/output qualification
+
+Clean source `123a186d94bc9026d5573dfb3d7bc831264c7677` passed the 2026-10-08
+Windows qualification below. CLAP and VST3 now carry bounded Unicode input names
+in the exact version 2 preparation handshake. Execution contracts, persisted bus
+keys, PCM storage and block commands retain their existing semantics. Names come
+from restored native ports, use stable-key fallback for empty or unavailable
+ports, and disambiguate repeated effective labels without changing routing IDs.
+The shared Rack uses cached observations; 100 repeated UI reads remain quiet.
+Invalid/unknown/duplicate name keys, control characters, Unicode line/paragraph
+separators and oversized metadata fail admission. Native malformed/empty display
+text falls back to the key without changing a valid audio bus contract.
+
+Audio source regressions passed **119**, with **15 ignored native cases**.
+Strict workspace/all-target/all-feature Clippy with `-D warnings` passed in
+**2 min 59 s**; fmt and diff checks passed. The product was rebuilt in
+**654,121 ms**, and both owned native sidechain fixtures were rebuilt.
+The source stayed clean and every captured binary hash stayed unchanged through
+all selected gates:
+
+| Gate | Passed | Test runtime |
+| --- | ---: | ---: |
+| Native CLAP/VST3 restored input names and bus/DSP contracts | 2 | 10.41 s |
+| Named shared Rack connection, Undo/save/Redo/fresh archive PCM | 4 | 40.14 s |
+| Cached observation and bound connection admission | 9 | 3.63 s |
+| Shared sidechain controls and name disambiguation | 4 | 0.33 s |
+| Rack authoring and Scope projection | 11 | 0.28 s |
+| Mixer routing and lock admission | 8 | 1.30 s |
+| Current native resource helpers and cancellation | 5 | 10.09 s |
+| Modal Tab containment and resource workflows | 16 | 23.75 s |
+| Modal event routing and removed/replaced owners | 1 | 0.00 s |
+| Resource authoring, archive and output | 103 (5 ignored) | 24.32 s |
+| Portable LUT/OCIO/media dependencies and output | 11 | 8.75 s |
+| Native constrained group Undo/save/reopen PCM | 2 | 169.38 s |
+
+The four native sidechain history cases now use actual SDK input inspection,
+localized shared Rack controls and a current observation-bound connection action
+before the single author transaction. CLAP and VST3 each cover same-strip
+pre-to-post and external-detector routing. Independent **0.625 / 0.4375** stereo
+PCM references, realtime/offline partitions, one Undo, saving with live Redo,
+Redo and separate Unicode archive reopens all passed. SDK cases additionally
+cover state-dependent port order/count, repeated native names, Unicode and blank
+names while preserving the independent weighted audio/delay/reset oracle.
+
+The five ignored resource cases were also run explicitly with this product.
+Modal tests cover forward/reverse Tab, initially background focus, disabled Apply,
+removed/replaced/empty modal owners and focus restoration. Resource checks retain
+atomic rejection for edited, cancelled, locked or replaced drafts and changed
+Save As directories. LUT checks execute real cube data, Undo/save/reopen and
+portable source removal with preview/export pixel comparisons.
+
+- Product SHA256: `d6b11da3ada7484d0fd0000c1eacabf33b80a19a8486955b163b932187b7f88b`.
+- CLAP sidechain SHA256: `1c53de35d163799a4425e5db2a8848b6c987fe1875d54ca51dd970eeda0d6806`.
+- VST3 sidechain SHA256: `d20cbd0e23876e4adaa6cc6753bb393e1c29f5bd129acccb378183f8aa44a45c`.
+- Receipt: `.scratch/curve-viewport/input-names-native-acceptance.json`
+  (SHA256 `156f376625e91d77cfc4818bd3d974f1aaece4f76433ef4f3b9cc3749997f4ac`), with twelve hash-verified
+  step logs and six binary hashes. No push was performed.
+
+Owned fixture builds emitted MSVC's localized import-library progress message as
+`linker_messages`; strict workspace code lint is clean. This matches the
+[upstream localized progress diagnostic report](https://github.com/rust-lang/rust/issues/159133)
+and is tracked separately for the pinned toolchain, without warning suppression.
+
+This qualifies the selected current Windows workflows, not the entire NLE goal.
+The complete Golden **3/3** below remains bound to `84e6eff`; it was not rerun or
+relabeled for this presentation/protocol revision. Main-path compensation for
+late auxiliary arrivals, broader layouts, full Host/Scope sidechain interactions,
+MIDI/editors, vendor/platform/performance matrices, remaining i18n and complete
+current workspace/CI qualification remain open.
+
 ## Causal sidechains and current clean workflow qualification
 
 The 2026-10-08 clean source `84e6eff9d036dc30da086b44785f0c398eea7ba3`

@@ -5,8 +5,10 @@ from the execution bus contract. CLAP reads restored deactivated audio ports;
 VST3 reads the validated activated bus metadata. The worker's exact version 2
 ready handshake carries names once, validates membership and unique keys, and
 keeps strings out of block commands, PCM layout and execution signatures.
-Explicit control inspection returns those prepared facts without creating DSP;
-ordinary factory resolution does not query presentation metadata.
+Explicit control inspection returns those prepared facts without creating DSP.
+The separate name accessor is called only by explicit inspection; normal factory
+resolution does not call it. Native preparation still captures names once from
+the bus metadata it already validates.
 
 Channel execution is lowered into ordered pre-fader and post-fader stages.
 The pre stage sums inputs and runs Scope/trim/pre racks, then immediately
