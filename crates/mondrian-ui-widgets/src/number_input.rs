@@ -108,6 +108,25 @@ impl<T: NumberInputValue> NumberInput<T> {
         self.model.normalized_text_value(self.input.text())
     }
 
+    /// Update an unfocused field from its fresh numeric presentation model.
+    ///
+    /// The existing hard-range and exact formatting contract applies. No user
+    /// callback runs. An unchanged committed value is a strict no-op; a focused
+    /// text session, including draft selection, history and IME preedit, is never
+    /// overwritten. External author changes during editing require the normal
+    /// fresh-model/draft-admission boundary rather than using this setter.
+    /// Returns whether the idle displayed baseline changed.
+    pub fn set_unfocused_value(&mut self, value: T) -> bool {
+        if self.focused || self.input.is_composing() {
+            return false;
+        }
+        let Some(update) = self.model.set_from_model(value) else {
+            return false;
+        };
+        self.input.set_text(update.text);
+        true
+    }
+
     fn dispatch_value(&self, value: T, ctx: &mut EventContext) {
         if let Some(factory) = &self.on_change
             && let Some(action) = factory(value)
@@ -1426,5 +1445,160 @@ mod tests {
             assert_eq!(fresh.text(), "12");
             assert!(!fresh.accepts_text_input());
         }
+    }
+
+    #[test]
+    fn unfocused_model_sync_preserves_exact_values_without_dispatch_or_quantization() {
+        let values = Rc::new(RefCell::new(Vec::new()));
+        let mut input = NumberInput::new(12.0, -100.0, 100.0)
+            .with_decimals(2)
+            .with_step(0.1)
+            .on_change(record_value(Rc::clone(&values)));
+        let exact = 42.123456789012344_f64;
+        assert!(input.set_unfocused_value(exact));
+        assert_eq!(
+            input.text().parse::<f64>().expect("exact text").to_bits(),
+            exact.to_bits()
+        );
+        assert_eq!(input.value().expect("numeric").to_bits(), exact.to_bits());
+        assert!(!input.set_unfocused_value(exact));
+        assert!(!input.set_unfocused_value(f64::NAN));
+        assert!(!input.set_unfocused_value(f64::INFINITY));
+        assert_eq!(
+            input.value().expect("unchanged numeric").to_bits(),
+            exact.to_bits()
+        );
+        assert!(input.set_unfocused_value(1000.0));
+        assert_eq!(input.value(), Some(100.0));
+        assert!(input.set_unfocused_value(-0.0));
+        assert_eq!(
+            input.text().parse::<f64>().expect("negative zero").to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert!(input.set_unfocused_value(0.0));
+        assert_eq!(
+            input.text().parse::<f64>().expect("positive zero").to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert!(
+            values.borrow().is_empty(),
+            "model projection never invokes an author callback"
+        );
+        let mut integer = NumberInput::new(0_i64, i64::MIN, i64::MAX).with_step(2_i64);
+        assert!(integer.set_unfocused_value(i64::MAX));
+        assert_eq!(integer.text().parse::<i64>(), Ok(i64::MAX));
+        assert!(integer.set_unfocused_value(i64::MIN));
+        assert_eq!(integer.text().parse::<i64>(), Ok(i64::MIN));
+        let mut disabled = NumberInput::new(1.0_f64, 0.0, 100.0).disabled();
+        assert!(disabled.set_unfocused_value(exact));
+        assert_eq!(
+            disabled.text().parse::<f64>().expect("readable disabled value").to_bits(),
+            exact.to_bits()
+        );
+        assert!(disabled.accessibility().expect("metadata").state.disabled);
+        assert!(!disabled.can_focus());
+    }
+
+    #[test]
+    fn unfocused_model_sync_refuses_to_overwrite_focused_draft_selection_and_history() {
+        let values = Rc::new(RefCell::new(Vec::new()));
+        let dispatch = |_: Action| {};
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input =
+            NumberInput::new(12.0, 0.0, 100.0).on_change(record_value(Rc::clone(&values)));
+        input.set_control_inspection_key(Some("numeric-peer-exact-owner".to_owned()));
+        layout(&mut input);
+        input.event(
+            &UiEvent::FocusGained { source: FocusSource::Keyboard },
+            &mut ctx,
+        );
+        input.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::test_utils::primary_text_modifiers(),
+            },
+            &mut ctx,
+        );
+        input.event(&UiEvent::TextInput("42".to_owned()), &mut ctx);
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::Home, modifiers: Modifiers::shift() },
+            &mut ctx,
+        );
+        let before = input.control_inspection_state().expect("bounded owned draft");
+        assert_eq!(input.text(), "42");
+        assert!(!input.set_unfocused_value(12.0));
+        assert!(!input.set_unfocused_value(80.0));
+        assert_eq!(
+            input.control_inspection_state().expect("retained owned draft"),
+            before,
+            "same and changed presentation requests preserve an active local session byte for byte"
+        );
+        assert!(values.borrow().is_empty());
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(input.text(), "12");
+        assert!(input.set_unfocused_value(80.0));
+        assert_eq!(input.text(), "80");
+        assert!(values.borrow().is_empty());
+    }
+
+    #[test]
+    fn unfocused_model_sync_preserves_preedit_then_confirm_dispatches_once() {
+        let values = Rc::new(RefCell::new(Vec::new()));
+        let dispatch = |_: Action| {};
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input =
+            NumberInput::new(12.0, 0.0, 100.0).on_change(record_value(Rc::clone(&values)));
+        layout(&mut input);
+        input.event(
+            &UiEvent::FocusGained { source: FocusSource::Keyboard },
+            &mut ctx,
+        );
+        input.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::test_utils::primary_text_modifiers(),
+            },
+            &mut ctx,
+        );
+        input.event(&UiEvent::TextInput("42".to_owned()), &mut ctx);
+        input.event(&UiEvent::ImePreedit("17".to_owned()), &mut ctx);
+        assert!(input.input.is_composing());
+        assert!(!input.set_unfocused_value(12.0));
+        assert!(!input.set_unfocused_value(80.0));
+        assert!(input.input.is_composing());
+        assert_eq!(input.text(), "42");
+        assert!(values.borrow().is_empty());
+        input.event(&UiEvent::ImeCancel, &mut ctx);
+        assert!(!input.input.is_composing());
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(&*values.borrow(), &[42.0]);
+        input.event(&UiEvent::FocusLost, &mut ctx);
+        assert!(input.set_unfocused_value(80.0));
+        assert_eq!(input.text(), "80");
+        input.event(
+            &UiEvent::FocusGained { source: FocusSource::Keyboard },
+            &mut ctx,
+        );
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(
+            &*values.borrow(),
+            &[42.0],
+            "synchronized baseline is not a second author edit"
+        );
     }
 }

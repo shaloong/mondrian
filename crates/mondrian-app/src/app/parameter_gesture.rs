@@ -14,6 +14,7 @@ use mondrian_core::{
 use mondrian_editor_state::{Action, AuthoringSessionId};
 use mondrian_timeline::{
     AudioAutomationEditRequest, AudioAutomationTarget, AudioProcessorRackAddress,
+    AudioProcessorRackEdit, AudioProcessorRackEditRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +36,58 @@ pub(crate) enum ParameterGestureEdit {
     ClipCurve(ClipEditNumericCurvePayload),
     EffectCurve(VisualEffectEditNumericCurvePayload),
     AudioCurve(AudioAutomationEditRequest),
+    AudioParameter(AudioParameterValueEdit),
+}
+
+/// Exact open-author lifetime captured by a fresh Rack control projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AudioParameterAuthorLease {
+    /// A reopened project is a new author lifetime even when every entity ID matches.
+    pub(crate) session_id: AuthoringSessionId,
+    /// Parameter edits cannot transfer onto another active Sequence.
+    pub(crate) sequence_id: SequenceId,
+}
+
+/// Complete scalar control owner, without widget presentation or native runtime state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AudioParameterGestureTarget {
+    /// Author lifetime captured at model projection, never inferred during dispatch.
+    pub(crate) lease: AudioParameterAuthorLease,
+    /// Exact Rack or materialized Scope occurrence represented by this control.
+    pub(crate) owner: mondrian_audio::AudioProcessorInputInspectionTarget,
+    /// Stable instance in that Rack.
+    pub(crate) processor_id: mondrian_core::AudioProcessorInstanceId,
+    /// Rebinding the same instance invalidates its old control.
+    pub(crate) definition: mondrian_timeline::audio::AudioProcessorDefinitionRef,
+    /// Exact parameter contract captured in the author instance.
+    pub(crate) parameter_schema: mondrian_core::automation::ParameterSchema,
+}
+
+impl AudioParameterGestureTarget {
+    /// Canonical mutation address derived from the exact occurrence owner.
+    pub(crate) fn rack_address(&self) -> AudioProcessorRackAddress {
+        match self.owner {
+            mondrian_audio::AudioProcessorInputInspectionTarget::ChannelStrip { owner, rack } => {
+                AudioProcessorRackAddress::ChannelStrip { owner, rack }
+            }
+            mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+                scope_id,
+                ..
+            } => AudioProcessorRackAddress::ProcessingScope { scope_id },
+        }
+    }
+}
+
+/// One definition-domain scalar intent; it cannot contain an arbitrary Rack operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AudioParameterValueEdit {
+    /// Captured fresh owner; boxing keeps ordinary gesture messages compact.
+    pub(crate) target: Box<AudioParameterGestureTarget>,
+    /// Canonical numeric value, validated by the existing Timeline mutation.
+    pub(crate) value: f64,
 }
 
 /// Stable owner of a local numeric curve draft, before its single release commit.
@@ -77,6 +130,10 @@ impl ParameterCurveGestureTarget {
 #[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
 /// Explicit lifecycle events; no nested or opaque author commands are admitted.
 pub(crate) enum ParameterGestureAction {
+    /// Confirm a single exact Rack parameter value from keyboard or numeric input.
+    SetAudioParameter {
+        edit: AudioParameterValueEdit,
+    },
     BeginCurve {
         gesture_id: AuthoringGestureId,
         target: ParameterCurveGestureTarget,
@@ -109,10 +166,11 @@ enum ParameterGestureKind {
     NumericCurve,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum ParameterGestureTarget {
     Visual(VisualParameterGestureTarget),
     AudioCurve(AudioAutomationTarget),
+    AudioParameter(Box<AudioParameterGestureTarget>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +201,11 @@ pub(crate) enum ParameterGestureCommand {
 impl ParameterGestureEdit {
     /// Extract only canonical parameter edits from a widget action.
     pub(crate) fn from_action(action: &Action) -> Option<Self> {
+        if let Ok(Some(ParameterGestureAction::SetAudioParameter { edit })) =
+            ParameterGestureAction::decode(action)
+        {
+            return Some(Self::AudioParameter(edit));
+        }
         match ProductAction::decode_external(action).ok().flatten()? {
             ProductAction::Clip(ClipProductAction::WriteParameterValues(edit)) => {
                 Some(Self::Clip(*edit))
@@ -170,6 +233,16 @@ impl ParameterGestureEdit {
             Self::AudioCurve(edit) => {
                 ProductAction::Audio(AudioProductAction::EditAutomation(edit))
             }
+            Self::AudioParameter(edit) => ProductAction::Audio(
+                AudioProductAction::EditProcessorRack(AudioProcessorRackEditRequest {
+                    address: edit.target.rack_address(),
+                    edit: AudioProcessorRackEdit::SetParameterStaticValue {
+                        processor_id: edit.target.processor_id,
+                        parameter_id: edit.target.parameter_schema.parameter_id,
+                        value: edit.value,
+                    },
+                }),
+            ),
             Self::ClipCurve(edit) => {
                 ProductAction::Clip(ClipProductAction::EditNumericCurve(Box::new(edit)))
             }
@@ -203,6 +276,9 @@ impl ParameterGestureEdit {
         };
         match self {
             Self::AudioCurve(edit) => ParameterGestureTarget::AudioCurve(edit.target.clone()),
+            Self::AudioParameter(edit) => {
+                ParameterGestureTarget::AudioParameter(edit.target.clone())
+            }
             Self::ClipCurve(edit) => ParameterCurveGestureTarget::Clip {
                 clip_id: edit.clip_id,
                 parameter: edit.parameter.clone(),
@@ -263,9 +339,77 @@ impl ParameterGestureAction {
 }
 
 impl AppState {
+    fn audio_parameter_target_is_current(&self, target: &AudioParameterGestureTarget) -> bool {
+        if self.authoring_session_id() != Some(target.lease.session_id)
+            || self.active_sequence_id() != Some(target.lease.sequence_id)
+        {
+            return false;
+        }
+        let Some(sequence) = self.active_sequence() else {
+            return false;
+        };
+        if !mondrian_timeline::inspect_audio_processor_rack(sequence, &target.rack_address())
+            .is_ok_and(|inspection| inspection.is_editable())
+        {
+            return false;
+        }
+        if let mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+            scope_id,
+            occurrence,
+        } = target.owner
+        {
+            if self.primary_selected_clip().is_none_or(|selected| {
+                selected.is_video_track || selected.clip_id != occurrence.clip_id
+            }) {
+                return false;
+            }
+            if let Some(selected) =
+                self.selection.audio_scope_occurrences.get(&(sequence.id, scope_id))
+            {
+                if *selected != occurrence {
+                    return false;
+                }
+            } else {
+                // Match the existing Inspector projection: only one binding may
+                // be selected implicitly. Ambiguous materializations need an
+                // explicit occurrence, never a guessed first component.
+                let Some(clip) = sequence.find_clip(occurrence.clip_id) else {
+                    return false;
+                };
+                let mut bindings = clip
+                    .audio_components
+                    .iter()
+                    .filter(|edit| edit.processing.scope_id == scope_id);
+                if bindings.next().is_none_or(|edit| edit.id != occurrence.edit_id)
+                    || bindings.next().is_some()
+                {
+                    return false;
+                }
+            }
+        }
+        mondrian_audio::inspect_audio_processor_input_author(
+            sequence,
+            target.owner,
+            target.processor_id,
+        )
+        .is_ok_and(|processor| {
+            processor.definition == target.definition
+                && processor.parameters.get(&target.parameter_schema.parameter_id).is_some_and(
+                    |parameter| {
+                        parameter.schema == target.parameter_schema
+                            && parameter.schema.numeric.is_some()
+                            && parameter.automation.keyframes.is_empty()
+                    },
+                )
+        })
+    }
+
     fn parameter_target_is_current(&self, target: &ParameterGestureTarget) -> bool {
         let target = match target {
             ParameterGestureTarget::Visual(target) => target,
+            ParameterGestureTarget::AudioParameter(target) => {
+                return self.audio_parameter_target_is_current(target);
+            }
             ParameterGestureTarget::AudioCurve(target) => {
                 let Some(sequence) = self.active_sequence() else {
                     return false;
@@ -416,6 +560,9 @@ impl AppState {
         if !self.parameter_gesture_is_current() {
             return self.finish_parameter_gesture();
         }
+        let audio_parameter = self.active_parameter_gesture.as_ref().is_some_and(|active| {
+            matches!(&active.target, ParameterGestureTarget::AudioParameter(_))
+        });
         let commit = self
             .authoring
             .as_mut()
@@ -424,6 +571,9 @@ impl AppState {
         self.active_parameter_gesture = None;
         if let Some(commit) = commit {
             self.consume_authoring_commit(commit);
+            if audio_parameter {
+                self.reconcile_audio_after_committed_authoring_change("audio_parameter_cancel");
+            }
         }
         Ok(())
     }
@@ -434,6 +584,15 @@ impl AppState {
         action: ParameterGestureAction,
     ) -> Result<()> {
         let (id, edit, begin) = match action {
+            ParameterGestureAction::SetAudioParameter { edit } => {
+                if !self.audio_parameter_target_is_current(&edit.target) {
+                    return Err(gesture_error("audio parameter author owner changed"));
+                }
+                self.finish_parameter_gesture()?;
+                return self.dispatch_product_action(
+                    ParameterGestureEdit::AudioParameter(edit).into_product(),
+                );
+            }
             ParameterGestureAction::BeginCurve { gesture_id, target } => {
                 self.begin_parameter_gesture(gesture_id, target.target())?;
                 return Ok(());
@@ -456,6 +615,13 @@ impl AppState {
         };
         let target = edit.target();
         if begin {
+            // Reject a queued stale Rack start before sealing any other live
+            // gesture. A refused control cannot advance author history.
+            if matches!(&target, ParameterGestureTarget::AudioParameter(_))
+                && !self.parameter_target_is_current(&target)
+            {
+                return Ok(());
+            }
             if !self.begin_parameter_gesture(id, target)? {
                 return Ok(());
             }
@@ -608,7 +774,8 @@ mod tests {
             ParameterGestureEdit::Mask(edit) => &mut edit.write,
             ParameterGestureEdit::ClipCurve(_)
             | ParameterGestureEdit::EffectCurve(_)
-            | ParameterGestureEdit::AudioCurve(_) => {
+            | ParameterGestureEdit::AudioCurve(_)
+            | ParameterGestureEdit::AudioParameter(_) => {
                 panic!("scalar fixture expected")
             }
         };

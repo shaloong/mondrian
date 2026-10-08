@@ -185,7 +185,11 @@ impl Slider {
         self.geometry.get().thumb_rect(self.bounds, self.ratio())
     }
 
-    fn set_value(&mut self, value: f32) -> bool {
+    /// Synchronize the coordinate from a fresh model without dispatching an edit.
+    ///
+    /// Existing pointer capture and the current drag origin are unchanged. This
+    /// setter is presentation only; author changes still enter through callbacks.
+    pub fn set_value(&mut self, value: f32) -> bool {
         self.model.set_value(value)
     }
 

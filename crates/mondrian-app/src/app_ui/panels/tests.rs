@@ -6818,7 +6818,10 @@ fn numeric_draft_cancel_preserves_automation_and_history() {
         &mut ctx,
     );
     widget.event(
-        &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+        &UiEvent::KeyDown {
+            key: KeyCode::A,
+            modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+        },
         &mut ctx,
     );
     widget.event(&UiEvent::TextInput("75".to_owned()), &mut ctx);
@@ -7045,7 +7048,10 @@ fn precise_inspector_entry_commits_and_undoes_exact_integer_and_double_values() 
             &mut ctx,
         );
         widget.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+            },
             &mut ctx,
         );
         widget.event(&UiEvent::TextInput(text.to_owned()), &mut ctx);
@@ -7075,7 +7081,10 @@ fn precise_inspector_entry_commits_and_undoes_exact_integer_and_double_values() 
         assert!(state.redo_timeline().expect("redo"));
         assert_eq!(snapshot(&state), expected);
         widget.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+            },
             &mut ctx,
         );
         widget.event(&UiEvent::TextInput("0".to_owned()), &mut ctx);
@@ -7152,7 +7161,10 @@ fn inspector_effect_float_property_text_input_preserves_value_between_steps() {
     );
     assert_eq!(
         widget.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers()
+            },
             &mut ctx,
         ),
         EventResult::Handled
@@ -7439,7 +7451,10 @@ fn inspector_effect_int_property_number_input_defaults_to_unit_step() {
     );
     assert_eq!(
         widget.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers()
+            },
             &mut ctx,
         ),
         EventResult::Handled
@@ -7920,7 +7935,10 @@ fn effect_vector_controls_preserve_current_siblings_keys_and_exact_history() {
                     &mut ctx,
                 );
                 row.event(
-                    &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+                    &UiEvent::KeyDown {
+                        key: KeyCode::A,
+                        modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+                    },
                     &mut ctx,
                 );
                 row.event(&UiEvent::TextInput("0.625".to_owned()), &mut ctx);
@@ -8106,7 +8124,10 @@ fn inspector_axis_controls_preserve_concurrent_siblings_and_canonical_percent_bi
             &mut ctx,
         );
         widget.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+            },
             &mut ctx,
         );
         widget.event(&UiEvent::TextInput(text.to_owned()), &mut ctx);
@@ -8184,7 +8205,10 @@ fn numeric_slider_input_control_text_input_dispatches_typed_transform_action() {
     );
     assert_eq!(
         widget.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers()
+            },
             &mut ctx,
         ),
         EventResult::Handled
@@ -10627,24 +10651,19 @@ fn audio_rack_numeric_widget_preserves_double_and_rejects_fractional_integer_inp
     }
     let mut state = AppState::new();
     state.test_set_sequence(Some(sequence));
+    state.select_clip_by_id(clip_id).expect("select exact scalar owner");
     for (index, text, expected) in [
         (0, "-6.123456789123456", -6.123456789123456_f64),
         (1, "192000", 192000.0),
     ] {
-        let sequence = state.active_sequence().expect("sequence");
-        let racks = clip_processing_scope_racks(
-            sequence,
-            sequence.find_clip(clip_id).expect("clip"),
-            &chinese_localizer(),
-            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
-                sequence,
-                sequence.playhead,
-            ),
-            |_| None,
-        );
-        let rack = &racks[0];
+        let model = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
+        let rack = &model.audio_processor_racks[0];
         let processor = &rack.processors[index];
         let parameter = &processor.parameters[0];
+        let target = crate::app_ui::audio_processor_rack::static_parameter_target(
+            rack, processor, parameter,
+        )
+        .expect("fresh parameter owner");
         let mut widget = audio_processor_static_parameter_control(
             rack,
             processor,
@@ -10682,25 +10701,22 @@ fn audio_rack_numeric_widget_preserves_double_and_rejects_fractional_integer_inp
         );
         if index == 1 {
             widget.event(
-                &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+                &UiEvent::KeyDown {
+                    key: KeyCode::A,
+                    modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+                },
                 &mut ctx,
             );
             widget.event(&UiEvent::TextInput("12.4".to_owned()), &mut ctx);
             assert!(actions.borrow().is_empty());
-            assert!(
-                audio_processor_set_static_parameter_action(rack, processor, parameter, 12.4)
-                    .is_none()
-            );
-            assert!(audio_processor_set_static_parameter_action(
-                rack,
-                processor,
-                parameter,
-                f64::INFINITY
-            )
-            .is_none());
+            assert!(audio_processor_set_static_parameter_action(&target, 12.4).is_none());
+            assert!(audio_processor_set_static_parameter_action(&target, f64::INFINITY).is_none());
         }
         widget.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+            },
             &mut ctx,
         );
         widget.event(&UiEvent::TextInput(text.to_owned()), &mut ctx);
@@ -10810,7 +10826,10 @@ fn audio_unit_controls_cancel_to_exact_canonical_baseline() {
             &mut ctx,
         );
         widget.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+            },
             &mut ctx,
         );
         widget.event(&UiEvent::TextInput("0.5".to_owned()), &mut ctx);
@@ -12099,7 +12118,10 @@ fn sequence_form_confirms_numeric_draft_before_submission_and_cancel_discards_it
             &mut ctx,
         );
         width.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+            },
             &mut ctx,
         );
         width.event(&UiEvent::TextInput("2560".to_owned()), &mut ctx);
@@ -14016,4 +14038,402 @@ fn owned_panel_status_disabled_nonempty_timeline_without_message_keeps_retained_
     let painted = owned_panel_status_painted_text(&mut widget);
     assert!(painted.iter().any(|text| text == "Retained disabled clip"));
     assert!(!painted.iter().any(|text| text == "序列时间显示设置无效"));
+}
+
+fn typed_static_parameter_widget_fixture() -> (
+    AppState,
+    mondrian_core::ClipId,
+    mondrian_core::AudioProcessingScopeId,
+) {
+    let mut sequence = Sequence::new("Scalar control author lease");
+    let track_id = sequence.audio_tracks[0].id;
+    let clip = Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("Clip");
+    let clip_id = clip.id;
+    sequence
+        .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+        .expect("audio Clip");
+    let scope_id = sequence.audio_tracks[0].clips[0].audio_components[0].processing.scope_id;
+    sequence
+        .audio_program
+        .processing_scopes
+        .iter_mut()
+        .find(|scope| scope.id == scope_id)
+        .expect("Scope")
+        .processors
+        .processors
+        .push(mondrian_timeline::audio::AudioProcessorInstance::built_in(
+            mondrian_timeline::audio::BUILTIN_GAIN_DEFINITION_ID,
+            1,
+        ));
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    state.select_clip_by_id(clip_id).expect("selected scalar owner");
+    (state, clip_id, scope_id)
+}
+
+fn typed_static_parameter_widget_for_rack(rack: &AudioProcessorRackModel) -> Box<dyn Widget> {
+    let processor = &rack.processors[0];
+    let parameter = &processor.parameters[0];
+    audio_processor_static_parameter_control(
+        rack,
+        processor,
+        parameter,
+        parameter
+            .schema
+            .numeric
+            .as_ref()
+            .and_then(|contracts| contracts.first())
+            .copied()
+            .expect("scalar contract"),
+        true,
+    )
+}
+
+#[test]
+fn typed_static_parameter_widget_without_app_lease_is_disabled_and_has_no_author_callbacks() {
+    use mondrian_ui_core::tree::WidgetTreeView;
+    let (state, clip_id, _) = typed_static_parameter_widget_fixture();
+    let sequence = state.active_sequence().expect("Sequence");
+    let racks = clip_processing_scope_racks(
+        sequence,
+        sequence.find_clip(clip_id).expect("Clip"),
+        &chinese_localizer(),
+        crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+            sequence,
+            sequence.playhead,
+        ),
+        |_| None,
+    );
+    assert!(
+        racks[0].is_editable,
+        "Timeline author admission alone is not a concrete control lifetime"
+    );
+    assert!(racks[0].parameter_author_lease.is_none());
+    let mut wrong_source = racks.clone();
+    wrong_source[0].source_sequence_id = mondrian_core::SequenceId::new();
+    crate::app_ui::audio_processor_rack::bind_parameter_author_lease(&mut wrong_source, &state);
+    assert!(
+        wrong_source[0].parameter_author_lease.is_none(),
+        "a Rack projected from another Sequence cannot be stamped with the current App lease"
+    );
+    let mut control = typed_static_parameter_widget_for_rack(&racks[0]);
+    control.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+    let nodes = mondrian_ui_core::widget::collect_accessibility_nodes(control.as_ref());
+    for role in [
+        mondrian_ui_core::AccessibilityRole::Slider,
+        mondrian_ui_core::AccessibilityRole::TextInput,
+    ] {
+        let node = nodes
+            .iter()
+            .find(|node| node.role == role)
+            .expect("numeric control remains readable");
+        assert!(
+            node.state.disabled && !node.state.focusable,
+            "missing lease disables both input adapters"
+        );
+    }
+    let actions = RefCell::new(Vec::new());
+    let mut router = mondrian_ui_events::EventRouter::new(control.id());
+    for event in [
+        UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+        UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+        UiEvent::MouseDown {
+            position: Point::new(40.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        UiEvent::MouseMove {
+            position: Point::new(100.0, 14.0),
+            modifiers: Modifiers::none(),
+        },
+        UiEvent::MouseUp {
+            position: Point::new(100.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        UiEvent::TextInput("-12".to_owned()),
+        UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+    ] {
+        router.route(
+            event,
+            &mut WidgetTreeView::new(control.as_mut()),
+            &|action| actions.borrow_mut().push(action),
+        );
+    }
+    assert!(actions.borrow().is_empty());
+    assert!(router.captured().is_none());
+    let fresh = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
+    let mut wrong_bound = fresh.audio_processor_racks[0].clone();
+    wrong_bound.source_sequence_id = mondrian_core::SequenceId::new();
+    let wrong_processor = &wrong_bound.processors[0];
+    assert!(crate::app_ui::audio_processor_rack::static_parameter_target(&wrong_bound,wrong_processor,&wrong_processor.parameters[0]).is_none(),"target construction validates the explicit source/lease relation even if a malformed model carries Some lease");
+    let valid = typed_static_parameter_widget_for_rack(&fresh.audio_processor_racks[0]);
+    assert!(
+        mondrian_ui_core::widget::collect_accessibility_nodes(valid.as_ref())
+            .iter()
+            .filter(|node| matches!(
+                node.role,
+                mondrian_ui_core::AccessibilityRole::Slider
+                    | mondrian_ui_core::AccessibilityRole::TextInput
+            ))
+            .all(|node| !node.state.disabled && node.state.focusable),
+        "same author value in a real App lifetime enables both adapters"
+    );
+    assert!(!state.can_undo_action());
+}
+
+#[test]
+fn typed_static_parameter_widget_ambiguous_scope_requires_choice_and_uses_fresh_occurrence() {
+    use mondrian_ui_core::tree::WidgetTreeView;
+    let (mut state, clip_id, scope_id) = typed_static_parameter_widget_fixture();
+    let second_address = {
+        let sequence = state.active_sequence_mut_uncommitted().expect("Sequence");
+        let track_id = sequence.audio_tracks[0].id;
+        let second = mondrian_timeline::audio::AudioComponentEdit::media(
+            AudioSourceComponentId::new(),
+            scope_id,
+        );
+        let address =
+            mondrian_timeline::AudioComponentAddress { track_id, clip_id, edit_id: second.id };
+        sequence.find_clip_mut(clip_id).expect("Clip").audio_components.push(second);
+        address
+    };
+    let model = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
+    let rack = &model.audio_processor_racks[0];
+    assert!(rack.parameter_author_lease.is_some());
+    assert!(
+        rack.input_inspection_target.is_none(),
+        "two materializations require explicit choice"
+    );
+    let disabled = typed_static_parameter_widget_for_rack(rack);
+    assert!(
+        mondrian_ui_core::widget::collect_accessibility_nodes(disabled.as_ref())
+            .iter()
+            .filter(|node| matches!(
+                node.role,
+                mondrian_ui_core::AccessibilityRole::Slider
+                    | mondrian_ui_core::AccessibilityRole::TextInput
+            ))
+            .all(|node| node.state.disabled && !node.state.focusable)
+    );
+    let sequence_id = state.active_sequence().expect("Sequence").id;
+    let before = state.active_sequence().expect("before").clone();
+    state
+        .dispatch_action(
+            ProductAction::Audio(
+                crate::app::product_action::AudioProductAction::SelectScopeOccurrence(
+                    crate::app::product_action::AudioScopeOccurrencePayload {
+                        sequence_id,
+                        scope_id,
+                        address: second_address,
+                    },
+                ),
+            )
+            .into_external_action(),
+        )
+        .expect("explicit navigation choice");
+    assert!(
+        !state.can_undo_action(),
+        "occurrence navigation has no author history"
+    );
+    let fresh = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
+    let mut control = typed_static_parameter_widget_for_rack(&fresh.audio_processor_racks[0]);
+    control.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+    let actions = RefCell::new(Vec::new());
+    let mut router = mondrian_ui_events::EventRouter::new(control.id());
+    for event in [
+        UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+        UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+        UiEvent::KeyDown {
+            key: KeyCode::A,
+            modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+        },
+        UiEvent::TextInput("-12.123456789123456".to_owned()),
+        UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+    ] {
+        router.route(
+            event,
+            &mut WidgetTreeView::new(control.as_mut()),
+            &|action| actions.borrow_mut().push(action),
+        );
+    }
+    assert_eq!(
+        actions.borrow().len(),
+        1,
+        "fresh confirmed input emits one scalar intent"
+    );
+    let action = actions.borrow_mut().remove(0);
+    let Some(crate::app::parameter_gesture::ParameterGestureAction::SetAudioParameter { edit }) =
+        crate::app::parameter_gesture::ParameterGestureAction::decode(&action)
+            .expect("typed scalar")
+    else {
+        panic!("Set scalar")
+    };
+    assert_eq!(
+        edit.target.owner,
+        mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+            scope_id,
+            occurrence: second_address
+        }
+    );
+    assert_eq!(edit.value.to_bits(), (-12.123456789123456_f64).to_bits());
+    state.dispatch_action(action).expect("canonical scalar confirmation");
+    assert_eq!(
+        state.authoring_history().expect("history").diagnostics().undo_entries,
+        1
+    );
+    assert!(state.undo_timeline().expect("one Undo"));
+    assert!(state
+        .active_sequence()
+        .expect("restored")
+        .author_state_eq_ignoring_revision(&before));
+}
+
+#[test]
+fn numeric_peer_fallback_second_drag_cancel_restores_current_exact_scalar_origin() {
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    let values = Rc::new(RefCell::new(Vec::<f64>::new()));
+    let observed = Rc::clone(&values);
+    let mut widget = numeric_slider_input_control_with_hard_range(
+        0.12345678901234568_f64,
+        0.0,
+        1.0,
+        -10.0,
+        10.0,
+        None,
+        2,
+        true,
+        move |value| {
+            observed.borrow_mut().push(value);
+            Some(Action::ToggleFullscreen)
+        },
+    );
+    widget.layout(Rect::new(0.0, 0.0, 280.0, 28.0));
+    let slider = widget.child(0).expect("paired Slider").id();
+    let dispatch = |_: Action| {};
+    let mut router = EventRouter::new(widget.id());
+    for event in [
+        UiEvent::MouseDown {
+            position: Point::new(100.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        UiEvent::MouseMove {
+            position: Point::new(140.0, 14.0),
+            modifiers: Modifiers::none(),
+        },
+        UiEvent::MouseUp {
+            position: Point::new(140.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+    ] {
+        assert_eq!(
+            router.route(event, &mut WidgetTreeView::new(widget.as_mut()), &dispatch),
+            EventResult::Handled
+        );
+    }
+    let first = *values.borrow().last().expect("first drag callback");
+    assert_ne!(first.to_bits(), 0.12345678901234568_f64.to_bits());
+    for event in [
+        UiEvent::MouseDown {
+            position: Point::new(40.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        UiEvent::MouseMove {
+            position: Point::new(70.0, 14.0),
+            modifiers: Modifiers::none(),
+        },
+    ] {
+        assert_eq!(
+            router.route(event, &mut WidgetTreeView::new(widget.as_mut()), &dispatch),
+            EventResult::Handled
+        );
+        assert_eq!(router.captured(), Some(slider));
+    }
+    assert_ne!(
+        values.borrow().last().expect("second live callback").to_bits(),
+        first.to_bits()
+    );
+    assert_eq!(
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut WidgetTreeView::new(widget.as_mut()),
+            &dispatch
+        ),
+        EventResult::Handled
+    );
+    assert!(router.captured().is_none());
+    assert_eq!(values.borrow().last().expect("Cancel callback").to_bits(), first.to_bits(),
+        "non-Parameter callbacks cancel to this drag's exact scalar origin, not construction baseline");
+}
+
+#[test]
+fn numeric_peer_outside_soft_range_drag_cancel_preserves_exact_entry_baseline() {
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    let baseline = 42.123456789012344_f64;
+    let values = Rc::new(RefCell::new(Vec::<f64>::new()));
+    let observed = Rc::clone(&values);
+    let mut widget = numeric_slider_input_control_with_hard_range(
+        baseline,
+        0.0,
+        1.0,
+        -100.0,
+        100.0,
+        None,
+        2,
+        true,
+        move |value| {
+            observed.borrow_mut().push(value);
+            Some(Action::ToggleFullscreen)
+        },
+    );
+    widget.layout(Rect::new(0.0, 0.0, 280.0, 28.0));
+    let dispatch = |_: Action| {};
+    let mut router = EventRouter::new(widget.id());
+    let text_value = |widget: &dyn Widget| {
+        let Some(mondrian_ui_core::AccessibilityValue::Text(text)) = widget
+            .child(1)
+            .expect("NumberInput peer")
+            .accessibility()
+            .expect("peer node")
+            .value
+        else {
+            panic!("numeric Text")
+        };
+        text.parse::<f64>().expect("exact numeric peer")
+    };
+    assert_eq!(text_value(widget.as_ref()).to_bits(), baseline.to_bits());
+    router.route(
+        UiEvent::MouseDown {
+            position: Point::new(70.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        &mut WidgetTreeView::new(widget.as_mut()),
+        &dispatch,
+    );
+    let live = *values.borrow().last().expect("live callback");
+    assert!((0.0..=1.0).contains(&live));
+    assert_eq!(
+        text_value(widget.as_ref()).to_bits(),
+        live.to_bits(),
+        "peer must show live scalar, not original outside-soft-range value"
+    );
+    router.route(
+        UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+        &mut WidgetTreeView::new(widget.as_mut()),
+        &dispatch,
+    );
+    assert_eq!(
+        values.borrow().last().expect("Cancel callback").to_bits(),
+        baseline.to_bits()
+    );
+    assert_eq!(
+        text_value(widget.as_ref()).to_bits(),
+        baseline.to_bits(),
+        "Cancel retains the exact author baseline even beyond slider's soft range"
+    );
+    assert!(router.captured().is_none());
 }

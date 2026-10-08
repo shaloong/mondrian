@@ -2334,18 +2334,15 @@ pub(super) fn audio_processor_static_parameter_control(
     numeric: mondrian_core::automation::ParameterNumericContract,
     can_edit: bool,
 ) -> Box<dyn Widget> {
-    let rack_for_action = rack.clone();
-    let processor_for_action = processor.clone();
-    let parameter_for_action = parameter.clone();
-    let action = move |value| {
-        audio_processor_set_static_parameter_action(
-            &rack_for_action,
-            &processor_for_action,
-            &parameter_for_action,
-            value,
-        )
-    };
-    let enabled = can_edit && parameter.is_static_editable();
+    let target = can_edit
+        .then(|| {
+            crate::app_ui::audio_processor_rack::static_parameter_target(rack, processor, parameter)
+        })
+        .flatten();
+    let enabled = target.is_some();
+    // Only the exact scalar owner is captured. Rack contents, route menus,
+    // native observations, curves and old callbacks are not retained here.
+    let action = move |value| audio_processor_set_static_parameter_action(target.as_ref()?, value);
     let mut control = if parameter.schema.value_type == PropertyValueType::Int {
         use crate::app_ui::audio_processor_rack::MAX_EXACT_AUDIO_INTEGER;
         let hard_min = numeric.hard_range.min.ceil().max(-MAX_EXACT_AUDIO_INTEGER) as i64;
@@ -2425,6 +2422,7 @@ where
     R: Into<Option<Action>>,
 {
     let action: Rc<dyn Fn(T) -> Option<Action>> = Rc::new(move |value| action(value).into());
+    let presented_value = Rc::new(std::cell::Cell::new(value));
     let mut slider = Slider::new(value.ratio(soft_min, soft_max), 0.0, 1.0)
         .enabled(enabled && soft_min != soft_max);
     let step = step.filter(|step| step.is_positive());
@@ -2436,8 +2434,25 @@ where
     }
     let slider_action = Rc::clone(&action);
     let author_interaction = std::cell::Cell::new(false);
+    let slider_value = Rc::clone(&presented_value);
+    let drag_origin = std::cell::Cell::new(None);
     slider = slider.on_edit(move |phase, ratio| {
         use mondrian_ui_widgets::ValueEdit;
+        match phase {
+            ValueEdit::Begin(_) => {
+                drag_origin.set(Some(slider_value.get()));
+                slider_value.set(T::from_ratio(ratio, soft_min, soft_max, step));
+            }
+            ValueEdit::Single | ValueEdit::Update(_) => {
+                slider_value.set(T::from_ratio(ratio, soft_min, soft_max, step));
+            }
+            ValueEdit::Finish(_) => drag_origin.set(None),
+            ValueEdit::Cancel(_) => {
+                if let Some(origin) = drag_origin.take() {
+                    slider_value.set(origin);
+                }
+            }
+        }
         if author_interaction.get() {
             let boundary = match phase {
                 ValueEdit::Finish(gesture_id) => {
@@ -2453,11 +2468,7 @@ where
                 return Some(boundary.action());
             }
         }
-        let action = slider_action(if matches!(phase, ValueEdit::Cancel(_)) {
-            value
-        } else {
-            T::from_ratio(ratio, soft_min, soft_max, step)
-        });
+        let action = slider_action(slider_value.get());
         let Some(edit) = action.as_ref().and_then(ParameterGestureEdit::from_action) else {
             return if matches!(phase, ValueEdit::Finish(_)) {
                 None
@@ -2491,15 +2502,133 @@ where
         input = input.with_step(step);
     }
     let input_action = Rc::clone(&action);
-    input = input.on_change(move |value| input_action(value));
+    let input_value = Rc::clone(&presented_value);
+    input = input.on_change(move |value| {
+        input_value.set(value);
+        input_action(value)
+    });
 
-    Box::new(
-        FlexContainer::row(vec![
-            FlexChild::flex(Box::new(slider), 1.0),
-            FlexChild::fixed(Box::new(input)),
-        ])
-        .with_gap(8.0),
-    )
+    Box::new(NumericSliderInputControl {
+        id: mondrian_ui_core::WidgetId::new(),
+        slider,
+        input,
+        presented_value,
+        soft_min,
+        soft_max,
+        layout: mondrian_ui_layout::FlexLayout {
+            gap: 8.0,
+            ..mondrian_ui_layout::FlexLayout::row()
+        },
+        bounds: mondrian_ui_core::Rect::ZERO,
+    })
+}
+
+// The scalar here is the latest UI intent, not proof that an author command
+// succeeded. The Host still validates the fresh typed owner/session, then
+// rebuilds from the canonical model on refusal. No presentation/draft callback
+// or pointer state is carried across that fresh projection boundary.
+struct NumericSliderInputControl<T: mondrian_ui_widgets::NumberInputValue> {
+    id: mondrian_ui_core::WidgetId,
+    slider: Slider,
+    input: NumberInput<T>,
+    presented_value: Rc<std::cell::Cell<T>>,
+    soft_min: T,
+    soft_max: T,
+    layout: mondrian_ui_layout::FlexLayout,
+    bounds: mondrian_ui_core::Rect,
+}
+
+impl<T: mondrian_ui_widgets::NumberInputValue> NumericSliderInputControl<T> {
+    fn synchronize_peers(&mut self) -> bool {
+        let value = self.presented_value.get();
+        let slider_changed = self.slider.set_value(value.ratio(self.soft_min, self.soft_max));
+        let input_changed = self.input.set_unfocused_value(value);
+        slider_changed || input_changed
+    }
+}
+
+impl<T: mondrian_ui_widgets::NumberInputValue> Widget for NumericSliderInputControl<T> {
+    fn id(&self) -> mondrian_ui_core::WidgetId {
+        self.id
+    }
+
+    fn measure(&self, constraint: mondrian_ui_core::LayoutConstraint) -> mondrian_ui_core::Size {
+        self.layout
+            .measure_with_flex(constraint, &[&self.slider, &self.input], &[1.0, 0.0])
+    }
+
+    fn layout(&mut self, bounds: mondrian_ui_core::Rect) {
+        self.bounds = bounds;
+        self.synchronize_peers();
+        let rects =
+            self.layout.compute_with_flex(bounds, &[&self.slider, &self.input], &[1.0, 0.0]);
+        self.slider.layout(rects[0]);
+        self.input.layout(rects[1]);
+    }
+
+    fn event(
+        &mut self,
+        event: &mondrian_ui_core::UiEvent,
+        ctx: &mut mondrian_ui_core::widget::EventContext,
+    ) -> mondrian_ui_core::EventResult {
+        let result = if self.input.event(event, ctx) == mondrian_ui_core::EventResult::Handled {
+            mondrian_ui_core::EventResult::Handled
+        } else {
+            self.slider.event(event, ctx)
+        };
+        if result == mondrian_ui_core::EventResult::Handled {
+            self.after_child_event(event, ctx);
+        }
+        result
+    }
+
+    fn after_child_event(
+        &mut self,
+        _event: &mondrian_ui_core::UiEvent,
+        ctx: &mut mondrian_ui_core::widget::EventContext,
+    ) -> mondrian_ui_core::EventResult {
+        if self.synchronize_peers() {
+            ctx.request_repaint();
+        }
+        mondrian_ui_core::EventResult::Ignored
+    }
+
+    fn commit_pending_input(&mut self, ctx: &mut mondrian_ui_core::widget::EventContext) -> bool {
+        let changed = self.input.commit_pending_input(ctx);
+        if self.synchronize_peers() {
+            ctx.request_repaint();
+        }
+        changed
+    }
+
+    fn paint(&self, ctx: &mut mondrian_ui_core::widget::PaintContext) {
+        self.slider.paint(ctx);
+        self.input.paint(ctx);
+    }
+
+    fn hit_test(&self, point: mondrian_ui_core::Point) -> bool {
+        self.bounds.contains(point) || self.slider.hit_test(point) || self.input.hit_test(point)
+    }
+
+    fn child_count(&self) -> usize {
+        2
+    }
+
+    fn child(&self, index: usize) -> Option<&dyn Widget> {
+        match index {
+            0 => Some(&self.slider),
+            1 => Some(&self.input),
+            _ => None,
+        }
+    }
+
+    fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
+        match index {
+            0 => Some(&mut self.slider),
+            1 => Some(&mut self.input),
+            _ => None,
+        }
+    }
 }
 
 pub(super) fn inspector_bool_action(

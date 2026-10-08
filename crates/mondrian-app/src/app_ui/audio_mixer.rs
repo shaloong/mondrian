@@ -199,6 +199,10 @@ impl AudioMixerPanelModel {
             }
         }
         for channel in &mut channels {
+            super::audio_processor_rack::bind_parameter_author_lease(
+                &mut channel.processor_racks,
+                state,
+            );
             super::audio_processor_rack::bind_processor_input_queries(
                 &mut channel.processor_racks,
                 state,

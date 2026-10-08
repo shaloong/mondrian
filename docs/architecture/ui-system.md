@@ -4501,3 +4501,52 @@ is unchanged. A valid populated canvas never displays empty guidance, and a
 disabled canvas without an explicit message retains its ordinary clip paint.
 Actual paint regressions cover the nonempty invalid display in all three locales
 and both available/disabled positive controls.
+
+### Rack scalar author interactions
+
+Audio Processor Rack scalar controls now carry an explicit fresh author session
+and Sequence lease, exact instance definition/parameter schema, and the existing
+canonical Rack or selected Scope component occurrence. A pure Sequence-only Rack
+projection has no author lease and cannot produce a scalar edit. Ambiguous Scope
+materializations require explicit selection; a single binding follows the same
+implicit occurrence contract as the existing Inspector projection.
+
+The shared numeric adapter recognizes the closed SetAudioParameter scalar intent
+and lowers pointer Begin/Update/Finish/Cancel through the existing parameter
+interaction protocol. Keyboard nudges and confirmed NumberInput text are discrete
+scalar intents. Widget refresh keeps fresh callbacks; inspection never carries
+these author callbacks, values, lease or pointer capture onto another control.
+The action closure captures one scalar target rather than cloning complete Racks,
+route menus, native input observations or automation curves.
+
+The App checks current session/Sequence, selected occurrence, canonical Rack lock
+admission, processor definition and exact parameter schema before a scalar intent
+can enter the sole Timeline mutation. A late queued start cannot seal another
+gesture or author a replacement owner. Regression tests exercise the
+real AppUiHost/EventRouter path; execution receipts qualify the result separately. Native
+accessibility names, domain values and assistive action delivery remain separate
+work; this interaction change does not claim physical AT qualification.
+
+
+### Coupled scalar readouts during active gestures
+
+Inspector/Mixer numeric pairs reuse the existing Slider and NumberInput as two
+logical children in one private typed compound control. The existing Router
+`after_child_event` hook synchronizes the adjacent presentation immediately;
+layout and form confirmation use the same synchronization. Numeric entry uses
+its sole NumberInputModel for hard-range admission and exact formatting.
+
+The shared scalar is current UI intent, not evidence of author success. The
+fresh typed callback and canonical author session still validate every command;
+a refused/stale intent triggers the existing Host fresh projection. Pointer
+capture, local draft, IME, callbacks and local/author histories are never restored
+from that UI scalar. Unfocused NumberInput synchronization publishes no callback;
+same baseline is a strict no-op, and a focused editing session is not overwritten.
+External author changes continue through fresh model/draft admission.
+
+Every drag captures its exact current scalar origin, including values outside
+its Slider soft range. Cancel restores that origin for either the canonical
+ParameterGesture adapter or non-Parameter callbacks. No second author history is
+created. Accessible numeric names/units and native assistive-technology action
+adapters remain independent follow-up work; a synchronized Text node is evidence
+of the actual NumberInput readout, not a native AT qualification claim.

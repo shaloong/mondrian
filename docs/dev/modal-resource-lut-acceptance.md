@@ -3237,3 +3237,37 @@ Native bus display names, source rewiring/automation UI and actual Host/Scope/
 fresh Unicode archive/native PCM workflows remain pending in the full goal.
 Historical native and Golden output evidence retains its exact revision/binary
 identity; none is attributed to this new product action by source tests alone.
+## Rack scalar gesture and paired readout qualification
+
+At parent revision `b90733d0c2567958062f418d87b4737688dd2d41`, the actual Host
+Rack drag tests first exposed excess Undo entries. Test fixture failures from an
+arbitrary slider width and an off-viewport leaf were corrected using root-visible
+hit testing; they were not counted as behavior RED. The corrected first two Host
+cases failed on history cardinality. The six stale-owner cases were qualified
+as post-fix corner cases, without claiming an old-product behavioral failure.
+
+A fresh typed session/Sequence/occurrence/definition/schema target now enters the
+sole author gesture transaction. No-lease projections are disabled. Pointer
+Begin/Update/Finish/Cancel share the existing author history; keyboard nudges and
+confirmed numeric entry remain discrete commands. A stale start cannot seal a
+separate valid gesture, and a late cancel cannot roll back intervening edits.
+
+The three paired-readout tests then failed on the real adjacent NumberInput text
+and on stale cancellation origins. The correction reuses the existing Slider and
+NumberInput in one private typed control. The Router synchronizes the actual
+unfocused readout without callbacks, preserves focused draft/IME/history, and
+captures an exact fresh origin on each drag, including outside the soft range.
+No presentation value becomes evidence of author acceptance.
+
+Fixed-source pipeline 44782 completed all nine gates with 321 test executions,
+zero failed and zero ignored: paired readouts 3, unfocused synchronization 3,
+Rack Host gestures 3, typed parameter contracts 8, all NumberInput 36, all Slider
+38, all panel tests 201, Scope Rack Host tests 28, and Inspector capture 1.
+The runner verified unchanged revision, modified path set and every source hash
+through completion. Mac primary text modifier fixtures now use the existing
+platform helper; no macOS runtime result is inferred from Windows tests.
+
+Native accessibility domain names/ranges/actions, physical AT/IME operation,
+sidechain gesture completeness, native editor gestures and full SDK/performance
+acceptance remain separate work. This source qualification does not establish
+universal plugin compatibility, encoded output or completion of the overall goal.

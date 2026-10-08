@@ -2136,3 +2136,22 @@ plugin-session scratch field does not establish that those allocations are free.
 Unknown plugin-owned memory remains separately observed process pressure.
 Future MIDI and heterogeneous input/output events need one bounded typed event
 admission/lifetime contract that extends the shared execution path.
+
+### Scalar Rack pointer transactions
+
+Audio parameter pointer edits reuse the canonical authoring Session's existing
+Sequence gesture, with no secondary Rack history or copied-value rollback. Each
+live update lowers only SetParameterStaticValue through the established Rack edit
+transaction and audio reconciliation seam. Finish seals one Undo entry. Cancel
+restores the current gesture's exact author origin through Session cancellation,
+preserving existing Undo/Redo and reconciling audio with the restored parameter.
+An invalidated owner or intervening author transaction seals the prior valid
+interaction instead of restoring a snapshot over unrelated newer edits.
+
+The App intent contains only typed session/Sequence identity, the exact Rack or
+Scope component occurrence, processor definition, parameter schema and scalar.
+It cannot embed arbitrary Rack edits, native state or opaque nested actions.
+Same-ID reopen/rebind, lock/deletion, schema change and Scope occurrence changes
+refuse old queued controls before author mutation. This scope covers Rack scalar
+values; sidechain gain, channel trim/fader and native editor gestures require
+independent author interaction qualification and are not implied by it.

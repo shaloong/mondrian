@@ -13610,4 +13610,583 @@ mod tests {
             1
         );
     }
+
+    fn rack_static_gesture_control_key(
+        host: &mut AppUiHost,
+        id: mondrian_ui_core::WidgetId,
+    ) -> String {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        WidgetTreeView::new(host.active_root_mut())
+            .get(id)
+            .expect("actual Rack slider")
+            .control_inspection_state()
+            .expect("explicit parameter owner")
+            .key
+    }
+
+    fn rack_static_gesture_find_owner(
+        widget: &dyn Widget,
+        key: &str,
+    ) -> Option<mondrian_ui_core::WidgetId> {
+        if widget.control_inspection_state().is_some_and(|state| state.key == key) {
+            return Some(widget.id());
+        }
+        (0..widget.child_count()).find_map(|index| {
+            widget.child(index).and_then(|child| rack_static_gesture_find_owner(child, key))
+        })
+    }
+
+    fn rack_static_gesture_pointer_positions(
+        host: &mut AppUiHost,
+        id: mondrian_ui_core::WidgetId,
+        bounds: Rect,
+    ) -> [Point; 3] {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        let tree = WidgetTreeView::new(host.active_root_mut());
+        let slider = tree.get(id).expect("actual laid out parameter slider");
+        let first = (0..bounds.height as usize)
+            .step_by(4)
+            .find_map(|y| {
+                (0..bounds.width as usize).step_by(4).find_map(|x| {
+                    let point = Point::new(bounds.x + x as f32, bounds.y + y as f32);
+                    (slider.hit_test(point)
+                        && mondrian_ui_events::hit_test::hit_test_deepest(&tree, point) == Some(id))
+                    .then_some(point)
+                })
+            })
+            .expect(
+                "actual root hit path must expose the Slider inside every ancestor hit-test clip",
+            );
+        let xs = (0..bounds.width as usize)
+            .filter_map(|x| {
+                let point = Point::new(bounds.x + x as f32, first.y + 2.0);
+                (slider.hit_test(point)
+                    && mondrian_ui_events::hit_test::hit_test_deepest(&tree, point) == Some(id))
+                .then_some(point.x)
+            })
+            .collect::<Vec<_>>();
+        let left = *xs.first().expect("left hit edge");
+        let right = *xs.last().expect("right hit edge");
+        assert!(right > left, "actual root-layout slider needs distinct hit positions: first={first:?}, left={left}, right={right}, root={bounds:?}");
+        let positions =
+            [0.25, 0.5, 0.75].map(|ratio| Point::new(left + (right - left) * ratio, first.y + 2.0));
+        for position in positions {
+            assert_eq!(mondrian_ui_events::hit_test::hit_test_deepest(&tree, position), Some(id),
+                "actual root admits the intended pointer target through every ancestor clip, position={position:?}, first={first:?}, left={left}, right={right}, root={bounds:?}");
+        }
+        positions
+    }
+
+    #[test]
+    fn rack_static_gesture_live_drag_commits_one_undo_and_exact_redo_through_host() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 2560.0, 1800.0);
+        let (mut host, scope_id, processor_id) = inspection_host_fixture("rack-static-drag-undo");
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let slider = inspection_control(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Slider,
+            None,
+        )
+        .expect("fixture Gain slider");
+        let positions = rack_static_gesture_pointer_positions(&mut host, slider, bounds);
+        let original = host.app_state().active_sequence().expect("origin").clone();
+        let history = host.app_state().authoring_history().expect("history").diagnostics();
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_key_event(
+            &mut host,
+            &mut router,
+            &pending,
+            bounds,
+            UiEvent::MouseDown {
+                position: positions[0],
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+        );
+        assert_eq!(
+            router.captured(),
+            Some(slider),
+            "actual root owns pointer capture"
+        );
+        let first = inspection_scope_gain(&host.app_state(), scope_id, processor_id);
+        assert_ne!(
+            first.to_bits(),
+            (-18.4_f64).to_bits(),
+            "pointer down publishes a real canonical preview edit"
+        );
+        for position in [positions[1], positions[2]] {
+            let before = inspection_scope_gain(&host.app_state(), scope_id, processor_id);
+            inspection_key_event(
+                &mut host,
+                &mut router,
+                &pending,
+                bounds,
+                UiEvent::MouseMove { position, modifiers: Modifiers::none() },
+            );
+            assert!(inspection_scope_gain(&host.app_state(),scope_id,processor_id)>before,"each pointer update reaches the canonical parameter, without losing capture on model dirtiness");
+            assert_eq!(router.captured(), Some(slider));
+        }
+        inspection_key_event(
+            &mut host,
+            &mut router,
+            &pending,
+            bounds,
+            UiEvent::MouseUp {
+                position: positions[2],
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+        );
+        assert!(router.captured().is_none());
+        let completed = host.app_state().active_sequence().expect("completed drag").clone();
+        assert_eq!(
+            host.app_state()
+                .authoring_history()
+                .expect("history")
+                .diagnostics()
+                .undo_entries,
+            history.undo_entries + 1,
+            "one pointer gesture must create exactly one author Undo entry"
+        );
+        assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo drag"));
+        assert!(
+            host.app_state()
+                .active_sequence()
+                .expect("Undo")
+                .author_state_eq_ignoring_revision(&original),
+            "one Undo restores the pointer-down baseline, not only the last move"
+        );
+        assert!(host.app_state.borrow_mut().redo_timeline().expect("Redo drag"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("Redo")
+            .author_state_eq_ignoring_revision(&completed));
+    }
+
+    #[test]
+    fn rack_static_gesture_second_drag_escape_preserves_fresh_start_and_history() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 2560.0, 1800.0);
+        let (mut host, scope_id, processor_id) = inspection_host_fixture("rack-static-drag-cancel");
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let slider = inspection_control(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Slider,
+            None,
+        )
+        .expect("fixture Gain slider");
+        let key = rack_static_gesture_control_key(&mut host, slider);
+        let positions = rack_static_gesture_pointer_positions(&mut host, slider, bounds);
+        let original = host.app_state().active_sequence().expect("origin").clone();
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        for event in [
+            UiEvent::MouseDown {
+                position: positions[0],
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseMove {
+                position: positions[2],
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseUp {
+                position: positions[2],
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            inspection_key_event(&mut host, &mut router, &pending, bounds, event);
+        }
+        let first = host.app_state().active_sequence().expect("first commit").clone();
+        let first_gain = inspection_scope_gain(&host.app_state(), scope_id, processor_id);
+        let history = host
+            .app_state()
+            .authoring_history()
+            .expect("history after first drag")
+            .diagnostics();
+        let next = rack_static_gesture_find_owner(host.active_root(), &key)
+            .expect("fresh same semantic owner");
+        let positions = rack_static_gesture_pointer_positions(&mut host, next, bounds);
+        for event in [
+            UiEvent::MouseDown {
+                position: positions[0],
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseMove {
+                position: positions[1],
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            inspection_key_event(&mut host, &mut router, &pending, bounds, event);
+        }
+        assert_ne!(
+            inspection_scope_gain(&host.app_state(), scope_id, processor_id).to_bits(),
+            first_gain.to_bits(),
+            "second live draft really changes the parameter"
+        );
+        inspection_key_event(
+            &mut host,
+            &mut router,
+            &pending,
+            bounds,
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::Escape,
+                modifiers: Modifiers::none(),
+            },
+        );
+        assert!(router.captured().is_none());
+        assert!(host.app_state().active_sequence().expect("Escape").author_state_eq_ignoring_revision(&first),"Escape restores this drag's exact fresh author start, not the first widget construction value");
+        assert_eq!(
+            host.app_state().authoring_history().expect("Escape history").diagnostics(),
+            history,
+            "canceling the second drag creates no author history and preserves redo state"
+        );
+        assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo only first drag"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("Undo")
+            .author_state_eq_ignoring_revision(&original));
+    }
+
+    #[test]
+    fn rack_static_gesture_queued_begin_refuses_deleted_locked_rebound_schema_occurrence_or_session(
+    ) {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 2560.0, 3600.0);
+        for boundary in 0..6 {
+            let (mut host, query, _, _, _) =
+                inspection_native_host_fixture("rack-static-queued-refusal");
+            let mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+                scope_id,
+                occurrence,
+            } = query.target
+            else {
+                panic!("Scope fixture")
+            };
+            let second_address = {
+                let mut state = host.app_state.borrow_mut();
+                let sequence = state.active_sequence_mut_uncommitted().expect("Sequence");
+                let clip = sequence.find_clip_mut(occurrence.clip_id).expect("owning Clip");
+                let second = mondrian_timeline::audio::AudioComponentEdit::media(
+                    mondrian_core::AudioSourceComponentId::new(),
+                    scope_id,
+                );
+                let address = mondrian_timeline::AudioComponentAddress {
+                    track_id: occurrence.track_id,
+                    clip_id: occurrence.clip_id,
+                    edit_id: second.id,
+                };
+                clip.audio_components.push(second);
+                let sequence_id = sequence.id;
+                state
+                    .selection
+                    .audio_scope_occurrences
+                    .insert((sequence_id, scope_id), occurrence);
+                address
+            };
+            host.mark_dirty();
+            host.refresh_if_dirty(bounds);
+            let slider = inspection_control(
+                host.active_root(),
+                false,
+                mondrian_ui_core::AccessibilityRole::Slider,
+                None,
+            )
+            .expect("native Gain slider");
+            let positions = rack_static_gesture_pointer_positions(&mut host, slider, bounds);
+            let pending = PendingUiActions::default();
+            let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+            router.route(
+                UiEvent::MouseDown {
+                    position: positions[0],
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &|action| pending.push(action),
+            );
+            assert_eq!(router.captured(), Some(slider));
+            match boundary {
+                0 => host
+                    .app_state
+                    .borrow_mut()
+                    .dispatch_action(crate::app::ui_actions::audio_processor_rack_edit_action(
+                        mondrian_timeline::AudioProcessorRackEditRequest {
+                            address:
+                                mondrian_timeline::AudioProcessorRackAddress::ProcessingScope {
+                                    scope_id,
+                                },
+                            edit: mondrian_timeline::AudioProcessorRackEdit::Remove {
+                                processor_id: query.processor_id,
+                            },
+                        },
+                    ))
+                    .expect("delete"),
+                1 => host
+                    .app_state
+                    .borrow_mut()
+                    .dispatch_action(crate::app::ui_actions::track_set_author_control_action(
+                        crate::app::product_action::TrackSetAuthorControlPayload {
+                            track_id: occurrence.track_id,
+                            control: crate::app::product_action::TrackAuthorControl::Lock,
+                            enabled: true,
+                        },
+                    ))
+                    .expect("lock"),
+                2 | 3 => {
+                    let mut state = host.app_state.borrow_mut();
+                    let processor = state
+                        .active_sequence_mut_uncommitted()
+                        .expect("Sequence")
+                        .audio_program
+                        .processing_scopes
+                        .iter_mut()
+                        .find(|scope| scope.id == scope_id)
+                        .expect("Scope")
+                        .processors
+                        .processors
+                        .iter_mut()
+                        .find(|processor| processor.id == query.processor_id)
+                        .expect("processor");
+                    if boundary == 2 {
+                        let mondrian_timeline::audio::AudioProcessorDefinitionRef::Clap {
+                            binary_sha256,
+                            ..
+                        } = &mut processor.definition
+                        else {
+                            panic!("CLAP fixture")
+                        };
+                        *binary_sha256 = Some([8; 32]);
+                    } else {
+                        processor
+                            .parameters
+                            .get_mut(&mondrian_core::ParameterId::new_static(
+                                mondrian_timeline::audio::GAIN_DB_PARAMETER_ID,
+                            ))
+                            .expect("parameter")
+                            .schema
+                            .schema_version += 1;
+                    }
+                }
+                4 => {
+                    let sequence_id = host.app_state().active_sequence().expect("Sequence").id;
+                    host.app_state
+                        .borrow_mut()
+                        .dispatch_action(
+                            ProductAction::Audio(AudioProductAction::SelectScopeOccurrence(
+                                crate::app::product_action::AudioScopeOccurrencePayload {
+                                    sequence_id,
+                                    scope_id,
+                                    address: second_address,
+                                },
+                            ))
+                            .into_external_action(),
+                        )
+                        .expect(
+                            "choose another materialization of the same Scope within the same Clip",
+                        );
+                }
+                5 => {
+                    let mut state = host.app_state.borrow_mut();
+                    let same = state.active_sequence().expect("Sequence").clone();
+                    state.test_set_sequence(None);
+                    state.test_set_sequence(Some(same));
+                }
+                _ => unreachable!(),
+            }
+            let before = host.app_state().active_sequence().expect("new owner").clone();
+            let history = host.app_state().authoring_history().expect("new history").diagnostics();
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            assert!(host.app_state().active_sequence().expect("refused stale begin").author_state_eq_ignoring_revision(&before),"boundary {boundary}: an already queued pointer down must not write the invalid or replacement owner");
+            assert_eq!(
+                host.app_state().authoring_history().expect("history").diagnostics(),
+                history,
+                "boundary {boundary}: stale begin creates no author history"
+            );
+            for event in [
+                UiEvent::MouseMove {
+                    position: positions[2],
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Escape,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::MouseUp {
+                    position: positions[2],
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+            ] {
+                inspection_key_event(&mut host, &mut router, &pending, bounds, event);
+            }
+            assert!(host.app_state().active_sequence().expect("late events").author_state_eq_ignoring_revision(&before),"boundary {boundary}: stale pointer/cancel events cannot transfer onto a replacement owner");
+            assert_eq!(
+                host.app_state().authoring_history().expect("history").diagnostics(),
+                history
+            );
+            assert!(router.captured().is_none());
+            assert!(WidgetTreeView::new(host.active_root_mut()).get(slider).is_none());
+        }
+    }
+
+    fn numeric_peer_number_text(host: &mut AppUiHost, id: mondrian_ui_core::WidgetId) -> String {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        let node = WidgetTreeView::new(host.active_root_mut())
+            .get(id)
+            .expect("live peer input belongs to the retained pair")
+            .accessibility()
+            .expect("numeric peer metadata");
+        let Some(mondrian_ui_core::AccessibilityValue::Text(text)) = node.value else {
+            panic!("numeric peer must expose the same raw text it paints");
+        };
+        text
+    }
+
+    #[test]
+    fn numeric_peer_rack_live_pointer_readout_tracks_exact_author_value_and_fresh_cancel_start() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 2560.0, 1800.0);
+        let (mut host, scope_id, processor_id) =
+            inspection_host_fixture("numeric-peer-live-readout");
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        // Capture the numeric peer before any coordinate changes. The fixture's
+        // initial gain finder is only valid for the initial canonical value.
+        let input = inspection_scope_numeric_entry_id(&mut host);
+        let input_key = rack_static_gesture_control_key(&mut host, input);
+        let slider = inspection_control(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Slider,
+            None,
+        )
+        .expect("actual Gain slider");
+        let slider_key = rack_static_gesture_control_key(&mut host, slider);
+        assert_eq!(
+            numeric_peer_number_text(&mut host, input)
+                .parse::<f64>()
+                .expect("initial numeric text")
+                .to_bits(),
+            inspection_scope_gain(&host.app_state(), scope_id, processor_id).to_bits()
+        );
+        let positions = rack_static_gesture_pointer_positions(&mut host, slider, bounds);
+        let initial = host.app_state().active_sequence().expect("initial author state").clone();
+        let history = host.app_state().authoring_history().expect("initial history").diagnostics();
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        for event in [
+            UiEvent::MouseDown {
+                position: positions[0],
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseMove {
+                position: positions[1],
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseMove {
+                position: positions[2],
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            inspection_key_event(&mut host, &mut router, &pending, bounds, event);
+            assert_eq!(
+                router.captured(),
+                Some(slider),
+                "same product control retains real pointer capture"
+            );
+            let author = inspection_scope_gain(&host.app_state(), scope_id, processor_id);
+            assert_ne!(
+                author.to_bits(),
+                (-18.4_f64).to_bits(),
+                "real live author edit"
+            );
+            let text = numeric_peer_number_text(&mut host, input);
+            assert_eq!(text.parse::<f64>().expect("peer displays a numeric value").to_bits(), author.to_bits(),
+                "while dragging, the actual adjacent NumberInput must display the current exact authored scalar, text={text}");
+        }
+        inspection_key_event(
+            &mut host,
+            &mut router,
+            &pending,
+            bounds,
+            UiEvent::MouseUp {
+                position: positions[2],
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+        );
+        let first = host.app_state().active_sequence().expect("first drag author state").clone();
+        let first_gain = inspection_scope_gain(&host.app_state(), scope_id, processor_id);
+        let committed_history =
+            host.app_state().authoring_history().expect("first drag history").diagnostics();
+        assert_eq!(committed_history.undo_entries, history.undo_entries + 1);
+        let slider = rack_static_gesture_find_owner(host.active_root(), &slider_key)
+            .expect("fresh same-owner slider");
+        let input = rack_static_gesture_find_owner(host.active_root(), &input_key)
+            .expect("fresh same-owner numeric peer");
+        let positions = rack_static_gesture_pointer_positions(&mut host, slider, bounds);
+        for event in [
+            UiEvent::MouseDown {
+                position: positions[0],
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseMove {
+                position: positions[1],
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            inspection_key_event(&mut host, &mut router, &pending, bounds, event);
+            assert_eq!(router.captured(), Some(slider));
+            let author = inspection_scope_gain(&host.app_state(), scope_id, processor_id);
+            assert_ne!(author.to_bits(), first_gain.to_bits());
+            assert_eq!(
+                numeric_peer_number_text(&mut host, input)
+                    .parse::<f64>()
+                    .expect("second live peer")
+                    .to_bits(),
+                author.to_bits()
+            );
+        }
+        inspection_key_event(
+            &mut host,
+            &mut router,
+            &pending,
+            bounds,
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::Escape,
+                modifiers: Modifiers::none(),
+            },
+        );
+        assert!(router.captured().is_none());
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("canceled author state")
+            .author_state_eq_ignoring_revision(&first));
+        assert_eq!(
+            host.app_state().authoring_history().expect("cancel history").diagnostics(),
+            committed_history
+        );
+        let input = rack_static_gesture_find_owner(host.active_root(), &input_key)
+            .expect("current canceled peer owner");
+        assert_eq!(numeric_peer_number_text(&mut host, input).parse::<f64>().expect("canceled peer").to_bits(), first_gain.to_bits(),
+            "Escape restores the second drag start in both canonical state and the real input display");
+        assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo first drag"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("undone author state")
+            .author_state_eq_ignoring_revision(&initial));
+    }
 }

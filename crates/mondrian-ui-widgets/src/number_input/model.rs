@@ -229,6 +229,17 @@ impl<T: NumberInputValue> NumberInputModel<T> {
     pub(super) fn committed_value(&self) -> T {
         self.committed_value
     }
+    pub(super) fn set_from_model(&mut self, value: T) -> Option<NumberDisplayUpdate<T>> {
+        if !value.is_finite() {
+            return None;
+        }
+        let next = clamp(value, self.min, self.max);
+        if next.inspection_value() == self.committed_value.inspection_value() {
+            return None;
+        }
+        self.committed_value = next;
+        Some(NumberDisplayUpdate { value: next, text: self.display_text() })
+    }
     pub(super) fn normalized_text_value(&self, text: &str) -> Option<T> {
         T::parse(text).map(|value| clamp(value, self.min, self.max))
     }

@@ -74,18 +74,40 @@ impl AudioProcessorParameterModel {
     pub(crate) fn is_static_editable(&self) -> bool {
         self.keyframe_count == 0 && self.schema.numeric.is_some()
     }
+}
 
-    fn normalized_static_value(&self, value: f64) -> Option<f64> {
-        if !value.is_finite() {
-            return None;
-        }
-        if self.schema.value_type == PropertyValueType::Int
-            && (value.fract() != 0.0 || value.abs() > MAX_EXACT_AUDIO_INTEGER)
-        {
-            return None;
-        }
-        let contract = self.schema.numeric.as_ref()?.first()?;
-        (value >= contract.hard_range.min && value <= contract.hard_range.max).then_some(value)
+/// Reuse the numeric input admission for one captured definition contract.
+pub(crate) fn normalized_static_parameter_value(
+    schema: &ParameterSchema,
+    value: f64,
+) -> Option<f64> {
+    if !value.is_finite() {
+        return None;
+    }
+    if schema.value_type == PropertyValueType::Int
+        && (value.fract() != 0.0 || value.abs() > MAX_EXACT_AUDIO_INTEGER)
+    {
+        return None;
+    }
+    let contract = schema.numeric.as_ref()?.first()?;
+    (value >= contract.hard_range.min && value <= contract.hard_range.max).then_some(value)
+}
+
+/// Attach only the author lifetime observed in the concrete App projection.
+/// A missing session or active Sequence remains non-authorizing.
+pub(crate) fn bind_parameter_author_lease(
+    racks: &mut [AudioProcessorRackModel],
+    state: &crate::app::AppState,
+) {
+    let lease = state.authoring_session_id().zip(state.active_sequence_id()).map(
+        |(session_id, sequence_id)| crate::app::parameter_gesture::AudioParameterAuthorLease {
+            session_id,
+            sequence_id,
+        },
+    );
+    for rack in racks {
+        rack.parameter_author_lease =
+            lease.filter(|lease| lease.sequence_id == rack.source_sequence_id);
     }
 }
 
@@ -105,6 +127,11 @@ pub(crate) struct AudioProcessorInstanceModel {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AudioProcessorRackModel {
     pub(crate) address: AudioProcessorRackAddress,
+    /// Exact source of this immutable Rack projection.
+    pub(crate) source_sequence_id: mondrian_core::SequenceId,
+    /// Fresh author lifetime; pure Sequence projections cannot authorize controls.
+    pub(crate) parameter_author_lease:
+        Option<crate::app::parameter_gesture::AudioParameterAuthorLease>,
     pub(crate) input_inspection_target: Option<mondrian_audio::AudioProcessorInputInspectionTarget>,
     pub(crate) title: String,
     pub(crate) ownership_label: String,
@@ -283,6 +310,8 @@ pub(crate) fn project_audio_processor_rack(
     };
     AudioProcessorRackModel {
         address,
+        source_sequence_id: sequence.id,
+        parameter_author_lease: None,
         input_inspection_target: match address {
             AudioProcessorRackAddress::ChannelStrip { owner, rack } => Some(
                 mondrian_audio::AudioProcessorInputInspectionTarget::ChannelStrip { owner, rack },
@@ -697,24 +726,49 @@ pub(crate) fn move_to_end_action(
     )
 }
 
-pub(crate) fn set_static_parameter_action(
+/// Capture only one editable scalar owner from a fresh App model.
+/// Sequence-only projections, ambiguous occurrences and keyed values cannot
+/// silently acquire author authority during input dispatch.
+pub(crate) fn static_parameter_target(
     rack: &AudioProcessorRackModel,
     processor: &AudioProcessorInstanceModel,
     parameter: &AudioProcessorParameterModel,
-    value: f64,
-) -> Option<Action> {
-    if !rack.is_editable || !parameter.is_static_editable() {
+) -> Option<crate::app::parameter_gesture::AudioParameterGestureTarget> {
+    if !rack.is_editable
+        || !parameter.is_static_editable()
+        || parameter.parameter_id != parameter.schema.parameter_id
+    {
         return None;
     }
-    let value = parameter.normalized_static_value(value)?;
-    Some(rack_edit_action(
-        rack.address,
-        AudioProcessorRackEdit::SetParameterStaticValue {
-            processor_id: processor.processor_id,
-            parameter_id: parameter.parameter_id.clone(),
-            value,
-        },
-    ))
+    let lease = rack
+        .parameter_author_lease
+        .filter(|lease| lease.sequence_id == rack.source_sequence_id)?;
+    let target = crate::app::parameter_gesture::AudioParameterGestureTarget {
+        lease,
+        owner: rack.input_inspection_target?,
+        processor_id: processor.processor_id,
+        definition: processor.definition.clone(),
+        parameter_schema: parameter.schema.clone(),
+    };
+    (target.rack_address() == rack.address).then_some(target)
+}
+
+/// Build one closed scalar intent from an explicitly captured control owner.
+/// No current App state or arbitrary nested Rack operation is inferred here.
+pub(crate) fn set_static_parameter_action(
+    target: &crate::app::parameter_gesture::AudioParameterGestureTarget,
+    value: f64,
+) -> Option<Action> {
+    let value = normalized_static_parameter_value(&target.parameter_schema, value)?;
+    Some(
+        crate::app::parameter_gesture::ParameterGestureAction::SetAudioParameter {
+            edit: crate::app::parameter_gesture::AudioParameterValueEdit {
+                target: Box::new(target.clone()),
+                value,
+            },
+        }
+        .action(),
+    )
 }
 
 fn rack_edit_action(address: AudioProcessorRackAddress, edit: AudioProcessorRackEdit) -> Action {
@@ -973,93 +1027,69 @@ mod tests {
             .is_some_and(|reason| reason.contains("已锁定")));
     }
 
-    #[test]
-    fn static_parameter_action_preserves_canonical_double_precision() {
-        let (sequence, _) = sequence_with_gain_scope();
-        let racks = clip_processing_scope_racks(
-            &sequence,
-            &sequence.audio_tracks[0].clips[0],
-            &chinese(),
-            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
-                &sequence,
-                sequence.playhead,
-            ),
-            |_| None,
-        );
-        let rack = &racks[0];
-        let processor = &rack.processors[0];
-        let parameter = &processor.parameters[0];
-        let action = set_static_parameter_action(rack, processor, parameter, -6.123456789123456)
-            .expect("value");
-        let Some(ProductAction::Audio(AudioProductAction::EditProcessorRack(request))) =
-            ProductAction::decode_external(&action).expect("decode")
-        else {
-            panic!("rack edit");
-        };
-        let AudioProcessorRackEdit::SetParameterStaticValue { value, .. } = request.edit else {
-            panic!("static value");
-        };
-        assert_eq!(value, -6.123456789123456_f64);
+    fn static_parameter_author_fixture() -> (
+        crate::app::AppState,
+        crate::app::parameter_gesture::AudioParameterGestureTarget,
+    ) {
+        let (sequence, clip_id) = sequence_with_gain_scope();
         let mut state = crate::app::AppState::new();
         state.test_set_sequence(Some(sequence));
-        let snapshot = |state: &crate::app::AppState| {
-            let sequence = state.active_sequence().expect("sequence");
-            clip_processing_scope_racks(
-                sequence,
-                &sequence.audio_tracks[0].clips[0],
-                &chinese(),
-                crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
-                    sequence,
-                    sequence.playhead,
-                ),
-                |_| None,
-            )[0]
-            .processors[0]
-                .parameters[0]
-                .static_value
-        };
-        let before = snapshot(&state);
-        state.dispatch_action(action).expect("author value");
-        assert_eq!(snapshot(&state), value);
-        assert!(state.undo_timeline().expect("undo"));
-        assert_eq!(snapshot(&state), before);
-        assert!(state.redo_timeline().expect("redo"));
-        assert_eq!(snapshot(&state), value);
+        state.select_clip_by_id(clip_id).expect("select scalar owner");
+        let model = crate::app_ui::panels::InspectorPanelModel::from_app_state(&state, &chinese());
+        let rack = &model.audio_processor_racks[0];
+        let processor = &rack.processors[0];
+        let target = static_parameter_target(rack, processor, &processor.parameters[0])
+            .expect("fresh scalar target");
+        (state, target)
     }
 
     #[test]
-    fn actions_preserve_typed_addresses_and_do_not_fake_automated_static_edits() {
-        let (mut sequence, _) = sequence_with_gain_scope();
-        let clip = &sequence.audio_tracks[0].clips[0];
-        let racks = clip_processing_scope_racks(
-            &sequence,
-            clip,
-            &chinese(),
-            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
-                &sequence,
-                sequence.playhead,
-            ),
-            |_| None,
+    fn typed_static_parameter_action_preserves_canonical_double_precision() {
+        let (mut state, target) = static_parameter_author_fixture();
+        let value = -6.123456789123456_f64;
+        let action = set_static_parameter_action(&target, value).expect("value");
+        let Some(crate::app::parameter_gesture::ParameterGestureAction::SetAudioParameter { edit }) =
+            crate::app::parameter_gesture::ParameterGestureAction::decode(&action)
+                .expect("typed codec")
+        else {
+            panic!("exact scalar intent")
+        };
+        assert_eq!(*edit.target, target);
+        assert_eq!(edit.value.to_bits(), value.to_bits());
+        let snapshot = |state: &crate::app::AppState| {
+            mondrian_audio::inspect_audio_processor_input_author(
+                state.active_sequence().expect("Sequence"),
+                target.owner,
+                target.processor_id,
+            )
+            .expect("exact canonical processor")
+            .parameters[&target.parameter_schema.parameter_id]
+                .automation
+                .default_value
+        };
+        let before = snapshot(&state);
+        state.dispatch_action(action).expect("author value");
+        assert_eq!(snapshot(&state).to_bits(), value.to_bits());
+        assert!(state.undo_timeline().expect("undo"));
+        assert_eq!(snapshot(&state).to_bits(), before.to_bits());
+        assert!(state.redo_timeline().expect("redo"));
+        assert_eq!(snapshot(&state).to_bits(), value.to_bits());
+    }
+
+    #[test]
+    fn typed_static_parameter_actions_preserve_exact_owner_and_refuse_keyed_projection() {
+        let (mut state, target) = static_parameter_author_fixture();
+        let action = set_static_parameter_action(&target, -6.0).expect("valid static edit");
+        assert!(
+            matches!(crate::app::parameter_gesture::ParameterGestureAction::decode(&action).expect("typed codec"), Some(crate::app::parameter_gesture::ParameterGestureAction::SetAudioParameter { edit }) if *edit.target == target && edit.value == -6.0)
         );
-        let rack = &racks[0];
-        let processor = &rack.processors[0];
-        let parameter = &processor.parameters[0];
-
-        let action = set_static_parameter_action(rack, processor, parameter, -6.0)
-            .expect("valid static edit");
-        assert!(matches!(
-            ProductAction::decode_external(&action).expect("decode"),
-            Some(ProductAction::Audio(AudioProductAction::EditProcessorRack(
-                AudioProcessorRackEditRequest {
-                    address: AudioProcessorRackAddress::ProcessingScope { .. },
-                    edit: AudioProcessorRackEdit::SetParameterStaticValue { .. },
-                }
-            )))
-        ));
-        assert!(set_static_parameter_action(rack, processor, parameter, -121.0).is_none());
-
-        let scope_id = clip.audio_components[0].processing.scope_id;
-        let parameter = sequence
+        assert!(set_static_parameter_action(&target, -121.0).is_none());
+        let AudioProcessorRackAddress::ProcessingScope { scope_id } = target.rack_address() else {
+            panic!("Scope")
+        };
+        state
+            .active_sequence_mut_uncommitted()
+            .expect("Sequence")
             .audio_program
             .processing_scopes
             .iter_mut()
@@ -1068,28 +1098,30 @@ mod tests {
             .processors
             .processors[0]
             .parameters
-            .values_mut()
-            .next()
-            .expect("parameter");
-        parameter
+            .get_mut(&target.parameter_schema.parameter_id)
+            .expect("parameter")
             .automation
             .set_keyframe(ExactAutomationKeyframe::linear(TimelineTime::ZERO, -3.0))
             .expect("keyframe");
-        let clip = &sequence.audio_tracks[0].clips[0];
-        let racks = clip_processing_scope_racks(
-            &sequence,
-            clip,
-            &chinese(),
-            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
-                &sequence,
-                sequence.playhead,
-            ),
-            |_| None,
+        let model = crate::app_ui::panels::InspectorPanelModel::from_app_state(&state, &chinese());
+        let rack = &model.audio_processor_racks[0];
+        let processor = &rack.processors[0];
+        assert_eq!(processor.parameters[0].keyframe_count, 1);
+        assert!(static_parameter_target(rack, processor, &processor.parameters[0]).is_none());
+        let before = state.active_sequence().expect("keyed value").clone();
+        let history = state.authoring_history().expect("history").diagnostics();
+        assert!(
+            state.dispatch_action(action).is_err(),
+            "captured unkeyed control cannot edit a subsequently keyed owner"
         );
-        let processor = &racks[0].processors[0];
-        let parameter = &processor.parameters[0];
-        assert_eq!(parameter.keyframe_count, 1);
-        assert!(set_static_parameter_action(&racks[0], processor, parameter, -9.0).is_none());
+        assert!(state
+            .active_sequence()
+            .expect("unchanged")
+            .author_state_eq_ignoring_revision(&before));
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
     }
 
     #[test]
@@ -1359,6 +1391,198 @@ mod tests {
                 .current_author_time
                 .is_err());
         }
+    }
+    #[test]
+    fn typed_static_parameter_rejects_wrong_lease_and_binding_without_author_writes() {
+        let (mut state, target) = static_parameter_author_fixture();
+        let (other_state, _) = static_parameter_author_fixture();
+        for boundary in 0..6 {
+            let mut stale = target.clone();
+            match boundary {
+                0 => {
+                    stale.lease.session_id =
+                        other_state.authoring_session_id().expect("other lifetime")
+                }
+                1 => stale.lease.sequence_id = mondrian_core::SequenceId::new(),
+                2 => stale.processor_id = AudioProcessorInstanceId::new(),
+                3 => {
+                    let AudioProcessorDefinitionRef::BuiltIn { schema_version, .. } =
+                        &mut stale.definition
+                    else {
+                        panic!("built-in")
+                    };
+                    *schema_version += 1;
+                }
+                4 => stale.parameter_schema.schema_version += 1,
+                5 => {
+                    let mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+                        occurrence,
+                        ..
+                    } = &mut stale.owner
+                    else {
+                        panic!("Scope")
+                    };
+                    occurrence.edit_id = mondrian_core::AudioComponentEditId::new();
+                }
+                _ => unreachable!(),
+            }
+            let before = state.active_sequence().expect("Sequence").clone();
+            let history = state.authoring_history().expect("history").diagnostics();
+            let action = set_static_parameter_action(&stale, -6.0)
+                .expect("syntactically valid scalar intent");
+            assert!(
+                state.dispatch_action(action).is_err(),
+                "boundary {boundary}: exact stale scalar owner must be refused"
+            );
+            assert!(state
+                .active_sequence()
+                .expect("refusal")
+                .author_state_eq_ignoring_revision(&before));
+            assert_eq!(
+                state.authoring_history().expect("history").diagnostics(),
+                history
+            );
+        }
+    }
+
+    #[test]
+    fn typed_static_parameter_cannot_embed_arbitrary_rack_operation() {
+        let (_, target) = static_parameter_author_fixture();
+        let mut action = set_static_parameter_action(&target, -6.0).expect("scalar");
+        let Action::Custom { payload, .. } = &mut action else {
+            panic!("protocol")
+        };
+        payload["edit"].as_object_mut().expect("closed scalar fields").insert(
+            "rack_operation".into(),
+            serde_json::json!({"operation":"remove","processor_id":target.processor_id}),
+        );
+        assert!(
+            crate::app::parameter_gesture::ParameterGestureAction::decode(&action).is_err(),
+            "unknown nested author intent is not admitted by the typed scalar protocol"
+        );
+    }
+
+    #[test]
+    fn typed_static_parameter_late_cancel_cannot_rollback_intervening_author_edit() {
+        use crate::app::parameter_gesture::{
+            AudioParameterValueEdit, ParameterGestureAction, ParameterGestureEdit,
+        };
+        let (mut state, target) = static_parameter_author_fixture();
+        let original = state.active_sequence().expect("origin").clone();
+        let gesture_id = mondrian_core::AuthoringGestureId::new();
+        let edit = |value| {
+            ParameterGestureEdit::AudioParameter(AudioParameterValueEdit {
+                target: Box::new(target.clone()),
+                value,
+            })
+        };
+        for action in [
+            ParameterGestureAction::Begin { gesture_id, edit: edit(-6.0) },
+            ParameterGestureAction::Update { gesture_id, edit: edit(-3.0) },
+        ] {
+            state.dispatch_action(action.action()).expect("live scalar gesture");
+        }
+        assert!(state.parameter_gesture_is_current());
+        let dragged = state.active_sequence().expect("live result").clone();
+        state
+            .dispatch_action(audio_processor_rack_edit_action(
+                AudioProcessorRackEditRequest {
+                    address: target.rack_address(),
+                    edit: AudioProcessorRackEdit::SetBypassed {
+                        processor_id: target.processor_id,
+                        bypassed: true,
+                    },
+                },
+            ))
+            .expect("independent canonical author transaction");
+        let intervening = state.active_sequence().expect("intervening bypass").clone();
+        let history = state.authoring_history().expect("history").diagnostics();
+        assert!(!state.parameter_gesture_is_current());
+        for action in [
+            ParameterGestureAction::Update { gesture_id, edit: edit(-15.0) },
+            ParameterGestureAction::Cancel { gesture_id },
+            ParameterGestureAction::Finish { gesture_id },
+        ] {
+            state
+                .dispatch_action(action.action())
+                .expect("late intent safely refused/sealed");
+        }
+        assert!(state
+            .active_sequence()
+            .expect("late intent")
+            .author_state_eq_ignoring_revision(&intervening));
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history,
+            "late cancel adds no history or whole-Rack rollback"
+        );
+        assert!(state.undo_timeline().expect("Undo bypass"));
+        assert!(
+            state
+                .active_sequence()
+                .expect("Undo bypass")
+                .author_state_eq_ignoring_revision(&dragged),
+            "independent edit is undone independently"
+        );
+        assert!(state.undo_timeline().expect("Undo scalar drag"));
+        assert!(state
+            .active_sequence()
+            .expect("Undo drag")
+            .author_state_eq_ignoring_revision(&original));
+    }
+
+    #[test]
+    fn typed_static_parameter_stale_begin_cannot_seal_another_live_gesture() {
+        use crate::app::parameter_gesture::{
+            AudioParameterValueEdit, ParameterGestureAction, ParameterGestureEdit,
+        };
+        let (mut state, target) = static_parameter_author_fixture();
+        let original = state.active_sequence().expect("origin").clone();
+        let gesture_id = mondrian_core::AuthoringGestureId::new();
+        let edit = |value| {
+            ParameterGestureEdit::AudioParameter(AudioParameterValueEdit {
+                target: Box::new(target.clone()),
+                value,
+            })
+        };
+        state
+            .dispatch_action(
+                ParameterGestureAction::Begin { gesture_id, edit: edit(-6.0) }.action(),
+            )
+            .expect("valid start");
+        let history = state.authoring_history().expect("live history").diagnostics();
+        let mut stale = target.clone();
+        stale.lease.sequence_id = mondrian_core::SequenceId::new();
+        state
+            .dispatch_action(
+                ParameterGestureAction::Begin {
+                    gesture_id: mondrian_core::AuthoringGestureId::new(),
+                    edit: ParameterGestureEdit::AudioParameter(AudioParameterValueEdit {
+                        target: Box::new(stale),
+                        value: -30.0,
+                    }),
+                }
+                .action(),
+            )
+            .expect("refuse stale queued start");
+        assert!(state.parameter_gesture_is_current());
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
+        state
+            .dispatch_action(
+                ParameterGestureAction::Update { gesture_id, edit: edit(-3.0) }.action(),
+            )
+            .expect("original gesture still owns updates");
+        state
+            .dispatch_action(ParameterGestureAction::Cancel { gesture_id }.action())
+            .expect("cancel original live gesture");
+        assert!(state
+            .active_sequence()
+            .expect("cancel")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(!state.can_undo_action());
     }
 }
 
