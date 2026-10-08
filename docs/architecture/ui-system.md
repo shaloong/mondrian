@@ -1,5 +1,11 @@
 # UI System
 
+Clean source `718696e` qualifies the shared source menu models and their product
+actions against actual CLAP/VST3 PCM, one Undo/save-live-Redo and four Unicode
+archive reopens. Source-gain curves are retained by rewiring; their complete Rack
+editing UI and the physical Host/Scope pointer matrix remain separate work.
+See [current workflow evidence](../dev/modal-resource-lut-acceptance.md).
+
 Shared Rack retained-input rows show the current source and a localized source
 selector. Options require the current Ready native observation, an editable old
 source, a matching stable input key and canonical stage-cycle/source-lock

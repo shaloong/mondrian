@@ -1,5 +1,63 @@
 # Modal, resource and LUT acceptance
 
+## Observed source switching and current native workflow qualification
+
+Clean source `718696eace2812200ec6efae3c9f88d4f289b6a5` passed the
+2026-10-08 Windows qualification. Shared Mixer/Inspector Rack rows now present
+localized source selectors, including a checked current-source item with no edit
+action. Replacements require the current Ready native observation, matching
+processor/input key, retained Route ID and expected old source. The existing
+Timeline endpoint command preserves route identity, enabled state, exact static
+gain and complete gain automation in one author transaction. Source locks and
+causal feedback remain domain admission; no UI-owned graph or implicit native
+probe was added. Missing ports remain visible/removable and cannot silently rebind.
+
+The source regression's real RED was an unrecognized closed rewire action.
+Current source gates passed observation/refusal **11**, shared controls **5**,
+Rack **11**, Mixer **8**, modal **16**, resources **103** (**5 ignored**) and
+portable output **11**. Creation and rewiring each cover fifteen stale, unavailable,
+cancelled, pending and old/new-source lock cases, with identical author/history
+and probe counts after refusal. Changed routes refuse stale menus; unchanged
+source retains generation/history. Exact gain-curve/enable/identity preservation
+and one Undo/Redo pass. Final strict workspace/all-target/all-feature Clippy with
+`-D warnings` passed in **2 min 06 s**, with fmt and diff checks.
+
+The current product was rebuilt in **501,885 ms**. These twelve selected gates
+passed with clean stable source and six stable captured binary hashes:
+
+| Gate | Passed | Test runtime |
+| --- | ---: | ---: |
+| Native CLAP/VST3 bus/state/delay/partition references | 2 | 11.05 s |
+| Shared named Rack source connection/rewire and native archive PCM | 6 | 114.10 s |
+| Current observation and atomic refusal matrix | 11 | 6.12 s |
+| Shared sidechain source/name controls | 5 | 0.45 s |
+| Rack / Mixer | 11 / 8 | 0.31 / 1.37 s |
+| Native resource helpers and cancellation | 5 | 9.12 s |
+| Modal Tab containment / event owner lifecycle | 16 / 1 | 24.38 / 0.00 s |
+| Resource transactions, archive and real LUT output | 103 (5 ignored) | 25.50 s |
+| Portable LUT/OCIO/media output and source removal | 11 | 8.86 s |
+| Native constrained group Undo/save/reopen PCM | 2 | 184.39 s |
+
+Each CLAP/VST3 same-strip, external and late-detector case selects a new detector
+through actual localized shared Rack menu models and the bound product action.
+The independent ABI output is **0.296875**; the late-detector replacement reduces
+public lookahead **6 to 3**. Route identity/controls, one source Undo, live Redo
+across saving and four separate Unicode archives retain their expected authored
+state and realtime/offline partitioned PCM. This verifies menu projection and
+product dispatch; it does not claim a complete physical Host/Scope pointer matrix.
+The five ignored resource cases were explicitly run with the current product.
+
+- Product SHA256: `b4f2257de70ecbd2588c5614636848fc05abf2f348d77e41c181df6e8fb60109`.
+- Receipt: `.scratch/curve-viewport/source-rewire-native-acceptance.json`,
+  SHA256 `9f4b082e24e0316bb29ba399b606d7193918628907e1b444cf29321f26aab7db`,
+  with twelve verified step-log hashes and six binary hashes.
+
+The prior Complete Golden **3/3** remains attributed to `9f0183a`, not this source
+revision. The original full goal remains active: gain-curve UI, full Host/Scope
+interactions, wider layouts, MIDI/editors, vendor/platform/performance matrices,
+remaining i18n and current full workspace/CI runtime qualification remain open.
+Both author and committer are Shalom Wang; no push was performed.
+
 ## Stage-aware main and auxiliary compensation: current qualification
 
 Clean source `9f0183a0220a578d5cd8ba3c4b1a7d8ee0f25ca8` passed the
