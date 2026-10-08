@@ -1842,6 +1842,25 @@ pub(super) fn with_audio_processor_rack_sections(
                 ));
             }
             for route in &processor.sidechain_routes {
+                let mut items = vec![MenuItem::new(
+                    route.source_label.clone(),
+                    None::<mondrian_editor_state::Action>,
+                )
+                .checked(true)];
+                items.extend(route.rewire_options.iter().map(|option| {
+                    MenuItem::new(
+                        option.label.clone(),
+                        crate::app_ui::audio_sidechain::rewire_action(option),
+                    )
+                }));
+                section = section.with_row(PropertyRow::new(
+                    localizer.text("audio-sidechain-source"),
+                    Box::new(
+                        Dropdown::new(route.source_label.clone(), items)
+                            .with_max_visible_items(12)
+                            .enabled(route.is_editable && !route.rewire_options.is_empty()),
+                    ),
+                ));
                 let enabled_route = route.clone();
                 section = section.with_row(PropertyRow::new(
                     route.label.clone(),

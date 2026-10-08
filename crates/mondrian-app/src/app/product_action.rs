@@ -217,6 +217,8 @@ pub const AUDIO_QUERY_PROCESSOR_INPUTS: &str = "query_processor_inputs";
 
 /// External author action for connecting a current observed processor input.
 pub const AUDIO_CONNECT_PROCESSOR_INPUT: &str = "connect_processor_input";
+/// Rewire one retained input Route using the current observed native contract.
+pub const AUDIO_REWIRE_PROCESSOR_INPUT: &str = "rewire_processor_input";
 
 /// External action name for one atomic Audio Processor Rack edit.
 pub const AUDIO_EDIT_PROCESSOR_RACK: &str = "edit_processor_rack";
@@ -475,6 +477,8 @@ pub enum AudioProductAction {
     QueryProcessorInputs(AudioProcessorInputQueryPayload),
     /// Connect a source only to an exact current observed auxiliary input.
     ConnectProcessorInput(AudioProcessorInputConnectionPayload),
+    /// Atomically replace a retained Route source without losing controls.
+    RewireProcessorInput(AudioProcessorInputRewirePayload),
     /// Change one transient Track audition flag without mutating author state.
     SetTrackSolo(AudioTrackSoloPayload),
     /// Apply one exact owner-time curve mutation.
@@ -739,6 +743,11 @@ impl ProductAction {
                 _ => Ok(None),
             },
             AUDIO_NAMESPACE => match name.as_str() {
+                AUDIO_REWIRE_PROCESSOR_INPUT => {
+                    Ok(Some(Self::Audio(AudioProductAction::RewireProcessorInput(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
                 AUDIO_CONNECT_PROCESSOR_INPUT => Ok(Some(Self::Audio(
                     AudioProductAction::ConnectProcessorInput(decode_payload(
                         namespace, name, payload,
@@ -1137,6 +1146,11 @@ impl ProductAction {
     /// names or payloads.
     pub fn into_external_action(self) -> Action {
         let (namespace, name, payload) = match self {
+            Self::Audio(AudioProductAction::RewireProcessorInput(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_REWIRE_PROCESSOR_INPUT,
+                serde_json::json!(payload),
+            ),
             Self::Audio(AudioProductAction::ConnectProcessorInput(payload)) => (
                 AUDIO_NAMESPACE,
                 AUDIO_CONNECT_PROCESSOR_INPUT,
@@ -5293,4 +5307,16 @@ pub struct AudioProcessorInputConnectionPayload {
     pub source: mondrian_timeline::audio::AudioRouteSource,
     /// Exact definition-owned key present in the observed contract.
     pub bus_key: String,
+}
+
+/// Current-observation-bound source replacement for one retained auxiliary Route.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioProcessorInputRewirePayload {
+    /// Exact current native target, input and replacement source.
+    pub connection: AudioProcessorInputConnectionPayload,
+    /// Existing Route whose identity and controls must be retained.
+    pub route_id: mondrian_core::AudioRouteId,
+    /// Source shown in the originating menu; changed routes refuse stale intents.
+    pub expected_source: mondrian_timeline::audio::AudioRouteSource,
 }

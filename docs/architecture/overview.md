@@ -1,5 +1,13 @@
 # Architecture Overview
 
+Observed auxiliary source rewiring shares creation's current native input
+admission and commits the existing Timeline endpoint edit once. The payload binds
+the retained Route ID and expected source to the same processor/input key;
+stale routes cannot retarget an unrelated connection. Route identity, enabled
+state, static gain and exact gain automation survive the source replacement.
+Unchanged source is a no-op; old/new Track locks and causal feedback remain
+canonical domain refusals. Shared Rack selectors use cached observations only.
+
 Core encoded sampling contracts explicitly retain planar GBR/GBRA IEEE Float32 in both byte orders. Their proven depth is 32 bits, with Alpha present only for GBRA; unknown or contradictory probe facts remain inadmissible. These are source facts, not a claim of a hardware YUV surface.
 
 Mondrian is a native video editor organized around strict crate boundaries. The self-hosted winit/wgpu UI is the product path; old egui-era modules have been removed or are no longer architectural reference.

@@ -916,6 +916,33 @@ mod tests {
         } else {
             sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
         }
+        let replacement_detector = sequence.add_audio_track();
+        sequence
+            .add_media_audio_clip(
+                replacement_detector,
+                mondrian_timeline::Clip::new(
+                    asset_id,
+                    mondrian_core::TimelineTime::ZERO,
+                    mondrian_core::TimelineTime::ONE,
+                )
+                .expect("replacement clip"),
+                AudioSourceComponentId::primary(),
+            )
+            .expect("replacement source");
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&replacement_detector)
+            .expect("replacement strip")
+            .strip
+            .fader_db = -18.061_799_739_838_87;
+        sequence.audio_program.routes.retain(|route| {
+            !matches!(route.source, AudioRouteSource::Track { track_id, .. } if track_id == replacement_detector)
+        });
+        let replacement_source = AudioRouteSource::Track {
+            track_id: replacement_detector,
+            port: AudioChannelStripOutputPort::PostMute,
+        };
         let source = AudioRouteSource::Track {
             track_id: detector,
             port: if same_strip {
@@ -1025,8 +1052,8 @@ mod tests {
             .input_names
             .iter()
             .any(|name| name.bus_key == bus_key && name.name == "压缩探测 🙂"));
-        let connection = crate::app_ui::test_utils::native_sidechain_connection_action(
-            &state, query, source, bus_key,
+        let connection = crate::app_ui::test_utils::native_sidechain_source_action(
+            &state, query, source, bus_key, None,
         );
         assert_eq!(
             state.project_author_generation(),
@@ -1083,6 +1110,58 @@ mod tests {
         );
         let edited_path = root.path().join("原生侧链重做🙂.mdp");
         state.save_project_file_as(edited_path.clone()).expect("save routed archive");
+        let route_id = edited.audio_program.sidechain_routes[0].id;
+        let rewire = crate::app_ui::test_utils::native_sidechain_source_action(
+            &state,
+            query,
+            replacement_source,
+            bus_key,
+            Some(route_id),
+        );
+        let generation = state.project_author_generation();
+        let history = state.authoring_history().expect("history").diagnostics();
+        state.dispatch_action(rewire).expect("shared Rack native source rewire");
+        assert_eq!(state.project_author_generation(), generation + 1);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics().undo_entries,
+            history.undo_entries + 1
+        );
+        let rewired = state.active_sequence().expect("rewired").clone();
+        let mut expected_rewire = edited.clone();
+        expected_rewire.audio_program.sidechain_routes[0].source = replacement_source;
+        assert!(rewired.author_state_eq_ignoring_revision(&expected_rewire));
+        // Independent ABI oracle: 0.5 * (2 * 0.25 + 3 * (0.25 * 0.125)).
+        let rewired_expected = 0.296875;
+        let rewired_pcm =
+            assert_native_sidechain_delivery(&state, resolver.as_ref(), rewired_expected, 3);
+        assert_ne!(rewired_pcm, after);
+        assert!(state.undo_timeline().expect("one source rewire Undo"));
+        assert!(state
+            .active_sequence()
+            .expect("rewire Undo")
+            .author_state_eq_ignoring_revision(&edited));
+        assert_eq!(
+            assert_native_sidechain_delivery(
+                &state,
+                resolver.as_ref(),
+                routed_expected,
+                routed_lookahead
+            ),
+            after
+        );
+        let rewire_undo_path = root.path().join("原生侧链改线撤销🙂.mdp");
+        state.save_project_file_as(rewire_undo_path.clone()).expect("save rewire Undo");
+        assert!(
+            state.can_redo_action(),
+            "saving source Undo retains live Redo"
+        );
+        assert!(state.redo_timeline().expect("source rewire Redo"));
+        assert_eq!(
+            assert_native_sidechain_delivery(&state, resolver.as_ref(), rewired_expected, 3),
+            rewired_pcm
+        );
+        let rewired_path = root.path().join("原生侧链改线🙂.mdp");
+        state.save_project_file_as(rewired_path.clone()).expect("save rewritten route");
         drop(state);
         for (path, authored, expected, lookahead, output) in [
             (undone_path, &sequence, 0.25, 3, before),
@@ -1091,8 +1170,16 @@ mod tests {
                 &edited,
                 routed_expected,
                 routed_lookahead,
+                after.clone(),
+            ),
+            (
+                rewire_undo_path,
+                &edited,
+                routed_expected,
+                routed_lookahead,
                 after,
             ),
+            (rewired_path, &rewired, rewired_expected, 3, rewired_pcm),
         ] {
             let mut reopened = AppState::new();
             reopened.open_project_file(path).expect("fresh Unicode sidechain reopen");

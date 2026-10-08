@@ -1,5 +1,12 @@
 # UI System
 
+Shared Rack retained-input rows show the current source and a localized source
+selector. Options require the current Ready native observation, an editable old
+source, a matching stable input key and canonical stage-cycle/source-lock
+admission. Missing ports remain visible and removable; query cancellation or
+invalidation clears replacement options. Choosing a source carries the retained
+Route ID and expected old source through a closed observed rewire action.
+
 Shared Mixer and Inspector Rack input controls bind native labels through the
 current cached input observation. Stable bus keys remain the connection payload
 and persisted routing identity. Repeated effective labels include their bus key;

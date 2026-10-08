@@ -12,6 +12,8 @@ use mondrian_timeline::{
 pub(crate) struct SidechainRouteModel {
     pub(crate) route_id: AudioRouteId,
     pub(crate) source: AudioRouteSource,
+    pub(crate) source_label: String,
+    pub(crate) rewire_options: Vec<SidechainRewireOption>,
     pub(crate) bus_key: String,
     pub(crate) label: String,
     pub(crate) enabled: bool,
@@ -25,6 +27,12 @@ pub(crate) struct SidechainRouteModel {
 pub(crate) struct SidechainCreateOption {
     pub(crate) label: String,
     pub(crate) payload: crate::app::product_action::AudioProcessorInputConnectionPayload,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SidechainRewireOption {
+    pub(crate) label: String,
+    pub(crate) payload: crate::app::product_action::AudioProcessorInputRewirePayload,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -57,6 +65,8 @@ pub(crate) fn retained_routes(
             SidechainRouteModel {
                 route_id: route.id,
                 source: route.source,
+                source_label: source_label(sequence, route.source, localizer),
+                rewire_options: Vec::new(),
                 bus_key: route.bus_key.clone(),
                 label: format!(
                     "{} → {}",
@@ -143,6 +153,42 @@ pub(crate) fn input_options(
                 .collect(),
         })
         .collect()
+}
+
+pub(crate) fn bind_rewire_options(
+    routes: &mut [SidechainRouteModel],
+    inputs: &[SidechainInputModel],
+) {
+    for route in routes {
+        route.rewire_options = if route.is_editable {
+            inputs
+                .iter()
+                .flat_map(|input| &input.options)
+                .filter(|option| {
+                    option.payload.bus_key == route.bus_key && option.payload.source != route.source
+                })
+                .map(|option| SidechainRewireOption {
+                    label: option.label.clone(),
+                    payload: crate::app::product_action::AudioProcessorInputRewirePayload {
+                        connection: option.payload.clone(),
+                        route_id: route.route_id,
+                        expected_source: route.source,
+                    },
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+    }
+}
+
+pub(crate) fn rewire_action(option: &SidechainRewireOption) -> Action {
+    crate::app::product_action::ProductAction::Audio(
+        crate::app::product_action::AudioProductAction::RewireProcessorInput(
+            option.payload.clone(),
+        ),
+    )
+    .into_external_action()
 }
 
 pub(crate) fn bind_retained_input_names(
@@ -449,6 +495,76 @@ mod tests {
         .options
         .is_empty());
     }
+    #[test]
+    fn retained_source_options_require_editable_current_port_and_preserve_route_identity() {
+        let (mut sequence, id, source) = fixture();
+        let route = AudioProcessorSidechainRoute::new(source, id, "detector.7");
+        let route_id = route.id;
+        sequence.audio_program.sidechain_routes.push(route);
+        sequence
+            .audio_program
+            .sidechain_routes
+            .push(AudioProcessorSidechainRoute::new(source, id, "missing"));
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence.clone()));
+        let binding = crate::app::product_action::AudioProcessorInputBinding {
+            session_id: state.authoring_session_id().expect("Session"),
+            sequence_id: sequence.id,
+            target: mondrian_audio::AudioProcessorInputInspectionTarget::ChannelStrip {
+                owner: mondrian_timeline::AudioChannelStripOwner::ProgramOutput {
+                    output_id: sequence.audio_program.outputs[0].id,
+                },
+                rack: mondrian_timeline::AudioChannelStripRack::PreFader,
+            },
+            processor_id: id,
+            observation_id: mondrian_core::AudioProcessorInputObservationId::new(),
+        };
+        let contract = AudioProcessorAuxiliaryInputContract {
+            buses: vec![AudioProcessorAuxiliaryInputBusContract {
+                bus_key: "detector.7".into(),
+                channel_layout: AudioChannelLayout::Stereo,
+            }],
+        };
+        let admission =
+            mondrian_timeline::inspect_audio_route_candidates(&sequence).expect("routing");
+        let before = serde_json::to_value(&sequence).expect("snapshot");
+        for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+            let localizer = Localizer::new(locale).expect("locale");
+            let inputs = input_options(
+                &sequence,
+                binding,
+                &contract,
+                &[],
+                Some(&admission),
+                &localizer,
+            );
+            let mut routes = retained_routes(&sequence, id, &localizer);
+            bind_rewire_options(&mut routes, &inputs);
+            assert!(!routes[0].rewire_options.is_empty());
+            assert!(
+                routes[1].rewire_options.is_empty(),
+                "unavailable ports cannot silently rebind"
+            );
+            for option in &routes[0].rewire_options {
+                assert_eq!(option.payload.route_id, route_id);
+                assert_eq!(option.payload.expected_source, source);
+                assert_eq!(option.payload.connection.binding, binding);
+                assert_ne!(option.payload.connection.source, source);
+                assert!(crate::app::product_action::ProductAction::decode_external(
+                    &rewire_action(option)
+                )
+                .expect("codec")
+                .is_some());
+            }
+            routes[0].is_editable = false;
+            bind_rewire_options(&mut routes, &inputs);
+            assert!(routes[0].rewire_options.is_empty());
+            bind_rewire_options(&mut routes, &[]);
+            assert!(routes.iter().all(|route| route.rewire_options.is_empty()));
+            assert_eq!(serde_json::to_value(&sequence).expect("read only"), before);
+        }
+    }
+
     #[test]
     fn sidechain_names_disambiguate_native_labels_and_preserve_unavailable_routes() {
         let (mut sequence, id, source) = fixture();

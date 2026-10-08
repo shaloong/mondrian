@@ -121,12 +121,13 @@ pub(crate) fn expected_shortcut(hint: &str) -> String {
     }
 }
 
-/// Check the real shared Rack presentation and return its observed connection action.
-pub(crate) fn native_sidechain_connection_action(
+/// Check the real shared Rack and return an observed source creation or rewire action.
+pub(crate) fn native_sidechain_source_action(
     state: &crate::app::AppState,
     query: crate::app::product_action::AudioProcessorInputQueryPayload,
     source: mondrian_timeline::audio::AudioRouteSource,
     bus_key: &str,
+    retained_route: Option<mondrian_core::AudioRouteId>,
 ) -> mondrian_editor_state::Action {
     use super::audio_automation::AudioAutomationTimeContext;
     use super::audio_processor_rack::{bind_processor_input_queries, project_audio_processor_rack};
@@ -168,7 +169,23 @@ pub(crate) fn native_sidechain_connection_action(
             .find(|option| option.payload.source == source)
             .expect("causal native source admitted by shared Rack");
         assert_eq!(option.payload.binding, observed.binding);
-        connection = Some(super::audio_sidechain::connection_action(option));
+        connection = Some(if let Some(route_id) = retained_route {
+            let route = racks[0].processors[0]
+                .sidechain_routes
+                .iter()
+                .find(|route| route.route_id == route_id)
+                .expect("retained native route");
+            let option = route
+                .rewire_options
+                .iter()
+                .find(|option| option.payload.connection.source == source)
+                .expect("causal native replacement admitted by shared Rack");
+            assert_eq!(option.payload.connection.binding, observed.binding);
+            assert_eq!(option.payload.connection.bus_key, bus_key);
+            super::audio_sidechain::rewire_action(option)
+        } else {
+            super::audio_sidechain::connection_action(option)
+        });
     }
 
     connection.expect("shared named connection action")

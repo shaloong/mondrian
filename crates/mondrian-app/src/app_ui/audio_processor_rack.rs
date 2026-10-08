@@ -1326,6 +1326,9 @@ pub(crate) fn bind_processor_input_queries(
         };
         for processor in &mut rack.processors {
             processor.sidechain_inputs.clear();
+            for route in &mut processor.sidechain_routes {
+                route.rewire_options.clear();
+            }
             if processor.native_format.is_none() {
                 continue;
             }
@@ -1371,6 +1374,10 @@ pub(crate) fn bind_processor_input_queries(
                                 .as_ref()
                         }),
                         localizer,
+                    );
+                    super::audio_sidechain::bind_rewire_options(
+                        &mut processor.sidechain_routes,
+                        &processor.sidechain_inputs,
                     );
                     let status = if inputs.auxiliary_inputs.buses.is_empty() {
                         localizer.text("audio-input-none")

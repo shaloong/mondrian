@@ -814,6 +814,167 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn observed_input_rewire_preserves_route_controls_and_one_undo() {
+        let (mut state, queries, calls, _, _) = observed_native_fixture();
+        let connection = connection_payload(&state, queries[0]);
+        state
+            .dispatch_action(
+                ProductAction::Audio(AudioProductAction::ConnectProcessorInput(
+                    connection.clone(),
+                ))
+                .into_external_action(),
+            )
+            .expect("Initial connection");
+        let precise_gain = -3.123_456_789_123;
+        let route = &mut state
+            .active_sequence_mut_uncommitted()
+            .expect("Sequence")
+            .audio_program
+            .sidechain_routes[0];
+        route.gain_db = precise_gain;
+        let mut curve = mondrian_core::ExactAutomationCurve::new(
+            mondrian_core::ParameterId::new_static(
+                mondrian_timeline::audio::ROUTE_GAIN_DB_PARAMETER_ID,
+            ),
+            precise_gain,
+        )
+        .expect("gain curve");
+        for (time, value) in [
+            (mondrian_core::TimelineTime::ZERO, precise_gain),
+            (mondrian_core::TimelineTime::ONE, -7.5),
+        ] {
+            curve
+                .set_keyframe(mondrian_core::ExactAutomationKeyframe::linear(time, value))
+                .expect("key");
+        }
+        route.gain_automation = Some(curve);
+        route.enabled = false;
+        let before = state.active_sequence().expect("Sequence").clone();
+        let route = before.audio_program.sidechain_routes[0].clone();
+        let mut next = connection;
+        next.source = mondrian_timeline::audio::AudioRouteSource::Track {
+            track_id: before.audio_tracks[1].id,
+            port: mondrian_timeline::audio::AudioChannelStripOutputPort::PreFader,
+        };
+        let action = mondrian_editor_state::Action::Custom {
+            namespace: super::super::product_action::AUDIO_NAMESPACE.to_owned(),
+            name: "rewire_processor_input".to_owned(),
+            payload: serde_json::json!({
+                "connection": next,
+                "route_id": route.id,
+                "expected_source": route.source,
+            }),
+        };
+        assert!(
+            ProductAction::decode_external(&action).expect("Codec").is_some(),
+            "Shared Rack rewire requires a closed product action"
+        );
+        let generation = state.project_author_generation();
+        let history = state.authoring_history().expect("History").diagnostics();
+        state.dispatch_action(action.clone()).expect("Atomic source rewire");
+        let after = state.active_sequence().expect("Sequence").clone();
+        let mut expected = route;
+        expected.source = next.source;
+        assert_eq!(&after.audio_program.sidechain_routes[..], &[expected]);
+        assert_eq!(state.project_author_generation(), generation + 1);
+        assert_eq!(
+            state.authoring_history().expect("History").diagnostics().undo_entries,
+            history.undo_entries + 1
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "Dispatch does not probe");
+        assert!(state.undo_timeline().expect("One rewire Undo"));
+        assert!(state
+            .active_sequence()
+            .expect("Undo")
+            .author_state_eq_ignoring_revision(&before));
+        assert!(state.redo_timeline().expect("Rewire Redo"));
+        assert!(state.active_sequence().expect("Redo").author_state_eq_ignoring_revision(&after));
+        let generation = state.project_author_generation();
+        let history = state.authoring_history().expect("History").diagnostics();
+        state
+            .dispatch_action(action)
+            .expect_err("Stale original source must not overwrite rewire");
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(
+            state.authoring_history().expect("History").diagnostics(),
+            history
+        );
+        assert!(state
+            .active_sequence()
+            .expect("Refused")
+            .author_state_eq_ignoring_revision(&after));
+    }
+
+    #[test]
+    fn observed_input_rewire_refuses_changed_routes_and_preserves_noop_history() {
+        use super::super::product_action::AudioProcessorInputRewirePayload;
+        for scenario in 0..5 {
+            let (mut state, queries, calls, _, _) = observed_native_fixture();
+            let connection = connection_payload(&state, queries[0]);
+            state
+                .dispatch_action(
+                    ProductAction::Audio(AudioProductAction::ConnectProcessorInput(
+                        connection.clone(),
+                    ))
+                    .into_external_action(),
+                )
+                .expect("Initial route");
+            let route = state.active_sequence().expect("Sequence").audio_program.sidechain_routes
+                [0]
+            .clone();
+            let mut payload = AudioProcessorInputRewirePayload {
+                connection,
+                route_id: route.id,
+                expected_source: route.source,
+            };
+            match scenario {
+                0 => payload.route_id = mondrian_core::AudioRouteId::new(),
+                1 => state
+                    .active_sequence_mut_uncommitted()
+                    .expect("Sequence")
+                    .audio_program
+                    .sidechain_routes
+                    .clear(),
+                2 => {
+                    state
+                        .active_sequence_mut_uncommitted()
+                        .expect("Sequence")
+                        .audio_program
+                        .sidechain_routes[0]
+                        .bus_key = "detector.11".into()
+                }
+                3 => {
+                    payload.expected_source = mondrian_timeline::audio::AudioRouteSource::Track {
+                        track_id: state.active_sequence().expect("Sequence").audio_tracks[1].id,
+                        port: mondrian_timeline::audio::AudioChannelStripOutputPort::PostMute,
+                    }
+                }
+                4 => {}
+                _ => unreachable!("closed scenarios"),
+            }
+            let before = state.active_sequence().expect("Sequence").clone();
+            let generation = state.project_author_generation();
+            let history = state.authoring_history().expect("History").diagnostics();
+            let result = state.dispatch_action(
+                ProductAction::Audio(AudioProductAction::RewireProcessorInput(payload))
+                    .into_external_action(),
+            );
+            assert_eq!(
+                result.is_ok(),
+                scenario == 4,
+                "only unchanged source is a successful no-op"
+            );
+            assert_eq!(state.project_author_generation(), generation);
+            assert_eq!(
+                state.authoring_history().expect("History").diagnostics(),
+                history
+            );
+            assert_eq!(state.active_sequence().expect("Sequence"), &before);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
     fn observed_input_connection_dispatch_preserves_receipt_multiple_routes_and_undo() {
         let (mut state, queries, calls, _, _) = observed_native_fixture();
         let payload = connection_payload(&state, queries[0]);
@@ -873,125 +1034,178 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn observed_input_connection_refuses_stale_unavailable_and_locked_intents_atomically() {
-        for scenario in 0..14 {
-            let (mut state, queries, calls, started, release) = observed_native_fixture();
-            let mut payload = connection_payload(&state, queries[0]);
-            match scenario {
-                0 => {
+    fn observed_input_connections_and_rewires_refuse_stale_unavailable_and_locked_intents_atomically(
+    ) {
+        for rewire in [false, true] {
+            for scenario in 0..15 {
+                let (mut state, queries, calls, started, release) = observed_native_fixture();
+                let mut payload = connection_payload(&state, queries[0]);
+                let retained = if rewire {
                     state
-                        .active_sequence_mut_uncommitted()
-                        .expect("Sequence")
-                        .audio_program
-                        .outputs[0]
-                        .strip
-                        .pre_fader
-                        .processors[0]
-                        .opaque_state = Some(vec![31, 7].into())
-                }
-                1 => state.audio_sample_rate += 1,
-                2 => state.audio_input_observations.invalidate(),
-                3 => {
-                    let sequence = state.active_sequence().expect("Sequence").clone();
-                    state.test_set_sequence(None);
-                    state.test_set_sequence(Some(sequence));
-                }
-                4 => {
-                    payload.binding.observation_id =
-                        mondrian_core::AudioProcessorInputObservationId::new()
-                }
-                5 => payload.bus_key = "missing.port".to_owned(),
-                6 => {
+                        .dispatch_action(
+                            ProductAction::Audio(AudioProductAction::ConnectProcessorInput(
+                                payload.clone(),
+                            ))
+                            .into_external_action(),
+                        )
+                        .expect("Initial retained connection");
+                    let route =
+                        state.active_sequence().expect("Sequence").audio_program.sidechain_routes
+                            [0]
+                        .clone();
                     payload.source = mondrian_timeline::audio::AudioRouteSource::Track {
-                        track_id: mondrian_core::TrackId::new(),
-                        port: mondrian_timeline::audio::AudioChannelStripOutputPort::PostMute,
-                    }
-                }
-                7 => {
-                    state.active_sequence_mut_uncommitted().expect("Sequence").audio_tracks[0]
-                        .is_locked = true
-                }
-                8 | 9 => {
-                    state.query_audio_processor_inputs(queries[0]).expect("Refresh");
-                    started.recv_timeout(Duration::from_secs(2)).expect("Refresh entered");
-                    if scenario == 9 {
-                        release.send(()).expect("Refresh complete");
-                        finish(&mut state);
-                        assert_ne!(
-                            connection_payload(&state, queries[0]).binding.observation_id,
-                            payload.binding.observation_id
-                        );
-                    }
-                }
-                10 => {
-                    state
-                        .active_sequence_mut_uncommitted()
-                        .expect("Sequence")
-                        .audio_program
-                        .outputs[0]
-                        .strip
-                        .pre_fader
-                        .processors[0]
-                        .definition = mondrian_timeline::audio::AudioProcessorDefinitionRef::Clap {
-                        plugin_id: "fixture.missing".to_owned(),
-                        schema_version: 1,
-                        binary_sha256: Some([7; 32]),
+                        track_id: state.active_sequence().expect("Sequence").audio_tracks[1].id,
+                        port: mondrian_timeline::audio::AudioChannelStripOutputPort::PreFader,
                     };
-                    state.query_audio_processor_inputs(queries[0]).expect("Inspect unavailable");
-                    started.recv_timeout(Duration::from_secs(2)).expect("Missing resolver entered");
-                    release.send(()).expect("Failure complete");
-                    finish(&mut state);
-                    assert!(matches!(
-                        state.audio_processor_input_observation(queries[0]),
-                        AudioInputObservation::Failed(_)
-                    ));
-                }
-                11 => state.audio_input_observations.cancel(&queries[0]),
-                12 => payload.binding.sequence_id = mondrian_core::SequenceId::new(),
-                13 => {
-                    payload.binding.target = AudioProcessorInputInspectionTarget::ChannelStrip {
-                        owner: mondrian_timeline::AudioChannelStripOwner::ProgramOutput {
-                            output_id: state
-                                .active_sequence()
-                                .expect("Sequence")
-                                .audio_program
-                                .outputs[0]
-                                .id,
-                        },
-                        rack: mondrian_timeline::AudioChannelStripRack::PostFader,
+                    Some(route)
+                } else {
+                    None
+                };
+                match scenario {
+                    0 => {
+                        state
+                            .active_sequence_mut_uncommitted()
+                            .expect("Sequence")
+                            .audio_program
+                            .outputs[0]
+                            .strip
+                            .pre_fader
+                            .processors[0]
+                            .opaque_state = Some(vec![31, 7].into())
                     }
+                    1 => state.audio_sample_rate += 1,
+                    2 => state.audio_input_observations.invalidate(),
+                    3 => {
+                        let sequence = state.active_sequence().expect("Sequence").clone();
+                        state.test_set_sequence(None);
+                        state.test_set_sequence(Some(sequence));
+                    }
+                    4 => {
+                        payload.binding.observation_id =
+                            mondrian_core::AudioProcessorInputObservationId::new()
+                    }
+                    5 => payload.bus_key = "missing.port".to_owned(),
+                    6 => {
+                        payload.source = mondrian_timeline::audio::AudioRouteSource::Track {
+                            track_id: mondrian_core::TrackId::new(),
+                            port: mondrian_timeline::audio::AudioChannelStripOutputPort::PostMute,
+                        }
+                    }
+                    7 => {
+                        state.active_sequence_mut_uncommitted().expect("Sequence").audio_tracks[0]
+                            .is_locked = true
+                    }
+                    8 | 9 => {
+                        state.query_audio_processor_inputs(queries[0]).expect("Refresh");
+                        started.recv_timeout(Duration::from_secs(2)).expect("Refresh entered");
+                        if scenario == 9 {
+                            release.send(()).expect("Refresh complete");
+                            finish(&mut state);
+                            assert_ne!(
+                                connection_payload(&state, queries[0]).binding.observation_id,
+                                payload.binding.observation_id
+                            );
+                        }
+                    }
+                    10 => {
+                        state
+                            .active_sequence_mut_uncommitted()
+                            .expect("Sequence")
+                            .audio_program
+                            .outputs[0]
+                            .strip
+                            .pre_fader
+                            .processors[0]
+                            .definition =
+                            mondrian_timeline::audio::AudioProcessorDefinitionRef::Clap {
+                                plugin_id: "fixture.missing".to_owned(),
+                                schema_version: 1,
+                                binary_sha256: Some([7; 32]),
+                            };
+                        state
+                            .query_audio_processor_inputs(queries[0])
+                            .expect("Inspect unavailable");
+                        started
+                            .recv_timeout(Duration::from_secs(2))
+                            .expect("Missing resolver entered");
+                        release.send(()).expect("Failure complete");
+                        finish(&mut state);
+                        assert!(matches!(
+                            state.audio_processor_input_observation(queries[0]),
+                            AudioInputObservation::Failed(_)
+                        ));
+                    }
+                    11 => state.audio_input_observations.cancel(&queries[0]),
+                    12 => payload.binding.sequence_id = mondrian_core::SequenceId::new(),
+                    13 => {
+                        payload.binding.target = AudioProcessorInputInspectionTarget::ChannelStrip {
+                            owner: mondrian_timeline::AudioChannelStripOwner::ProgramOutput {
+                                output_id: state
+                                    .active_sequence()
+                                    .expect("Sequence")
+                                    .audio_program
+                                    .outputs[0]
+                                    .id,
+                            },
+                            rack: mondrian_timeline::AudioChannelStripRack::PostFader,
+                        }
+                    }
+                    14 => {
+                        let sequence = state.active_sequence_mut_uncommitted().expect("Sequence");
+                        payload.source = mondrian_timeline::audio::AudioRouteSource::Track {
+                            track_id: sequence.audio_tracks[1].id,
+                            port: mondrian_timeline::audio::AudioChannelStripOutputPort::PreFader,
+                        };
+                        sequence.audio_tracks[1].is_locked = true;
+                    }
+                    _ => unreachable!("Closed scenario matrix"),
                 }
-                _ => unreachable!("Closed scenario matrix"),
-            }
-            let before =
-                serde_json::to_vec(state.active_sequence().expect("Sequence")).expect("Snapshot");
-            let generation = state.project_author_generation();
-            let calls_before = calls.load(Ordering::SeqCst);
-            let action = ProductAction::Audio(AudioProductAction::ConnectProcessorInput(payload))
+                let before = serde_json::to_vec(state.active_sequence().expect("Sequence"))
+                    .expect("Snapshot");
+                let generation = state.project_author_generation();
+                let calls_before = calls.load(Ordering::SeqCst);
+                let history = state.authoring_history().expect("History").diagnostics();
+                let action = ProductAction::Audio(if let Some(route) = retained {
+                    AudioProductAction::RewireProcessorInput(
+                        super::super::product_action::AudioProcessorInputRewirePayload {
+                            connection: payload,
+                            route_id: route.id,
+                            expected_source: route.source,
+                        },
+                    )
+                } else {
+                    AudioProductAction::ConnectProcessorInput(payload)
+                })
                 .into_external_action();
-            assert!(
-                state.dispatch_action(action).is_err(),
-                "scenario {scenario}"
-            );
-            assert_eq!(
-                serde_json::to_vec(state.active_sequence().expect("Sequence")).expect("Snapshot"),
-                before,
-                "scenario {scenario}"
-            );
-            assert_eq!(
-                state.project_author_generation(),
-                generation,
-                "scenario {scenario}"
-            );
-            assert_eq!(
-                calls.load(Ordering::SeqCst),
-                calls_before,
-                "No implicit native probe"
-            );
-            assert!(!state.undo_timeline().expect("No rejected history item"));
-            if scenario == 8 {
-                release.send(()).expect("Pending refresh complete");
-                finish(&mut state);
+                assert!(
+                    state.dispatch_action(action).is_err(),
+                    "scenario {scenario}"
+                );
+                assert_eq!(
+                    serde_json::to_vec(state.active_sequence().expect("Sequence"))
+                        .expect("Snapshot"),
+                    before,
+                    "scenario {scenario}"
+                );
+                assert_eq!(
+                    state.project_author_generation(),
+                    generation,
+                    "scenario {scenario}"
+                );
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    calls_before,
+                    "No implicit native probe"
+                );
+                assert_eq!(
+                    state.authoring_history().expect("History").diagnostics(),
+                    history,
+                    "Rejected intent preserves all retained history"
+                );
+                if scenario == 8 {
+                    release.send(()).expect("Pending refresh complete");
+                    finish(&mut state);
+                }
             }
         }
     }

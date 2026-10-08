@@ -1445,3 +1445,5 @@ audio-sidechain-status = 侧链状态
 audio-sidechain-controls = 侧链控制
 audio-sidechain-disconnect = 断开来源
 audio-sidechain-missing-track = 缺失轨道 · { $identity }
+
+audio-sidechain-source = 来源

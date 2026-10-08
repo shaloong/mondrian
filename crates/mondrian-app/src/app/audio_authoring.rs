@@ -67,6 +67,9 @@ impl AppState {
         action: AudioProductAction,
     ) -> Result<()> {
         match action {
+            AudioProductAction::RewireProcessorInput(payload) => {
+                self.rewire_observed_processor_input(payload)
+            }
             AudioProductAction::ConnectProcessorInput(payload) => {
                 self.connect_observed_processor_input(payload)
             }
@@ -485,12 +488,13 @@ impl AppState {
         Ok(())
     }
 
-    fn connect_observed_processor_input(
-        &mut self,
-        payload: super::product_action::AudioProcessorInputConnectionPayload,
+    fn admit_observed_processor_input(
+        &self,
+        payload: &super::product_action::AudioProcessorInputConnectionPayload,
+        step_id: &str,
     ) -> Result<()> {
         let failure = |reason: &str| MondrianError::WorkflowStepFailed {
-            step_id: "audio_connect_processor_input".to_owned(),
+            step_id: step_id.to_owned(),
             reason: reason.to_owned(),
         };
         let super::audio_input_observation::AudioInputObservation::Ready(observed) =
@@ -516,11 +520,51 @@ impl AppState {
                 "Requested auxiliary input is absent from the observed contract",
             ));
         }
+        Ok(())
+    }
+
+    fn connect_observed_processor_input(
+        &mut self,
+        payload: super::product_action::AudioProcessorInputConnectionPayload,
+    ) -> Result<()> {
+        self.admit_observed_processor_input(&payload, "audio_connect_processor_input")?;
         self.edit_audio_routing(AudioRoutingEditRequest {
             edit: mondrian_timeline::AudioRoutingEdit::CreateProcessorSidechain {
                 source: payload.source,
                 processor_id: payload.binding.processor_id,
                 bus_key: payload.bus_key,
+            },
+        })
+    }
+
+    fn rewire_observed_processor_input(
+        &mut self,
+        payload: super::product_action::AudioProcessorInputRewirePayload,
+    ) -> Result<()> {
+        let failure = |reason: &str| MondrianError::WorkflowStepFailed {
+            step_id: "audio_rewire_processor_input".to_owned(),
+            reason: reason.to_owned(),
+        };
+        self.admit_observed_processor_input(&payload.connection, "audio_rewire_processor_input")?;
+        let sequence = self.active_sequence().ok_or_else(|| failure("No active Sequence"))?;
+        let inspected =
+            mondrian_timeline::inspect_audio_processor_sidechain(sequence, payload.route_id)
+                .map_err(|error| failure(&error.to_string()))?;
+        let route = inspected.route();
+        if route.source != payload.expected_source
+            || route.processor_id != payload.connection.binding.processor_id
+            || route.bus_key != payload.connection.bus_key
+        {
+            return Err(failure(
+                "Processor input Route has changed; refresh the source menu",
+            ));
+        }
+        self.edit_audio_routing(AudioRoutingEditRequest {
+            edit: mondrian_timeline::AudioRoutingEdit::SetProcessorSidechainEndpoints {
+                route_id: payload.route_id,
+                source: payload.connection.source,
+                processor_id: payload.connection.binding.processor_id,
+                bus_key: payload.connection.bus_key,
             },
         })
     }

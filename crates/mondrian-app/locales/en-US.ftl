@@ -1513,3 +1513,5 @@ audio-sidechain-status = Sidechain status
 audio-sidechain-controls = Sidechain controls
 audio-sidechain-disconnect = Disconnect source
 audio-sidechain-missing-track = Missing track · { $identity }
+
+audio-sidechain-source = Source
