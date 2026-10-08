@@ -1752,7 +1752,7 @@ pub(super) fn with_audio_processor_rack_sections(
                 ));
             }
             for parameter in &processor.parameters {
-                let label = audio_processor_parameter_label(parameter);
+                let label = audio_processor_parameter_label(parameter, localizer);
                 if parameter.keyframe_count > 0 {
                     section = section.with_row(PropertyRow::new(
                         label.clone(),
@@ -1936,19 +1936,23 @@ pub(super) fn with_audio_processor_rack_sections(
     panel
 }
 
+/// Format parameter units using localized words and standard scientific symbols.
 pub(super) fn audio_processor_parameter_label(
     parameter: &crate::app_ui::audio_processor_rack::AudioProcessorParameterModel,
+    localizer: &Localizer,
 ) -> String {
-    let unit = match parameter.schema.unit {
-        ParameterUnit::Decibels => "dB",
-        ParameterUnit::Milliseconds => "ms",
-        ParameterUnit::Samples => "samples",
-        ParameterUnit::Percent => "%",
-        ParameterUnit::Degrees => "°",
-        ParameterUnit::Pixels => "px",
-        ParameterUnit::Stops => "stops",
-        ParameterUnit::Nits => "nits",
-        ParameterUnit::Unitless | ParameterUnit::Normalized | ParameterUnit::TimelineTime => "",
+    let unit: std::borrow::Cow<'_, str> = match parameter.schema.unit {
+        ParameterUnit::Decibels => "dB".into(),
+        ParameterUnit::Milliseconds => "ms".into(),
+        ParameterUnit::Samples => localizer.text("parameter-unit-samples").into(),
+        ParameterUnit::Percent => "%".into(),
+        ParameterUnit::Degrees => "°".into(),
+        ParameterUnit::Pixels => "px".into(),
+        ParameterUnit::Stops => localizer.text("parameter-unit-stops").into(),
+        ParameterUnit::Nits => localizer.text("parameter-unit-nits").into(),
+        ParameterUnit::Unitless | ParameterUnit::Normalized | ParameterUnit::TimelineTime => {
+            "".into()
+        }
     };
     if unit.is_empty() {
         parameter.label.clone()

@@ -4210,6 +4210,9 @@ including routes into a Processing Scope; a Scope parameter viewport must not
 reinterpret a route's time. Automated gain refuses scalar replacement. Source
 locks remain authoritative even for unavailable native inputs, and editing a
 curve does not require a native input observation or load a plugin.
+The shared Rack formats linguistic parameter units through the current Localizer
+and Fluent catalogs (samples, exposure stops and nits); standard symbols such as
+dB, ms and percent remain invariant. Native parameter names stay plugin-owned.
 Native cached input contracts offer additive source menus, admitted by Timeline
 complete retained routing graph and source locks. Projection loads no native
 factory and creates no alternate author/routing state.
