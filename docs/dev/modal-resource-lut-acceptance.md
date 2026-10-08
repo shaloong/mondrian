@@ -1,5 +1,70 @@
 # Modal, resource and LUT acceptance
 
+## Stage-aware main and auxiliary compensation: current qualification
+
+Clean source `9f0183a0220a578d5cd8ba3c4b1a7d8ee0f25ca8` passed the
+2026-10-08 Windows qualification. Late detector input now aligns the processor's
+main input instead of refusing preparation. The sole causal stage schedule solves
+all input arrivals; fixed Session-owned delay lines obey existing storage and
+lookahead budgets and reset on every epoch. No second mixer or latency authority
+was added. A real Scope regression exposed an incorrect block-prefix auxiliary
+slice and pre-Clip output leakage; both were corrected against the original PCM
+reference.
+
+Audio source regressions passed **122**, with **15 native cases ignored by the
+ordinary source run**. New independent varying-PCM references cover main latency
+0/2/4 versus detector latency 2, Scope starts 0/3, multiple detector routes into
+one input, realtime/offline, scalar/SIMD, whole/partitioned blocks and seek.
+Exact compensation budgets admit the realized Session; one byte less refuses.
+The original summing-point/port and malformed-causality regressions are retained.
+Full workspace/all-target/all-feature Clippy with `-D warnings`, fmt and diff
+checks passed before the production commit.
+
+The product was rebuilt in **614,791 ms**. Source stayed clean and all six
+captured binary hashes stayed stable throughout these selected gates:
+
+| Gate | Passed | Test runtime |
+| --- | ---: | ---: |
+| Native CLAP/VST3 bus/state/delay/partition contracts | 2 | 10.34 s |
+| Observed Rack connection, native PCM, Undo/save/Redo/fresh reopen | 6 | 64.38 s |
+| Current input observations and stale/locked refusal | 9 | 3.47 s |
+| Shared sidechain controls | 4 | 0.34 s |
+| Rack / Mixer | 11 / 8 | 0.27 / 1.28 s |
+| Native resource helpers and cancellation | 5 | 8.72 s |
+| Modal Tab containment / event owner lifecycle | 16 / 1 | 23.11 / 0.00 s |
+| Resource transactions, archive and real LUT output | 103 (5 ignored) | 24.59 s |
+| Portable LUT/OCIO/media dependencies and output | 11 | 8.52 s |
+| Native constrained group Undo/save/reopen PCM | 2 | 167.35 s |
+
+The resource run's five ignored cases were run explicitly in the native helper
+gate. CLAP and VST3 each add a detector with its own three-frame native latency:
+connecting it changes public lookahead from **3 to 6**, while preserving the
+independent **0.4375** audible PCM reference. One Undo restores lookahead 3;
+saving preserves live Redo and both Unicode archives reopen with the expected
+sound. Existing same-strip and external-detector references also pass.
+
+The full Complete Golden gate was rerun on this source and passed **3/3**.
+Every round passed all seven stages, used distinct run/project identities and
+exited naturally with code 0; none was forced after its report. The aggregate is
+baseline eligible with clean stable source. Runtime was 122,250 / 118,198 /
+117,845 ms. This is correctness/workflow evidence, not throughput or zero-copy
+qualification.
+
+- Product SHA256: `bc34cb3b99706b559a500dd6697820fcb1d0b9afcb1b70acd40d5df58eeeb380`.
+- Native receipt: `.scratch/curve-viewport/stage-pdc-native-acceptance.json`,
+  SHA256 `cbe244ff123703a626dad99cbe14540f3048b77bacb943184c1433db0ffd7813`;
+  twelve step-log hashes verified.
+- Golden aggregate: `E:/dev/mondrian/target/validation/nle-backlog-complete/20261008T040426Z-complete-golden-42642b5a/complete-golden-consecutive-report.json`,
+  SHA256 `f36a24d7399831dcedb182149e069986508df6e6a305f8b4233cebafdac492e3`;
+  all three report hashes verified.
+- Golden runner SHA256: `c773e3c3908afeae14c99771c70f1ab9470355dc62c2cbb36ac4c2a9fc0ae9f0`.
+
+The original full NLE goal remains active. Broader main/auxiliary layouts,
+retained-source rewiring and gain-curve UI, full Host/Scope interactions,
+MIDI/editors, vendor/platform/performance matrices, remaining i18n and current
+full workspace/CI runtime qualification remain open. No push was performed.
+Historical reports below keep their original source attribution.
+
 ## Native input names and current modal/resource/output qualification
 
 Clean source `123a186d94bc9026d5573dfb3d7bc831264c7677` passed the 2026-10-08

@@ -1,5 +1,13 @@
 # Audio pipeline
 
+Clean source `9f0183a` qualifies stage-aware main/auxiliary compensation with
+122 source audio regressions, actual CLAP/VST3 late-detector Undo/save/reopen
+PCM and three complete Golden rounds. The native late detector increases public
+lookahead from 3 to 6 without moving author-time sound. Full evidence and scope
+limits are in [modal/resource/output acceptance](../dev/modal-resource-lut-acceptance.md).
+Broader layouts and complete Host/Scope product interactions remain separate
+obligations.
+
 Native auxiliary input names are bounded preparation metadata, keyed separately
 from the execution bus contract. CLAP reads restored deactivated audio ports;
 VST3 reads the validated activated bus metadata. The worker's exact version 2
