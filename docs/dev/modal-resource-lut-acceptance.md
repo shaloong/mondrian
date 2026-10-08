@@ -1,5 +1,67 @@
 # Modal, resource and LUT acceptance
 
+## Sidechain gain curves and current modal/resource/LUT qualification
+
+Clean source `538ae6182d4b971837c527ef33640d8d83c5438b` passed the
+2026-10-08 Windows qualification. Inspector and Mixer expose retained sidechain
+gain curves through the existing exact `RouteGain` authoring path and common
+curve widget. Sequence time remains authoritative for routes into Processing
+Scopes: a tested Scope binding at 5–6 seconds does not change its route gain's
+Sequence viewport at 0–1 second. Source locks, unavailable native inputs,
+scalar-edit refusal under automation and selected-key projection remain canonical.
+
+The actual panel gesture test runs English, Chinese and pseudo locales. Escape
+cancels insertion without history; committed insertion and keyboard value nudge
+retain exact key identity and form separate reversible edits. Source gates passed
+sidechain **10** (**6 native cases run separately**) and shared automation **11**.
+Strict workspace/all-target/all-feature Clippy with `-D warnings` passed in
+**2 min 10 s**, with fmt and diff checks before the local Shalom Wang commit.
+
+The native precheck first caught a test-helper error: a bounded transfer-point
+constructor clamped negative dB. The helper now uses absolute author coordinates,
+then the actual shared selection menu to choose Linear from default Hold.
+The independent output oracle was retained:
+`0.25 + 0.046875 * 10^(db(t)/20)`, where
+`db(t) = -6.020599913279624 * (1 - t)` and `t = sample/48000`.
+The owned CLAP/VST3 fixtures independently weight main and detector inputs by
+2 and 3, with plugin gain 0.5. All six native scenarios verify 257 delivered
+stereo samples, realtime/offline partition equality, seek/reset at sample 93,
+two key insertions plus the Linear-menu edit with three Undo/Redo steps,
+save after Undo retaining live Redo, and two fresh Unicode gain archives.
+Their existing source-switch checks and four source/history archives also run.
+
+The current product rebuilt in **505,315 ms**. All thirteen selected gates passed:
+
+| Gate | Passed | Test runtime |
+| --- | ---: | ---: |
+| Native SDK bus/state/delay/partition references | 2 | 10.55 s |
+| Native sidechain/source/gain/history/reopen/output | 6 | 158.15 s |
+| Actual localized gain-panel gesture | 1 | 2.76 s |
+| Observation admission and refusal | 11 | 6.28 s |
+| Shared sidechain controls | 6 | 0.56 s |
+| Shared Rack, including Scope/Sequence time separation | 12 | 0.28 s |
+| Mixer projection and admission | 8 | 1.37 s |
+| Real native resource inspection/cancellation/reopen | 5 | 8.67 s |
+| Modal Tab/focus/resources/startup | 16 | 24.60 s |
+| Event modal replacement/empty/removal | 1 | 0.00 s |
+| Resource transactions and real LUT output | 103 (5 ignored here, executed above) | 25.20 s |
+| Portable LUT/OCIO/media and source-removal output | 11 | 9.13 s |
+| Native Auto/Continuous Bézier history and output | 2 | 172.42 s |
+
+Receipt: `.scratch/curve-viewport/sidechain-gain-curve-native-acceptance.json`,
+SHA-256 `61C7D081546EC67CD68CB1871E2517528079900DF163E2745AB8CA6A98E798A2`.
+All thirteen log hashes and six stable binary hashes were independently checked.
+Product SHA-256:
+`81422D77110F4D57F0957C3531796836534934565CE98E3314CEE8F6C58BCADB`.
+Source remained clean and unchanged throughout. Nothing was pushed.
+
+This qualifies these named model, real-widget, authoring and native-output paths.
+The full physical Host/Scope interaction matrix, broader native layouts/vendors,
+MIDI/editors, remaining i18n, OpenFX contexts, platform/device and performance
+matrices, full workspace runtime tests and current remote CI remain open.
+Complete Golden 3/3 remains bound to `9f0183a`, not relabelled as `538ae61`.
+The overall NLE goal is not complete.
+
 ## Observed source switching and current native workflow qualification
 
 Clean source `718696eace2812200ec6efae3c9f88d4f289b6a5` passed the
