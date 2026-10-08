@@ -4213,6 +4213,14 @@ curve does not require a native input observation or load a plugin.
 The shared Rack formats linguistic parameter units through the current Localizer
 and Fluent catalogs (samples, exposure stops and nits); standard symbols such as
 dB, ms and percent remain invariant. Native parameter names stay plugin-owned.
+
+Scope input inspection binds the exact Track/Clip/Component occurrence as well
+as the shared Scope and processor. Another valid occurrence cannot reuse its
+receipt; deleting or rebinding the selected occurrence refuses connection and
+rewiring while other materializations remain. Native workflow references include
+Scope bindings at 5 and 7 seconds over overlapping Sequence placements at 0–1
+second. VST3 uses distinct Scope-time gains; the state-only CLAP reference uses
+distinct placement gain. Route gain curves retain Sequence signal time in both.
 Native cached input contracts offer additive source menus, admitted by Timeline
 complete retained routing graph and source locks. Projection loads no native
 factory and creates no alternate author/routing state.

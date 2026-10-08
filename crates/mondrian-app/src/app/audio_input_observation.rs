@@ -813,6 +813,183 @@ pub(crate) mod tests {
         }
     }
 
+    fn observed_native_scope_fixture() -> Fixture {
+        let (mut state, mut queries, calls, started, release) = fixture(1);
+        let sequence = state.active_sequence_mut_uncommitted().expect("Sequence");
+        let mut processor = sequence.audio_program.outputs[0].strip.pre_fader.processors.remove(0);
+        processor.definition = mondrian_timeline::audio::AudioProcessorDefinitionRef::Clap {
+            plugin_id: "fixture.inputs".to_owned(),
+            schema_version: 1,
+            binary_sha256: Some([7; 32]),
+        };
+        let track_id = sequence.audio_tracks[0].id;
+        sequence
+            .add_media_audio_clip(
+                track_id,
+                mondrian_timeline::Clip::new(
+                    mondrian_core::AssetId::new(),
+                    mondrian_core::TimelineTime::ZERO,
+                    mondrian_core::TimelineTime::ONE,
+                )
+                .expect("Clip"),
+                mondrian_core::AudioSourceComponentId::primary(),
+            )
+            .expect("Scope occurrence");
+        let clip = &mut sequence.audio_tracks[0].clips[0];
+        clip.audio_components[0].processing.scope_in =
+            mondrian_core::TimelineTime::new(5, 1).expect("Scope time");
+        let scope_id = clip.audio_components[0].processing.scope_id;
+        let occurrence = mondrian_timeline::AudioComponentAddress {
+            track_id,
+            clip_id: clip.id,
+            edit_id: clip.audio_components[0].id,
+        };
+        let mut other = clip.clone();
+        other.id = mondrian_core::ClipId::new();
+        for edit in &mut other.audio_components {
+            edit.id = mondrian_core::AudioComponentEditId::new();
+            edit.processing.scope_in =
+                mondrian_core::TimelineTime::new(7, 1).expect("other Scope time");
+        }
+        sequence.audio_tracks[0].clips.push(other);
+        sequence
+            .audio_program
+            .processing_scopes
+            .iter_mut()
+            .find(|scope| scope.id == scope_id)
+            .expect("Scope")
+            .processors
+            .processors
+            .push(processor);
+        sequence.add_audio_track();
+        queries[0].target =
+            AudioProcessorInputInspectionTarget::ProcessingScope { scope_id, occurrence };
+        state.query_audio_processor_inputs(queries[0]).expect("Scope inspection");
+        started.recv_timeout(Duration::from_secs(2)).expect("Resolver entered");
+        release.send(()).expect("Scope inspection complete");
+        finish(&mut state);
+        (state, queries, calls, started, release)
+    }
+
+    #[test]
+    fn observed_input_scope_connections_and_rewires_refuse_wrong_deleted_and_rebound_occurrences() {
+        for rewire in [false, true] {
+            for scenario in 0..7 {
+                let (mut state, queries, calls, _, _) = observed_native_scope_fixture();
+                let mut payload = connection_payload(&state, queries[0]);
+                payload.source = mondrian_timeline::audio::AudioRouteSource::Track {
+                    track_id: state.active_sequence().expect("Sequence").audio_tracks[1].id,
+                    port: mondrian_timeline::audio::AudioChannelStripOutputPort::PostMute,
+                };
+                let retained = if rewire {
+                    state
+                        .dispatch_action(
+                            ProductAction::Audio(AudioProductAction::ConnectProcessorInput(
+                                payload.clone(),
+                            ))
+                            .into_external_action(),
+                        )
+                        .expect("current Scope connection");
+                    Some(
+                        state.active_sequence().expect("Sequence").audio_program.sidechain_routes
+                            [0]
+                        .clone(),
+                    )
+                } else {
+                    None
+                };
+                let AudioProcessorInputInspectionTarget::ProcessingScope {
+                    mut scope_id,
+                    mut occurrence,
+                } = payload.binding.target
+                else {
+                    panic!("Scope fixture")
+                };
+                match scenario {
+                    0 => scope_id = mondrian_core::AudioProcessingScopeId::new(),
+                    1 => {
+                        occurrence.track_id =
+                            state.active_sequence().expect("Sequence").audio_tracks[1].id
+                    }
+                    2 => occurrence.clip_id = mondrian_core::ClipId::new(),
+                    3 => occurrence.edit_id = mondrian_core::AudioComponentEditId::new(),
+                    4 => {
+                        let other =
+                            &state.active_sequence().expect("Sequence").audio_tracks[0].clips[1];
+                        occurrence.clip_id = other.id;
+                        occurrence.edit_id = other.audio_components[0].id;
+                    }
+                    5 => {
+                        state.active_sequence_mut_uncommitted().expect("Sequence").audio_tracks[0]
+                            .clips
+                            .remove(0);
+                    }
+                    6 => {
+                        let sequence = state.active_sequence_mut_uncommitted().expect("Sequence");
+                        let track_id = sequence.audio_tracks[0].id;
+                        sequence
+                            .add_media_audio_clip(
+                                track_id,
+                                mondrian_timeline::Clip::new(
+                                    mondrian_core::AssetId::new(),
+                                    mondrian_core::TimelineTime::ZERO,
+                                    mondrian_core::TimelineTime::ONE,
+                                )
+                                .expect("replacement Clip"),
+                                mondrian_core::AudioSourceComponentId::primary(),
+                            )
+                            .expect("another Scope");
+                        let replacement_scope = sequence.audio_tracks[0].clips[2].audio_components
+                            [0]
+                        .processing
+                        .scope_id;
+                        sequence.audio_tracks[0].clips[0].audio_components[0].processing.scope_id =
+                            replacement_scope;
+                    }
+                    _ => unreachable!("closed Scope matrix"),
+                }
+                payload.binding.target =
+                    AudioProcessorInputInspectionTarget::ProcessingScope { scope_id, occurrence };
+                let before = serde_json::to_vec(state.active_sequence().expect("Sequence"))
+                    .expect("snapshot");
+                let generation = state.project_author_generation();
+                let history = state.authoring_history().expect("history").diagnostics();
+                let probes = calls.load(Ordering::SeqCst);
+                let action = ProductAction::Audio(if let Some(route) = retained {
+                    AudioProductAction::RewireProcessorInput(
+                        super::super::product_action::AudioProcessorInputRewirePayload {
+                            connection: payload,
+                            route_id: route.id,
+                            expected_source: route.source,
+                        },
+                    )
+                } else {
+                    AudioProductAction::ConnectProcessorInput(payload)
+                })
+                .into_external_action();
+                assert!(
+                    state.dispatch_action(action).is_err(),
+                    "Scope scenario {scenario}, rewire {rewire}"
+                );
+                assert_eq!(
+                    serde_json::to_vec(state.active_sequence().expect("Sequence"))
+                        .expect("snapshot"),
+                    before
+                );
+                assert_eq!(state.project_author_generation(), generation);
+                assert_eq!(
+                    state.authoring_history().expect("history").diagnostics(),
+                    history
+                );
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    probes,
+                    "no implicit Scope probe or other-occurrence fallback"
+                );
+            }
+        }
+    }
+
     #[test]
     fn observed_input_rewire_preserves_route_controls_and_one_undo() {
         let (mut state, queries, calls, _, _) = observed_native_fixture();

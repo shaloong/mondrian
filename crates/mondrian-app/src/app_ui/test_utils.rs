@@ -220,10 +220,18 @@ pub(crate) fn native_sidechain_source_action(
     use super::localization::{AppUiLocale, Localizer};
     use crate::app::audio_input_observation::AudioInputObservation;
     use mondrian_timeline::AudioProcessorRackAddress;
-    let mondrian_audio::AudioProcessorInputInspectionTarget::ChannelStrip { owner, rack } =
-        query.target
-    else {
-        panic!("Native history fixture uses a channel strip");
+    let (address, occurrence) = match query.target {
+        mondrian_audio::AudioProcessorInputInspectionTarget::ChannelStrip { owner, rack } => (
+            AudioProcessorRackAddress::ChannelStrip { owner, rack },
+            None,
+        ),
+        mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+            scope_id,
+            occurrence,
+        } => (
+            AudioProcessorRackAddress::ProcessingScope { scope_id },
+            Some(occurrence),
+        ),
     };
     let AudioInputObservation::Ready(observed) = state.audio_processor_input_observation(query)
     else {
@@ -233,11 +241,14 @@ pub(crate) fn native_sidechain_source_action(
     for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
         let localizer = Localizer::new(locale).expect("native Rack locale");
         let current = state.active_sequence().expect("native author");
+        let mut time_context =
+            AudioAutomationTimeContext::at_sequence_time(current, current.playhead);
+        time_context.scope_occurrence = occurrence;
         let mut racks = vec![project_audio_processor_rack(
             current,
-            AudioProcessorRackAddress::ChannelStrip { owner, rack },
+            address,
             &localizer,
-            AudioAutomationTimeContext::at_sequence_time(current, current.playhead),
+            time_context,
         )];
         bind_processor_input_queries(&mut racks, state, &localizer, None);
         let input = racks[0].processors[0]

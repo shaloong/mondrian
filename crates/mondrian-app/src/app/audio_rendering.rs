@@ -753,6 +753,32 @@ mod tests {
         External,
         SameStrip,
         LateExternal,
+        ProcessingScope,
+        SharedProcessingScope,
+    }
+
+    #[test]
+    #[ignore = "requires current product and owned CLAP sidechain DLL"]
+    fn native_clap_shared_scope_sidechain_undo_save_reopen_preserves_output() {
+        qualify_native_clap_sidechain(NativeSidechainCase::SharedProcessingScope);
+    }
+
+    #[test]
+    #[ignore = "requires current product and owned VST3 sidechain DLL"]
+    fn native_vst3_shared_scope_sidechain_undo_save_reopen_preserves_output() {
+        qualify_native_vst3_sidechain(NativeSidechainCase::SharedProcessingScope);
+    }
+
+    #[test]
+    #[ignore = "requires current product and owned CLAP sidechain DLL"]
+    fn native_clap_scope_sidechain_undo_save_reopen_preserves_output() {
+        qualify_native_clap_sidechain(NativeSidechainCase::ProcessingScope);
+    }
+
+    #[test]
+    #[ignore = "requires current product and owned VST3 sidechain DLL"]
+    fn native_vst3_scope_sidechain_undo_save_reopen_preserves_output() {
+        qualify_native_vst3_sidechain(NativeSidechainCase::ProcessingScope);
     }
 
     #[test]
@@ -841,7 +867,7 @@ mod tests {
     }
 
     fn assert_native_sidechain_history(
-        instance: mondrian_timeline::audio::AudioProcessorInstance,
+        mut instance: mondrian_timeline::audio::AudioProcessorInstance,
         resolver: Arc<dyn AudioProcessorResolver>,
         bus_key: &str,
         case: NativeSidechainCase,
@@ -850,6 +876,18 @@ mod tests {
         use mondrian_timeline::audio::{AudioChannelStripOutputPort, AudioRouteSource};
         use mondrian_timeline::{AudioRoutingEdit, AudioRoutingEditRequest};
         let same_strip = case == NativeSidechainCase::SameStrip;
+        let is_scope = matches!(
+            case,
+            NativeSidechainCase::ProcessingScope | NativeSidechainCase::SharedProcessingScope
+        );
+        // Shared Scope occurrences at times 5 and 7 have effective gains .5
+        // and .25. VST3 uses Scope parameter automation; the state-only CLAP
+        // fixture uses .5 native gain and .5 second-occurrence placement gain.
+        let signal_scale = if case == NativeSidechainCase::SharedProcessingScope {
+            1.5
+        } else {
+            1.0
+        };
         let routed_lookahead = if case == NativeSidechainCase::LateExternal {
             6
         } else {
@@ -903,7 +941,63 @@ mod tests {
                 .processors
                 .push(detector_processor);
         }
-        if same_strip {
+        if is_scope {
+            let component = &mut sequence.audio_tracks[0].clips[0].audio_components[0];
+            component.processing.scope_in =
+                mondrian_core::TimelineTime::new(5, 1).expect("Scope binding trim");
+            let scope_id = component.processing.scope_id;
+            if case == NativeSidechainCase::SharedProcessingScope {
+                let mut other = sequence.audio_tracks[0].clips[0].clone();
+                other.id = mondrian_core::ClipId::new();
+                for edit in &mut other.audio_components {
+                    edit.id = mondrian_core::AudioComponentEditId::new();
+                    edit.processing.scope_in =
+                        mondrian_core::TimelineTime::new(7, 1).expect("second Scope binding");
+                }
+                match &instance.definition {
+                    mondrian_timeline::audio::AudioProcessorDefinitionRef::Clap { .. } => {
+                        assert!(instance.parameters.is_empty(), "state-only CLAP contract");
+                        other.audio_components[0].volume_db = -6.020_599_913_279_624;
+                    }
+                    mondrian_timeline::audio::AudioProcessorDefinitionRef::Vst3 { .. } => {
+                        let parameter_id =
+                            instance.parameters.keys().next().cloned().expect("native VST3 gain");
+                        let mut curve =
+                            mondrian_core::ExactAutomationCurve::new(parameter_id.clone(), 0.5)
+                                .expect("Scope gain curve");
+                        for (second, value) in [(5, 0.5), (7, 0.25)] {
+                            let mut key = mondrian_core::ExactAutomationKeyframe::linear(
+                                mondrian_core::TimelineTime::new(second, 1)
+                                    .expect("Scope key time"),
+                                value,
+                            );
+                            key.interpolation_to_next =
+                                mondrian_core::AutomationSegmentInterpolation::Hold;
+                            curve.set_keyframe(key).expect("Scope gain key");
+                        }
+                        instance
+                            .parameters
+                            .get_mut(&parameter_id)
+                            .expect("native gain")
+                            .set_automation(curve)
+                            .expect("native Scope curve admitted");
+                    }
+                    mondrian_timeline::audio::AudioProcessorDefinitionRef::BuiltIn { .. } => {
+                        panic!("native fixture required")
+                    }
+                }
+                sequence.audio_tracks[0].clips.push(other);
+            }
+            sequence
+                .audio_program
+                .processing_scopes
+                .iter_mut()
+                .find(|scope| scope.id == scope_id)
+                .expect("main Scope")
+                .processors
+                .processors
+                .push(instance);
+        } else if same_strip {
             sequence
                 .audio_program
                 .track_channels
@@ -952,7 +1046,7 @@ mod tests {
             },
         };
         // Independent owned ABI fixture: gain * (2 main + 3 first auxiliary).
-        let routed_expected = if same_strip { 0.625 } else { 0.4375 };
+        let routed_expected = if same_strip { 0.625 } else { 0.4375 } * signal_scale;
         let action = |processor_id| {
             ProductAction::Audio(AudioProductAction::EditRouting(AudioRoutingEditRequest {
                 edit: AudioRoutingEdit::CreateProcessorSidechain {
@@ -966,7 +1060,8 @@ mod tests {
         let mut state = AppState::with_audio_processor_resolver(Arc::clone(&resolver));
         state.test_set_sequence(Some(sequence.clone()));
         state.test_set_asset_library(Some(library));
-        let before = assert_native_sidechain_delivery(&state, resolver.as_ref(), 0.25, 3);
+        let before =
+            assert_native_sidechain_delivery(&state, resolver.as_ref(), 0.25 * signal_scale, 3);
         let generation = state.project_author_generation();
         let history = state.authoring_history().expect("history").diagnostics();
         state
@@ -1021,9 +1116,19 @@ mod tests {
         let query = AudioProcessorInputQueryPayload {
             session_id: state.authoring_session_id().expect("native editing session"),
             sequence_id: sequence.id,
-            target: mondrian_audio::AudioProcessorInputInspectionTarget::ChannelStrip {
-                owner,
-                rack,
+            target: if is_scope {
+                let clip = &sequence.audio_tracks[0].clips[0];
+                let component = &clip.audio_components[0];
+                mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+                    scope_id: component.processing.scope_id,
+                    occurrence: mondrian_timeline::AudioComponentAddress {
+                        track_id: sequence.audio_tracks[0].id,
+                        clip_id: clip.id,
+                        edit_id: component.id,
+                    },
+                }
+            } else {
+                mondrian_audio::AudioProcessorInputInspectionTarget::ChannelStrip { owner, rack }
             },
             processor_id,
             operation: AudioProcessorInputQueryOperation::Query,
@@ -1087,7 +1192,7 @@ mod tests {
             .expect("Undo")
             .author_state_eq_ignoring_revision(&sequence));
         assert_eq!(
-            assert_native_sidechain_delivery(&state, resolver.as_ref(), 0.25, 3),
+            assert_native_sidechain_delivery(&state, resolver.as_ref(), 0.25 * signal_scale, 3),
             before
         );
         assert!(!state.can_undo_action() && state.can_redo_action());
@@ -1131,7 +1236,7 @@ mod tests {
         expected_rewire.audio_program.sidechain_routes[0].source = replacement_source;
         assert!(rewired.author_state_eq_ignoring_revision(&expected_rewire));
         // Independent ABI oracle: 0.5 * (2 * 0.25 + 3 * (0.25 * 0.125)).
-        let rewired_expected = 0.296875;
+        let rewired_expected = 0.296875 * signal_scale;
         let rewired_pcm =
             assert_native_sidechain_delivery(&state, resolver.as_ref(), rewired_expected, 3);
         assert_ne!(rewired_pcm, after);
@@ -1168,10 +1273,11 @@ mod tests {
             processor_id,
             route_id,
             root.path(),
+            signal_scale,
         );
         drop(state);
         for (path, authored, expected, lookahead, output) in [
-            (undone_path, &sequence, 0.25, 3, before),
+            (undone_path, &sequence, 0.25 * signal_scale, 3, before),
             (
                 edited_path,
                 &edited,
@@ -1227,6 +1333,7 @@ mod tests {
         processor_id: mondrian_core::AudioProcessorInstanceId,
         route_id: mondrian_core::AudioRouteId,
         root: &std::path::Path,
+        signal_scale: f32,
     ) {
         let before = state.active_sequence().expect("before gain curve").clone();
         // Independent oracle: main .25, detector .03125; native weights 2 and 3,
@@ -1265,7 +1372,7 @@ mod tests {
         let expected: Vec<f32> = (0..257)
             .map(|sample| {
                 let db = START_DB * (1.0 - f64::from(sample) / 48_000.0);
-                (0.25 + 0.046875 * 10.0_f64.powf(db / 20.0)) as f32
+                ((0.25 + 0.046875 * 10.0_f64.powf(db / 20.0)) * f64::from(signal_scale)) as f32
             })
             .collect();
         let output = assert_native_sidechain_delivery_samples(state, resolver, &expected, 3);
@@ -1279,7 +1386,7 @@ mod tests {
         let undone_path = root.join("侧链曲线撤销保存🙂.mdp");
         state.save_project_file_as(undone_path.clone()).expect("save gain Undo");
         assert!(state.can_redo_action(), "save preserves live gain Redo");
-        assert_native_sidechain_delivery(state, resolver, 0.296875, 3);
+        assert_native_sidechain_delivery(state, resolver, 0.296875 * signal_scale, 3);
         assert!(state.redo_timeline().expect("start key Redo"));
         assert!(state.redo_timeline().expect("end key Redo"));
         assert!(state.redo_timeline().expect("Linear menu Redo"));
@@ -1294,7 +1401,7 @@ mod tests {
         let edited_path = root.join("侧链曲线输出🙂.mdp");
         state.save_project_file_as(edited_path.clone()).expect("save gain edited");
         for (path, author, samples) in [
-            (undone_path, &before, vec![0.296875; 257]),
+            (undone_path, &before, vec![0.296875 * signal_scale; 257]),
             (edited_path, &authored, expected),
         ] {
             let mut reopened = AppState::new();
