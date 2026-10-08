@@ -1,5 +1,27 @@
 # Modal, resource and LUT acceptance
 
+## Full workspace runtime baseline
+
+Clean source `210a02450bce44329087dce7abf2f844ab07477a` passed
+`cargo test --offline --locked -j 1 --workspace --all-features -- --test-threads=1`
+on Windows on 2026-10-08. The command exited zero: **7,728 passed execution
+instances**, **181 declared ignored**, zero failures, across 134 result summaries.
+App library: **2,647 passed, 80 ignored**. Ignored native/resource cases qualified
+in the preceding named native report are separate evidence; this run does not
+claim those ignored cases ran here. Build and runtime together took **4,541,283 ms**;
+compilation took **40 min 55 s**. This is functional qualification, not a native
+plugin throughput or complete device/vendor performance qualification.
+
+Result receipt: `.scratch/curve-viewport/current-workspace-runtime-result.json`,
+SHA-256 `D521C5F2FA943CED3F80B98AC7FE1451F6FAA9214ED01E131E7FBD2B3E37FDCB`.
+Log SHA-256:
+`7B8B184B79047375C6D5D4362C6A23621E418439524B282E68BAE9537FA5BDC3`.
+The receipt, log digest, successful summaries and clean unchanged source were
+independently checked after terminal completion. Current remote CI and platform,
+vendor, full physical interaction and performance matrices remain open. Subsequent
+CLAP/OpenFX/control changes require their own evidence; this result stays bound
+to `210a024`.
+
 ## Processing Scope and current modal/resource/LUT qualification
 
 Clean source `e65a1c25f5f42b63c2e2adbdf33da42ba24e3450` passed the
