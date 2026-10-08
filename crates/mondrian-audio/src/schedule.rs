@@ -1,6 +1,6 @@
 //! Render-contract-specific lowering from semantic audio IR to dense execution data.
 
-use crate::latency::{solve_prepared_latency, PreparedLatencyNodeInput, PreparedNodeLatency};
+use crate::latency::{solve_prepared_latency, PreparedLatencyGraph, PreparedNodeLatency};
 use crate::plan::{
     AudioRenderContract, CompiledAudioContribution, CompiledAudioProgram, CompiledChannelStrip,
     CompiledProcessingScope, CompiledRack, CompiledTransition,
@@ -154,7 +154,7 @@ pub enum AudioKernelBackend {
 /// Stable structural facts about one dense Prepared Audio Schedule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreparedAudioScheduleSummary {
-    /// Track, Bus, and Output nodes in main-path latency order.
+    /// Track, Bus, and Output nodes in stable main-route storage order.
     pub node_count: usize,
     /// Dense Track nodes.
     pub track_count: usize,
@@ -548,7 +548,7 @@ pub(crate) struct PreparedProcessor {
     pub(crate) occurrence: AudioProcessorOccurrence,
     pub(crate) parameter_ids: Vec<ParameterId>,
     pub(crate) parameter_curves: Vec<PreparedAutomationCurve>,
-    pub(crate) rack_prefix_algorithmic_latency_frames: usize,
+    pub(crate) main_compensation_delay_frames: usize,
     pub(crate) input_signal_delay_frames: usize,
     pub(crate) auxiliary_buses: Range<usize>,
     pub(crate) factory: PreparedProcessorFactoryBinding,
@@ -1110,75 +1110,6 @@ impl PreparedAudioSchedule {
             node.incoming = start..routes.len();
         }
 
-        let latency_nodes = nodes
-            .iter()
-            .map(|node| {
-                Ok(PreparedLatencyNodeInput {
-                    origin: node.origin,
-                    contribution_start: node.contributions.start,
-                    contribution_end: node.contributions.end,
-                    route_start: node.incoming.start,
-                    route_end: node.incoming.end,
-                    pre_rack_latency_frames: node.pre_rack.algorithmic_latency_frames,
-                    post_rack_latency_frames: node.post_rack.algorithmic_latency_frames,
-                })
-            })
-            .collect::<Result<Vec<_>, AudioCompileError>>()?;
-        let contribution_intrinsic_latency_frames = contributions
-            .iter()
-            .map(|contribution| {
-                contribution
-                    .source_algorithmic_latency_frames
-                    .checked_add(contribution.scope_rack.algorithmic_latency_frames)
-                    .ok_or_else(|| {
-                        AudioCompileError::InvalidPreparedGraph(format!(
-                            "Contribution {} total latency overflowed",
-                            contribution.semantic.edit_id
-                        ))
-                    })
-            })
-            .collect::<Result<Vec<_>, AudioCompileError>>()?;
-        let latency = solve_prepared_latency(
-            &latency_nodes,
-            &routes,
-            &contribution_intrinsic_latency_frames,
-            output_slot,
-        )
-        .map_err(|reason| AudioCompileError::InvalidPreparedGraph(reason.to_owned()))?;
-        for (contribution, compensation) in contributions
-            .iter_mut()
-            .zip(latency.contribution_compensation_frames.iter().copied())
-        {
-            contribution.compensation_delay_frames = compensation;
-        }
-        for (route, compensation) in
-            routes.iter_mut().zip(latency.route_compensation_frames.iter().copied())
-        {
-            route.compensation_delay_frames = compensation;
-        }
-        for (node, node_latency) in nodes.iter_mut().zip(latency.node_latencies.iter().copied()) {
-            node.latency = node_latency;
-        }
-        for contribution in &contributions {
-            assign_rack_processor_signal_delays(
-                &mut processors,
-                &contribution.scope_rack,
-                contribution.source_algorithmic_latency_frames,
-            )?;
-        }
-        for node in &nodes {
-            assign_rack_processor_signal_delays(
-                &mut processors,
-                &node.pre_rack,
-                node.latency.input_frames,
-            )?;
-            assign_rack_processor_signal_delays(
-                &mut processors,
-                &node.post_rack,
-                node.latency.pre_fader_frames,
-            )?;
-        }
-
         let execution_order = prepared_execution_order(program, &nodes)?;
         let stage_positions = execution_order
             .iter()
@@ -1240,16 +1171,6 @@ impl PreparedAudioSchedule {
                             route.id
                         )));
                     }
-                    let source_latency = nodes[source_slot].latency.port(source_port);
-                    let target_latency = processor.input_signal_delay_frames;
-                    let compensation_delay_frames =
-                        target_latency.checked_sub(source_latency).ok_or_else(|| {
-                            AudioCompileError::InvalidPreparedGraph(format!(
-                                "sidechain Route {} arrives {} frames after the target processor main input; main-path sidechain PDC is not representable by this schedule",
-                                route.id,
-                                source_latency - target_latency
-                            ))
-                        })?;
                     let source_buffer_slot = *sidechain_source_slots
                         .entry((source_slot, source_port))
                         .or_insert_with(|| {
@@ -1271,7 +1192,7 @@ impl PreparedAudioSchedule {
                             .is_none()
                             .then(|| crate::dsp::db_to_linear(route.gain_db)),
                         gain_automation,
-                        compensation_delay_frames,
+                        compensation_delay_frames: 0,
                     });
                     matched_sidechain_routes.insert(route.id);
                 }
@@ -1293,6 +1214,30 @@ impl PreparedAudioSchedule {
                 missing.map_or_else(|| "unknown".to_owned(), |id| id.to_string())
             )));
         }
+        let latency = solve_prepared_latency(PreparedLatencyGraph {
+            nodes: &mut nodes,
+            routes: &mut routes,
+            contributions: &mut contributions,
+            processors: &mut processors,
+            auxiliary_buses: &processor_auxiliary_buses,
+            bindings: &mut sidechain_bindings,
+            sources: &sidechain_sources,
+            execution_order: &execution_order,
+            output_slot,
+        })
+        .map_err(|reason| AudioCompileError::InvalidPreparedGraph(reason.to_owned()))?;
+        for (contribution, frames) in
+            contributions.iter_mut().zip(&latency.contribution_compensation_frames)
+        {
+            contribution.compensation_delay_frames = *frames;
+        }
+        for (route, frames) in routes.iter_mut().zip(&latency.route_compensation_frames) {
+            route.compensation_delay_frames = *frames;
+        }
+        for (node, frames) in nodes.iter_mut().zip(&latency.node_latencies) {
+            node.latency = *frames;
+        }
+
         for (source_buffer_slot, source) in sidechain_sources.iter().enumerate() {
             nodes
                 .get_mut(source.node_slot)
@@ -1380,6 +1325,7 @@ impl PreparedAudioSchedule {
             .contribution_compensation_frames
             .iter()
             .chain(&latency.route_compensation_frames)
+            .chain(processors.iter().map(|processor| &processor.main_compensation_delay_frames))
             .try_fold(0_usize, |samples, frames| {
                 frames
                     .checked_mul(contract.channel_count())
@@ -1771,7 +1717,7 @@ fn prepare_rack(
             occurrence,
             parameter_ids,
             parameter_curves,
-            rack_prefix_algorithmic_latency_frames: algorithmic_latency_frames,
+            main_compensation_delay_frames: 0,
             input_signal_delay_frames: 0,
             auxiliary_buses: 0..0,
             factory,
@@ -1796,28 +1742,6 @@ fn prepare_rack(
             .iter()
             .any(|processor| processor.factory.contract().requires_state_entry()),
     })
-}
-
-fn assign_rack_processor_signal_delays(
-    processors: &mut [PreparedProcessor],
-    rack: &PreparedRack,
-    rack_input_signal_delay_frames: usize,
-) -> Result<(), AudioCompileError> {
-    let rack_processors = processors.get_mut(rack.processors.clone()).ok_or_else(|| {
-        AudioCompileError::InvalidPreparedGraph(
-            "processor Rack range is outside the prepared schedule".to_owned(),
-        )
-    })?;
-    for processor in rack_processors {
-        processor.input_signal_delay_frames = rack_input_signal_delay_frames
-            .checked_add(processor.rack_prefix_algorithmic_latency_frames)
-            .ok_or_else(|| {
-                AudioCompileError::InvalidPreparedGraph(
-                    "processor input signal delay overflowed".to_owned(),
-                )
-            })?;
-    }
-    Ok(())
 }
 
 fn accumulate_sequential_tail(

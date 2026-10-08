@@ -748,19 +748,38 @@ mod tests {
         qualify_native_audio_group_history(instance, &resolver);
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum NativeSidechainCase {
+        External,
+        SameStrip,
+        LateExternal,
+    }
+
+    #[test]
+    #[ignore = "requires current product and owned CLAP sidechain DLL"]
+    fn native_clap_late_detector_sidechain_undo_save_reopen_preserves_output() {
+        qualify_native_clap_sidechain(NativeSidechainCase::LateExternal);
+    }
+
+    #[test]
+    #[ignore = "requires current product and owned VST3 sidechain DLL"]
+    fn native_vst3_late_detector_sidechain_undo_save_reopen_preserves_output() {
+        qualify_native_vst3_sidechain(NativeSidechainCase::LateExternal);
+    }
+
     #[test]
     #[ignore = "requires current product and owned CLAP sidechain DLL"]
     fn native_clap_sidechain_routing_undo_save_reopen_preserves_output() {
-        qualify_native_clap_sidechain(false);
+        qualify_native_clap_sidechain(NativeSidechainCase::External);
     }
 
     #[test]
     #[ignore = "requires current product and owned CLAP sidechain DLL"]
     fn native_clap_same_strip_prefader_sidechain_undo_save_reopen_preserves_output() {
-        qualify_native_clap_sidechain(true);
+        qualify_native_clap_sidechain(NativeSidechainCase::SameStrip);
     }
 
-    fn qualify_native_clap_sidechain(same_strip: bool) {
+    fn qualify_native_clap_sidechain(case: NativeSidechainCase) {
         use mondrian_audio::{
             DiscoveredClapAudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
         };
@@ -782,22 +801,22 @@ mod tests {
             )
             .expect("capture stateful native definition");
         let resolver = Arc::new(IsolatedAudioProcessorResolver::new(Arc::new(installed)));
-        assert_native_sidechain_history(instance, resolver, "clap.audio-input.11", same_strip);
+        assert_native_sidechain_history(instance, resolver, "clap.audio-input.11", case);
     }
 
     #[test]
     #[ignore = "requires current product and owned VST3 sidechain DLL"]
     fn native_vst3_sidechain_routing_undo_save_reopen_preserves_output() {
-        qualify_native_vst3_sidechain(false);
+        qualify_native_vst3_sidechain(NativeSidechainCase::External);
     }
 
     #[test]
     #[ignore = "requires current product and owned VST3 sidechain DLL"]
     fn native_vst3_same_strip_prefader_sidechain_undo_save_reopen_preserves_output() {
-        qualify_native_vst3_sidechain(true);
+        qualify_native_vst3_sidechain(NativeSidechainCase::SameStrip);
     }
 
-    fn qualify_native_vst3_sidechain(same_strip: bool) {
+    fn qualify_native_vst3_sidechain(case: NativeSidechainCase) {
         use mondrian_audio::{
             DiscoveredVst3AudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
         };
@@ -818,18 +837,24 @@ mod tests {
             )
             .expect("capture default native state");
         let resolver = Arc::new(IsolatedAudioProcessorResolver::new(Arc::new(installed)));
-        assert_native_sidechain_history(instance, resolver, "vst3.audio-input.1", same_strip);
+        assert_native_sidechain_history(instance, resolver, "vst3.audio-input.1", case);
     }
 
     fn assert_native_sidechain_history(
         instance: mondrian_timeline::audio::AudioProcessorInstance,
         resolver: Arc<dyn AudioProcessorResolver>,
         bus_key: &str,
-        same_strip: bool,
+        case: NativeSidechainCase,
     ) {
         use super::super::product_action::{AudioProductAction, ProductAction};
         use mondrian_timeline::audio::{AudioChannelStripOutputPort, AudioRouteSource};
         use mondrian_timeline::{AudioRoutingEdit, AudioRoutingEditRequest};
+        let same_strip = case == NativeSidechainCase::SameStrip;
+        let routed_lookahead = if case == NativeSidechainCase::LateExternal {
+            6
+        } else {
+            3
+        };
         let processor_id = instance.id;
         let (root, library, mut sequence) = native_gain_media_fixture();
         let asset_id = sequence.audio_tracks[0].clips[0].media_asset_id().expect("media asset");
@@ -862,6 +887,22 @@ mod tests {
             });
             detector
         };
+        if case == NativeSidechainCase::LateExternal {
+            // The owned native fixture has three frames of declared latency.
+            // Its gain is 0.5 and disconnected auxiliary buses are silent, so
+            // gain * (2 main) preserves the detector's independent amplitude.
+            let mut detector_processor = instance.clone();
+            detector_processor.id = mondrian_core::AudioProcessorInstanceId::new();
+            sequence
+                .audio_program
+                .track_channels
+                .get_mut(&detector)
+                .expect("detector strip")
+                .strip
+                .pre_fader
+                .processors
+                .push(detector_processor);
+        }
         if same_strip {
             sequence
                 .audio_program
@@ -898,7 +939,7 @@ mod tests {
         let mut state = AppState::with_audio_processor_resolver(Arc::clone(&resolver));
         state.test_set_sequence(Some(sequence.clone()));
         state.test_set_asset_library(Some(library));
-        let before = assert_native_sidechain_delivery(&state, resolver.as_ref(), 0.25);
+        let before = assert_native_sidechain_delivery(&state, resolver.as_ref(), 0.25, 3);
         let generation = state.project_author_generation();
         let history = state.authoring_history().expect("history").diagnostics();
         state
@@ -1006,7 +1047,12 @@ mod tests {
         );
         let edited = state.active_sequence().expect("edited").clone();
         assert_eq!(edited.audio_program.sidechain_routes.len(), 1);
-        let after = assert_native_sidechain_delivery(&state, resolver.as_ref(), routed_expected);
+        let after = assert_native_sidechain_delivery(
+            &state,
+            resolver.as_ref(),
+            routed_expected,
+            routed_lookahead,
+        );
         assert_ne!(before, after);
         assert!(state.undo_timeline().expect("one route Undo"));
         assert!(state
@@ -1014,7 +1060,7 @@ mod tests {
             .expect("Undo")
             .author_state_eq_ignoring_revision(&sequence));
         assert_eq!(
-            assert_native_sidechain_delivery(&state, resolver.as_ref(), 0.25),
+            assert_native_sidechain_delivery(&state, resolver.as_ref(), 0.25, 3),
             before
         );
         assert!(!state.can_undo_action() && state.can_redo_action());
@@ -1027,15 +1073,26 @@ mod tests {
             .expect("Redo")
             .author_state_eq_ignoring_revision(&edited));
         assert_eq!(
-            assert_native_sidechain_delivery(&state, resolver.as_ref(), routed_expected),
+            assert_native_sidechain_delivery(
+                &state,
+                resolver.as_ref(),
+                routed_expected,
+                routed_lookahead
+            ),
             after
         );
         let edited_path = root.path().join("原生侧链重做🙂.mdp");
         state.save_project_file_as(edited_path.clone()).expect("save routed archive");
         drop(state);
-        for (path, authored, expected, output) in [
-            (undone_path, &sequence, 0.25, before),
-            (edited_path, &edited, routed_expected, after),
+        for (path, authored, expected, lookahead, output) in [
+            (undone_path, &sequence, 0.25, 3, before),
+            (
+                edited_path,
+                &edited,
+                routed_expected,
+                routed_lookahead,
+                after,
+            ),
         ] {
             let mut reopened = AppState::new();
             reopened.open_project_file(path).expect("fresh Unicode sidechain reopen");
@@ -1050,7 +1107,7 @@ mod tests {
                 1
             );
             assert_eq!(
-                assert_native_sidechain_delivery(&reopened, resolver.as_ref(), expected),
+                assert_native_sidechain_delivery(&reopened, resolver.as_ref(), expected, lookahead),
                 output
             );
         }
@@ -1060,6 +1117,7 @@ mod tests {
         state: &AppState,
         processor_resolver: &dyn AudioProcessorResolver,
         expected: f32,
+        expected_lookahead: usize,
     ) -> Vec<f32> {
         let sequence = state.active_sequence().expect("author sequence");
         let library = state.asset_library_handle().expect("source library");
@@ -1080,7 +1138,7 @@ mod tests {
             ).expect("prepare shared native routing and PDC");
             assert_eq!(
                 runtime.public_output_lookahead_frames(),
-                3,
+                expected_lookahead,
                 "native latency remains in shared public output compensation"
             );
             let mut delivery =

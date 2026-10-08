@@ -342,6 +342,8 @@ impl PreparedProcessorHost {
         pcm: &mut [f32],
         sidechain_source_buffers: &[Vec<f32>],
         sidechain_delay_lines: &mut [FixedDelayLine],
+        processor_delay_lines: &mut [FixedDelayLine],
+        sidechain_offset_frames: usize,
     ) -> Result<(), AudioExecutionError> {
         let expected_samples = request
             .frames
@@ -429,6 +431,7 @@ impl PreparedProcessorHost {
                 signal_request,
                 sample_rate,
                 expected_samples,
+                sidechain_offset_frames,
                 channel_layout.channel_count(),
                 auxiliary_pcm,
                 sidechain_frame_db,
@@ -438,6 +441,10 @@ impl PreparedProcessorHost {
                 .len()
                 .checked_mul(expected_samples)
                 .ok_or(AudioExecutionError::BufferTooLarge)?;
+            processor_delay_lines
+                .get_mut(processor_index)
+                .ok_or(AudioExecutionError::InvalidPreparedSchedule)?
+                .delay_interleaved_in_place(pcm);
             let mut audio = MainBusAudioIo {
                 channel_layout,
                 frames: request.frames,
@@ -515,6 +522,7 @@ fn prepare_processor_auxiliary_buses<'a>(
     signal_request: AudioRenderRequest,
     sample_rate: AudioSampleRate,
     samples: usize,
+    source_offset_frames: usize,
     channels: usize,
     auxiliary_pcm: &mut [f32],
     sidechain_frame_db: &mut [f64],
@@ -529,6 +537,11 @@ fn prepare_processor_auxiliary_buses<'a>(
         .get_mut(..required_samples)
         .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
     auxiliary_pcm.fill(0.0);
+    let source_start = source_offset_frames
+        .checked_mul(channels)
+        .ok_or(AudioExecutionError::BufferTooLarge)?;
+    let source_end =
+        source_start.checked_add(samples).ok_or(AudioExecutionError::BufferTooLarge)?;
     for (bus_index, bus) in buses.iter().enumerate() {
         let start = bus_index.checked_mul(samples).ok_or(AudioExecutionError::BufferTooLarge)?;
         let end = start.checked_add(samples).ok_or(AudioExecutionError::BufferTooLarge)?;
@@ -539,7 +552,7 @@ fn prepare_processor_auxiliary_buses<'a>(
                 .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
             let source = sidechain_source_buffers
                 .get(binding.source_buffer_slot)
-                .and_then(|source| source.get(..samples))
+                .and_then(|source| source.get(source_start..source_end))
                 .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
             let delay_line = sidechain_delay_lines
                 .get_mut(binding_index)

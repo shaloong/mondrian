@@ -3673,3 +3673,363 @@ fn clip_balance_targets_semantic_front_pair_without_touching_surround_channels()
         }
     }
 }
+
+struct LateSidechainResolver;
+impl AudioProcessorResolver for LateSidechainResolver {
+    fn prepare(
+        &self,
+        request: AudioProcessorPrepareRequest<'_>,
+    ) -> Result<Arc<dyn AudioProcessorFactory>, AudioProcessorHostError> {
+        match request.definition() {
+            mondrian_timeline::AudioProcessorDefinitionRef::Clap { plugin_id, .. }
+                if plugin_id == "test.mondrian.weighted_aux" =>
+            {
+                Ok(Arc::new(WeightedAuxFactory(
+                    request.render_contract().channel_layout,
+                )))
+            }
+            _ => TestDelayProcessorResolver {
+                latency_frames: 2,
+                realtime_capable: true,
+                ..Default::default()
+            }
+            .prepare(request),
+        }
+    }
+}
+struct WeightedAuxFactory(AudioChannelLayout);
+impl AudioProcessorFactory for WeightedAuxFactory {
+    fn execution_contract(&self) -> AudioProcessorExecutionContract {
+        AudioProcessorExecutionContract::stateless()
+    }
+    fn auxiliary_input_contract(&self) -> AudioProcessorAuxiliaryInputContract {
+        TestSidechainFactory { layout: self.0 }.auxiliary_input_contract()
+    }
+    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+        Ok(Box::new(WeightedAux))
+    }
+}
+struct WeightedAux;
+impl AudioProcessor for WeightedAux {
+    fn enter_state(&mut self, _: i64) -> Result<(), AudioProcessorHostError> {
+        Ok(())
+    }
+    fn process(
+        &mut self,
+        _: AudioProcessorProcessContext,
+        audio: &mut dyn AudioProcessorAudioIo,
+        _: AudioParameterEventBatch<'_>,
+    ) -> Result<(), AudioProcessorHostError> {
+        let buses = audio.main_and_auxiliary_input("detector").expect("admitted auxiliary bus");
+        for (main, detector) in buses.main_interleaved.iter_mut().zip(buses.auxiliary.interleaved) {
+            *main += 2.0 * detector;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn late_sidechain_pdc_aligns_main_and_detector_across_modes_partitions_and_seek() {
+    assert_late_sidechain_pdc(None, 0, false);
+}
+
+#[test]
+fn late_sidechain_scope_pdc_preserves_partial_activation_and_seek() {
+    for start in [0, 3] {
+        for main_delay_count in [0, 1, 2] {
+            assert_late_sidechain_pdc(Some(start), main_delay_count, false);
+        }
+    }
+}
+
+#[test]
+fn late_sidechain_pdc_aligns_multiple_detector_routes_at_the_same_input() {
+    assert_late_sidechain_pdc(None, 0, true);
+    for main_delay_count in [0, 1, 2] {
+        assert_late_sidechain_pdc(Some(3), main_delay_count, true);
+    }
+}
+
+fn assert_late_sidechain_pdc(
+    scope_start: Option<i64>,
+    main_delay_count: usize,
+    early_detector: bool,
+) {
+    struct VaryingSource(std::collections::BTreeMap<AudioComponentEditId, f32>);
+    impl AudioPcmSource for VaryingSource {
+        fn read_indexed_interleaved(
+            &mut self,
+            edit: AudioComponentEditId,
+            frames: &[i64],
+            layout: AudioChannelLayout,
+            destination: &mut [f32],
+        ) -> Result<(), AudioExecutionError> {
+            for (frame, position) in frames.iter().copied().enumerate() {
+                destination[frame * layout.channel_count()..(frame + 1) * layout.channel_count()]
+                    .fill(if position < 0 {
+                        0.0
+                    } else {
+                        self.0[&edit] * (position as f32 + 1.0)
+                    });
+            }
+            Ok(())
+        }
+    }
+    let mut sequence = Sequence::new("late detector PDC");
+    sequence.settings.audio_channel_layout = AudioChannelLayout::Mono;
+    let main = sequence.audio_tracks[0].id;
+    let detector = sequence.add_audio_track();
+    let early = early_detector.then(|| sequence.add_audio_track());
+    let mut values = std::collections::BTreeMap::new();
+    let mut sources = vec![(main, 0.25), (detector, 0.125)];
+    if let Some(track) = early {
+        sources.push((track, 0.0625));
+    }
+    for (track, value) in sources {
+        sequence
+            .add_media_audio_clip(
+                track,
+                Clip::new(
+                    AssetId::new(),
+                    tt(
+                        if track == main {
+                            scope_start.unwrap_or(0)
+                        } else {
+                            0
+                        },
+                        2,
+                    ),
+                    tt(8, 1),
+                )
+                .expect("clip"),
+                AudioSourceComponentId::primary(),
+            )
+            .expect("audio source");
+        let edit = sequence
+            .audio_tracks
+            .iter()
+            .find(|candidate| candidate.id == track)
+            .expect("track")
+            .clips[0]
+            .audio_components[0]
+            .id;
+        values.insert(edit, value);
+    }
+    let bus = mondrian_core::MixBusId::new();
+    let mut strip = mondrian_timeline::AudioChannelStrip::default();
+    strip.pre_fader.processors.push(AudioProcessorInstance {
+        id: mondrian_core::AudioProcessorInstanceId::new(),
+        definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
+            plugin_id: "test.mondrian.delay".into(),
+            schema_version: 1,
+            binary_sha256: None,
+        },
+        bypassed: false,
+        parameters: Default::default(),
+        opaque_state: None,
+    });
+    sequence.audio_program.buses.push(AudioMixBus {
+        id: bus,
+        name: "delayed detector".into(),
+        strip,
+    });
+    let processor = AudioProcessorInstance {
+        id: mondrian_core::AudioProcessorInstanceId::new(),
+        definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
+            plugin_id: "test.mondrian.weighted_aux".into(),
+            schema_version: 1,
+            binary_sha256: None,
+        },
+        bypassed: false,
+        parameters: Default::default(),
+        opaque_state: None,
+    };
+    let processor_id = processor.id;
+    if scope_start.is_some() {
+        let scope_id =
+            sequence.audio_tracks.iter().find(|track| track.id == main).expect("main").clips[0]
+                .audio_components[0]
+                .processing
+                .scope_id;
+        let rack = &mut sequence
+            .audio_program
+            .processing_scopes
+            .iter_mut()
+            .find(|scope| scope.id == scope_id)
+            .expect("Scope")
+            .processors
+            .processors;
+        for _ in 0..main_delay_count {
+            let mut delay = sequence.audio_program.buses[0].strip.pre_fader.processors[0].clone();
+            delay.id = mondrian_core::AudioProcessorInstanceId::new();
+            rack.push(delay);
+        }
+        rack.push(processor);
+    } else {
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&main)
+            .expect("main strip")
+            .strip
+            .post_fader
+            .processors
+            .push(processor);
+    }
+    sequence.audio_program.routes.clear();
+    sequence.audio_program.routes.extend([
+        AudioRoute::new(
+            AudioRouteSource::Track {
+                track_id: main,
+                port: AudioChannelStripOutputPort::PostMute,
+            },
+            AudioRouteDestination::Output(sequence.audio_program.outputs[0].id),
+        ),
+        AudioRoute::new(
+            AudioRouteSource::Track {
+                track_id: detector,
+                port: AudioChannelStripOutputPort::PostMute,
+            },
+            AudioRouteDestination::Bus(bus),
+        ),
+    ]);
+    sequence.audio_program.sidechain_routes.push(AudioProcessorSidechainRoute::new(
+        AudioRouteSource::Bus {
+            bus_id: bus,
+            port: AudioChannelStripOutputPort::PostMute,
+        },
+        processor_id,
+        "detector",
+    ));
+    if let Some(track_id) = early {
+        sequence.audio_program.sidechain_routes.push(AudioProcessorSidechainRoute::new(
+            AudioRouteSource::Track {
+                track_id,
+                port: AudioChannelStripOutputPort::PostMute,
+            },
+            processor_id,
+            "detector",
+        ));
+    }
+    for mode in [AudioProcessingMode::Realtime, AudioProcessingMode::Offline] {
+        for backend in [
+            AudioKernelBackend::ScalarReference,
+            AudioKernelBackend::RuntimeVectorized,
+        ] {
+            let compiled = Arc::new(
+                compile_audio_program(
+                    &sequence,
+                    AudioCompileRequest::program(sequence.audio_program.outputs[0].id),
+                )
+                .expect("causal detector graph"),
+            );
+            let contract = AudioRenderContract {
+                sample_rate: 2,
+                channel_layout: AudioChannelLayout::Mono,
+                max_block_frames: 8,
+                processing_mode: mode,
+                processor_session_scratch_budget_bytes:
+                    AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+                public_output_lookahead_budget_frames:
+                    AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+                compensation_delay_scratch_budget_bytes:
+                    AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+            };
+            let plan = Arc::new(
+                PreparedAudioPlan::prepare_with_processor_resolver(
+                    Arc::clone(&compiled),
+                    contract,
+                    backend,
+                    &LateSidechainResolver,
+                )
+                .expect("align late detector with the processor main input"),
+            );
+            let compensation_samples = if main_delay_count == 1 { 0 } else { 2 }
+                + if early_detector {
+                    (2 * main_delay_count).max(2)
+                } else {
+                    0
+                };
+            assert_eq!(
+                plan.schedule_summary().compensation_delay_samples,
+                compensation_samples
+            );
+            if compensation_samples > 0 {
+                let error = PreparedAudioPlan::prepare_with_processor_resolver(
+                    Arc::clone(&compiled),
+                    AudioRenderContract {
+                        compensation_delay_scratch_budget_bytes: compensation_samples * 4 - 1,
+                        ..contract
+                    },
+                    backend,
+                    &LateSidechainResolver,
+                )
+                .expect_err("main or auxiliary compensation must obey the same storage budget");
+                assert_eq!(
+                    error,
+                    AudioCompileError::CompensationScratchBudgetExceeded {
+                        required_bytes: compensation_samples * 4,
+                        budget_bytes: compensation_samples * 4 - 1,
+                    }
+                );
+            }
+            let exact = PreparedAudioPlan::prepare_with_processor_resolver(
+                compiled,
+                AudioRenderContract {
+                    compensation_delay_scratch_budget_bytes: compensation_samples * 4,
+                    public_output_lookahead_budget_frames: (2 * main_delay_count).max(2),
+                    ..contract
+                },
+                backend,
+                &LateSidechainResolver,
+            )
+            .expect("exact compensation and lookahead budgets admit the plan");
+            AudioRenderSession::new(Arc::new(exact)).expect("realized storage matches preparation");
+            assert_eq!(
+                plan.public_output_lookahead_frames(),
+                (2 * main_delay_count).max(2)
+            );
+            let mut session = AudioRenderSession::new(plan).expect("bounded compensated session");
+            for (epoch, start, partitions) in [
+                (1, 0, vec![8]),
+                (2, 0, vec![1, 2, 5]),
+                (3, 3, vec![3, 1, 4]),
+            ] {
+                session
+                    .enter_state(AudioStateEntry {
+                        epoch: AudioContinuityEpoch::new(epoch),
+                        start_sample: start,
+                    })
+                    .expect("fresh seek state");
+                let mut source = VaryingSource(values.clone());
+                let mut actual = Vec::new();
+                let mut position = start;
+                for frames in partitions {
+                    let mut block = vec![0.0; frames];
+                    session
+                        .render_into(
+                            &mut source,
+                            AudioRenderRequest { start_sample: position, frames },
+                            &mut block,
+                        )
+                        .expect("compensated block");
+                    actual.extend(block);
+                    position += frames as i64;
+                }
+                let expected = (start..start + 8)
+                    .map(|frame| {
+                        let clip_start = scope_start.unwrap_or(0);
+                        if frame < clip_start {
+                            0.0
+                        } else {
+                            0.25 * ((frame - clip_start) as f32 + 1.0)
+                                + (0.25 + if early_detector { 0.125 } else { 0.0 })
+                                    * (frame as f32 + 1.0)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(actual, expected, "{mode:?} {backend:?} epoch{epoch}");
+            }
+        }
+    }
+}

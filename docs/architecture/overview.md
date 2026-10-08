@@ -6,6 +6,13 @@ Mondrian is a native video editor organized around strict crate boundaries. The 
 
 ## Layers
 
+Audio latency preparation follows the execution module's existing causal channel
+stages. App authoring keeps one observation-bound routing transaction; native
+CLAP/VST3 acceptance additionally covers a detector whose own declared latency
+requires target main-input compensation. Undo, saving with live Redo and fresh
+archive reopens compare independent PCM and the explicit public lookahead, without
+introducing an App-side latency interpretation.
+
 Canonical visual key capture returns complete schema-ordered channel groups by
 stable identity without evaluating `PropertyValue`. Clipboard capture scans each
 selected property once and retains exact `f64`/`i64` author values plus each

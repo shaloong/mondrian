@@ -13,14 +13,18 @@ the bus metadata it already validates.
 Channel execution is lowered into ordered pre-fader and post-fader stages.
 The pre stage sums inputs and runs Scope/trim/pre racks, then immediately
 publishes pre-fader sidechain taps. The post stage applies the fader/post rack
-and mute, then publishes final taps and meters. A separate main-path order is
-used only to propagate declared latency; it does not determine execution order.
+and mute, then publishes final taps and meters. The same causal stage order
+solves latency; main-route order provides stable node storage only.
 Scratch liveness spans stage positions, all main-route consumers and the public
 output copy. Reciprocal pre-to-post dependencies and same-strip pre-to-post
 connections are causal; final-tap feedback remains rejected. Preparation owns
 stage sorting and storage; processing allocates no stage graph or buffers.
-Late auxiliary arrival still fails explicitly when main-path sidechain delay
-compensation cannot be represented. Native and wider layout qualification remain
+At each processor, main and all connected auxiliary arrivals align to their
+maximum. Session-owned fixed main/auxiliary delay lines propagate that arrival
+through Scope racks, contribution sums and exact port taps. Their storage and
+lookahead count toward existing admission budgets and reset on every epoch.
+Partial Scope blocks read the matching source slice; compensated warmup cannot
+publish audio before the Clip start. Native and wider layout qualification remain
 separate from source regression evidence.
 
 The VST3 adapter uses a selected-plugin catalog, a deadline-bound metadata
@@ -691,8 +695,9 @@ spans; the Session advances span cursors instead of searching or validating
 author curves per sample. Each generated Processor has stable Parameter-ID
 lanes. Static lanes produce one offset-zero event per block; varying lanes
 produce exact values at every sample offset in Session-reused storage. Latency
-is accumulated through each
-pre-/post-fader rack and resolved independently at every real summing point;
+is solved on the existing causal stages, aligning every processor's main and
+connected auxiliary inputs before adding its declared latency, and resolved at
+every contribution/route summing point;
 the selected Program Output exposes the resulting internal lookahead. Every
 automation and Processor occurrence also receives its checked input-signal
 delay: Scope input, each Rack prefix, edit envelope, channel fader, and Route

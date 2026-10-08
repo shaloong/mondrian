@@ -99,6 +99,17 @@ impl FixedDelayLine {
         Ok(())
     }
 
+    /// Delay an admitted main bus without temporary PCM or block allocation.
+    pub(crate) fn delay_interleaved_in_place(&mut self, pcm: &mut [f32]) {
+        if self.samples.is_empty() {
+            return;
+        }
+        for sample in pcm {
+            std::mem::swap(sample, &mut self.samples[self.cursor]);
+            self.advance_cursor();
+        }
+    }
+
     fn advance_cursor(&mut self) {
         self.cursor += 1;
         if self.cursor == self.samples.len() {
