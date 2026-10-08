@@ -1,5 +1,13 @@
 # Audio pipeline
 
+Native auxiliary input names are bounded preparation metadata, keyed separately
+from the execution bus contract. CLAP reads restored deactivated audio ports;
+VST3 reads the validated activated bus metadata. The worker's exact version 2
+ready handshake carries names once, validates membership and unique keys, and
+keeps strings out of block commands, PCM layout and execution signatures.
+Explicit control inspection returns those prepared facts without creating DSP;
+ordinary factory resolution does not query presentation metadata.
+
 Channel execution is lowered into ordered pre-fader and post-fader stages.
 The pre stage sums inputs and runs Scope/trim/pre racks, then immediately
 publishes pre-fader sidechain taps. The post stage applies the fader/post rack

@@ -64,6 +64,11 @@ pub const ISOLATED_AUDIO_PROCESSOR_NONCE_ENV: &str = "MONDRIAN_INTERNAL_AUDIO_PR
 /// Recommended product-executable dispatch argument for an audio Processor Worker.
 pub const ISOLATED_AUDIO_PROCESSOR_WORKER_ARGUMENT: &str = "--internal-audio-processor-worker-v1";
 
+pub(super) struct NativeAudioInputMetadata {
+    pub(super) contract: AudioProcessorAuxiliaryInputContract,
+    pub(super) names: Vec<crate::AudioProcessorInputName>,
+}
+
 /// Immutable launch and capacity facts for one process-isolated processor definition.
 #[derive(Clone)]
 pub struct IsolatedAudioProcessorWorkerSpec {
@@ -259,6 +264,7 @@ impl fmt::Debug for IsolatedAudioProcessorResolver {
 
 /// Render-contract-bound Factory backed by one supervised Worker per instance.
 pub struct IsolatedAudioProcessorFactory {
+    input_names: Vec<crate::AudioProcessorInputName>,
     spec: IsolatedAudioProcessorWorkerSpec,
     execution_contract: AudioProcessorExecutionContract,
     layout: SharedBlockLayout,
@@ -280,7 +286,8 @@ impl IsolatedAudioProcessorFactory {
         let execution_contract = spec
             .plugin_execution_contract
             .with_additional_session_scratch_bytes(layout.total_bytes)?;
-        let mut validation = SupervisedAudioWorker::launch(&spec, spec.render_contract, layout)?;
+        let (mut validation, input_names) =
+            SupervisedAudioWorker::launch(&spec, spec.render_contract, layout)?;
         if !validation.shutdown() {
             return Err(AudioProcessorHostError::WorkerFailed {
                 operation: "validation shutdown",
@@ -288,7 +295,12 @@ impl IsolatedAudioProcessorFactory {
                     .to_owned(),
             });
         }
-        Ok(Arc::new(Self { spec, execution_contract, layout }))
+        Ok(Arc::new(Self {
+            spec,
+            execution_contract,
+            layout,
+            input_names,
+        }))
     }
 }
 
@@ -301,8 +313,12 @@ impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
         self.spec.auxiliary_inputs.clone()
     }
 
+    fn auxiliary_input_names(&self) -> Vec<crate::AudioProcessorInputName> {
+        self.input_names.clone()
+    }
+
     fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
-        let worker =
+        let (worker, _) =
             SupervisedAudioWorker::launch(&self.spec, self.spec.render_contract, self.layout)?;
         Ok(Box::new(IsolatedAudioProcessor {
             worker,
@@ -560,6 +576,11 @@ pub trait IsolatedAudioProcessorWorker {
 
     /// Revalidated native auxiliary-bus facts.
     fn auxiliary_input_contract(&self) -> AudioProcessorAuxiliaryInputContract;
+
+    /// Optional native display names captured during control-side preparation.
+    fn auxiliary_input_names(&self) -> Vec<crate::AudioProcessorInputName> {
+        Vec::new()
+    }
 
     /// Reset native history for one fresh continuity epoch.
     fn enter_state(&mut self, start_sample: i64) -> Result<(), AudioProcessorHostError>;

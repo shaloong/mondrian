@@ -427,6 +427,16 @@ pub(crate) mod tests {
     struct ControlInputFactory(mondrian_core::AudioChannelLayout);
 
     impl AudioProcessorFactory for ControlInputFactory {
+        fn auxiliary_input_names(&self) -> Vec<mondrian_audio::AudioProcessorInputName> {
+            [("detector.11", "压缩探测 🙂"), ("detector.7", "备用探测")]
+                .into_iter()
+                .map(|(key, name)| mondrian_audio::AudioProcessorInputName {
+                    bus_key: key.to_owned(),
+                    name: name.to_owned(),
+                })
+                .collect()
+        }
+
         fn execution_contract(&self) -> mondrian_audio::AudioProcessorExecutionContract {
             mondrian_audio::AudioProcessorExecutionContract::stateless()
         }

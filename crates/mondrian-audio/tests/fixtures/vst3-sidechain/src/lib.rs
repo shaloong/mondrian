@@ -177,7 +177,14 @@ impl IComponentTrait for GainProcessor {
         bus.mediaType = media_type;
         bus.direction = direction;
         bus.channelCount = 2;
-        copy_wstring("Audio", &mut bus.name);
+        let name = match (direction, index, self.mode.load(Ordering::Relaxed)) {
+            (BusDirections_::kInput, 0, _) => "Main",
+            (BusDirections_::kInput, _, 2) => "   ",
+            (BusDirections_::kInput, _, 1) | (BusDirections_::kInput, 1, _) => "压缩探测 🙂",
+            (BusDirections_::kInput, _, _) => "备用探测",
+            _ => "Audio",
+        };
+        copy_wstring(name, &mut bus.name);
         bus.busType = if index == 0 {
             BusTypes_::kMain
         } else {

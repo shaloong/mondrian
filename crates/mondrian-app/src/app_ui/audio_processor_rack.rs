@@ -1351,10 +1351,18 @@ pub(crate) fn bind_processor_input_queries(
                 }
                 AudioInputObservation::Ready(observed) => {
                     let inputs = &observed.inputs;
+                    super::audio_sidechain::bind_retained_input_names(
+                        &mut processor.sidechain_routes,
+                        sequence,
+                        &inputs.auxiliary_inputs,
+                        &inputs.input_names,
+                        localizer,
+                    );
                     processor.sidechain_inputs = super::audio_sidechain::input_options(
                         sequence,
                         observed.binding,
                         &inputs.auxiliary_inputs,
+                        &inputs.input_names,
                         routing.or_else(|| {
                             local_routing
                                 .get_or_init(|| {
@@ -1442,6 +1450,26 @@ mod input_query_tests {
                     AudioAutomationTimeContext::at_sequence_time(sequence, sequence.playhead),
                 )];
                 bind_processor_input_queries(&mut racks, state, &localizer, None);
+                if !racks[0].processors[0].sidechain_inputs.is_empty() {
+                    let inputs = &racks[0].processors[0].sidechain_inputs;
+                    assert_eq!(inputs.len(), 2);
+                    assert_eq!(
+                        inputs[0].label,
+                        localizer.format_text("audio-sidechain-input", "identity", "压缩探测 🙂")
+                    );
+                    assert_eq!(
+                        inputs[1].label,
+                        localizer.format_text("audio-sidechain-input", "identity", "备用探测")
+                    );
+                    assert!(inputs[0]
+                        .options
+                        .iter()
+                        .all(|option| option.payload.bus_key == "detector.11"));
+                    assert!(inputs[1]
+                        .options
+                        .iter()
+                        .all(|option| option.payload.bus_key == "detector.7"));
+                }
                 let model =
                     racks[0].processors[0].input_query.clone().expect("Native query control");
                 (model, localizer)
@@ -1495,6 +1523,14 @@ mod input_query_tests {
                 calls.load(Ordering::SeqCst),
                 1,
                 "Locale/model updates only read facts"
+            );
+            for _ in 0..100 {
+                let _ = project(&state, AppUiLocale::EnUs);
+            }
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "Repeated UI reads never prepare native adapters"
             );
             // Actual failed adapter preparation remains a quiet localized, retryable control state.
             state.active_sequence_mut_uncommitted().expect("Sequence").audio_program.outputs[0]

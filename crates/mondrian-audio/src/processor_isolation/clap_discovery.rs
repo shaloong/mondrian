@@ -545,7 +545,7 @@ pub(super) fn probe_loaded(
     } else {
         None
     };
-    let auxiliary_inputs = list_audio_inputs(&handle, channel_layout)?;
+    let auxiliary_inputs = inspect_audio_inputs(&handle, channel_layout)?.contract;
     let configuration = PluginAudioConfiguration {
         sample_rate: f64::from(sample_rate),
         min_frames_count: 1,
@@ -593,10 +593,10 @@ struct BoundedStateWriter {
 }
 
 /// Read deactivated native ports in ABI order, using stable IDs for author routes.
-pub(super) fn list_audio_inputs(
+pub(super) fn inspect_audio_inputs(
     handle: &clack_host::prelude::PluginMainThreadHandle<'_>,
     channel_layout: AudioChannelLayout,
-) -> Result<AudioProcessorAuxiliaryInputContract, AudioProcessorHostError> {
+) -> Result<super::NativeAudioInputMetadata, AudioProcessorHostError> {
     let expected_type = match channel_layout {
         AudioChannelLayout::Mono => AudioPortType::MONO,
         AudioChannelLayout::Stereo => AudioPortType::STEREO,
@@ -606,6 +606,7 @@ pub(super) fn list_audio_inputs(
         .get_extension::<PluginAudioPorts>()
         .ok_or_else(|| invalid("CLAP plugin does not expose audio ports"))?;
     let mut auxiliary_inputs = AudioProcessorAuxiliaryInputContract::default();
+    let mut names = Vec::new();
     for is_input in [true, false] {
         let count = ports.count(handle, is_input);
         if count == 0 || (is_input && count > MAX_INPUT_PORTS) || (!is_input && count != 1) {
@@ -629,6 +630,14 @@ pub(super) fn list_audio_inputs(
                 ));
             }
             if is_input && index != 0 {
+                if let Ok(name) = std::str::from_utf8(port.name)
+                    && let Some(name) = crate::AudioProcessorInputName::capture(
+                        format!("clap.audio-input.{}", port.id.get()),
+                        name,
+                    )
+                {
+                    names.push(name);
+                }
                 auxiliary_inputs.buses.push(AudioProcessorAuxiliaryInputBusContract {
                     bus_key: format!("clap.audio-input.{}", port.id.get()),
                     channel_layout,
@@ -637,7 +646,7 @@ pub(super) fn list_audio_inputs(
         }
     }
     auxiliary_inputs.validate(channel_layout)?;
-    Ok(auxiliary_inputs)
+    Ok(super::NativeAudioInputMetadata { contract: auxiliary_inputs, names })
 }
 
 impl Write for BoundedStateWriter {

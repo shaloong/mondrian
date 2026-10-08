@@ -8,7 +8,7 @@ use mondrian_core::{AudioChannelLayout, ParameterId};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
-pub(super) const PROTOCOL_VERSION: u32 = 1;
+pub(super) const PROTOCOL_VERSION: u32 = 2;
 pub(super) const MAX_CONTROL_FRAME_BYTES: usize = 1024 * 1024;
 pub(super) const MAX_WORKER_DETAIL_BYTES: usize = 4096;
 const COMMAND_MAGIC: u32 = u32::from_le_bytes(*b"MAPC");
@@ -113,6 +113,7 @@ pub(super) enum ReadyResultWire {
     Ready {
         execution_contract: ExecutionContractWire,
         auxiliary_buses: Vec<AuxiliaryBusWire>,
+        input_names: Vec<crate::AudioProcessorInputName>,
     },
     Rejected {
         detail: String,

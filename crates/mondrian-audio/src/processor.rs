@@ -299,6 +299,12 @@ pub trait AudioProcessorFactory: Send + Sync {
         AudioProcessorAuxiliaryInputContract::default()
     }
 
+    /// Optional control-side native names keyed by admitted auxiliary buses.
+    /// Names never enter execution-contract equality or per-block processing.
+    fn auxiliary_input_names(&self) -> Vec<AudioProcessorInputName> {
+        Vec::new()
+    }
+
     /// Create one exclusive mutable instance before realtime execution starts.
     fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError>;
 }
@@ -411,6 +417,55 @@ pub struct AudioProcessorAuxiliaryInputBusContract {
     pub bus_key: String,
     /// Exact semantic layout accepted by this bus.
     pub channel_layout: AudioChannelLayout,
+}
+
+/// Control-side native name independent of a bus's routing identity and layout.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioProcessorInputName {
+    /// Exact stable key in the auxiliary input contract.
+    pub bus_key: String,
+    /// Native text suitable for one control row.
+    pub name: String,
+}
+
+impl AudioProcessorInputName {
+    /// Capture valid native text; absent or invalid names use the key in the UI.
+    pub fn capture(bus_key: impl Into<String>, name: &str) -> Option<Self> {
+        let name = name.trim();
+        Self::valid_name(name).then(|| Self { bus_key: bus_key.into(), name: name.to_owned() })
+    }
+
+    fn valid_name(name: &str) -> bool {
+        !name.trim().is_empty()
+            && name.len() <= 1024
+            && !name.chars().any(|character| {
+                character.is_control() || matches!(character, '\u{2028}' | '\u{2029}')
+            })
+    }
+
+    pub(crate) fn validate_all(
+        names: &[Self],
+        contract: &AudioProcessorAuxiliaryInputContract,
+    ) -> Result<(), AudioProcessorHostError> {
+        if names.len() > contract.buses.len() {
+            return Err(AudioProcessorHostError::InvalidContract(
+                "too many auxiliary input names".to_owned(),
+            ));
+        }
+        let mut keys = std::collections::BTreeSet::new();
+        for name in names {
+            if !contract.buses.iter().any(|bus| bus.bus_key == name.bus_key)
+                || !keys.insert(name.bus_key.as_str())
+                || !Self::valid_name(&name.name)
+            {
+                return Err(AudioProcessorHostError::InvalidContract(
+                    "invalid auxiliary input presentation metadata".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Complete immutable auxiliary-input contract of one prepared processor.

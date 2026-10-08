@@ -11,6 +11,8 @@ use mondrian_timeline::{
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SidechainRouteModel {
     pub(crate) route_id: AudioRouteId,
+    pub(crate) source: AudioRouteSource,
+    pub(crate) bus_key: String,
     pub(crate) label: String,
     pub(crate) enabled: bool,
     pub(crate) static_gain: Option<f64>,
@@ -54,6 +56,8 @@ pub(crate) fn retained_routes(
             };
             SidechainRouteModel {
                 route_id: route.id,
+                source: route.source,
+                bus_key: route.bus_key.clone(),
                 label: format!(
                     "{} → {}",
                     source_label(sequence, route.source, localizer),
@@ -76,6 +80,7 @@ pub(crate) fn input_options(
     sequence: &Sequence,
     binding: crate::app::product_action::AudioProcessorInputBinding,
     inputs: &mondrian_audio::AudioProcessorAuxiliaryInputContract,
+    input_names: &[mondrian_audio::AudioProcessorInputName],
     admission: Option<&AudioRouteCandidateInspection>,
     localizer: &Localizer,
 ) -> Vec<SidechainInputModel> {
@@ -120,7 +125,11 @@ pub(crate) fn input_options(
         .buses
         .iter()
         .map(|bus| SidechainInputModel {
-            label: localizer.format_text("audio-sidechain-input", "identity", &bus.bus_key),
+            label: localizer.format_text(
+                "audio-sidechain-input",
+                "identity",
+                &input_label(&bus.bus_key, inputs, input_names),
+            ),
             options: sources
                 .iter()
                 .map(|source| SidechainCreateOption {
@@ -134,6 +143,49 @@ pub(crate) fn input_options(
                 .collect(),
         })
         .collect()
+}
+
+pub(crate) fn bind_retained_input_names(
+    routes: &mut [SidechainRouteModel],
+    sequence: &Sequence,
+    inputs: &mondrian_audio::AudioProcessorAuxiliaryInputContract,
+    names: &[mondrian_audio::AudioProcessorInputName],
+    localizer: &Localizer,
+) {
+    for route in routes {
+        route.label = format!(
+            "{} → {}",
+            source_label(sequence, route.source, localizer),
+            input_label(&route.bus_key, inputs, names)
+        );
+    }
+}
+
+fn input_label(
+    key: &str,
+    inputs: &mondrian_audio::AudioProcessorAuxiliaryInputContract,
+    names: &[mondrian_audio::AudioProcessorInputName],
+) -> String {
+    let label_for = |key: &str| {
+        names
+            .iter()
+            .find(|name| name.bus_key == key)
+            .map_or_else(|| key.to_owned(), |name| name.name.clone())
+    };
+    // Missing retained ports remain addressable using their persisted stable key.
+    if !inputs.buses.iter().any(|bus| bus.bus_key == key) {
+        return key.to_owned();
+    }
+    let label = label_for(key);
+    if inputs
+        .buses
+        .iter()
+        .any(|bus| bus.bus_key != key && label_for(&bus.bus_key) == label)
+    {
+        format!("{label} ({key})")
+    } else {
+        label
+    }
 }
 
 fn source_label(sequence: &Sequence, source: AudioRouteSource, localizer: &Localizer) -> String {
@@ -371,6 +423,7 @@ mod tests {
             &sequence,
             binding,
             &contract,
+            &[],
             Some(&admission),
             &Localizer::new(AppUiLocale::EnUs).expect("catalog"),
         );
@@ -389,10 +442,61 @@ mod tests {
             &sequence,
             binding,
             &contract,
+            &[],
             None,
             &Localizer::new(AppUiLocale::EnUs).expect("catalog")
         )[0]
         .options
         .is_empty());
+    }
+    #[test]
+    fn sidechain_names_disambiguate_native_labels_and_preserve_unavailable_routes() {
+        let (mut sequence, id, source) = fixture();
+        let keys = ["detector.11", "detector.7", "nameless"];
+        let contract = AudioProcessorAuxiliaryInputContract {
+            buses: keys
+                .iter()
+                .map(|key| AudioProcessorAuxiliaryInputBusContract {
+                    bus_key: (*key).into(),
+                    channel_layout: AudioChannelLayout::Stereo,
+                })
+                .collect(),
+        };
+        let mut names = keys[..2]
+            .iter()
+            .map(|key| mondrian_audio::AudioProcessorInputName {
+                bus_key: (*key).into(),
+                name: "压缩探测 🙂".into(),
+            })
+            .collect::<Vec<_>>();
+        sequence.audio_program.sidechain_routes.extend(
+            keys.iter()
+                .chain([&"missing"])
+                .map(|key| AudioProcessorSidechainRoute::new(source, id, *key)),
+        );
+        let before = serde_json::to_value(&sequence).expect("author snapshot");
+        for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+            let localizer = Localizer::new(locale).expect("catalog");
+            let mut models = retained_routes(&sequence, id, &localizer);
+            bind_retained_input_names(&mut models, &sequence, &contract, &names, &localizer);
+            assert!(models[0].label.ends_with("压缩探测 🙂 (detector.11)"));
+            assert!(models[1].label.ends_with("压缩探测 🙂 (detector.7)"));
+            assert!(models[2].label.ends_with("nameless"));
+            assert!(models[3].label.ends_with("missing"));
+            assert!(models.iter().all(|route| remove_action(route).is_some()));
+            assert_eq!(
+                serde_json::to_value(&sequence).expect("unchanged author"),
+                before
+            );
+        }
+        names[0].name = "nameless".into();
+        assert_eq!(
+            input_label("detector.11", &contract, &names),
+            "nameless (detector.11)"
+        );
+        assert_eq!(
+            input_label("nameless", &contract, &names),
+            "nameless (nameless)"
+        );
     }
 }

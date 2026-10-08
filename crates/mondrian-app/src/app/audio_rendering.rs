@@ -781,8 +781,8 @@ mod tests {
                 Some(opaque),
             )
             .expect("capture stateful native definition");
-        let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
-        assert_native_sidechain_history(instance, &resolver, "clap.audio-input.11", same_strip);
+        let resolver = Arc::new(IsolatedAudioProcessorResolver::new(Arc::new(installed)));
+        assert_native_sidechain_history(instance, resolver, "clap.audio-input.11", same_strip);
     }
 
     #[test]
@@ -817,13 +817,13 @@ mod tests {
                 None,
             )
             .expect("capture default native state");
-        let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
-        assert_native_sidechain_history(instance, &resolver, "vst3.audio-input.1", same_strip);
+        let resolver = Arc::new(IsolatedAudioProcessorResolver::new(Arc::new(installed)));
+        assert_native_sidechain_history(instance, resolver, "vst3.audio-input.1", same_strip);
     }
 
     fn assert_native_sidechain_history(
         instance: mondrian_timeline::audio::AudioProcessorInstance,
-        resolver: &dyn AudioProcessorResolver,
+        resolver: Arc<dyn AudioProcessorResolver>,
         bus_key: &str,
         same_strip: bool,
     ) {
@@ -895,10 +895,10 @@ mod tests {
             }))
             .into_external_action()
         };
-        let mut state = AppState::new();
+        let mut state = AppState::with_audio_processor_resolver(Arc::clone(&resolver));
         state.test_set_sequence(Some(sequence.clone()));
         state.test_set_asset_library(Some(library));
-        let before = assert_native_sidechain_delivery(&state, resolver, 0.25);
+        let before = assert_native_sidechain_delivery(&state, resolver.as_ref(), 0.25);
         let generation = state.project_author_generation();
         let history = state.authoring_history().expect("history").diagnostics();
         state
@@ -933,9 +933,72 @@ mod tests {
         assert_eq!(refused.project_author_generation(), locked_generation);
         assert!(!refused.can_undo_action() && !refused.can_redo_action());
         drop(refused);
+        use super::super::audio_input_observation::AudioInputObservation;
+        use super::super::product_action::{
+            AudioProcessorInputQueryOperation, AudioProcessorInputQueryPayload,
+        };
+        let (owner, rack) = if same_strip {
+            (
+                mondrian_timeline::AudioChannelStripOwner::Track { track_id: detector },
+                mondrian_timeline::AudioChannelStripRack::PostFader,
+            )
+        } else {
+            (
+                mondrian_timeline::AudioChannelStripOwner::ProgramOutput {
+                    output_id: sequence.audio_program.outputs[0].id,
+                },
+                mondrian_timeline::AudioChannelStripRack::PreFader,
+            )
+        };
+        let query = AudioProcessorInputQueryPayload {
+            session_id: state.authoring_session_id().expect("native editing session"),
+            sequence_id: sequence.id,
+            target: mondrian_audio::AudioProcessorInputInspectionTarget::ChannelStrip {
+                owner,
+                rack,
+            },
+            processor_id,
+            operation: AudioProcessorInputQueryOperation::Query,
+        };
         state
-            .dispatch_action(action(processor_id))
-            .expect("atomic native sidechain routing");
+            .dispatch_action(
+                ProductAction::Audio(AudioProductAction::QueryProcessorInputs(query))
+                    .into_external_action(),
+            )
+            .expect("real native control inspection");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while state.has_native_audio_control_work() {
+            state.poll_audio_processor_input_observations();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "native input observation deadline"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let AudioInputObservation::Ready(observed) = state.audio_processor_input_observation(query)
+        else {
+            panic!("Real native auxiliary observation must succeed");
+        };
+        assert!(observed
+            .inputs
+            .input_names
+            .iter()
+            .any(|name| name.bus_key == bus_key && name.name == "压缩探测 🙂"));
+        let connection = crate::app_ui::test_utils::native_sidechain_connection_action(
+            &state, query, source, bus_key,
+        );
+        assert_eq!(
+            state.project_author_generation(),
+            generation,
+            "Read-only SDK labels never edit author state"
+        );
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
+        state
+            .dispatch_action(connection)
+            .expect("atomic observed native sidechain routing");
         assert_eq!(state.project_author_generation(), generation + 1);
         assert_eq!(
             state.authoring_history().expect("history").diagnostics().undo_entries,
@@ -943,7 +1006,7 @@ mod tests {
         );
         let edited = state.active_sequence().expect("edited").clone();
         assert_eq!(edited.audio_program.sidechain_routes.len(), 1);
-        let after = assert_native_sidechain_delivery(&state, resolver, routed_expected);
+        let after = assert_native_sidechain_delivery(&state, resolver.as_ref(), routed_expected);
         assert_ne!(before, after);
         assert!(state.undo_timeline().expect("one route Undo"));
         assert!(state
@@ -951,7 +1014,7 @@ mod tests {
             .expect("Undo")
             .author_state_eq_ignoring_revision(&sequence));
         assert_eq!(
-            assert_native_sidechain_delivery(&state, resolver, 0.25),
+            assert_native_sidechain_delivery(&state, resolver.as_ref(), 0.25),
             before
         );
         assert!(!state.can_undo_action() && state.can_redo_action());
@@ -964,7 +1027,7 @@ mod tests {
             .expect("Redo")
             .author_state_eq_ignoring_revision(&edited));
         assert_eq!(
-            assert_native_sidechain_delivery(&state, resolver, routed_expected),
+            assert_native_sidechain_delivery(&state, resolver.as_ref(), routed_expected),
             after
         );
         let edited_path = root.path().join("原生侧链重做🙂.mdp");
@@ -987,7 +1050,7 @@ mod tests {
                 1
             );
             assert_eq!(
-                assert_native_sidechain_delivery(&reopened, resolver, expected),
+                assert_native_sidechain_delivery(&reopened, resolver.as_ref(), expected),
                 output
             );
         }

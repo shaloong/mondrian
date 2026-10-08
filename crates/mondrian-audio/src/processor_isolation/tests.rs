@@ -256,6 +256,27 @@ fn installed_clap_sidechain_preserves_native_buses_state_delay_and_partitions() 
             for partitions in [&[4, 4, 4, 2][..], &[3, 2, 1, 4, 4][..]] {
                 let factory = IsolatedAudioProcessorFactory::prepare(spec.clone())
                     .expect("prepare native sidechain worker");
+                let expected_names = if port_mode == 2 {
+                    Vec::new()
+                } else {
+                    expected_ids
+                        .iter()
+                        .map(|id| crate::AudioProcessorInputName {
+                            bus_key: format!("clap.audio-input.{id}"),
+                            name: if port_mode == 1 || *id == 11 {
+                                "压缩探测 🙂"
+                            } else {
+                                "备用探测"
+                            }
+                            .into(),
+                        })
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(
+                    factory.auxiliary_input_names(),
+                    expected_names,
+                    "Restored native metadata must preserve keys and Unicode text"
+                );
                 let mut processor = factory.create().expect("create isolated instance");
                 processor.enter_state(100).expect("enter native continuity");
                 let mut output = Vec::new();
@@ -418,6 +439,27 @@ fn installed_vst3_sidechain_preserves_native_buses_state_delay_and_partitions() 
             for partitions in [&[4, 4, 4, 2][..], &[3, 2, 1, 4, 4][..]] {
                 let factory = IsolatedAudioProcessorFactory::prepare(spec.clone())
                     .expect("prepare native sidechain worker");
+                let expected_names = if port_mode == 2 {
+                    Vec::new()
+                } else {
+                    expected_ids
+                        .iter()
+                        .map(|id| crate::AudioProcessorInputName {
+                            bus_key: format!("vst3.audio-input.{id}"),
+                            name: if port_mode == 1 || *id == 1 {
+                                "压缩探测 🙂"
+                            } else {
+                                "备用探测"
+                            }
+                            .into(),
+                        })
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(
+                    factory.auxiliary_input_names(),
+                    expected_names,
+                    "Restored native metadata must preserve keys and Unicode text"
+                );
                 let mut processor = factory.create().expect("create isolated instance");
                 processor.enter_state(100).expect("enter native continuity");
                 let mut output = Vec::new();

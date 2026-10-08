@@ -305,7 +305,7 @@ impl IsolatedAudioProcessorWorkerFactory for Vst3AudioProcessorWorkerFactory {
         plugin
             .set_process_mode(mode)
             .map_err(|error| invalid(format!("VST3 processing mode is unsupported: {error}")))?;
-        validate_loaded(&mut plugin, &registration, render.channel_layout)?;
+        let input_names = validate_loaded(&mut plugin, &registration, render.channel_layout)?;
         let buffers = plugin
             .create_bus_audio_buffers(render.max_block_frames)
             .map_err(|error| invalid(format!("VST3 bus buffer preparation failed: {error}")))?;
@@ -320,6 +320,7 @@ impl IsolatedAudioProcessorWorkerFactory for Vst3AudioProcessorWorkerFactory {
             render,
             buffers,
             auxiliary_inputs: registration.auxiliary_inputs,
+            input_names,
             last_end: None,
         }))
     }
@@ -333,6 +334,7 @@ struct Vst3Worker {
     render: crate::AudioRenderContract,
     buffers: BusAudioBuffers,
     auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
+    input_names: Vec<crate::AudioProcessorInputName>,
     last_end: Option<i64>,
 }
 
@@ -343,6 +345,10 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
 
     fn auxiliary_input_contract(&self) -> AudioProcessorAuxiliaryInputContract {
         self.auxiliary_inputs.clone()
+    }
+
+    fn auxiliary_input_names(&self) -> Vec<crate::AudioProcessorInputName> {
+        self.input_names.clone()
     }
 
     fn enter_state(&mut self, start_sample: i64) -> Result<(), AudioProcessorHostError> {
@@ -531,7 +537,7 @@ fn validate_loaded(
     plugin: &mut Plugin,
     registration: &Vst3PluginRegistration,
     channel_layout: AudioChannelLayout,
-) -> Result<(), AudioProcessorHostError> {
+) -> Result<Vec<crate::AudioProcessorInputName>, AudioProcessorHostError> {
     if plugin.info().uid != registration.class_id
         || registration
             .vendor
@@ -540,7 +546,8 @@ fn validate_loaded(
     {
         return Err(invalid("VST3 class identity changed after preparation"));
     }
-    if prepare_audio_inputs(plugin, channel_layout)? != registration.auxiliary_inputs {
+    let metadata = prepare_audio_inputs(plugin, channel_layout)?;
+    if metadata.contract != registration.auxiliary_inputs {
         return Err(invalid("VST3 auxiliary bus contract changed since probe"));
     }
     let tail = match plugin.tail_samples() {
@@ -560,14 +567,14 @@ fn validate_loaded(
             "VST3 parameter metadata changed since contract probe",
         ));
     }
-    Ok(())
+    Ok(metadata.names)
 }
 
 /// Read roles from the actual restored component and activate admitted audio ports.
 pub(super) fn prepare_audio_inputs(
     plugin: &mut Plugin,
     channel_layout: AudioChannelLayout,
-) -> Result<AudioProcessorAuxiliaryInputContract, AudioProcessorHostError> {
+) -> Result<super::NativeAudioInputMetadata, AudioProcessorHostError> {
     let metadata = plugin
         .native_audio_bus_info()
         .map_err(|error| invalid(format!("VST3 native bus query failed: {error}")))?;
@@ -609,7 +616,16 @@ pub(super) fn prepare_audio_inputs(
     {
         return Err(invalid("VST3 bus contract changed during activation"));
     }
-    Ok(expected)
+    let names = current_metadata
+        .inputs
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter_map(|(index, bus)| {
+            crate::AudioProcessorInputName::capture(format!("vst3.audio-input.{index}"), &bus.name)
+        })
+        .collect();
+    Ok(super::NativeAudioInputMetadata { contract: expected, names })
 }
 
 fn audio_inputs_from_metadata(

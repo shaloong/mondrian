@@ -90,6 +90,13 @@ pub(super) fn run_worker(
         return Ok(());
     }
 
+    let input_names = processor.auxiliary_input_names();
+    if let Err(error) =
+        crate::AudioProcessorInputName::validate_all(&input_names, &auxiliary_inputs)
+    {
+        write_ready_rejected(&mut control, error.to_string())?;
+        return Ok(());
+    }
     let shared_path = std::path::PathBuf::from(prepare.shared_path);
     let shared_file = OpenOptions::new()
         .read(true)
@@ -115,6 +122,7 @@ pub(super) fn run_worker(
             result: ReadyResultWire::Ready {
                 execution_contract: prepare.execution_contract,
                 auxiliary_buses: auxiliary_to_wire(&auxiliary_inputs),
+                input_names,
             },
         },
     )

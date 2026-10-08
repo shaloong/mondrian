@@ -30,7 +30,7 @@ impl SupervisedAudioWorker {
         spec: &IsolatedAudioProcessorWorkerSpec,
         contract: AudioRenderContract,
         layout: SharedBlockLayout,
-    ) -> Result<Self, AudioProcessorHostError> {
+    ) -> Result<(Self, Vec<crate::AudioProcessorInputName>), AudioProcessorHostError> {
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
             .map_err(|error| worker_failed("startup", error))?;
         listener
@@ -117,8 +117,8 @@ impl SupervisedAudioWorker {
                 "Worker replied with another protocol version",
             ));
         }
-        match ready.result {
-            ReadyResultWire::Ready { execution_contract, auxiliary_buses } => {
+        let input_names = match ready.result {
+            ReadyResultWire::Ready { execution_contract, auxiliary_buses, input_names } => {
                 let worker_contract = match execution_contract.realize() {
                     Ok(contract) => contract,
                     Err(error) => {
@@ -136,26 +136,36 @@ impl SupervisedAudioWorker {
                         "Worker preparation contract drifted from the admitted parent contract",
                     ));
                 }
+                if let Err(error) =
+                    crate::AudioProcessorInputName::validate_all(&input_names, &worker_auxiliary)
+                {
+                    terminate_and_reap(&mut child);
+                    return Err(error);
+                }
+                input_names
             }
             ReadyResultWire::Rejected { detail } => {
                 terminate_and_reap(&mut child);
                 return Err(worker_failed_detail("startup", &detail));
             }
-        }
+        };
         if let Err(error) = set_stream_timeout(&control, spec.operation_timeout) {
             terminate_and_reap(&mut child);
             return Err(worker_failed("startup", error));
         }
-        Ok(Self {
-            child,
-            control,
-            shared,
-            _shared_file: shared_file,
-            layout,
-            operation_timeout: spec.operation_timeout,
-            state_entry_timeout: spec.state_entry_timeout,
-            active: true,
-        })
+        Ok((
+            Self {
+                child,
+                control,
+                shared,
+                _shared_file: shared_file,
+                layout,
+                operation_timeout: spec.operation_timeout,
+                state_entry_timeout: spec.state_entry_timeout,
+                active: true,
+            },
+            input_names,
+        ))
     }
 
     pub(super) const fn layout(&self) -> SharedBlockLayout {

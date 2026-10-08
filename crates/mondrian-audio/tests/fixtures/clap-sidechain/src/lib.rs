@@ -116,7 +116,13 @@ impl PluginAudioPortsImpl for Main<'_> {
         };
         writer.set(&AudioPortInfo {
             id: ClapId::new(id),
-            name: b"input",
+            name: match (index, self.0.mode.load(Ordering::Relaxed), id) {
+                (0, _, _) => "Main",
+                (_, 2, _) => "   ",
+                (_, 1, _) | (_, _, 11) => "压缩探测 🙂",
+                _ => "备用探测",
+            }
+            .as_bytes(),
             channel_count: 2,
             flags: if index == 0 {
                 AudioPortFlags::IS_MAIN

@@ -120,3 +120,56 @@ pub(crate) fn expected_shortcut(hint: &str) -> String {
         hint.to_owned()
     }
 }
+
+/// Check the real shared Rack presentation and return its observed connection action.
+pub(crate) fn native_sidechain_connection_action(
+    state: &crate::app::AppState,
+    query: crate::app::product_action::AudioProcessorInputQueryPayload,
+    source: mondrian_timeline::audio::AudioRouteSource,
+    bus_key: &str,
+) -> mondrian_editor_state::Action {
+    use super::audio_automation::AudioAutomationTimeContext;
+    use super::audio_processor_rack::{bind_processor_input_queries, project_audio_processor_rack};
+    use super::localization::{AppUiLocale, Localizer};
+    use crate::app::audio_input_observation::AudioInputObservation;
+    use mondrian_timeline::AudioProcessorRackAddress;
+    let mondrian_audio::AudioProcessorInputInspectionTarget::ChannelStrip { owner, rack } =
+        query.target
+    else {
+        panic!("Native history fixture uses a channel strip");
+    };
+    let AudioInputObservation::Ready(observed) = state.audio_processor_input_observation(query)
+    else {
+        panic!("Native UI projection requires completed real inspection");
+    };
+    let mut connection = None;
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("native Rack locale");
+        let current = state.active_sequence().expect("native author");
+        let mut racks = vec![project_audio_processor_rack(
+            current,
+            AudioProcessorRackAddress::ChannelStrip { owner, rack },
+            &localizer,
+            AudioAutomationTimeContext::at_sequence_time(current, current.playhead),
+        )];
+        bind_processor_input_queries(&mut racks, state, &localizer, None);
+        let input = racks[0].processors[0]
+            .sidechain_inputs
+            .iter()
+            .find(|input| input.options.iter().any(|option| option.payload.bus_key == bus_key))
+            .expect("real named input control");
+        assert_eq!(
+            input.label,
+            localizer.format_text("audio-sidechain-input", "identity", "压缩探测 🙂")
+        );
+        let option = input
+            .options
+            .iter()
+            .find(|option| option.payload.source == source)
+            .expect("causal native source admitted by shared Rack");
+        assert_eq!(option.payload.binding, observed.binding);
+        connection = Some(super::audio_sidechain::connection_action(option));
+    }
+
+    connection.expect("shared named connection action")
+}

@@ -60,6 +60,8 @@ pub struct AudioProcessorInputInspection {
     pub render_contract: AudioRenderContract,
     /// Ordered stable auxiliary input keys and exact layouts.
     pub auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
+    /// Optional native display names associated with admitted input keys.
+    pub input_names: Vec<crate::AudioProcessorInputName>,
     /// Mode, latency, tail and private scratch facts of the prepared factory.
     pub execution_contract: AudioProcessorExecutionContract,
 }
@@ -169,6 +171,7 @@ pub fn inspect_audio_processor_inputs(
         occurrence,
         render_contract: request.render_contract,
         auxiliary_inputs: factory.auxiliary_inputs().clone(),
+        input_names: factory.input_names()?,
         execution_contract: factory.contract(),
     })
 }

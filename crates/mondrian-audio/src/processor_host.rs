@@ -60,6 +60,16 @@ impl PreparedProcessorFactoryBinding {
         &self.auxiliary_inputs
     }
 
+    pub(crate) fn input_names(
+        &self,
+    ) -> Result<Vec<crate::AudioProcessorInputName>, AudioProcessorHostError> {
+        let names = isolate_adapter_value("auxiliary-input name query", || {
+            self.factory.auxiliary_input_names()
+        })?;
+        crate::AudioProcessorInputName::validate_all(&names, &self.auxiliary_inputs)?;
+        Ok(names)
+    }
+
     fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         let current_contract = isolate_adapter_value("execution-contract revalidation", || {
             self.factory.execution_contract()

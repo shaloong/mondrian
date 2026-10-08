@@ -346,7 +346,7 @@ fn probe_loaded(
             ProcessMode::Realtime
         })
         .map_err(|error| invalid(format!("VST3 probe mode is unsupported: {error}")))?;
-    let auxiliary_inputs = prepare_audio_inputs(&mut plugin, layout)?;
+    let auxiliary_inputs = prepare_audio_inputs(&mut plugin, layout)?.contract;
     let parameters = parameter_descriptors(&plugin)?;
     let current_values = plugin
         .get_parameters()

@@ -10,6 +10,10 @@ enum FactoryMode {
     WrongLayout,
     OfflineOnly,
     Panic,
+    UnknownNameKey,
+    DuplicateNameKey,
+    InvalidName,
+    PanicNames,
 }
 
 struct InspectionResolver {
@@ -64,6 +68,7 @@ impl AudioProcessorResolver for InspectionResolver {
         }
         Ok(Arc::new(InspectionFactory {
             buses,
+            mode: self.mode,
             offline_only: matches!(self.mode, FactoryMode::OfflineOnly),
             creates: Arc::clone(&self.creates),
         }))
@@ -71,12 +76,34 @@ impl AudioProcessorResolver for InspectionResolver {
 }
 
 struct InspectionFactory {
+    mode: FactoryMode,
     buses: Vec<AudioProcessorAuxiliaryInputBusContract>,
     offline_only: bool,
     creates: Arc<AtomicUsize>,
 }
 
 impl AudioProcessorFactory for InspectionFactory {
+    fn auxiliary_input_names(&self) -> Vec<AudioProcessorInputName> {
+        if matches!(self.mode, FactoryMode::PanicNames) {
+            panic!("injected name query panic");
+        }
+        let mut names = self
+            .buses
+            .iter()
+            .map(|bus| AudioProcessorInputName {
+                bus_key: bus.bus_key.clone(),
+                name: "压缩探测 🙂".into(),
+            })
+            .collect::<Vec<_>>();
+        match self.mode {
+            FactoryMode::UnknownNameKey => names[0].bus_key = "not-advertised".into(),
+            FactoryMode::DuplicateNameKey => names[1] = names[0].clone(),
+            FactoryMode::InvalidName => names[0].name = "line\nbreak".into(),
+            _ => {}
+        }
+        names
+    }
+
     fn execution_contract(&self) -> AudioProcessorExecutionContract {
         AudioProcessorExecutionContract::new(
             3,
@@ -226,6 +253,20 @@ fn processor_input_inspection_preserves_channel_addresses_modes_and_author_state
                             vec!["detector.7"]
                         }
                     );
+                    assert_eq!(
+                        result
+                            .input_names
+                            .iter()
+                            .map(|name| name.bus_key.as_str())
+                            .collect::<Vec<_>>(),
+                        result
+                            .auxiliary_inputs
+                            .buses
+                            .iter()
+                            .map(|bus| bus.bus_key.as_str())
+                            .collect::<Vec<_>>()
+                    );
+                    assert!(result.input_names.iter().all(|name| name.name == "压缩探测 🙂"));
                     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
                     assert_eq!(resolver.creates.load(Ordering::SeqCst), 0);
                     assert_eq!(
@@ -341,6 +382,10 @@ fn processor_input_inspection_reuses_mode_layout_key_and_panic_admission() {
         FactoryMode::WrongLayout,
         FactoryMode::OfflineOnly,
         FactoryMode::Panic,
+        FactoryMode::UnknownNameKey,
+        FactoryMode::DuplicateNameKey,
+        FactoryMode::InvalidName,
+        FactoryMode::PanicNames,
     ] {
         let resolver = InspectionResolver::new(expected, mode);
         let result = inspect_audio_processor_inputs(&sequence, request, &resolver);
@@ -416,4 +461,38 @@ fn processor_input_inspection_reads_the_builtin_factory_contract() {
         result.occurrence.insertion,
         AudioProcessorInsertionPoint::PostFader
     );
+}
+
+#[test]
+fn processor_input_names_bound_unicode_without_changing_bus_identity() {
+    let japanese = "探".repeat(127);
+    let captured = AudioProcessorInputName::capture("detector.7", &format!("  {japanese}  "))
+        .expect("full native UTF-16 name remains valid UTF-8");
+    assert_eq!(captured.name, japanese);
+    for invalid in [
+        "",
+        "   ",
+        "two\nrows",
+        "null\0byte",
+        "unicode\u{2028}line",
+        "unicode\u{2029}paragraph",
+        &"x".repeat(1025),
+    ] {
+        assert!(AudioProcessorInputName::capture("detector.7", invalid).is_none());
+    }
+    let contract = AudioProcessorAuxiliaryInputContract {
+        buses: vec![AudioProcessorAuxiliaryInputBusContract {
+            bus_key: "detector.7".into(),
+            channel_layout: AudioChannelLayout::Stereo,
+        }],
+    };
+    AudioProcessorInputName::validate_all(std::slice::from_ref(&captured), &contract)
+        .expect("admitted key");
+    assert!(
+        AudioProcessorInputName::validate_all(&[captured.clone(), captured], &contract).is_err()
+    );
+    assert!(serde_json::from_str::<AudioProcessorInputName>(
+        r#"{"bus_key":"detector.7","name":"Probe","unknown":true}"#
+    )
+    .is_err());
 }

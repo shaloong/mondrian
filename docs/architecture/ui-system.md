@@ -1,5 +1,12 @@
 # UI System
 
+Shared Mixer and Inspector Rack input controls bind native labels through the
+current cached input observation. Stable bus keys remain the connection payload
+and persisted routing identity. Repeated effective labels include their bus key;
+unnamed or unavailable retained ports use that key directly and remain removable.
+Locale changes and repeated model reads use cached preparation facts without
+native discovery or processor creation. Labels never mutate authoring state.
+
 Inspector enum dropdowns consume definition-owned stable option keys. The
 Dropdown widget supports non-action separator rows. Video Clip blend modes
 project Core's typed option order into a localized Inspector dropdown, with

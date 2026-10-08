@@ -1,7 +1,7 @@
 //! CLAP ABI execution inside the supervised audio worker process.
 
 use super::clap_discovery::{
-    fingerprint_clap_binary, list_audio_inputs, list_parameters,
+    fingerprint_clap_binary, inspect_audio_inputs, list_parameters,
     probe_clap_plugin_registration_with_state, validate_parameters,
 };
 use super::{
@@ -588,7 +588,8 @@ fn prepare_loaded(
             "CLAP parameter metadata changed since contract probe",
         ));
     }
-    let auxiliary_inputs = list_audio_inputs(&handle, request.render_contract().channel_layout)?;
+    let input_metadata = inspect_audio_inputs(&handle, request.render_contract().channel_layout)?;
+    let auxiliary_inputs = input_metadata.contract;
     if &auxiliary_inputs != request.auxiliary_inputs() {
         return Err(invalid("CLAP auxiliary ports changed since contract probe"));
     }
@@ -665,6 +666,7 @@ fn prepare_loaded(
         input,
         output,
         auxiliary_inputs,
+        input_names: input_metadata.names,
         input_ports: AudioPorts::with_capacity(channel_count * input_port_count, input_port_count),
         output_ports: AudioPorts::with_capacity(channel_count, 1),
         parameter_lanes,
@@ -680,6 +682,7 @@ struct ClapWorker {
     contract: AudioProcessorExecutionContract,
     input: Vec<Vec<Vec<f32>>>,
     auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
+    input_names: Vec<crate::AudioProcessorInputName>,
     output: Vec<Vec<f32>>,
     input_ports: AudioPorts,
     output_ports: AudioPorts,
@@ -696,6 +699,10 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
 
     fn auxiliary_input_contract(&self) -> AudioProcessorAuxiliaryInputContract {
         self.auxiliary_inputs.clone()
+    }
+
+    fn auxiliary_input_names(&self) -> Vec<crate::AudioProcessorInputName> {
+        self.input_names.clone()
     }
 
     fn enter_state(&mut self, start_sample: i64) -> Result<(), AudioProcessorHostError> {
