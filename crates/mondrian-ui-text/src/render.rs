@@ -9,7 +9,10 @@ use mondrian_ui_renderer::command::DrawCommand;
 use crate::atlas::{GlyphAtlas, GlyphRasterizeOutcome};
 use crate::font::FontManager;
 use crate::layout::TextLayout;
-use unicode_segmentation::UnicodeSegmentation;
+use crate::single_line::{
+    single_line_request_admitted, SingleLineTextCaret, SingleLineTextNavigation,
+    SingleLineTextProjection,
+};
 
 /// Geometry from one complete advanced single-line shaping pass.
 ///
@@ -21,10 +24,10 @@ pub struct SingleLineTextGeometry {
     pub width: f32,
     /// Complete shaped line height in logical pixels.
     pub height: f32,
-    /// Visual caret x coordinate for the requested UTF-8 byte boundary.
+    /// Visual caret x for the requested logical boundary and cluster association.
     pub caret_x: f32,
-    /// Logical UTF-8 byte boundary hit by the optional pointer x coordinate.
-    pub hit_byte_index: Option<usize>,
+    /// Logical boundary and cluster association hit by the optional pointer x coordinate.
+    pub hit_caret: Option<SingleLineTextCaret>,
 }
 
 /// One visual selected span from the complete advanced single-line layout.
@@ -46,89 +49,6 @@ pub struct SingleLineTextSelectionGeometry {
     pub line: SingleLineTextGeometry,
     /// Selected visual advance spans, ordered from left to right.
     pub spans: Vec<SingleLineTextSelectionSpan>,
-}
-
-// Reuse cosmic-text's complete glyphs and its equal-grapheme cluster advance
-// convention. In an RTL ligature logical grapheme order runs right to left;
-// the selected portion must use the glyph's BiDi level, not paragraph direction.
-fn selected_glyph_span(
-    text: &str,
-    glyph: &cosmic_text::LayoutGlyph,
-    range: &std::ops::Range<usize>,
-) -> Option<SingleLineTextSelectionSpan> {
-    if glyph.end <= range.start || glyph.start >= range.end || glyph.w <= 0.0 {
-        return None;
-    }
-    let cluster = text.get(glyph.start..glyph.end)?;
-    let total = cluster.graphemes(true).count();
-    if total == 0 {
-        return None;
-    }
-    let mut selected_start = None;
-    let mut selected_end = 0;
-    for (ordinal, (offset, grapheme)) in cluster.grapheme_indices(true).enumerate() {
-        let start = glyph.start + offset;
-        let end = start + grapheme.len();
-        if end > range.start && start < range.end {
-            selected_start.get_or_insert(ordinal);
-            selected_end = ordinal + 1;
-        }
-    }
-    let selected_start = selected_start?;
-    let unit = glyph.w / total as f32;
-    let x = if glyph.level.is_rtl() {
-        glyph.x + unit * (total - selected_end) as f32
-    } else {
-        glyph.x + unit * selected_start as f32
-    };
-    Some(SingleLineTextSelectionSpan {
-        x,
-        width: unit * (selected_end - selected_start) as f32,
-    })
-}
-
-fn push_selection_span(
-    spans: &mut Vec<SingleLineTextSelectionSpan>,
-    span: SingleLineTextSelectionSpan,
-) {
-    // Merge adjacent glyph advances before allocating another span; large
-    // contiguous selections retain one rectangle rather than one per glyph.
-    const ADVANCE_ROUNDING_EPSILON: f32 = 0.001;
-    if let Some(last) = spans.last_mut()
-        && span.x <= last.x + last.width + ADVANCE_ROUNDING_EPSILON
-        && span.x + span.width + ADVANCE_ROUNDING_EPSILON >= last.x
-    {
-        let right = (last.x + last.width).max(span.x + span.width);
-        last.x = last.x.min(span.x);
-        last.width = right - last.x;
-    } else {
-        spans.push(span);
-    }
-}
-
-fn complete_selection_spans(
-    layout: &TextLayout,
-    range: Option<&std::ops::Range<usize>>,
-) -> Vec<SingleLineTextSelectionSpan> {
-    let Some(range) = range.filter(|range| range.start < range.end) else {
-        return Vec::new();
-    };
-    let mut spans = Vec::new();
-    for run in layout.buffer().layout_runs() {
-        for glyph in run.glyphs {
-            if let Some(span) = selected_glyph_span(run.text, glyph, range) {
-                push_selection_span(&mut spans, span);
-            }
-        }
-    }
-    // Full layout glyph arrays need not use increasing x for every paragraph
-    // direction. Merge in visual order after the allocation-saving first pass.
-    spans.sort_by(|a, b| a.x.total_cmp(&b.x));
-    let mut merged = Vec::with_capacity(spans.len());
-    for span in spans {
-        push_selection_span(&mut merged, span);
-    }
-    merged
 }
 
 #[derive(Clone, Copy)]
@@ -361,47 +281,37 @@ impl TextRenderer {
         ResolvedTextCommands { commands, stats }
     }
 
-    /// Shape the complete normalized single line once for width, caret and pointer geometry.
+    /// Shape the complete single-line display projection once, returning exact source carets.
     ///
-    /// Returns `None` before shaping for an out-of-range or non-UTF-8 cursor
-    /// boundary, or a non-finite/non-positive font size. Pointer hits return byte
-    /// boundaries from the same advanced layout; callers map them to their own
-    /// logical grapheme coordinates. No draft or glyph context is truncated.
+    /// Invalid grapheme/association/font requests return `None` before shaping.
+    /// Line metrics and resulting geometry must be representable finite pixels.
     pub fn single_line_geometry(
         &mut self,
         text: &str,
         font_size: f32,
-        cursor_byte_index: usize,
+        caret: SingleLineTextCaret,
         pointer_x: Option<f32>,
     ) -> Option<SingleLineTextGeometry> {
-        self.single_line_selection_geometry(text, font_size, cursor_byte_index, pointer_x, None)
+        self.single_line_selection_geometry(text, font_size, caret, pointer_x, None)
             .map(|geometry| geometry.line)
     }
 
-    /// Shape complete text once for its line, caret, pointer and selection geometry.
+    /// Obtain associated caret, pointer and visual selection spans from one complete layout.
     ///
-    /// Selection is an ordered UTF-8 byte range within `text`; all overlapping
-    /// graphemes use their complete shaped cluster advances. Mixed BiDi ranges
-    /// can yield multiple visual spans. Invalid cursor/range/font requests return
-    /// `None` before shaping. Empty selections produce no spans. No text context
-    /// is truncated and no selected prefix or substring is independently shaped.
+    /// Every logical caret/selection endpoint addresses the original source.
+    /// Its complete display projection is shaped once; glyph clusters map back
+    /// to source EGC intervals, including ligatures/BiDi and separator-only
+    /// display joins. Invalid or unrepresentable requests/geometry return `None`;
+    /// no source context is truncated or normalized into an author value.
     pub fn single_line_selection_geometry(
         &mut self,
         text: &str,
         font_size: f32,
-        cursor_byte_index: usize,
+        caret: SingleLineTextCaret,
         pointer_x: Option<f32>,
         selection_byte_range: Option<std::ops::Range<usize>>,
     ) -> Option<SingleLineTextSelectionGeometry> {
-        if !text.is_char_boundary(cursor_byte_index)
-            || !font_size.is_finite()
-            || font_size <= 0.0
-            || selection_byte_range.as_ref().is_some_and(|range| {
-                range.start > range.end
-                    || !text.is_char_boundary(range.start)
-                    || !text.is_char_boundary(range.end)
-            })
-        {
+        if !single_line_request_admitted(text, font_size, caret, selection_byte_range.as_ref()) {
             return None;
         }
         if text.is_empty() {
@@ -410,7 +320,7 @@ impl TextRenderer {
                     width: 0.0,
                     height: 0.0,
                     caret_x: 0.0,
-                    hit_byte_index: pointer_x.map(|_| 0),
+                    hit_caret: pointer_x.map(|_| SingleLineTextCaret::before_next(0)),
                 },
                 spans: Vec::new(),
             });
@@ -418,26 +328,61 @@ impl TextRenderer {
         let attrs = cosmic_text::Attrs::new()
             .family(cosmic_text::Family::SansSerif)
             .weight(cosmic_text::Weight::NORMAL);
-        let layout =
-            TextLayout::new_single_line(&mut self.font_manager.font_system, text, attrs, font_size);
-        let (width, height) = layout.size();
-        let caret_x = layout
-            .buffer()
-            .cursor_position(&cosmic_text::Cursor::new(0, cursor_byte_index))
-            .map_or(0.0, |(x, _)| x);
-        let hit_byte_index = pointer_x.and_then(|x| {
-            layout
-                .buffer()
-                .hit(
-                    if x.is_finite() { x } else { 0.0 },
-                    layout.line_height() * 0.5,
-                )
-                .map(|cursor| cursor.index)
-        });
-        Some(SingleLineTextSelectionGeometry {
-            line: SingleLineTextGeometry { width, height, caret_x, hit_byte_index },
-            spans: complete_selection_spans(&layout, selection_byte_range.as_ref()),
-        })
+        let projection = SingleLineTextProjection::new(text);
+        let layout = TextLayout::new_single_line(
+            &mut self.font_manager.font_system,
+            projection.display_text(),
+            attrs,
+            font_size,
+        );
+        crate::single_line::complete_geometry(
+            &layout,
+            &projection,
+            caret,
+            pointer_x,
+            selection_byte_range.as_ref(),
+        )
+    }
+
+    /// Navigate complete shaped visual grapheme cells with logical cluster association.
+    ///
+    /// An optional nonempty selection collapses at the requested visual edge for
+    /// arrows. Home/End address logical boundaries. Word arrows reuse the existing
+    /// whitespace policy in visual source-cell order. Separator projection does
+    /// not erase source EGC stops. Invalid/unrepresentable requests return `None`;
+    /// valid empty or exhausted navigation is an owned no-op.
+    pub fn navigate_single_line(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        caret: SingleLineTextCaret,
+        navigation: SingleLineTextNavigation,
+        collapse_selection: Option<std::ops::Range<usize>>,
+    ) -> Option<SingleLineTextCaret> {
+        if !single_line_request_admitted(text, font_size, caret, collapse_selection.as_ref()) {
+            return None;
+        }
+        if text.is_empty() {
+            return Some(SingleLineTextCaret::before_next(0));
+        }
+        let attrs = cosmic_text::Attrs::new()
+            .family(cosmic_text::Family::SansSerif)
+            .weight(cosmic_text::Weight::NORMAL);
+        let projection = SingleLineTextProjection::new(text);
+        let layout = TextLayout::new_single_line(
+            &mut self.font_manager.font_system,
+            projection.display_text(),
+            attrs,
+            font_size,
+        );
+        crate::single_line::navigate_complete(
+            &layout,
+            &projection,
+            caret,
+            navigation,
+            collapse_selection.as_ref(),
+        )
+        .filter(|next| next.is_valid_for(text))
     }
 
     pub fn measure_text(&mut self, text: &str, font_size: f32) -> (f32, f32) {
@@ -1668,22 +1613,37 @@ mod tests {
         let mut renderer = TextRenderer::new();
         for (text, cursor) in [("你", 1), ("你", 2), ("你", 4), ("x", usize::MAX), ("", 1)] {
             assert!(
-                renderer.single_line_geometry(text, 14.0, cursor, Some(2.0)).is_none(),
+                renderer
+                    .single_line_geometry(
+                        text,
+                        14.0,
+                        SingleLineTextCaret::at_logical_boundary(cursor),
+                        Some(2.0)
+                    )
+                    .is_none(),
                 "invalid UTF-8/extent cannot masquerade as caret zero"
             );
         }
         for size in [0.0, -1.0, f32::NAN, f32::INFINITY] {
-            assert!(renderer.single_line_geometry("x", size, 0, None).is_none());
+            assert!(renderer
+                .single_line_geometry("x", size, SingleLineTextCaret::at_logical_boundary(0), None)
+                .is_none());
         }
-        let empty =
-            renderer.single_line_geometry("", 14.0, 0, Some(0.0)).expect("valid empty line");
+        let empty = renderer
+            .single_line_geometry(
+                "",
+                14.0,
+                SingleLineTextCaret::at_logical_boundary(0),
+                Some(0.0),
+            )
+            .expect("valid empty line");
         assert_eq!(
             empty,
             SingleLineTextGeometry {
                 width: 0.0,
                 height: 0.0,
                 caret_x: 0.0,
-                hit_byte_index: Some(0)
+                hit_caret: Some(SingleLineTextCaret::before_next(0))
             }
         );
     }
@@ -1693,20 +1653,42 @@ mod tests {
         let mut renderer = TextRenderer::new();
         let text = "שלום";
         let end = renderer
-            .single_line_geometry(text, 14.0, text.len(), Some(0.1))
+            .single_line_geometry(
+                text,
+                14.0,
+                SingleLineTextCaret::at_logical_boundary(text.len()),
+                Some(0.1),
+            )
             .expect("valid complete line");
         assert!(end.width > 0.0 && end.height > 0.0);
         assert!(end.caret_x.abs() <= 0.1);
-        assert_eq!(end.hit_byte_index, Some(text.len()));
-        let start =
-            renderer.single_line_geometry(text, 14.0, 0, None).expect("valid logical start");
+        assert_eq!(
+            end.hit_caret.map(|caret| caret.byte_index),
+            Some(text.len())
+        );
+        let start = renderer
+            .single_line_geometry(
+                text,
+                14.0,
+                SingleLineTextCaret::at_logical_boundary(0),
+                None,
+            )
+            .expect("valid logical start");
         assert!((start.caret_x - start.width).abs() <= 0.1);
         let text = "A👩‍💻e\u{301}B";
         let end = renderer
-            .single_line_geometry(text, 14.0, text.len(), Some(f32::INFINITY))
+            .single_line_geometry(
+                text,
+                14.0,
+                SingleLineTextCaret::at_logical_boundary(text.len()),
+                Some(f32::INFINITY),
+            )
             .expect("valid emoji line");
         assert!((end.caret_x - end.width).abs() <= 0.1);
-        assert!(end.hit_byte_index.is_some_and(|index| text.is_char_boundary(index)));
+        assert!(end
+            .hit_caret
+            .map(|caret| caret.byte_index)
+            .is_some_and(|index| text.is_char_boundary(index)));
     }
 
     #[test]
@@ -1714,14 +1696,32 @@ mod tests {
         let mut renderer = TextRenderer::new();
         for range in [1..3, 0..4, std::ops::Range { start: 3, end: 0 }] {
             assert!(renderer
-                .single_line_selection_geometry("你", 14.0, 0, None, Some(range))
+                .single_line_selection_geometry(
+                    "你",
+                    14.0,
+                    SingleLineTextCaret::at_logical_boundary(0),
+                    None,
+                    Some(range)
+                )
                 .is_none());
         }
         assert!(renderer
-            .single_line_selection_geometry("你", f32::NAN, 0, None, Some(0..3))
+            .single_line_selection_geometry(
+                "你",
+                f32::NAN,
+                SingleLineTextCaret::at_logical_boundary(0),
+                None,
+                Some(0..3)
+            )
             .is_none());
         let empty = renderer
-            .single_line_selection_geometry("", 14.0, 0, None, Some(0..0))
+            .single_line_selection_geometry(
+                "",
+                14.0,
+                SingleLineTextCaret::at_logical_boundary(0),
+                None,
+                Some(0..0),
+            )
             .expect("valid empty line and selection");
         assert!(empty.spans.is_empty());
         assert_eq!(empty.line.width, 0.0);
@@ -1731,12 +1731,30 @@ mod tests {
     fn complete_selected_geometry_arabic_partial_cluster_matches_complete_caret_advances() {
         let mut renderer = TextRenderer::new();
         let text = "لا";
-        let start = renderer.single_line_geometry(text, 24.0, 0, None).expect("RTL line start");
+        let start = renderer
+            .single_line_geometry(
+                text,
+                24.0,
+                SingleLineTextCaret::at_logical_boundary(0),
+                None,
+            )
+            .expect("RTL line start");
         let end = renderer
-            .single_line_geometry(text, 24.0, "ل".len(), None)
+            .single_line_geometry(
+                text,
+                24.0,
+                SingleLineTextCaret::at_logical_boundary("ل".len()),
+                None,
+            )
             .expect("RTL grapheme boundary");
         let selected = renderer
-            .single_line_selection_geometry(text, 24.0, "ل".len(), None, Some(0.."ل".len()))
+            .single_line_selection_geometry(
+                text,
+                24.0,
+                SingleLineTextCaret::at_logical_boundary("ل".len()),
+                None,
+                Some(0.."ل".len()),
+            )
             .expect("complete partial RTL selection");
         assert!(
             start.caret_x > end.caret_x,
@@ -1756,7 +1774,13 @@ mod tests {
         let mut renderer = TextRenderer::new();
         let text = "x".repeat(131_072);
         let selected = renderer
-            .single_line_selection_geometry(&text, 14.0, text.len(), None, Some(0..text.len()))
+            .single_line_selection_geometry(
+                &text,
+                14.0,
+                SingleLineTextCaret::at_logical_boundary(text.len()),
+                None,
+                Some(0..text.len()),
+            )
             .expect("complete large selected line");
         assert_eq!(
             selected.spans.len(),
@@ -1766,5 +1790,201 @@ mod tests {
         assert!(selected.line.width.is_finite() && selected.line.width > 0.0);
         assert!((selected.spans[0].x).abs() <= 0.1);
         assert!((selected.spans[0].width - selected.line.width).abs() <= 0.1);
+    }
+
+    #[test]
+    fn associated_single_line_unrepresentable_complete_output_refuses_geometry_and_navigation() {
+        let text = "MMMMMMMMMMMMMMMM";
+        let size = f32::MAX / 2.0;
+        let start = SingleLineTextCaret::before_next(0);
+        assert!(
+            single_line_request_admitted(text, size, start, None),
+            "line metrics themselves remain representable"
+        );
+        let mut renderer = TextRenderer::new();
+        assert!(renderer.single_line_geometry(text, size, start, None).is_none());
+        assert!(renderer
+            .single_line_selection_geometry(text, size, start, None, Some(0..text.len()))
+            .is_none());
+        assert!(renderer.navigate_single_line(text, size, start, SingleLineTextNavigation::Home, None).is_none(),
+            "a finite request does not turn a nonrepresentable complete layout into a valid cursor result");
+    }
+
+    #[test]
+    fn associated_single_line_shared_bidi_boundary_keeps_both_complete_visual_associations() {
+        let text = "abc אבג xyz";
+        let font_size = 14.0;
+        let mut renderer = TextRenderer::new();
+        let attrs_owner = FontManager::new();
+        let mut reference_owner = FontManager::new();
+        let layout = TextLayout::new_single_line(
+            &mut reference_owner.font_system,
+            text,
+            attrs_owner.default_attrs(),
+            font_size,
+        );
+        let runs = layout.runs();
+        let space = runs[0]
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.start == 3 && glyph.end == 4)
+            .expect("complete LTR whitespace");
+        let alef = runs[0]
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.start == 4 && glyph.end == 6)
+            .expect("complete first logical Hebrew grapheme");
+        assert!(!space.level.is_rtl() && alef.level.is_rtl());
+        let after_ltr = SingleLineTextCaret::after_previous(4);
+        let before_rtl = SingleLineTextCaret::before_next(4);
+        let ltr = renderer
+            .single_line_geometry(text, font_size, after_ltr, Some(space.x + space.w * 0.9))
+            .expect("LTR associated seam");
+        let rtl = renderer
+            .single_line_geometry(text, font_size, before_rtl, Some(alef.x + alef.w * 0.9))
+            .expect("RTL associated seam");
+        assert!((ltr.caret_x - space.x - space.w).abs() <= 0.1);
+        assert!((rtl.caret_x - alef.x - alef.w).abs() <= 0.1);
+        assert!(
+            rtl.caret_x > ltr.caret_x,
+            "one logical seam has two distinct complete run associations"
+        );
+        assert_eq!(ltr.hit_caret, Some(after_ltr));
+        assert_eq!(rtl.hit_caret, Some(before_rtl));
+        let left = renderer
+            .navigate_single_line(
+                text,
+                font_size,
+                before_rtl,
+                SingleLineTextNavigation::Left { word: false },
+                None,
+            )
+            .expect("one visual cell to the left");
+        assert_eq!(left, SingleLineTextCaret::after_previous(6));
+        let left_geometry = renderer
+            .single_line_geometry(text, font_size, left, None)
+            .expect("left endpoint");
+        assert!((left_geometry.caret_x - alef.x).abs() <= 0.1);
+        assert!(left_geometry.caret_x.is_finite() && left_geometry.width.is_finite());
+    }
+
+    #[test]
+    fn associated_single_line_rtl_ligature_navigation_uses_complete_grapheme_advances() {
+        let mut renderer = TextRenderer::new();
+        let text = "لا";
+        let end = SingleLineTextCaret::after_previous(text.len());
+        let middle = renderer
+            .navigate_single_line(
+                text,
+                24.0,
+                end,
+                SingleLineTextNavigation::Right { word: false },
+                None,
+            )
+            .expect("complete RTL grapheme step");
+        assert_eq!(middle, SingleLineTextCaret::before_next("ل".len()));
+        let selected = renderer
+            .single_line_selection_geometry(text, 24.0, middle, None, Some("ل".len()..text.len()))
+            .expect("one selected RTL grapheme from complete layout");
+        let edge = renderer.single_line_geometry(text, 24.0, end, None).expect("logical end");
+        assert_eq!(selected.spans.len(), 1);
+        assert!((selected.spans[0].x - edge.caret_x).abs() <= 0.1);
+        assert!((selected.spans[0].width - (selected.line.caret_x - edge.caret_x)).abs() <= 0.1);
+        let exhausted = renderer
+            .navigate_single_line(
+                text,
+                24.0,
+                end,
+                SingleLineTextNavigation::Left { word: false },
+                None,
+            )
+            .expect("valid exhausted navigation is owned");
+        assert_eq!(exhausted, end);
+    }
+    #[test]
+    fn source_single_line_public_geometry_maps_crlf_selection_and_pointer_to_original_bytes() {
+        let mut renderer = TextRenderer::new();
+        let raw = "ab\r\ncd";
+        let displayed = "ab cd";
+        let reference = renderer
+            .single_line_selection_geometry(
+                displayed,
+                24.0,
+                SingleLineTextCaret::after_previous(3),
+                None,
+                Some(2..3),
+            )
+            .expect("complete projected reference");
+        let actual = renderer
+            .single_line_selection_geometry(
+                raw,
+                24.0,
+                SingleLineTextCaret::after_previous(4),
+                None,
+                Some(2..4),
+            )
+            .expect("complete raw source must have a representable single-line projection");
+        assert_eq!(actual.line.width, reference.line.width);
+        assert_eq!(actual.line.height, reference.line.height);
+        assert_eq!(actual.line.caret_x, reference.line.caret_x);
+        assert_eq!(
+            actual.spans, reference.spans,
+            "source CRLF selection covers the one display separator advance"
+        );
+        let span = actual.spans.first().expect("visible separator");
+        for (fraction, expected) in [(0.1, 2), (0.9, 4)] {
+            let hit = renderer
+                .single_line_geometry(
+                    raw,
+                    24.0,
+                    SingleLineTextCaret::after_previous(4),
+                    Some(span.x + span.width * fraction),
+                )
+                .expect("source pointer geometry")
+                .hit_caret
+                .expect("source hit");
+            assert_eq!(
+                hit.byte_index, expected,
+                "pointer hit never selects inside original CRLF"
+            );
+            assert!(hit.is_valid_for(raw));
+        }
+        assert!(
+            renderer
+                .single_line_geometry(raw, 24.0, SingleLineTextCaret::after_previous(3), None)
+                .is_none(),
+            "interior CRLF is not admitted source caret"
+        );
+    }
+
+    #[test]
+    fn source_single_line_public_navigation_does_not_drop_egc_stops_joined_only_in_display() {
+        use unicode_segmentation::UnicodeSegmentation;
+        let mut renderer = TextRenderer::new();
+        for raw in ["a\r\n\u{301}b", "a\u{2028}\u{301}b", "a\u{2029}\u{200d}b"] {
+            let mut caret = SingleLineTextCaret::before_next(0);
+            let expected: Vec<_> = raw
+                .grapheme_indices(true)
+                .map(|(start, grapheme)| start + grapheme.len())
+                .collect();
+            for byte in expected {
+                caret = renderer
+                    .navigate_single_line(
+                        raw,
+                        24.0,
+                        caret,
+                        SingleLineTextNavigation::Right { word: false },
+                        None,
+                    )
+                    .expect("source navigation is admitted");
+                assert_eq!(
+                    caret.byte_index, byte,
+                    "complete source grapheme must remain a distinct reachable stop: {raw:?}"
+                );
+                assert!(caret.is_valid_for(raw));
+                assert!(renderer.single_line_geometry(raw, 24.0, caret, None).is_some());
+            }
+            assert_eq!(caret.byte_index, raw.len());
+        }
     }
 }

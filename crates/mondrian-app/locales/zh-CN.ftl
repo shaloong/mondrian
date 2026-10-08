@@ -1451,3 +1451,13 @@ audio-sidechain-disconnect = 断开来源
 audio-sidechain-missing-track = 缺失轨道 · { $identity }
 
 audio-sidechain-source = 来源
+
+## Timeline / Inspector owned empty and invalid states
+timeline-empty-no-sequence = 未载入序列
+    打开项目或创建序列以开始编辑
+timeline-empty-no-tracks = 当前序列没有轨道
+    添加视频轨道或音频轨道后开始编辑
+timeline-invalid-display = 序列时间显示设置无效
+    { $reason }
+inspector-empty-selection = 未选择剪辑
+    选择剪辑、图层或效果后，可在这里调整参数。

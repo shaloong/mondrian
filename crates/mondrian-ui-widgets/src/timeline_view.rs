@@ -1218,7 +1218,11 @@ impl TimelineView {
         self
     }
 
-    /// Set the message shown in the timeline body when there are no tracks.
+    /// Set guidance for an empty body or an explicitly unavailable timeline.
+    ///
+    /// A disabled timeline with retained tracks shows this status over its body;
+    /// an available populated timeline does not show empty guidance. Supplying a
+    /// message does not change input availability or retained track identities.
     pub fn with_empty_message(mut self, message: impl Into<String>) -> Self {
         self.empty_message = Some(message.into());
         self
@@ -3841,8 +3845,8 @@ impl TimelineView {
         self.paint_asset_drop_indicator(ctx);
     }
 
-    fn paint_empty_state(&self, ctx: &mut PaintContext) {
-        if !self.tracks.is_empty() {
+    fn paint_status_message(&self, ctx: &mut PaintContext) {
+        if !self.tracks.is_empty() && self.enabled {
             return;
         }
         let Some(message) = self
@@ -3865,6 +3869,12 @@ impl TimelineView {
             message.split_once('\n').map_or((message, ""), |(title, description)| {
                 (title.trim(), description.trim())
             });
+        if !self.tracks.is_empty() {
+            // The retained model is still authoritative, but an unavailable
+            // time-display contract cannot present its fallback grid as valid.
+            // Use the semantic body surface so guidance cannot overlap clips.
+            ctx.encoder.draw_rect(self.body_rect, ctx.theme.colors.background, 0.0);
+        }
         let x = self.body_rect.x + 16.0;
         let y = self.body_rect.y + (self.body_rect.height * 0.28).max(20.0);
         ctx.encoder.draw_text_box(
@@ -5337,7 +5347,7 @@ impl Widget for TimelineView {
             self.body_rect.height,
         ));
         self.paint_tracks(ctx);
-        self.paint_empty_state(ctx);
+        self.paint_status_message(ctx);
         ctx.pop_clip();
 
         ctx.push_clip(Rect::new(

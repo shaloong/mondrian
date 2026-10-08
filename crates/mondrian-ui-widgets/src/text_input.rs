@@ -26,7 +26,8 @@ use mondrian_ui_core::widget::{
     AccessibilityNode, AccessibilityRole, AccessibilityState, AccessibilityValue, CursorRequest,
     EventContext, PaintContext,
 };
-use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_core::{EventResult, TextInputCaretPosition, UiEvent, Widget};
+use mondrian_ui_text::SingleLineTextNavigation;
 use mondrian_ui_theme::{current_theme, Theme};
 
 mod commands;
@@ -199,6 +200,11 @@ impl TextInput {
         }
     }
 
+    /// Set the initial single-line value without dispatching a user edit.
+    ///
+    /// Preserve exact model bytes, including line separators. The complete
+    /// single-line display projection never changes the authoritative value;
+    /// normalization applies only to user text/IME commits and paste.
     pub fn with_text(mut self, text: impl Into<String>) -> Self {
         self.edit = TextEditState::with_text(text.into());
         self.clear_local_history();
@@ -293,8 +299,10 @@ impl TextInput {
         if let Some(draft) = draft {
             let count = TextEditState::grapheme_count(&draft.text);
             if !focused
-                || draft.cursor > count
-                || draft.selection_anchor.is_some_and(|anchor| anchor > count)
+                || !TextEditState::position_admitted(draft.cursor, count)
+                || draft
+                    .selection_anchor
+                    .is_some_and(|anchor| !TextEditState::position_admitted(anchor, count))
                 || normalize_single_line_input(&draft.text).as_ref() != draft.text.as_str()
             {
                 return false;
@@ -368,10 +376,14 @@ impl TextInput {
         true
     }
 
-    fn valid_history_snapshot(text: &str, cursor: usize, anchor: Option<usize>) -> bool {
+    fn valid_history_snapshot(
+        text: &str,
+        cursor: TextInputCaretPosition,
+        anchor: Option<TextInputCaretPosition>,
+    ) -> bool {
         let count = TextEditState::grapheme_count(text);
-        cursor <= count
-            && anchor.is_none_or(|anchor| anchor <= count)
+        TextEditState::position_admitted(cursor, count)
+            && anchor.is_none_or(|anchor| TextEditState::position_admitted(anchor, count))
             && normalize_single_line_input(text).as_ref() == text
     }
     pub(crate) fn owns_local_history(&self) -> bool {
@@ -408,6 +420,10 @@ impl TextInput {
     }
 
     /// Replace text from an external authoritative model.
+    ///
+    /// Preserve the exact supplied source. Line separators display through the
+    /// same complete single-line projection as caret/selection/navigation,
+    /// rather than applying the normalization policy for user input or paste.
     ///
     /// In transactional mode this also resets the focused session origin, so
     /// a later focus loss cannot publish the programmatic synchronization as a
@@ -738,8 +754,8 @@ impl TextInput {
             }
             TextInputKeyCommand::DeleteWordBackward => {
                 if !self.delete_selection() {
-                    let target = self.prev_word_boundary(self.edit.cursor);
-                    if target != self.edit.cursor {
+                    let target = self.prev_word_boundary(self.edit.cursor.grapheme_index);
+                    if target != self.edit.cursor.grapheme_index {
                         self.move_cursor_with_selection(target, true);
                         self.delete_selection();
                     }
@@ -749,8 +765,8 @@ impl TextInput {
             }
             TextInputKeyCommand::DeleteWordForward => {
                 if !self.delete_selection() {
-                    let target = self.next_word_boundary(self.edit.cursor);
-                    if target != self.edit.cursor {
+                    let target = self.next_word_boundary(self.edit.cursor.grapheme_index);
+                    if target != self.edit.cursor.grapheme_index {
                         self.move_cursor_with_selection(target, true);
                         self.delete_selection();
                     }
@@ -760,7 +776,7 @@ impl TextInput {
             }
             TextInputKeyCommand::SelectAll => {
                 self.move_cursor_to(self.len_graphemes());
-                self.edit.selection_start = Some(0);
+                self.edit.selection_start = Some(TextInputCaretPosition::default());
                 EventResult::Handled
             }
             TextInputKeyCommand::Copy => {
@@ -788,29 +804,39 @@ impl TextInput {
                 }
             }
             TextInputKeyCommand::MoveLeft { word, extend_selection } => {
-                let target = if word {
-                    self.prev_word_boundary(self.edit.cursor)
-                } else {
-                    self.edit.cursor.saturating_sub(1)
-                };
-                self.move_cursor_with_selection(target, extend_selection);
+                self.edit.navigate(
+                    TextInputMetrics::current().font_size,
+                    SingleLineTextNavigation::Left { word },
+                    extend_selection,
+                );
+                self.update_scroll(TextInputMetrics::current());
                 EventResult::Handled
             }
             TextInputKeyCommand::MoveRight { word, extend_selection } => {
-                let target = if word {
-                    self.next_word_boundary(self.edit.cursor)
-                } else {
-                    self.edit.cursor + 1
-                };
-                self.move_cursor_with_selection(target, extend_selection);
+                self.edit.navigate(
+                    TextInputMetrics::current().font_size,
+                    SingleLineTextNavigation::Right { word },
+                    extend_selection,
+                );
+                self.update_scroll(TextInputMetrics::current());
                 EventResult::Handled
             }
             TextInputKeyCommand::MoveHome { extend_selection } => {
-                self.move_cursor_with_selection(0, extend_selection);
+                self.edit.navigate(
+                    TextInputMetrics::current().font_size,
+                    SingleLineTextNavigation::Home,
+                    extend_selection,
+                );
+                self.update_scroll(TextInputMetrics::current());
                 EventResult::Handled
             }
             TextInputKeyCommand::MoveEnd { extend_selection } => {
-                self.move_cursor_with_selection(self.len_graphemes(), extend_selection);
+                self.edit.navigate(
+                    TextInputMetrics::current().font_size,
+                    SingleLineTextNavigation::End,
+                    extend_selection,
+                );
+                self.update_scroll(TextInputMetrics::current());
                 EventResult::Handled
             }
             TextInputKeyCommand::DeleteBackward => {
@@ -1093,6 +1119,7 @@ impl Widget for TextInput {
             }
         }
 
+        let display = mondrian_ui_text::SingleLineTextProjection::new(self.edit.text());
         paint_text_input(
             ctx,
             TextInputPaintSnapshot {
@@ -1102,7 +1129,7 @@ impl Widget for TextInput {
                 focused: self.focused,
                 cursor_visible,
                 has_selection: self.has_selection(),
-                text: self.edit.text(),
+                text: display.display_text(),
                 placeholder: &self.placeholder,
                 selection_spans: selection
                     .as_ref()
@@ -1414,7 +1441,7 @@ mod tests {
     fn new_is_empty() {
         let ti = TextInput::new("ph");
         assert!(ti.text().is_empty());
-        assert_eq!(ti.edit.cursor, 0);
+        assert_eq!(ti.edit.cursor.grapheme_index, 0);
         assert!(!ti.has_selection());
         assert!(!ti.focused);
     }
@@ -1422,25 +1449,25 @@ mod tests {
     #[test]
     fn text_edit_state_deletes_selection_and_collapses_cursor_to_start() {
         let mut edit = TextEditState::with_text("before after".into());
-        edit.selection_start = Some(7);
-        edit.cursor = 12;
+        edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(7));
+        edit.cursor = TextInputCaretPosition::at_logical_boundary(12);
 
         assert_eq!(edit.selection_byte_range(), Some((7, 12)));
         assert!(edit.delete_selection());
         assert_eq!(edit.text(), "before ");
-        assert_eq!(edit.cursor, 7);
+        assert_eq!(edit.cursor.grapheme_index, 7);
         assert!(!edit.has_selection());
     }
 
     #[test]
     fn text_edit_state_deletes_whole_grapheme_clusters() {
         let mut edit = TextEditState::with_text("a👨‍👩‍👧‍👦b".into());
-        edit.cursor = 2;
+        edit.cursor = TextInputCaretPosition::at_logical_boundary(2);
 
         assert_eq!(edit.len_graphemes(), 3);
         assert!(edit.delete_grapheme_before());
         assert_eq!(edit.text(), "ab");
-        assert_eq!(edit.cursor, 1);
+        assert_eq!(edit.cursor.grapheme_index, 1);
     }
 
     #[test]
@@ -1679,14 +1706,14 @@ mod tests {
     fn with_text() {
         let ti = TextInput::new("ph").with_text("hello");
         assert_eq!(ti.text(), "hello");
-        assert_eq!(ti.edit.cursor, 5);
+        assert_eq!(ti.edit.cursor.grapheme_index, 5);
     }
 
     #[test]
     fn with_text_cjk() {
         let ti = TextInput::new("ph").with_text("你好世界");
         assert_eq!(ti.text(), "你好世界");
-        assert_eq!(ti.edit.cursor, 4);
+        assert_eq!(ti.edit.cursor.grapheme_index, 4);
     }
 
     // ── Focus ────────────────────────────────────────────────────────────
@@ -1730,8 +1757,8 @@ mod tests {
     fn focus_lost_clears_selection() {
         let mut ti = TextInput::new("ph").with_text("abc");
         ti.focused = true;
-        ti.edit.selection_start = Some(0);
-        ti.edit.cursor = 2;
+        ti.edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(0));
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(2);
         assert!(ti.has_selection());
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
@@ -1756,7 +1783,7 @@ mod tests {
         tp(&mut ti, "a", &mut ctx);
         tp(&mut ti, "b", &mut ctx);
         assert_eq!(ti.text(), "ab");
-        assert_eq!(ti.edit.cursor, 2);
+        assert_eq!(ti.edit.cursor.grapheme_index, 2);
         assert!(ctx.requests.repaint);
     }
 
@@ -1770,7 +1797,7 @@ mod tests {
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
         tp(&mut ti, "你好", &mut ctx);
         assert_eq!(ti.text(), "你好");
-        assert_eq!(ti.edit.cursor, 2);
+        assert_eq!(ti.edit.cursor.grapheme_index, 2);
     }
 
     #[test]
@@ -1798,8 +1825,8 @@ mod tests {
         let platform = ClipboardPlatform::with_text("first\r\nsecond\u{2028}third");
         let mut ti = TextInput::new("ph").with_text("before after").on_change(change_action);
         ti.focused = true;
-        ti.edit.selection_start = Some(7);
-        ti.edit.cursor = 12;
+        ti.edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(7));
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(12);
         let actions = RefCell::new(Vec::new());
         let dispatch = |action: Action| actions.borrow_mut().push(action);
         let mut focus = DummyFocus;
@@ -1829,8 +1856,8 @@ mod tests {
         let platform = ClipboardPlatform::with_text("");
         let mut ti = TextInput::new("ph").with_text("before after").on_change(change_action);
         ti.focused = true;
-        ti.edit.selection_start = Some(7);
-        ti.edit.cursor = 12;
+        ti.edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(7));
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(12);
         let actions = RefCell::new(Vec::new());
         let dispatch = |action: Action| actions.borrow_mut().push(action);
         let mut focus = DummyFocus;
@@ -1858,8 +1885,8 @@ mod tests {
         let platform = ClipboardPlatform::paste_failure();
         let mut ti = TextInput::new("ph").with_text("before after").on_change(change_action);
         ti.focused = true;
-        ti.edit.selection_start = Some(7);
-        ti.edit.cursor = 12;
+        ti.edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(7));
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(12);
         let actions = RefCell::new(Vec::new());
         let dispatch = |action: Action| actions.borrow_mut().push(action);
         let mut focus = DummyFocus;
@@ -1946,7 +1973,7 @@ mod tests {
         let mut ti = TextInput::new("ph").with_text("abc").on_change(change_action);
         layout(&mut ti);
         ti.focused = true;
-        ti.edit.cursor = 3;
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(3);
         ti.composition.set_preedit("ni".into());
         let actions = RefCell::new(Vec::new());
         let dispatch = |action: Action| actions.borrow_mut().push(action);
@@ -1967,7 +1994,7 @@ mod tests {
                 EventResult::Handled
             );
             assert_eq!(ti.text(), "abc");
-            assert_eq!(ti.edit.cursor, 3);
+            assert_eq!(ti.edit.cursor.grapheme_index, 3);
             assert_eq!(ti.composition.preedit(), "ni");
             assert!(!ti.has_selection());
         }
@@ -1979,7 +2006,7 @@ mod tests {
         let mut ti = TextInput::new("ph").with_text("abc").on_change(change_action);
         layout(&mut ti);
         ti.focused = true;
-        ti.edit.cursor = 3;
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(3);
         ti.composition.set_preedit("ni".into());
         let actions = RefCell::new(Vec::new());
         let dispatch = |action: Action| actions.borrow_mut().push(action);
@@ -2006,7 +2033,7 @@ mod tests {
         let mut ti = TextInput::new("ph").with_text("abc").on_change(change_action);
         layout(&mut ti);
         ti.focused = true;
-        ti.edit.cursor = 3;
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(3);
         ti.composition.set_preedit("ni".into());
         let actions = RefCell::new(Vec::new());
         let dispatch = |action: Action| actions.borrow_mut().push(action);
@@ -2032,8 +2059,8 @@ mod tests {
         let mut ti = TextInput::new("ph").with_text("before after").on_change(change_action);
         layout(&mut ti);
         ti.focused = true;
-        ti.edit.selection_start = Some(7);
-        ti.edit.cursor = 12;
+        ti.edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(7));
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(12);
         ti.composition.set_preedit("候选".into());
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
@@ -2044,7 +2071,7 @@ mod tests {
 
         assert_eq!(result, EventResult::Handled);
         assert_eq!(ti.text(), "before 中");
-        assert_eq!(ti.edit.cursor, 8);
+        assert_eq!(ti.edit.cursor.grapheme_index, 8);
         assert!(!ti.has_selection());
         assert!(!ti.composition.is_active());
         assert_eq!(actions.borrow().as_slice(), &[change_action("before 中")]);
@@ -2058,8 +2085,8 @@ mod tests {
         let mut ti = TextInput::new("ph").with_text("abc").on_change(change_action);
         layout(&mut ti);
         ti.focused = true;
-        ti.edit.selection_start = Some(1);
-        ti.edit.cursor = 2;
+        ti.edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(1));
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(2);
         ti.composition.set_preedit("候选".into());
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
@@ -2070,7 +2097,7 @@ mod tests {
 
         assert_eq!(result, EventResult::Handled);
         assert_eq!(ti.text(), "ac");
-        assert_eq!(ti.edit.cursor, 1);
+        assert_eq!(ti.edit.cursor.grapheme_index, 1);
         assert!(!ti.has_selection());
         assert!(!ti.composition.is_active());
         assert_eq!(actions.borrow().as_slice(), &[change_action("ac")]);
@@ -2123,15 +2150,15 @@ mod tests {
     fn type_replaces_selection() {
         let mut ti = TextInput::new("ph").with_text("hello");
         ti.focused = true;
-        ti.edit.selection_start = Some(1);
-        ti.edit.cursor = 4;
+        ti.edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(1));
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(4);
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
         tp(&mut ti, "X", &mut ctx);
         assert_eq!(ti.text(), "hXo");
-        assert_eq!(ti.edit.cursor, 2);
+        assert_eq!(ti.edit.cursor.grapheme_index, 2);
         assert!(!ti.has_selection());
     }
 
@@ -2148,28 +2175,28 @@ mod tests {
     fn backspace_deletes_grapheme() {
         let mut ti = TextInput::new("ph").with_text("a😊b");
         ti.focused = true;
-        ti.edit.cursor = 2; // after the emoji
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(2); // after the emoji
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
         kd(&mut ti, KeyCode::Backspace, &mut ctx);
         assert_eq!(ti.text(), "ab");
-        assert_eq!(ti.edit.cursor, 1);
+        assert_eq!(ti.edit.cursor.grapheme_index, 1);
     }
 
     #[test]
     fn delete_deletes_grapheme() {
         let mut ti = TextInput::new("ph").with_text("a😊b");
         ti.focused = true;
-        ti.edit.cursor = 1; // before the emoji
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(1); // before the emoji
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
         kd(&mut ti, KeyCode::Delete, &mut ctx);
         assert_eq!(ti.text(), "ab");
-        assert_eq!(ti.edit.cursor, 1);
+        assert_eq!(ti.edit.cursor.grapheme_index, 1);
     }
 
     // ── Backspace / Delete ───────────────────────────────────────────────
@@ -2178,7 +2205,7 @@ mod tests {
     fn backspace_at_start_noop() {
         let mut ti = TextInput::new("ph").with_text("abc");
         ti.focused = true;
-        ti.edit.cursor = 0;
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(0);
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
@@ -2191,22 +2218,22 @@ mod tests {
     fn backspace_deletes_selection() {
         let mut ti = TextInput::new("ph").with_text("hello");
         ti.focused = true;
-        ti.edit.selection_start = Some(1);
-        ti.edit.cursor = 4;
+        ti.edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(1));
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(4);
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
         kd(&mut ti, KeyCode::Backspace, &mut ctx);
         assert_eq!(ti.text(), "ho");
-        assert_eq!(ti.edit.cursor, 1);
+        assert_eq!(ti.edit.cursor.grapheme_index, 1);
     }
 
     #[test]
     fn delete_at_end_noop() {
         let mut ti = TextInput::new("ph").with_text("abc");
         ti.focused = true;
-        ti.edit.cursor = 3;
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(3);
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
@@ -2219,15 +2246,15 @@ mod tests {
     fn delete_selection_select_all() {
         let mut ti = TextInput::new("ph").with_text("hello");
         ti.focused = true;
-        ti.edit.selection_start = Some(0);
-        ti.edit.cursor = 5;
+        ti.edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(0));
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(5);
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
         kd(&mut ti, KeyCode::Delete, &mut ctx);
         assert_eq!(ti.text(), "");
-        assert_eq!(ti.edit.cursor, 0);
+        assert_eq!(ti.edit.cursor.grapheme_index, 0);
     }
 
     // ── Arrow / Home / End ───────────────────────────────────────────────
@@ -2241,24 +2268,24 @@ mod tests {
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
         kd(&mut ti, KeyCode::Left, &mut ctx);
-        assert_eq!(ti.edit.cursor, 2);
+        assert_eq!(ti.edit.cursor.grapheme_index, 2);
         kd(&mut ti, KeyCode::Right, &mut ctx);
-        assert_eq!(ti.edit.cursor, 3);
+        assert_eq!(ti.edit.cursor.grapheme_index, 3);
     }
 
     #[test]
     fn home_end() {
         let mut ti = TextInput::new("ph").with_text("abc");
         ti.focused = true;
-        ti.edit.cursor = 1;
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(1);
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
         kd(&mut ti, KeyCode::Home, &mut ctx);
-        assert_eq!(ti.edit.cursor, 0);
+        assert_eq!(ti.edit.cursor.grapheme_index, 0);
         kd(&mut ti, KeyCode::End, &mut ctx);
-        assert_eq!(ti.edit.cursor, 3);
+        assert_eq!(ti.edit.cursor.grapheme_index, 3);
     }
 
     // ── Word navigation ──────────────────────────────────────────────────
@@ -2268,17 +2295,17 @@ mod tests {
         let mut ti = TextInput::new("ph").with_text("hello world foo");
         ti.focused = true;
         // "hello world foo" = 15 graphemes: hello(5) + space(1) + world(5) + space(1) + foo(3)
-        ti.edit.cursor = 15; // end
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(15); // end
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
         kd_word(&mut ti, KeyCode::Left, &mut ctx);
-        assert_eq!(ti.edit.cursor, 12); // start of "foo"
+        assert_eq!(ti.edit.cursor.grapheme_index, 12); // start of "foo"
         kd_word(&mut ti, KeyCode::Left, &mut ctx);
-        assert_eq!(ti.edit.cursor, 6); // start of "world"
+        assert_eq!(ti.edit.cursor.grapheme_index, 6); // start of "world"
         kd_word(&mut ti, KeyCode::Left, &mut ctx);
-        assert_eq!(ti.edit.cursor, 0); // start of "hello"
+        assert_eq!(ti.edit.cursor.grapheme_index, 0); // start of "hello"
     }
 
     #[test]
@@ -2286,22 +2313,22 @@ mod tests {
         let mut ti = TextInput::new("ph").with_text("hello world");
         ti.focused = true;
         // "hello world" = 11 graphemes: hello(5) + space(1) + world(5)
-        ti.edit.cursor = 0;
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(0);
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
         kd_word(&mut ti, KeyCode::Right, &mut ctx);
-        assert_eq!(ti.edit.cursor, 6); // past "hello" + space, at "world" start
+        assert_eq!(ti.edit.cursor.grapheme_index, 6); // past "hello" + space, at "world" start
         kd_word(&mut ti, KeyCode::Right, &mut ctx);
-        assert_eq!(ti.edit.cursor, 11); // past "world", at end
+        assert_eq!(ti.edit.cursor.grapheme_index, 11); // past "world", at end
     }
 
     #[test]
     fn native_word_navigation_extends_selection() {
         let mut ti = TextInput::new("ph").with_text("hello world");
         ti.focused = true;
-        ti.edit.cursor = 11;
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(11);
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
@@ -2317,8 +2344,11 @@ mod tests {
             &mut ctx,
         );
 
-        assert_eq!(ti.edit.cursor, 6);
-        assert_eq!(ti.edit.selection_start, Some(11));
+        assert_eq!(ti.edit.cursor.grapheme_index, 6);
+        assert_eq!(
+            ti.edit.selection_start.map(|caret| caret.grapheme_index),
+            Some(11)
+        );
         assert_eq!(ti.selection_byte_range(), Some((6, 11)));
     }
 
@@ -2326,21 +2356,21 @@ mod tests {
     fn native_word_navigation_uses_unicode_whitespace_boundaries() {
         let mut ti = TextInput::new("ph").with_text("alpha\tbeta\n\u{00A0}gamma");
         ti.focused = true;
-        ti.edit.cursor = ti.len_graphemes();
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(ti.len_graphemes());
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
 
         kd_word(&mut ti, KeyCode::Left, &mut ctx);
-        assert_eq!(ti.edit.cursor, 12);
+        assert_eq!(ti.edit.cursor.grapheme_index, 12);
         kd_word(&mut ti, KeyCode::Left, &mut ctx);
-        assert_eq!(ti.edit.cursor, 6);
+        assert_eq!(ti.edit.cursor.grapheme_index, 6);
         kd(&mut ti, KeyCode::Home, &mut ctx);
         kd_word(&mut ti, KeyCode::Right, &mut ctx);
-        assert_eq!(ti.edit.cursor, 6);
+        assert_eq!(ti.edit.cursor.grapheme_index, 6);
         kd_word(&mut ti, KeyCode::Right, &mut ctx);
-        assert_eq!(ti.edit.cursor, 12);
+        assert_eq!(ti.edit.cursor.grapheme_index, 12);
     }
 
     // ── Shift selection ──────────────────────────────────────────────────
@@ -2349,36 +2379,45 @@ mod tests {
     fn shift_left_selects() {
         let mut ti = TextInput::new("ph").with_text("abc");
         ti.focused = true;
-        ti.edit.cursor = 3;
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(3);
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
         kd_shift(&mut ti, KeyCode::Left, &mut ctx);
         assert!(ti.has_selection());
-        assert_eq!(ti.edit.selection_start, Some(3));
+        assert_eq!(
+            ti.edit.selection_start.map(|caret| caret.grapheme_index),
+            Some(3)
+        );
     }
 
     #[test]
     fn shift_navigation_at_boundaries_preserves_empty_anchor() {
         let mut ti = TextInput::new("ph").with_text("abc");
         ti.focused = true;
-        ti.edit.cursor = 0;
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(0);
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
 
         kd_shift(&mut ti, KeyCode::Left, &mut ctx);
-        assert_eq!(ti.edit.cursor, 0);
-        assert_eq!(ti.edit.selection_start, Some(0));
+        assert_eq!(ti.edit.cursor.grapheme_index, 0);
+        assert_eq!(
+            ti.edit.selection_start.map(|caret| caret.grapheme_index),
+            Some(0)
+        );
         assert!(!ti.has_selection());
 
-        ti.edit.cursor = ti.len_graphemes();
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(ti.len_graphemes());
         ti.clear_selection();
         kd_shift(&mut ti, KeyCode::Right, &mut ctx);
-        assert_eq!(ti.edit.cursor, 3);
-        assert_eq!(ti.edit.selection_start, Some(3));
+        assert_eq!(ti.edit.cursor.grapheme_index, 3);
+        assert_eq!(
+            ti.edit.selection_start.map(|caret| caret.grapheme_index),
+            Some(3)
+        );
         assert!(!ti.has_selection());
     }
 
@@ -2393,12 +2432,15 @@ mod tests {
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
         // First click at start
         md(&mut ti, 8.0, 14.0, &mut ctx);
-        assert_eq!(ti.edit.cursor, 0);
+        assert_eq!(ti.edit.cursor.grapheme_index, 0);
         // Shift+click near end
         md_shift(&mut ti, 150.0, 14.0, &mut ctx);
         assert!(ti.has_selection());
-        assert_eq!(ti.edit.selection_start, Some(0));
-        assert!(ti.edit.cursor > 0);
+        assert_eq!(
+            ti.edit.selection_start.map(|caret| caret.grapheme_index),
+            Some(0)
+        );
+        assert!(ti.edit.cursor.grapheme_index > 0);
     }
 
     // ── Selection byte range ─────────────────────────────────────────────
@@ -2406,16 +2448,16 @@ mod tests {
     #[test]
     fn selection_range_forward() {
         let mut ti = TextInput::new("ph").with_text("hello");
-        ti.edit.selection_start = Some(1);
-        ti.edit.cursor = 4;
+        ti.edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(1));
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(4);
         assert_eq!(ti.selection_byte_range(), Some((1, 4)));
     }
 
     #[test]
     fn selection_range_reverse() {
         let mut ti = TextInput::new("ph").with_text("hello");
-        ti.edit.selection_start = Some(4);
-        ti.edit.cursor = 1;
+        ti.edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(4));
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(1);
         assert_eq!(ti.selection_byte_range(), Some((1, 4)));
     }
 
@@ -2430,8 +2472,11 @@ mod tests {
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
         kd_primary(&mut ti, KeyCode::A, &mut ctx);
-        assert_eq!(ti.edit.cursor, 5);
-        assert_eq!(ti.edit.selection_start, Some(0));
+        assert_eq!(ti.edit.cursor.grapheme_index, 5);
+        assert_eq!(
+            ti.edit.selection_start.map(|caret| caret.grapheme_index),
+            Some(0)
+        );
     }
 
     #[test]
@@ -2439,8 +2484,8 @@ mod tests {
         let platform = ClipboardPlatform::with_text("");
         let mut ti = TextInput::new("ph").with_text("hello");
         ti.focused = true;
-        ti.edit.selection_start = Some(1);
-        ti.edit.cursor = 4;
+        ti.edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(1));
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(4);
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
@@ -2459,7 +2504,7 @@ mod tests {
         };
         kd_primary(&mut ti, KeyCode::X, &mut ctx);
         assert_eq!(ti.text(), "ho");
-        assert_eq!(ti.edit.cursor, 1);
+        assert_eq!(ti.edit.cursor.grapheme_index, 1);
         assert!(!ti.has_selection());
     }
 
@@ -2468,8 +2513,8 @@ mod tests {
         let platform = ClipboardPlatform::copy_failure();
         let mut ti = TextInput::new("ph").with_text("hello").on_change(change_action);
         ti.focused = true;
-        ti.edit.selection_start = Some(1);
-        ti.edit.cursor = 4;
+        ti.edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(1));
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(4);
         let actions = RefCell::new(Vec::new());
         let dispatch = |action: Action| actions.borrow_mut().push(action);
         let mut focus = DummyFocus;
@@ -2510,8 +2555,8 @@ mod tests {
             };
             let mut input = TextInput::new("name").with_text("A🙂中B").on_change(change_action);
             input.focused = true;
-            input.edit.selection_start = Some(1);
-            input.edit.cursor = 3;
+            input.edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(1));
+            input.edit.cursor = TextInputCaretPosition::at_logical_boundary(3);
             let actions = RefCell::new(Vec::new());
             let dispatch = |action| actions.borrow_mut().push(action);
             let mut focus = DummyFocus;
@@ -2576,8 +2621,8 @@ mod tests {
         let platform = ClipboardPlatform::with_text("paste");
         let mut ti = TextInput::new("ph").with_text("hello world").on_change(change_action);
         ti.focused = true;
-        ti.edit.selection_start = Some(0);
-        ti.edit.cursor = 5;
+        ti.edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(0));
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(5);
         let actions = RefCell::new(Vec::new());
         let dispatch = |action: Action| actions.borrow_mut().push(action);
         let mut focus = DummyFocus;
@@ -2661,7 +2706,7 @@ mod tests {
                 EventResult::Ignored
             );
             assert_eq!(ti.text(), "hello world");
-            assert_eq!(ti.edit.cursor, 5);
+            assert_eq!(ti.edit.cursor.grapheme_index, 5);
             assert_eq!(ti.selection_byte_range(), Some((0, 5)));
         }
         assert!(actions.borrow().is_empty());
@@ -2727,7 +2772,7 @@ mod tests {
         mm(&mut ti, 500.0, 14.0, &mut ctx);
         assert!(ti.has_selection());
         // Should have selected to end
-        assert_eq!(ti.edit.cursor, ti.len_graphemes());
+        assert_eq!(ti.edit.cursor.grapheme_index, ti.len_graphemes());
     }
 
     #[test]
@@ -2766,7 +2811,7 @@ mod tests {
     #[test]
     fn text_geometry_keeps_clip_text_and_ime_caret_in_one_coordinate_space() {
         let mut ti = TextInput::new("ph").with_text("abc");
-        ti.edit.cursor = 2;
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(2);
         ti.composition.set_preedit("ni".into());
         ti.layout(Rect::new(10.0, 20.0, 160.0, 32.0));
 
@@ -2805,15 +2850,15 @@ mod tests {
 
         md(&mut ti, click_x, 14.0, &mut ctx);
 
-        assert!(ti.edit.cursor > 0);
+        assert!(ti.edit.cursor.grapheme_index > 0);
     }
 
     #[test]
     fn click_clears_selection() {
         let mut ti = TextInput::new("ph").with_text("hello");
         layout(&mut ti);
-        ti.edit.selection_start = Some(0);
-        ti.edit.cursor = 3;
+        ti.edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(0));
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(3);
         assert!(ti.has_selection());
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
@@ -2841,32 +2886,32 @@ mod tests {
     #[test]
     fn delete_selection_at_boundary() {
         let mut ti = TextInput::new("ph").with_text("a");
-        ti.edit.selection_start = Some(0);
-        ti.edit.cursor = 1;
+        ti.edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(0));
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(1);
         assert!(ti.delete_selection());
         assert_eq!(ti.text(), "");
-        assert_eq!(ti.edit.cursor, 0);
+        assert_eq!(ti.edit.cursor.grapheme_index, 0);
         assert!(!ti.delete_selection());
     }
 
     #[test]
     fn set_text_clears_selection() {
         let mut ti = TextInput::new("ph").with_text("old");
-        ti.edit.selection_start = Some(0);
-        ti.edit.cursor = 2;
+        ti.edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(0));
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(2);
         ti.set_text("new".into());
         assert_eq!(ti.text(), "new");
-        assert_eq!(ti.edit.cursor, 3);
+        assert_eq!(ti.edit.cursor.grapheme_index, 3);
         assert!(!ti.has_selection());
     }
 
     #[test]
     fn clear_resets_all() {
         let mut ti = TextInput::new("ph").with_text("hello");
-        ti.edit.selection_start = Some(1);
+        ti.edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(1));
         ti.clear();
         assert!(ti.text().is_empty());
-        assert_eq!(ti.edit.cursor, 0);
+        assert_eq!(ti.edit.cursor.grapheme_index, 0);
         assert!(!ti.has_selection());
     }
 
@@ -2926,8 +2971,8 @@ mod tests {
     fn paint_handles_cjk_emoji_selection_and_ime_preedit_in_one_clip() {
         let mut ti = TextInput::new("ph").with_text("A你😊B");
         ti.focused = true;
-        ti.edit.cursor = 2;
-        ti.edit.selection_start = Some(4);
+        ti.edit.cursor = TextInputCaretPosition::at_logical_boundary(2);
+        ti.edit.selection_start = Some(TextInputCaretPosition::at_logical_boundary(4));
         ti.composition.set_preedit("拼音".into());
         ti.cursor_visible.set(true);
         ti.last_blink.set(Instant::now());
@@ -3461,8 +3506,11 @@ mod tests {
         mu(&mut input, &mut ctx);
         md_shift(&mut input, metrics.padding_x + right_x, 14.0, &mut ctx);
         mu(&mut input, &mut ctx);
-        assert_eq!(input.edit.cursor, 0);
-        assert_eq!(input.edit.selection_start, Some(1));
+        assert_eq!(input.edit.cursor.grapheme_index, 0);
+        assert_eq!(
+            input.edit.selection_start.map(|caret| caret.grapheme_index),
+            Some(1)
+        );
         assert!(
             actions.borrow().is_empty(),
             "navigation/selection dispatches no text edit callback"
@@ -3477,9 +3525,9 @@ mod tests {
         assert_eq!(input.undo_stack.entries.len(), 1);
         kd_primary(&mut input, KeyCode::Z, &mut ctx);
         assert_eq!(input.text(), text);
-        assert_eq!(input.edit.cursor, 0);
+        assert_eq!(input.edit.cursor.grapheme_index, 0);
         assert_eq!(
-            input.edit.selection_start,
+            input.edit.selection_start.map(|caret| caret.grapheme_index),
             Some(1),
             "Undo restores the actual reverse anchor"
         );
@@ -3487,6 +3535,956 @@ mod tests {
             actions.borrow().len(),
             2,
             "live TextInput Undo retains the existing on_change contract"
+        );
+    }
+
+    #[test]
+    fn visual_single_line_rtl_right_moves_from_logical_end_without_author_edit() {
+        let text = "שלום";
+        let mut input = TextInput::new("Text").with_text(text).on_change(change_action);
+        input.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        kd(&mut input, KeyCode::End, &mut ctx);
+        let before = paint_complete_selection(&input).rects.last().copied().expect("caret before");
+        kd(&mut input, KeyCode::Right, &mut ctx);
+        let after = paint_complete_selection(&input).rects.last().copied().expect("caret after");
+        assert!(
+            after.x > before.x,
+            "Right must move visually right in pure RTL: {before:?} -> {after:?}"
+        );
+        assert!(actions.borrow().is_empty());
+        assert!(input.undo_stack.entries.is_empty());
+        tp(&mut input, "!", &mut ctx);
+        assert_eq!(input.text(), "שלו!ם");
+        kd_primary(&mut input, KeyCode::Z, &mut ctx);
+        assert_eq!(input.text(), text);
+    }
+
+    #[test]
+    fn visual_single_line_mixed_bidi_right_follows_selected_glyph_run_direction() {
+        let text = "abc אבג xyz";
+        let metrics = TextInputMetrics::current();
+        let (_, right_x, _) =
+            complete_selection_reference(text, metrics.font_size, "abc א".len(), -100.0);
+        let mut input = TextInput::new("Text").with_text(text).on_change(change_action);
+        input.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        md(&mut input, metrics.padding_x + right_x, 14.0, &mut ctx);
+        mu(&mut input, &mut ctx);
+        assert_eq!(
+            input.edit.cursor.grapheme_index, 5,
+            "pointer is before the logical Bet glyph in an LTR paragraph"
+        );
+        let before = paint_complete_selection(&input).rects.last().copied().expect("caret before");
+        kd(&mut input, KeyCode::Right, &mut ctx);
+        let after = paint_complete_selection(&input).rects.last().copied().expect("caret after");
+        assert!(
+            after.x > before.x,
+            "Right must follow visual RTL glyph run even in LTR paragraph: {before:?} -> {after:?}"
+        );
+        assert!(actions.borrow().is_empty());
+        assert!(input.undo_stack.entries.is_empty());
+        tp(&mut input, "!", &mut ctx);
+        assert_eq!(input.text(), "abc !אבג xyz");
+        kd_primary(&mut input, KeyCode::Z, &mut ctx);
+        assert_eq!(input.text(), text);
+    }
+
+    #[test]
+    fn visual_single_line_pointer_keeps_ltr_side_of_shared_bidi_boundary() {
+        let text = "abc אבג xyz";
+        let metrics = TextInputMetrics::current();
+        let attrs_owner = mondrian_ui_text::font::FontManager::new();
+        let mut font_owner = mondrian_ui_text::font::FontManager::new();
+        let reference = mondrian_ui_text::layout::TextLayout::new_single_line(
+            &mut font_owner.font_system,
+            text,
+            attrs_owner.default_attrs(),
+            metrics.font_size,
+        );
+        let glyphs = reference.glyphs();
+        let space = glyphs
+            .iter()
+            .find(|glyph| glyph.start == "abc".len())
+            .expect("actual complete LTR whitespace advance before embedded RTL run");
+        assert!(!space.level.is_rtl() && space.w > 0.0);
+        let hit_x = space.x + space.w * 0.9;
+        let expected_caret_x = space.x + space.w;
+        let mut input = TextInput::new("Text").with_text(text).on_change(change_action);
+        input.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        md(&mut input, metrics.padding_x + hit_x, 14.0, &mut ctx);
+        mu(&mut input, &mut ctx);
+        assert_eq!(
+            input.edit.cursor.grapheme_index, 4,
+            "logical boundary immediately after LTR whitespace"
+        );
+        let painted = paint_complete_selection(&input);
+        let caret = painted.rects.last().expect("actual widget caret");
+        let text_origin = painted.texts.iter().find(|(s, _)| s == text).expect("complete text").1;
+        assert!((caret.x - (text_origin.x + expected_caret_x)).abs() <= 0.1,
+            "pointer caret must stay associated with hit LTR space, not jump across RTL word: {caret:?}");
+        assert!(actions.borrow().is_empty());
+        assert!(input.undo_stack.entries.is_empty());
+        tp(&mut input, "!", &mut ctx);
+        assert_eq!(input.text(), "abc !אבג xyz");
+        kd_primary(&mut input, KeyCode::Z, &mut ctx);
+        assert_eq!(input.text(), text);
+    }
+
+    #[test]
+    fn visual_single_line_rtl_shift_right_selects_one_grapheme_and_undo_restores_direction() {
+        let text = "שלום";
+        let metrics = TextInputMetrics::current();
+        let (_, _, expected) =
+            complete_selection_reference(text, metrics.font_size, "שלו".len(), f32::MAX);
+        let mut input = TextInput::new("Text").with_text(text).on_change(change_action);
+        input.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        kd(&mut input, KeyCode::End, &mut ctx);
+        kd_shift(&mut input, KeyCode::Right, &mut ctx);
+        assert_eq!(
+            input.selection_byte_range(),
+            Some(("שלו".len(), text.len()))
+        );
+        assert!(actions.borrow().is_empty());
+        assert!(input.undo_stack.entries.is_empty());
+        assert_complete_selection_pixels(&input, &expected);
+        tp(&mut input, "X", &mut ctx);
+        assert_eq!(input.text(), "שלוX");
+        assert_eq!(actions.borrow().len(), 1);
+        kd_primary(&mut input, KeyCode::Z, &mut ctx);
+        assert_eq!(input.text(), text);
+        assert_eq!(
+            input.selection_byte_range(),
+            Some(("שלו".len(), text.len()))
+        );
+        assert_complete_selection_pixels(&input, &expected);
+        assert_eq!(actions.borrow().len(), 2);
+    }
+
+    #[test]
+    fn visual_single_line_rtl_home_end_and_plain_arrow_collapse_use_visual_selection_edge() {
+        let text = "שלום";
+        let mut input = TextInput::new("Text").with_text(text);
+        input.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = mk_ctx(&mut focus, &mut shortcut, &mut tooltip);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        kd(&mut input, KeyCode::End, &mut ctx);
+        let end = paint_complete_selection(&input)
+            .rects
+            .last()
+            .copied()
+            .expect("logical End caret");
+        kd_shift(&mut input, KeyCode::Home, &mut ctx);
+        assert_eq!(input.selection_byte_range(), Some((0, text.len())));
+        let home = paint_complete_selection(&input)
+            .rects
+            .last()
+            .copied()
+            .expect("logical Home caret");
+        assert!(
+            home.x > end.x,
+            "RTL Home is logical start at right; End is logical end at left"
+        );
+        kd(&mut input, KeyCode::Left, &mut ctx);
+        assert!(!input.has_selection());
+        let collapsed =
+            paint_complete_selection(&input).rects.last().copied().expect("collapsed caret");
+        assert!(
+            (collapsed.x - end.x).abs() <= 0.1,
+            "plain Left collapses to selected visual left edge without another character move"
+        );
+        tp(&mut input, "!", &mut ctx);
+        assert_eq!(input.text(), "שלום!");
+        kd_primary(&mut input, KeyCode::Z, &mut ctx);
+        assert_eq!(input.text(), text);
+        assert!(
+            !input.has_selection(),
+            "navigation was complete before the one reversible insertion"
+        );
+    }
+
+    #[test]
+    fn visual_single_line_ltr_right_collapses_selection_without_skipping_a_character() {
+        let mut input = TextInput::new("Text").with_text("abcdef");
+        input.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = mk_ctx(&mut focus, &mut shortcut, &mut tooltip);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        kd(&mut input, KeyCode::Home, &mut ctx);
+        for _ in 0..3 {
+            kd_shift(&mut input, KeyCode::Right, &mut ctx);
+        }
+        assert_eq!(input.selection_byte_range(), Some((0, 3)));
+        kd(&mut input, KeyCode::Right, &mut ctx);
+        assert!(!input.has_selection());
+        assert!(input.undo_stack.entries.is_empty());
+        tp(&mut input, "!", &mut ctx);
+        assert_eq!(
+            input.text(),
+            "abc!def",
+            "plain Right collapses at the selected right edge"
+        );
+        kd_primary(&mut input, KeyCode::Z, &mut ctx);
+        assert_eq!(input.text(), "abcdef");
+    }
+
+    #[test]
+    fn visual_single_line_arabic_ligature_shift_navigation_preserves_logical_grapheme() {
+        let text = "لا";
+        let mut input = TextInput::new("Text").with_text(text);
+        input.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = mk_ctx(&mut focus, &mut shortcut, &mut tooltip);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        kd(&mut input, KeyCode::End, &mut ctx);
+        kd_shift(&mut input, KeyCode::Right, &mut ctx);
+        assert_eq!(
+            input.selection_byte_range(),
+            Some(("ل".len(), text.len())),
+            "one visual step into the complete Arabic cluster selects only Alef"
+        );
+        tp(&mut input, "X", &mut ctx);
+        assert_eq!(input.text(), "لX");
+        kd_primary(&mut input, KeyCode::Z, &mut ctx);
+        assert_eq!(input.text(), text);
+        assert_eq!(input.selection_byte_range(), Some(("ل".len(), text.len())));
+        // The existing full grapheme contract also applies to combining marks
+        // and emoji; navigation must never expose a UTF-8 or ZWJ interior.
+        input.set_text("e\u{301}👩‍💻".to_owned());
+        kd_shift(&mut input, KeyCode::Left, &mut ctx);
+        assert_eq!(
+            input.selection_byte_range(),
+            Some(("e\u{301}".len(), input.text().len()))
+        );
+        tp(&mut input, "X", &mut ctx);
+        assert_eq!(input.text(), "e\u{301}X");
+        kd_primary(&mut input, KeyCode::Z, &mut ctx);
+        assert_eq!(input.text(), "e\u{301}👩‍💻");
+    }
+
+    #[test]
+    fn visual_single_line_zero_advance_boundary_is_owned_and_not_skipped() {
+        let text = "a\u{200b}ב";
+        let mut input = TextInput::new("Text").with_text(text);
+        input.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = mk_ctx(&mut focus, &mut shortcut, &mut tooltip);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        kd(&mut input, KeyCode::Home, &mut ctx);
+        kd(&mut input, KeyCode::Right, &mut ctx);
+        let after_a = paint_complete_selection(&input).rects.last().copied().expect("after a");
+        kd(&mut input, KeyCode::Right, &mut ctx);
+        let after_control = paint_complete_selection(&input)
+            .rects
+            .last()
+            .copied()
+            .expect("after zero-width space");
+        assert!(
+            (after_a.x - after_control.x).abs() <= 0.1,
+            "a zero-advance grapheme is a finite logical caret step at the same pixel"
+        );
+        kd(&mut input, KeyCode::Right, &mut ctx);
+        let after_rtl_cell = paint_complete_selection(&input)
+            .rects
+            .last()
+            .copied()
+            .expect("RTL visual cell right edge");
+        assert!(
+            after_rtl_cell.x > after_control.x,
+            "the next visual step traverses the actual RTL glyph, not a logical skip fallback"
+        );
+        assert!(input.undo_stack.entries.is_empty());
+        tp(&mut input, "!", &mut ctx);
+        assert_eq!(input.text(), "a\u{200b}!ב");
+        kd_primary(&mut input, KeyCode::Z, &mut ctx);
+        assert_eq!(input.text(), text);
+    }
+
+    #[test]
+    fn visual_single_line_sequential_egc_input_has_complete_result_endpoint_and_reversible_text() {
+        for (fragments, complete) in [
+            (vec!["e", "\u{301}"], "e\u{301}"),
+            (vec!["👩", "\u{200d}", "💻"], "👩‍💻"),
+        ] {
+            let mut input = TextInput::new("Text").on_change(change_action);
+            input.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+            let actions = RefCell::new(Vec::new());
+            let dispatch = |action: Action| actions.borrow_mut().push(action);
+            let mut focus = DummyFocus;
+            let mut shortcut = DummyShortcut;
+            let mut tooltip = DummyTooltip;
+            let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+            input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+            for fragment in &fragments {
+                tp(&mut input, fragment, &mut ctx);
+            }
+            assert_eq!(input.text(), complete);
+            assert_eq!(
+                actions.borrow().len(),
+                fragments.len(),
+                "one callback per actual input mutation"
+            );
+            kd(&mut input, KeyCode::Left, &mut ctx);
+            assert_eq!(
+                actions.borrow().len(),
+                fragments.len(),
+                "navigation is not an edit"
+            );
+            tp(&mut input, "X", &mut ctx);
+            assert_eq!(
+                input.text(),
+                format!("X{complete}"),
+                "one Left from the complete joined EGC must move before it"
+            );
+            kd_primary(&mut input, KeyCode::Z, &mut ctx);
+            assert_eq!(input.text(), complete);
+            let redo = UiEvent::KeyDown {
+                key: KeyCode::Z,
+                modifiers: Modifiers {
+                    shift: true,
+                    ..crate::test_utils::primary_text_modifiers()
+                },
+            };
+            input.event(&redo, &mut ctx);
+            assert_eq!(input.text(), format!("X{complete}"));
+            kd_primary(&mut input, KeyCode::Z, &mut ctx);
+            kd(&mut input, KeyCode::Delete, &mut ctx);
+            assert_eq!(
+                input.text(),
+                "",
+                "Undo restores a caret before the complete joined EGC"
+            );
+        }
+    }
+
+    #[test]
+    fn visual_single_line_zwj_inserted_between_existing_emoji_snaps_forward_in_complete_result() {
+        let mut input = TextInput::new("Text").with_text("👩💻").on_change(change_action);
+        input.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        kd(&mut input, KeyCode::End, &mut ctx);
+        kd(&mut input, KeyCode::Left, &mut ctx);
+        tp(&mut input, "\u{200d}", &mut ctx);
+        assert_eq!(input.text(), "👩‍💻");
+        assert_eq!(actions.borrow().len(), 1);
+        kd(&mut input, KeyCode::Left, &mut ctx);
+        tp(&mut input, "X", &mut ctx);
+        assert_eq!(
+            input.text(),
+            "X👩‍💻",
+            "insertion byte endpoint inside the joined complete EGC must snap forward to its end"
+        );
+        kd_primary(&mut input, KeyCode::Z, &mut ctx);
+        assert_eq!(input.text(), "👩‍💻");
+        kd_primary(&mut input, KeyCode::Z, &mut ctx);
+        assert_eq!(input.text(), "👩💻");
+        let redo = UiEvent::KeyDown {
+            key: KeyCode::Z,
+            modifiers: Modifiers {
+                shift: true,
+                ..crate::test_utils::primary_text_modifiers()
+            },
+        };
+        input.event(&redo, &mut ctx);
+        assert_eq!(input.text(), "👩‍💻");
+        tp(&mut input, "Y", &mut ctx);
+        assert_eq!(input.text(), "Y👩‍💻",
+            "Redo restores the actual before-Undo navigation endpoint, not an invalid fragment count");
+    }
+
+    #[test]
+    fn visual_single_line_rtl_word_left_uses_visual_word_boundary_and_keeps_edit_ownership() {
+        let text = "שלום עולם";
+        let mut input = TextInput::new("Text").with_text(text).on_change(change_action);
+        input.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        kd(&mut input, KeyCode::Home, &mut ctx);
+        let before = paint_complete_selection(&input).rects.last().copied().expect("RTL Home");
+        kd_word(&mut input, KeyCode::Left, &mut ctx);
+        let after = paint_complete_selection(&input)
+            .rects
+            .last()
+            .copied()
+            .expect("visual word boundary");
+        assert!(
+            after.x < before.x,
+            "physical word Left must advance toward RTL first word end"
+        );
+        assert!(actions.borrow().is_empty());
+        assert!(input.undo_stack.entries.is_empty());
+        tp(&mut input, "X", &mut ctx);
+        assert_eq!(input.text(), "שלוםX עולם");
+        kd_primary(&mut input, KeyCode::Z, &mut ctx);
+        assert_eq!(input.text(), text);
+    }
+
+    // The numeric wrapper exposes exactly the same public Widget paint/event
+    // and inspection seams as the shell. A genuine repeated focus event pins
+    // the caret blink without reaching through NumberInput's private fields.
+    fn paint_visual_number(
+        input: &mut crate::NumberInput,
+        ctx: &mut EventContext,
+    ) -> RecordingEncoder {
+        input.event(&UiEvent::focus_gained_keyboard(), ctx);
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        input.paint(&mut PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 400.0, 100.0),
+        });
+        encoder
+    }
+
+    #[test]
+    fn visual_single_line_numeric_inspection_preserves_bidi_association_and_local_undo_with_fresh_callback(
+    ) {
+        let text = "abc אבג xyz";
+        let metrics = TextInputMetrics::current();
+        let attrs_owner = mondrian_ui_text::font::FontManager::new();
+        let mut font_owner = mondrian_ui_text::font::FontManager::new();
+        let shaped = mondrian_ui_text::layout::TextLayout::new_single_line(
+            &mut font_owner.font_system,
+            text,
+            attrs_owner.default_attrs(),
+            metrics.font_size,
+        );
+        let runs = shaped.runs();
+        let space = runs[0]
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.start == 3 && glyph.end == 4)
+            .expect("complete LTR space before the Hebrew run");
+        assert!(!space.level.is_rtl() && space.w > 0.0);
+        let expected_x = space.x + space.w;
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        let key = |key, modifiers| UiEvent::KeyDown { key, modifiers };
+        let primary = crate::test_utils::primary_text_modifiers();
+        let redo = Modifiers { shift: true, ..primary };
+        let mut original =
+            crate::NumberInput::new(12.0_f64, 0.0, 100.0).on_change(|_| Action::Play);
+        original.set_control_inspection_key(Some("complete-numeric-caret".to_owned()));
+        original.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        original.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        original.event(&key(KeyCode::A, primary), &mut ctx);
+        original.event(&UiEvent::TextInput(text.to_owned()), &mut ctx);
+        original.event(&key(KeyCode::Home, Modifiers::none()), &mut ctx);
+        let before = paint_visual_number(&mut original, &mut ctx);
+        let origin_x =
+            before.texts.iter().find(|(value, _)| value == text).expect("full draft").1.x;
+        let point = Point::new(origin_x + space.x + space.w * 0.9, 14.0);
+        for event in [
+            UiEvent::MouseDown {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseUp {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            original.event(&event, &mut ctx);
+        }
+        let retained = original
+            .control_inspection_state()
+            .expect("completed pointer allows an admitted numeric keyboard draft");
+        let mut fresh = crate::NumberInput::new(12.0_f64, 0.0, 100.0).on_change(|_| Action::Pause);
+        fresh.set_control_inspection_key(Some("complete-numeric-caret".to_owned()));
+        fresh.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        assert!(fresh.restore_control_inspection_state(&retained));
+        let painted = paint_visual_number(&mut fresh, &mut ctx);
+        let origin_x = painted
+            .texts
+            .iter()
+            .find(|(value, _)| value == text)
+            .expect("fresh full draft")
+            .1
+            .x;
+        let caret = painted.rects.last().expect("fresh associated caret");
+        assert!((caret.x - origin_x - expected_x).abs() <= 0.1,
+            "same logical byte seam must keep its original LTR cluster association through refresh: {caret:?}");
+        fresh.event(&UiEvent::TextInput("Q".to_owned()), &mut ctx);
+        assert_eq!(fresh.text(), "abc Qאבג xyz");
+        fresh.event(&key(KeyCode::Z, primary), &mut ctx);
+        assert_eq!(fresh.text(), text);
+        let undone = paint_visual_number(&mut fresh, &mut ctx);
+        let origin_x =
+            undone.texts.iter().find(|(value, _)| value == text).expect("undone draft").1.x;
+        let caret = undone.rects.last().expect("Undo associated caret");
+        assert!(
+            (caret.x - origin_x - expected_x).abs() <= 0.1,
+            "Undo must retain the same visual association, not only the logical offset"
+        );
+        fresh.event(&key(KeyCode::Z, redo), &mut ctx);
+        assert_eq!(fresh.text(), "abc Qאבג xyz");
+        assert!(
+            actions.borrow().is_empty(),
+            "numeric draft and local history are not author commits"
+        );
+        let mut changed = crate::NumberInput::new(13.0_f64, 0.0, 100.0);
+        changed.set_control_inspection_key(Some("complete-numeric-caret".to_owned()));
+        let new_id = changed.id();
+        assert!(!changed.restore_control_inspection_state(&retained));
+        assert_eq!(changed.id(), new_id);
+        assert_eq!(changed.text(), "13");
+        let mut rebound = crate::NumberInput::new(12.0_f64, 0.0, 100.0);
+        rebound.set_control_inspection_key(Some("another-numeric-owner".to_owned()));
+        assert!(!rebound.restore_control_inspection_state(&retained));
+        fresh.event(&key(KeyCode::A, primary), &mut ctx);
+        fresh.event(&UiEvent::TextInput("25".to_owned()), &mut ctx);
+        fresh.event(&key(KeyCode::Enter, Modifiers::none()), &mut ctx);
+        assert_eq!(fresh.text(), "25");
+        assert_eq!(
+            &*actions.borrow(),
+            &[Action::Pause],
+            "one confirmation, using only the fresh callback"
+        );
+        assert_eq!(
+            fresh.event(&key(KeyCode::Z, primary), &mut ctx),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            fresh.text(),
+            "25",
+            "confirmed value releases local Undo to the author boundary"
+        );
+    }
+
+    #[test]
+    fn visual_single_line_numeric_sequential_egc_draft_admits_refresh_and_reversible_complete_endpoint(
+    ) {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        let key = |key, modifiers| UiEvent::KeyDown { key, modifiers };
+        let primary = crate::test_utils::primary_text_modifiers();
+        let mut original =
+            crate::NumberInput::new(12.0_f64, 0.0, 100.0).on_change(|_| Action::Play);
+        original.set_control_inspection_key(Some("joined-numeric-draft".to_owned()));
+        original.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        original.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        original.event(&key(KeyCode::A, primary), &mut ctx);
+        for fragment in ["👩", "\u{200d}", "💻"] {
+            original.event(&UiEvent::TextInput(fragment.to_owned()), &mut ctx);
+        }
+        assert_eq!(original.text(), "👩‍💻");
+        let retained = original
+            .control_inspection_state()
+            .expect("complete-result EGC endpoint must admit its owned draft/history");
+        let mut fresh = crate::NumberInput::new(12.0_f64, 0.0, 100.0).on_change(|_| Action::Pause);
+        fresh.set_control_inspection_key(Some("joined-numeric-draft".to_owned()));
+        fresh.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        assert!(fresh.restore_control_inspection_state(&retained));
+        fresh.event(&key(KeyCode::Left, Modifiers::none()), &mut ctx);
+        fresh.event(&UiEvent::TextInput("X".to_owned()), &mut ctx);
+        assert_eq!(fresh.text(), "X👩‍💻");
+        fresh.event(&key(KeyCode::Z, primary), &mut ctx);
+        assert_eq!(fresh.text(), "👩‍💻");
+        fresh.event(&key(KeyCode::Delete, Modifiers::none()), &mut ctx);
+        assert_eq!(
+            fresh.text(),
+            "",
+            "Undo restores the complete before-EGC endpoint after draft refresh"
+        );
+        assert!(actions.borrow().is_empty());
+        fresh.event(&UiEvent::TextInput("25".to_owned()), &mut ctx);
+        fresh.event(&key(KeyCode::Enter, Modifiers::none()), &mut ctx);
+        assert_eq!(&*actions.borrow(), &[Action::Pause]);
+    }
+
+    #[test]
+    fn associated_single_line_logical_delete_keeps_surviving_bidi_association_and_actual_undo_pixels(
+    ) {
+        let original = "abc אבג xyz";
+        let reduced = "abc בג xyz";
+        let metrics = TextInputMetrics::current();
+        let reference = |text: &str| {
+            let attrs_owner = mondrian_ui_text::font::FontManager::new();
+            let mut font_owner = mondrian_ui_text::font::FontManager::new();
+            let shaped = mondrian_ui_text::layout::TextLayout::new_single_line(
+                &mut font_owner.font_system,
+                text,
+                attrs_owner.default_attrs(),
+                metrics.font_size,
+            );
+            let glyphs = shaped.glyphs();
+            let first = glyphs
+                .iter()
+                .find(|glyph| glyph.start == 4 && glyph.end == 6)
+                .expect("actual first complete RTL glyph after the LTR seam");
+            assert!(first.level.is_rtl() && first.w > 0.0);
+            (first.x + first.w * 0.9, first.x + first.w)
+        };
+        let (hit, original_right) = reference(original);
+        let (_, reduced_right) = reference(reduced);
+        let mut input = TextInput::new("Text").with_text(original).on_change(change_action);
+        input.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        md(&mut input, metrics.padding_x + hit, 14.0, &mut ctx);
+        mu(&mut input, &mut ctx);
+        kd(&mut input, KeyCode::Delete, &mut ctx);
+        assert_eq!(input.text(), reduced);
+        assert_eq!(
+            input.edit.cursor.affinity,
+            mondrian_ui_core::TextCaretAffinity::BeforeNext
+        );
+        let painted = paint_complete_selection(&input);
+        let origin = painted
+            .texts
+            .iter()
+            .find(|(text, _)| text == reduced)
+            .expect("complete reduced draft")
+            .1
+            .x;
+        assert!(
+            (painted.rects.last().expect("remaining RTL association").x - origin - reduced_right)
+                .abs()
+                <= 0.1
+        );
+        assert_eq!(actions.borrow().len(), 1);
+        kd_primary(&mut input, KeyCode::Z, &mut ctx);
+        assert_eq!(input.text(), original);
+        let painted = paint_complete_selection(&input);
+        let origin = painted
+            .texts
+            .iter()
+            .find(|(text, _)| text == original)
+            .expect("complete undone draft")
+            .1
+            .x;
+        assert!(
+            (painted.rects.last().expect("original RTL association").x - origin - original_right)
+                .abs()
+                <= 0.1
+        );
+        assert_eq!(actions.borrow().len(), 2);
+    }
+
+    #[test]
+    fn associated_single_line_deletion_joining_egcs_uses_complete_result_endpoint_and_real_undo() {
+        let mut input = TextInput::new("Text").with_text("👩‍X💻").on_change(change_action);
+        input.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        kd(&mut input, KeyCode::End, &mut ctx);
+        kd(&mut input, KeyCode::Left, &mut ctx);
+        kd(&mut input, KeyCode::Backspace, &mut ctx);
+        assert_eq!(input.text(), "👩‍💻");
+        assert_eq!(actions.borrow().len(), 1);
+        assert_eq!(input.edit.cursor.grapheme_index, 1);
+        assert!(TextEditState::position_admitted(
+            input.edit.cursor,
+            input.len_graphemes()
+        ));
+        kd(&mut input, KeyCode::Left, &mut ctx);
+        tp(&mut input, "Q", &mut ctx);
+        assert_eq!(input.text(), "Q👩‍💻");
+        kd_primary(&mut input, KeyCode::Z, &mut ctx);
+        assert_eq!(input.text(), "👩‍💻");
+        kd_primary(&mut input, KeyCode::Z, &mut ctx);
+        assert_eq!(input.text(), "👩‍X💻");
+        kd(&mut input, KeyCode::Delete, &mut ctx);
+        assert_eq!(
+            input.text(),
+            "👩‍X",
+            "Undo restores the actual logical caret after X, before Laptop"
+        );
+    }
+
+    #[test]
+    fn source_single_line_constructor_preserves_model_bytes_and_keeps_native_word_navigation() {
+        for separator in ["\r", "\n", "\r\n", "\u{2028}", "\u{2029}", "\t", "\u{00A0}"] {
+            let expected = format!("left{separator}right");
+            let actions = RefCell::new(Vec::new());
+            let dispatch = |action: Action| actions.borrow_mut().push(action);
+            let mut focus = DummyFocus;
+            let mut shortcuts = DummyShortcut;
+            let mut tooltip = DummyTooltip;
+            let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+            let mut input = TextInput::new("Text")
+                .with_text(format!("left{separator}right"))
+                .on_commit(change_action);
+            layout(&mut input);
+            input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+            assert_eq!(
+                input.text(),
+                expected,
+                "programmatic separator {separator:?}"
+            );
+            kd_word(&mut input, KeyCode::Left, &mut ctx);
+            assert_eq!(
+                input.edit.cursor.grapheme_index, 5,
+                "whole-line navigation must be admitted"
+            );
+            kd_word(&mut input, KeyCode::Right, &mut ctx);
+            assert_eq!(input.edit.cursor.grapheme_index, 10);
+            kd(&mut input, KeyCode::Enter, &mut ctx);
+            assert!(
+                actions.borrow().is_empty(),
+                "construction and navigation are not an author edit"
+            );
+        }
+    }
+
+    #[test]
+    fn source_single_line_set_text_establishes_exact_focus_cancel_and_history_baseline() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input = TextInput::new("Text").with_text("Old").on_commit(change_action);
+        layout(&mut input);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        input.select_all();
+        tp(&mut input, "old local draft", &mut ctx);
+        assert!(input.owns_local_history());
+        input.set_text("👩‍💻e\u{301}\r\nשלום\u{2028}X\u{2029}\t\u{00A0}end".to_owned());
+        let raw_source = "👩‍💻e\u{301}\r\nשלום\u{2028}X\u{2029}\t\u{00A0}end";
+        assert_eq!(input.text(), raw_source);
+        assert!(!input.has_selection());
+        assert!(
+            !input.owns_local_history(),
+            "external baseline replaces local history without authoring"
+        );
+        input.select_all();
+        tp(&mut input, "new local draft", &mut ctx);
+        kd(&mut input, KeyCode::Escape, &mut ctx);
+        assert_eq!(
+            input.text(),
+            raw_source,
+            "Escape restores the exact raw model baseline"
+        );
+        assert!(!input.is_focused());
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        kd(&mut input, KeyCode::Enter, &mut ctx);
+        input.event(&UiEvent::FocusLost, &mut ctx);
+        assert!(
+            actions.borrow().is_empty(),
+            "model synchronization, Escape and unchanged confirmation never dispatch"
+        );
+    }
+
+    #[test]
+    fn source_single_line_model_ingress_and_user_input_have_distinct_author_contracts() {
+        let raw = "A\r\nB\rC\nD\u{2028}E\u{2029}F\t\u{00A0}👩‍💻e\u{301}";
+        let expected = "A B C D E F\t\u{00A0}👩‍💻e\u{301}";
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut committed = TextInput::new("Text").on_change(change_action);
+        committed.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        tp(&mut committed, raw, &mut ctx);
+        assert_eq!(committed.text(), expected);
+        assert_eq!(&*actions.borrow(), &[change_action(expected)]);
+        let mut programmatic = TextInput::new("Text").with_text(raw).on_change(change_action);
+        assert_eq!(programmatic.text(), raw);
+        programmatic.set_text(raw.to_owned());
+        assert_eq!(programmatic.text(), raw);
+        assert_eq!(
+            &*actions.borrow(),
+            &[change_action(expected)],
+            "programmatic ingress has no user callback"
+        );
+    }
+
+    #[test]
+    fn source_single_line_numeric_dto_refuses_raw_model_separators_without_guessing_positions() {
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = mk_ctx(&mut focus, &mut shortcuts, &mut tooltip);
+        let mut raw = TextInput::new("Text").with_text("left\r\nright");
+        raw.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        assert_eq!(
+            raw.text(),
+            "left\r\nright",
+            "a declared single-line view preserves authoritative source"
+        );
+        let raw_draft = raw.inspection_draft().expect("raw focused source snapshot");
+        let mut raw_refused = TextInput::new("Text").with_text("fresh baseline");
+        assert!(!raw_refused.restore_numeric_input_inspection(raw.id(), true, Some(&raw_draft)), "numeric draft admission remains canonical even though a general single-line model can preserve raw separators");
+        assert_eq!(raw_refused.text(), "fresh baseline");
+        let mut input = TextInput::new("Text").with_text("left right");
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        let draft = input.inspection_draft().expect("canonical numeric draft");
+        let mut fresh = TextInput::new("Text").with_text("fresh baseline");
+        assert!(fresh.restore_numeric_input_inspection(input.id(), true, Some(&draft)));
+        assert_eq!(fresh.text(), "left right");
+        for invalid in [
+            "left\rright",
+            "left\nright",
+            "left\r\nright",
+            "left\u{2028}right",
+            "left\u{2029}right",
+        ] {
+            let mut malformed = draft.clone();
+            malformed.text = invalid.to_owned();
+            let mut refused = TextInput::new("Text").with_text("fresh baseline");
+            let fresh_id = refused.id();
+            assert!(
+                !refused.restore_numeric_input_inspection(input.id(), true, Some(&malformed)),
+                "never normalize an untrusted numeric payload and guess its saved endpoints"
+            );
+            assert_eq!(refused.text(), "fresh baseline");
+            assert_eq!(refused.id(), fresh_id);
+            assert!(!refused.is_focused());
+        }
+    }
+
+    #[test]
+    fn source_single_line_paint_uses_complete_projection_without_changing_model_or_pixels() {
+        let raw = "e\u{301}\r\n\u{301}👩\n\u{200d}💻 שלום\u{2028}X\u{2029}\t\u{00a0}Z";
+        let displayed = "e\u{301} \u{301}👩 \u{200d}💻 שלום X \t\u{00a0}Z";
+        let mut input = TextInput::new("Text").with_text(raw).on_commit(change_action);
+        let mut reference = TextInput::new("Text").with_text(displayed);
+        input.layout(Rect::new(0.0, 0.0, 380.0, 28.0));
+        reference.layout(Rect::new(0.0, 0.0, 380.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        reference.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        assert_eq!(input.text(), raw, "model source is not a user input event");
+        assert_eq!(
+            input.accessibility().expect("source value").value,
+            Some(AccessibilityValue::Text(raw.to_owned()))
+        );
+        let actual = paint_complete_selection(&input);
+        let expected = paint_complete_selection(&reference);
+        assert_eq!(actual.texts.len(), 1);
+        assert_eq!(
+            actual.texts[0].0, displayed,
+            "actual draw content is the complete one-line projection"
+        );
+        assert_eq!(actual.texts[0].1, expected.texts[0].1);
+        let caret = actual.rects.last().expect("source caret");
+        let expected_caret = expected.rects.last().expect("reference caret");
+        assert!((caret.x - expected_caret.x).abs() < 0.01);
+        assert!((caret.y - expected_caret.y).abs() < 0.01);
+        assert!(!input.commit_pending_input(&mut ctx));
+        assert!(
+            actions.borrow().is_empty(),
+            "projection/navigation never authors a normalized value"
+        );
+    }
+
+    #[test]
+    fn source_single_line_selection_keeps_crlf_and_combining_source_stops_and_real_undo() {
+        let raw = "a\r\n\u{301}b";
+        let mut input = TextInput::new("Text").with_text(raw).on_change(change_action);
+        input.layout(Rect::new(0.0, 0.0, 300.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        kd(&mut input, KeyCode::Home, &mut ctx);
+        kd(&mut input, KeyCode::Right, &mut ctx);
+        kd_shift(&mut input, KeyCode::Right, &mut ctx);
+        assert_eq!(
+            input.selection_byte_range(),
+            Some((1, 3)),
+            "CRLF is one original source grapheme, not a replacement author space"
+        );
+        assert_eq!(&input.text()[1..3], "\r\n");
+        assert_eq!(input.edit.cursor.grapheme_index, 2);
+        kd_shift(&mut input, KeyCode::Right, &mut ctx);
+        assert_eq!(input.selection_byte_range(), Some((1, 5)), "a following source combining grapheme remains reachable although the display joins it to space");
+        assert!(
+            actions.borrow().is_empty(),
+            "visual selection does not edit"
+        );
+        tp(&mut input, "X", &mut ctx);
+        assert_eq!(input.text(), "aXb");
+        assert_eq!(&*actions.borrow(), &[change_action("aXb")]);
+        kd_primary(&mut input, KeyCode::Z, &mut ctx);
+        assert_eq!(
+            input.text(),
+            raw,
+            "local Undo restores exact original bytes"
+        );
+        assert_eq!(input.selection_byte_range(), Some((1, 5)));
+        assert_eq!(
+            &*actions.borrow(),
+            &[change_action("aXb"), change_action(raw)]
         );
     }
 }

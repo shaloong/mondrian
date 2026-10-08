@@ -1348,8 +1348,9 @@ mod tests {
         bad.numeric_input.as_mut().expect("numeric").draft.history.owns_input = false;
         cases.push(bad);
         let mut bad = valid.clone();
-        bad.numeric_input.as_mut().expect("numeric").draft.history.entries[0].cursor_before =
-            usize::MAX;
+        bad.numeric_input.as_mut().expect("numeric").draft.history.entries[0]
+            .cursor_before
+            .grapheme_index = usize::MAX;
         cases.push(bad);
         let mut bad = valid.clone();
         bad.numeric_input.as_mut().expect("numeric").draft.history.entries[0].text_before =
@@ -1375,6 +1376,55 @@ mod tests {
             );
             assert_eq!(replacement.text(), "10");
             assert!(!replacement.accepts_text_input());
+        }
+    }
+
+    #[test]
+    fn associated_single_line_numeric_inspection_refuses_invalid_edge_affinity_before_installing_identity(
+    ) {
+        let dispatch = |_: Action| {};
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut original = NumberInput::new(12.0_f64, 0.0, 100.0);
+        original.set_control_inspection_key(Some("exact-associated-number".to_owned()));
+        for event in [
+            UiEvent::focus_gained_keyboard(),
+            UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::test_utils::primary_text_modifiers(),
+            },
+            UiEvent::TextInput("42".to_owned()),
+        ] {
+            original.event(&event, &mut ctx);
+        }
+        let valid = original.control_inspection_state().expect("valid bounded history");
+        let mut wrong_current = valid.clone();
+        wrong_current.numeric_input.as_mut().expect("numeric").draft.cursor.affinity =
+            mondrian_ui_core::TextCaretAffinity::BeforeNext;
+        let mut wrong_history = valid.clone();
+        wrong_history.numeric_input.as_mut().expect("numeric").draft.history.entries[0]
+            .cursor_before
+            .affinity = mondrian_ui_core::TextCaretAffinity::BeforeNext;
+        let mut wrong_anchor = valid.clone();
+        wrong_anchor.numeric_input.as_mut().expect("numeric").draft.selection_anchor =
+            Some(mondrian_ui_core::TextInputCaretPosition {
+                grapheme_index: 0,
+                affinity: mondrian_ui_core::TextCaretAffinity::AfterPrevious,
+            });
+        for invalid in [wrong_current, wrong_history, wrong_anchor] {
+            let mut fresh = NumberInput::new(12.0_f64, 0.0, 100.0);
+            fresh.set_control_inspection_key(Some("exact-associated-number".to_owned()));
+            let new_id = fresh.id();
+            assert!(!fresh.restore_control_inspection_state(&invalid));
+            assert_eq!(
+                fresh.id(),
+                new_id,
+                "whole payload refusal precedes stale identity installation"
+            );
+            assert_eq!(fresh.text(), "12");
+            assert!(!fresh.accepts_text_input());
         }
     }
 }

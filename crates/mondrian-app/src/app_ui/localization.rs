@@ -1365,4 +1365,34 @@ mod tests {
                     .len()
         );
     }
+
+    #[test]
+    fn owned_panel_status_catalog_table_is_complete_in_every_requested_locale() {
+        for locale in [AppUiLocale::ZhCn, AppUiLocale::EnUs, AppUiLocale::Pseudo] {
+            let localizer = Localizer::new(locale).expect("catalog");
+            for id in [
+                "timeline-empty-no-sequence",
+                "timeline-empty-no-tracks",
+                "timeline-invalid-display",
+                "inspector-empty-selection",
+            ] {
+                assert!(
+                    localizer
+                        .requested
+                        .get_message(id)
+                        .and_then(|message| message.value())
+                        .is_some(),
+                    "missing {locale:?} owned panel status {id}; fallback is not coverage"
+                );
+            }
+            let opaque = "vendor.reason 用户🙂 / source=file://camera/name\nnot a catalog address";
+            let message =
+                crate::app::AppMessage::new("timeline-invalid-display").with_text("reason", opaque);
+            let rendered = localizer.message(&message);
+            assert!(
+                rendered.contains(opaque),
+                "opaque reason survives every requested locale including pseudo"
+            );
+        }
+    }
 }

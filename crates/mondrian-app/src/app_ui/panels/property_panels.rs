@@ -401,10 +401,12 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
             "inspector-no-clip-selected"
         })
     });
-    if let Some(message) = model.empty_message.as_deref().filter(|message| !message.is_empty()) {
-        let (title, description) = message
-            .split_once('\n')
-            .map_or((message, ""), |(title, description)| (title, description));
+    if let Some(message) = &model.empty_message {
+        let message = localizer.message(message);
+        let (title, description) =
+            message.split_once('\n').map_or((message.as_str(), ""), |(title, description)| {
+                (title, description)
+            });
         let mut panel = PropertyPanel::with_options(
             localizer.text("inspector-title"),
             PropertyPanelOptions {

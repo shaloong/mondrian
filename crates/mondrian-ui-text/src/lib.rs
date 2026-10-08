@@ -6,8 +6,14 @@ pub mod atlas;
 pub mod font;
 pub mod layout;
 pub mod render;
+pub mod single_line;
 
 pub use render::{
     resolve_text_commands, ResolvedTextCommands, SingleLineTextGeometry,
     SingleLineTextSelectionGeometry, SingleLineTextSelectionSpan, TextRenderer, TextResolveStats,
+};
+
+pub use single_line::{
+    single_line_request_admitted, SingleLineTextCaret, SingleLineTextNavigation,
+    SingleLineTextProjection,
 };

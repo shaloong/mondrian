@@ -2104,3 +2104,35 @@ include tree before loading the helper. Its receipt collector only records a
 completed build. This is execution evidence for the selected ABI slice on the
 actual platform/compiler pair; it does not implement optional host features or
 qualify third-party plugin behavior. Separate native MSVC/macOS runs are required.
+
+### Typed CLAP parameter-event storage
+
+The child worker's current input stream owns SDK `ParamValueEvent` values in one
+preallocated vector and original insertion ordinals in another. Both owners
+retain their actual vector capacities across reset/process. Admission bounds
+the event count; a full owner refuses another event before either vector can
+grow. An allocation-free unstable sort orders ordinals by `(timestamp, ordinal)`
+and preserves equal-time event order. Clack's standard `InputEventBuffer` and
+`InputEvents` adapter borrow the typed events; no ABI declarations or generic
+event byte arena are added. Transport remains a separate stack-owned event.
+
+The worker-source allocator oracle measures successful allocator requests on
+its current test thread, with const TLS bookkeeping and all fixture inputs
+outside measurement. Preparation at two block capacities must differ by exactly
+the derived planar PCM, SDK parameter-event and ordinal storage bytes. A warmed
+owner receives the full admitted two-parameter event count, with deliberately
+non-numeric equal-time ID order, then resets/processes at positive, negative
+and repeated timeline positions without any Rust allocation or reallocation.
+An independent plugin-side event and PCM oracle checks native ordering and
+values. This is an allocator-request correctness gate, not RSS, third-party
+heap measurement or a realtime latency qualification.
+
+Each event owner occupies its actual `Vec::capacity()` multiplied by its SDK
+event or ordinal element width. This local closure does not yet make the native
+resource contract complete: known payload/state/descriptors, other vectors and
+native bus buffer owners must join the canonical resource admission contract,
+with shared immutable allocations counted once. Discovery's current zero
+plugin-session scratch field does not establish that those allocations are free.
+Unknown plugin-owned memory remains separately observed process pressure.
+Future MIDI and heterogeneous input/output events need one bounded typed event
+admission/lifetime contract that extends the shared execution path.

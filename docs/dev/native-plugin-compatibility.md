@@ -13,13 +13,18 @@ Checked on 2026-10-08:
 - [VST SDK 3.8.1](https://steinbergmedia.github.io/vst3_dev_portal/pages/Versions/Version%2B3.8.1.html),
   published 2026-08-11. The new transport-control, MIDI 2 articulation and exchange
   interfaces require explicit implementation and qualification.
-- [CLAP public version header](https://github.com/free-audio/clap/blob/main/include/clap/version.h)
-  declares 1.2.10. Stable extensions and draft extensions are separate obligations.
+- [CLAP 1.2.10](https://github.com/free-audio/clap/tree/1.2.10), additionally checked
+  on 2026-10-09 at immutable commit `195b42a004144fab0b3cf95e9c067187d15365b7`.
+  Stable extensions and draft extensions are separate obligations.
   The pinned 1.x binding's ABI compatibility does not establish feature parity.
 - [OpenFX 1.5.1 release](https://github.com/AcademySoftwareFoundation/openfx/releases/tag/OFX_Release_1.5.1).
   Main-branch clarifications and extensions must be identified separately from
   the published release. The current product advertises host API 1.4; selected
   newer properties do not establish complete 1.5.1 hosting.
+
+The detailed [audio standard matrix](native-audio-standard-features.md) and
+[OpenFX standard matrix](native-openfx-standard-features.md) identify actual
+product consumers and pending closure for each feature family.
 
 ## Implementation boundary
 
@@ -36,7 +41,7 @@ Checked on 2026-10-08:
 | OpenFX capabilities and bootstrap | Actual Float32/CPU advertisement; optional early host bootstrap; CPU-disabled admission refusal; canonical PAR dimensions and progressive fields | GPU execution and negotiated colour/lifetime/synchronization contracts |
 | OpenFX author controls | Numeric tuples/colour/bool/choice/StrChoice/UTF-8 text/resources; canonical curve queries and shared transactions | Spatial semantic types, hierarchy/buttons/custom/parametric/interacts, dynamic descriptors, plugin-origin writes/private data |
 | OpenFX product callbacks | Native message/progress/timeline primitives exist | Typed application messages, real cancellation/progress/transport responses and consistent persistence |
-| Product interaction | Shared Rack control identity preserves keyboard ownership through canonical refresh; focused text owns clipboard and bounded local Undo/Redo; exact native text modifiers; fresh author callbacks and values | Remaining control adoption, accessible numeric names, complete visual BiDi navigation and physical/native-editor acceptance |
+| Product interaction | Shared Rack control identity preserves keyboard ownership through canonical refresh; focused text owns clipboard and bounded local Undo/Redo; single-line visual BiDi/EGC navigation and associated caret geometry; exact model ingress with one-line source projection | Remaining control adoption, accessible numeric names, multiline visual navigation and physical/native-editor acceptance |
 | Performance | Persistent children, bounded mappings, preallocated native audio buffers and execution budgets | Measured native DSP plus IPC percentiles/deadlines, video frame budgets, warm/cold/memory/overload and vendor/platform matrices |
 
 This table describes source capabilities. Each qualification below remains tied
@@ -57,7 +62,10 @@ HDR/negative/alpha, PAR, canonical/pixel coordinate seams and actual encoded out
 Audio performance measures the complete native worker callback after excluded
 warmup, at declared rates/layouts/buffer sizes, with p50/p95/p99/max and deadline
 misses. The available callback deadline is derived from frames/sample-rate;
-crash timeouts are not audio performance budgets. Video measures actual resident
+crash timeouts are not audio performance budgets. Native root preflight
+request-query IPC is included whenever it is part of the production callback;
+process-only measurements cannot exempt that round trip or certify the full
+root path. Video measures actual resident
 worker frame execution against a declared frame budget and image correctness.
 Report build profile, CPU/OS, source and fixture hashes, iterations, setup cost,
 tail/overload/cancellation and memory. No universal zero-overhead or compatibility
@@ -95,7 +103,7 @@ for partial RTL selection, disjoint BiDi spans and IME origin. After repair, all
 248 text-input tests, three new renderer contracts and the cold-owner selection
 admission test passed. These include reverse-anchor Undo restoration, Arabic
 partial clusters and a long contiguous selection without per-glyph rectangles.
-Visual BiDi arrow traversal and native/physical IME acceptance remain open.
+At this earlier selection checkpoint, visual BiDi arrow traversal and native/physical IME acceptance remained open.
 Strict workspace lint and fresh native product gates are separate requirements.
 
 The frozen foundation native run completed on 2026-10-09 (Asia/Shanghai):
@@ -114,7 +122,7 @@ commit. The first run's shared-product artifact check had failed; the immutable
 helper run resolves that failure without weakening the stability checks.
 
 `cargo fmt --all --check` and strict workspace/all-target/all-feature Clippy with
-`-D warnings` passed for this source. Clippy log SHA-256:
+`-D warnings` passed for the frozen foundation checkpoint. Clippy log SHA-256:
 `0099A18186DBB3B075A7E9CCA5A80A2808766E83E55D2677AC62C3BE1259B33B`.
 These selected correctness results do not qualify native release performance,
 the unfinished standard features, arbitrary vendors or other platforms.
@@ -130,3 +138,82 @@ Packaged distributions copy `LICENSES`, which now retains the exact official
 Steinberg SDK MIT notice, the binding runtime's license options, and the
 HarfRust notice alongside the existing native-adapter notices. Source and
 generation manifests keep their independent license identities.
+
+
+### Typed CLAP scalar-event carrier qualification (2026-10-09)
+
+The subsequent source-bound worker gate passed 20 tests with four native
+installation tests ignored, followed by one typed-storage test. The independent
+preparation allocator oracle reproduced 13,547,520 bytes of growth for the old
+storage between 64 and 4096 maximum frames, against the derived 580,608-byte
+typed-event/ordinal/PCM expectation. The corrected owner passed that same
+580,608-byte expectation. A warmed full-capacity/reset control passed exact
+native event order and independently calculated PCM with zero measured Rust
+allocations/reallocations in realtime and offline mode.
+
+Worker source SHA-256:
+`07343967964fad8ce8de92c85c7303845d2459d09f6f6ea99b776137eb1e479b`.
+Typed carrier source SHA-256:
+`fa0826ace88558a162c41f9c88902a942411685b18ca2ba00c54e06490bf8166`.
+Worker log SHA-256:
+`f275902bbb66fc740ea4ce5caace6c29f5a7e5a67c9207aee630c04a62ed4376`.
+Typed-storage log SHA-256:
+`70bf26830f52e95a3cfcb528ce83e394067a34f2e0da2a16e1a25b888d6d0606`.
+
+This qualifies current scalar-event storage capacity/allocation behavior and
+the owned control, not native release deadline performance, foreign heap/RSS,
+heterogeneous event support or the complete host-owned resource ledger. The
+full known-owner, root/IPC callback deadline and native reprepare acceptance
+remain open. See [native audio standard features](native-audio-standard-features.md)
+and [audio architecture](../architecture/audio-pipeline.md).
+
+## Single-line navigation and source projection qualification
+
+The visual navigation stage reproduced thirteen runtime failures before the
+production change, then passed all thirteen regressions and all 64 UI-text
+tests. Caret geometry, hit testing, selection and navigation use the sole
+complete shaped line with explicit BiDi association. Logical deletion and
+Home/End retain their existing contracts; grapheme joins use the complete
+result's boundaries rather than separately counted inserted fragments.
+
+A later full input run exposed Unicode-whitespace word-navigation admission.
+The initial repair incorrectly treated programmatic model content as user-input
+normalization. Its four focused tests and widget/Host gates passed, as recorded
+by `8FC211FBE0A079728A5939394419A7A80D7F71F5CDE9B3FEED95C60F2AFD8593`
+(`.scratch/plugin-standard-audit/ingress-and-visual-green-result-r3.json`), but the
+full panel run then failed the original native long-text property contract:
+196 passed and one failed. A native definition's declared single-line control
+must preserve its exact authored value even when that value contains separators.
+Those prior narrower passes do not qualify model-byte preservation.
+
+The corrected seam preserves raw programmatic source, focus/Undo/cancel baselines
+and unchanged author no-op. One complete single-line display projection maps
+shaped clusters back to original source EGC/byte endpoints, rather than changing
+the author value or inventing another logical-navigation fallback. User input/paste
+normalization remains an edit policy. Numeric DTO/history admission still refuses
+noncanonical payloads without guessing positions. The original long native text
+property and Unicode word-navigation expectations are unchanged; the four tests
+based on the incorrect ingress premise are replaced by raw-source/public-geometry
+regressions.
+
+The corrected frozen stage reproduced six widget and two public geometry runtime
+failures, then passed all eight after the source projection repair. It also passed
+the original native long-text test, all 70 UI-text tests, 269 text-input tests,
+33 number-input tests, six metrics tests, 14 Host numeric tests, 197 panel tests,
+27 localization tests and 128 timeline-view tests. The eleven-gate receipt
+SHA-256 is `0d4f02b01f21f43f5d6db8b722f2a10662d0b04afdd16e627cb4839e60d71246`
+(`.scratch/plugin-standard-audit/raw-projection-green-result-r10.json`), with
+source stability checked even on failure. The associated typed Timeline/Inspector
+status localization and unavailable nonempty timeline feedback are included in
+the named panel/localization/timeline gates.
+
+The fixed typed CLAP parameter carrier additionally passed actual sample-offset
+gain and sidechain/state/delay/partition native DLL gates in realtime and offline
+modes using a fresh, immutable product helper. Their source/binary receipt is
+`c656e591236daf27ecaefa4f3e3ab334a04688ff4a34bf9f83cbb8229219f548`
+(`.scratch/plugin-standard-audit/carrier-native-result-r8.json`). This is native
+correctness evidence for these workloads; it does not establish measured
+realtime deadline, complete host resource accounting or universal compatibility.
+
+Physical IME, native editors, screen-reader delivery, multiline visual navigation
+and complete-line shaping performance remain separate qualification requirements.

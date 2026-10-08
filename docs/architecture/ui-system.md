@@ -4414,3 +4414,90 @@ live TextInput Undo still dispatches the resulting text through its existing
 fresh on_change callback; transactional numeric/commit inputs remain local until
 confirmation. This slice covers single-line geometry, not full visual BiDi
 keyboard traversal, native macOS IME qualification or multiline interaction.
+
+
+### Associated visual single-line carets
+
+Single-line caret and selection endpoints carry a logical grapheme offset plus
+the adjacent logical cluster supplying the visual position. This typed UI
+position replaces bare grapheme offsets in local Undo and numeric inspection;
+it contains no font, layout pixels, native handle or author timeline state.
+Fresh draft/history admission validates both offset and edge association before
+copying bounded snapshots. Canonical model replacement still refuses old input.
+
+The sole complete advanced cosmic layout projects streaming visual grapheme
+cells from its shaped cluster advances and glyph BiDi levels. Pointer hit,
+caret, selected spans and visual navigation share this projection, including
+partial ligatures, combining/ZWJ graphemes and zero advances. No independent
+prefix shape, paragraph-direction arrow flip or retained all-caret vector is
+used. Adjacent glyphs belonging to one logical cluster share its advance cell;
+ligature subdivision follows the existing equal-grapheme advance convention.
+Plain arrows traverse one visual cell; unshifted arrows collapse a selected
+range at its actual visual edge without another character step. Shift retains
+the original associated anchor. Home/End retain logical line boundaries,
+including portable Mac Command-arrow classification; word arrows apply the
+existing whitespace boundary policy in visual order using a fixed number of
+streaming scans. Backspace/Delete remain logical grapheme/word editing.
+
+Logical association survives local replacement Undo/Redo and admitted numeric
+draft refresh through the existing typed inspection seam. Navigation and
+selection alone dispatch no text callback/history entry. Existing live
+on_change and numeric Enter/Escape transaction boundaries remain authoritative.
+Insertion and removal derive the resulting caret from the complete text's
+grapheme boundaries at the changed byte endpoint, snapping forward when a
+combining mark/ZWJ joins neighboring graphemes. Fragment grapheme counts never
+advance the cursor independently of the complete result.
+Typed geometry admission rejects nonrepresentable line-height metrics before
+font initialization and refuses nonfinite complete output geometry. Complete
+shaping scratch remains proportional to the full line; this does not claim
+viewport-only shaping, native macOS IME/AT or multiline qualification.
+
+### Exact source ingress and single-line visual projection
+
+Programmatic TextInput `with_text`/`set_text` synchronization preserves exact
+authoritative model bytes, including line separators. The definition's single-line
+mode is a display/input contract, not permission to normalize an authored value.
+Focus baselines, Escape, local Undo and unchanged confirmation retain raw source;
+programmatic synchronization resets local history without a user callback.
+User typing/IME commits/paste keep the existing edit policy: CR/LF, CRLF and
+Unicode line/paragraph separators become spaces, while tabs/NBSP are retained.
+
+The sole SingleLineTextProjection borrows original source and derives complete
+one-line display content, mapping only separator length contractions. Rendering
+geometry shapes that entire display once and derives its VisualCells against the
+original source EGC intervals. Caret/selection/hit/navigation endpoints therefore
+remain original source bytes and BiDi association, including CRLF and distinct
+source combining/ZWJ stops joined only by display projection. Actual TextInput
+paint uses the same projector; other layout modes are unaffected. There is no
+prefix shaping, secondary navigation fallback or second author text authority.
+
+This corrects the earlier canonical programmatic-ingress premise. Full Inspector
+qualification exposed legitimate native single-line author values with newlines;
+the original long-text and Unicode word-navigation contracts remain unchanged.
+Numeric inspection DTO/history admission remains strictly canonical before copy;
+it never normalizes untrusted raw text and guesses saved positions. Projection
+scratch is proportional to display content plus length-changing separators; normal
+single-line text remains borrowed. Full shaping, native IME and assistive technology
+qualification remain the existing separate limits.
+
+### Owned Timeline and Inspector status localization
+
+Timeline and Inspector empty/invalid model fields retain the existing typed
+AppMessage identity and arguments rather than formatted strings. Actual panel
+construction resolves them through the current Localizer, so a retained model
+can be painted in another UI locale without author mutation or stale-language
+copy. Empty sequences remain editable add-track canvases; absent/invalid
+sequences retain their disabled behavior. Invalid display context wraps the
+existing typed core error projection; opaque diagnostic arguments, user clip
+labels, title contents and sequence names remain unchanged. Catalog-presence
+tests cover the requested ZhCn, EnUs and Pseudo bundles without treating fallback
+as translation coverage; actual draw-command tests cover titles and guidance.
+
+TimelineView paints an explicit status when its body is empty or when the
+timeline is unavailable despite retained tracks. For the latter it covers the
+unavailable fallback grid with the existing semantic body surface before painting
+the localized title/reason. Track models and IDs remain intact; input availability
+is unchanged. A valid populated canvas never displays empty guidance, and a
+disabled canvas without an explicit message retains its ordinary clip paint.
+Actual paint regressions cover the nonempty invalid display in all three locales
+and both available/disabled positive controls.

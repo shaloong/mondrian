@@ -4,6 +4,7 @@ use super::clap_discovery::{
     fingerprint_clap_binary, inspect_audio_inputs, list_parameters,
     probe_clap_plugin_registration_with_state, validate_parameters,
 };
+use super::clap_parameter_events::ClapParameterEvents;
 use super::{
     probe_clap_plugin_registration, scan_clap_library_descriptors, ClapPluginDescriptor,
     IsolatedAudioProcessorSpecResolver, IsolatedAudioProcessorWorker,
@@ -22,9 +23,9 @@ use clack_extensions::thread_check::{HostThreadCheck, HostThreadCheckImpl};
 use clack_host::events::event_types::{ParamValueEvent, TransportEvent, TransportFlags};
 use clack_host::events::{EventFlags, EventHeader};
 use clack_host::prelude::{
-    AudioPortBuffer, AudioPortBufferType, AudioPorts, ClapId, EventBuffer, HostExtensions,
-    HostHandlers, HostInfo, InputChannel, OutputEvents, Pckn, PluginAudioConfiguration,
-    PluginAudioProcessor, PluginEntry, PluginInstance, SharedHandler,
+    AudioPortBuffer, AudioPortBufferType, AudioPorts, ClapId, HostExtensions, HostHandlers,
+    HostInfo, InputChannel, OutputEvents, Pckn, PluginAudioConfiguration, PluginAudioProcessor,
+    PluginEntry, PluginInstance, SharedHandler,
 };
 use clack_host::utils::{BeatTime, SecondsTime};
 use mondrian_core::{AudioProcessorInstanceId, AuthoringMap, ExactAutomationCurve};
@@ -760,7 +761,7 @@ fn prepare_loaded(
         input_ports: AudioPorts::with_capacity(channel_count * input_port_count, input_port_count),
         output_ports: AudioPorts::with_capacity(channel_count, 1),
         parameter_lanes,
-        input_events: EventBuffer::with_capacity(event_capacity),
+        input_events: ClapParameterEvents::with_capacity(event_capacity),
         last_end: None,
         shared,
     }))
@@ -777,7 +778,7 @@ struct ClapWorker {
     input_ports: AudioPorts,
     output_ports: AudioPorts,
     parameter_lanes: Vec<(ClapId, f64, f64, bool)>,
-    input_events: EventBuffer,
+    input_events: ClapParameterEvents,
     last_end: Option<i64>,
     shared: ClapHostShared,
 }
@@ -851,12 +852,16 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
                         "CLAP parameter event violates its admitted contract".to_owned(),
                     ));
                 }
-                self.input_events.push(&ParamValueEvent::new(
+                if !self.input_events.try_push(ParamValueEvent::new(
                     event.sample_offset,
                     clap_id,
                     Pckn::match_all(),
                     event.value,
-                ));
+                )) {
+                    return Err(AudioProcessorHostError::Process(
+                        "CLAP parameter events exceed the prepared storage".to_owned(),
+                    ));
+                }
             }
         }
         self.input_events.sort();
@@ -2843,3 +2848,7 @@ mod canonical_transport_tests {
         assert!(clap_seconds_position(i64::MIN, 1).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "tests/clap_parameter_allocations.rs"]
+mod parameter_allocation_tests;

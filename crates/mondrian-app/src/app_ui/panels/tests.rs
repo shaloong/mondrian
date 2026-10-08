@@ -1462,7 +1462,12 @@ fn app_state_models_are_safe_without_an_open_project() {
     assert_eq!(models.timeline.playhead_frame, 0);
     assert!(!models.timeline.enabled);
     assert_eq!(
-        models.timeline.empty_message.as_deref(),
+        models
+            .timeline
+            .empty_message
+            .as_ref()
+            .map(|message| chinese_localizer().message(message))
+            .as_deref(),
         Some("未载入序列\n打开项目或创建序列以开始编辑")
     );
     assert!(!timeline_panel(
@@ -1484,7 +1489,12 @@ fn app_state_models_are_safe_without_an_open_project() {
     assert_eq!(models.viewer.preview_quality_label, "1/1");
     assert_eq!(models.inspector.selected_clip, None);
     assert_eq!(
-        models.inspector.empty_message.as_deref(),
+        models
+            .inspector
+            .empty_message
+            .as_ref()
+            .map(|message| chinese_localizer().message(message))
+            .as_deref(),
         Some("未选择剪辑\n选择剪辑、图层或效果后，可在这里调整参数。")
     );
     assert!(!models.inspector.is_editable);
@@ -1526,7 +1536,11 @@ fn sequence_backed_empty_timeline_keeps_add_track_entrypoints_enabled() {
     assert!(model.enabled);
     assert!(model.tracks.is_empty());
     assert_eq!(
-        model.empty_message.as_deref(),
+        model
+            .empty_message
+            .as_ref()
+            .map(|message| chinese_localizer().message(message))
+            .as_deref(),
         Some("当前序列没有轨道\n添加视频轨道或音频轨道后开始编辑")
     );
     assert!(
@@ -1541,7 +1555,11 @@ fn empty_inspector_panel_shows_status_only_and_does_not_dispatch_clip_controls()
     panel.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
 
     assert_eq!(
-        model.empty_message.as_deref(),
+        model
+            .empty_message
+            .as_ref()
+            .map(|message| chinese_localizer().message(message))
+            .as_deref(),
         Some("未选择剪辑\n选择剪辑、图层或效果后，可在这里调整参数。")
     );
     assert_eq!(panel.section_count(), 0);
@@ -13751,4 +13769,251 @@ fn group_interpolation_menu_commits_once_and_roundtrips_both_history_states() {
             assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
         }
     }
+}
+
+#[derive(Default)]
+struct OwnedPanelStatusPaintEncoder {
+    texts: Vec<String>,
+}
+
+impl mondrian_ui_core::DrawCommandEncoder for OwnedPanelStatusPaintEncoder {
+    fn push_clip(&mut self, _bounds: Rect) {}
+    fn pop_clip(&mut self) {}
+    fn draw_rect(&mut self, _bounds: Rect, _color: Color, _corner_radius: f32) {}
+    fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {}
+    fn draw_text(&mut self, text: &str, _size: f32, _position: Point, _color: Color) {
+        self.texts.push(text.to_owned());
+    }
+    fn push_translate(&mut self, _offset: glam::Vec2) {}
+    fn pop_transform(&mut self) {}
+}
+
+fn owned_panel_status_painted_text(widget: &mut dyn Widget) -> Vec<String> {
+    let bounds = Rect::new(0.0, 0.0, 720.0, 420.0);
+    widget.layout(bounds);
+    let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+    let mut encoder = OwnedPanelStatusPaintEncoder::default();
+    widget.paint(&mut PaintContext {
+        encoder: &mut encoder,
+        theme: &theme,
+        clip_rect: bounds,
+    });
+    encoder.texts
+}
+
+fn assert_owned_panel_status_painted(widget: &mut dyn Widget, message: &str) {
+    let painted = owned_panel_status_painted_text(widget);
+    let (title, description) = message.split_once('\n').expect("title and guidance");
+    assert!(
+        painted.iter().any(|text| text == title),
+        "actual title {title:?} missing from {painted:?}"
+    );
+    assert!(
+        painted.iter().any(|text| text == description),
+        "actual guidance {description:?} missing from {painted:?}"
+    );
+}
+
+#[test]
+fn owned_panel_status_no_sequence_and_inspector_empty_use_current_locale_in_actual_paint() {
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    let state = AppState::new();
+    let models = AppUiPanelModels::from_app_state(&state);
+    assert!(models.timeline.tracks.is_empty());
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let timeline_message = localizer.text("timeline-empty-no-sequence");
+        let inspector_message = localizer.text("inspector-empty-selection");
+        match locale {
+            AppUiLocale::EnUs => {
+                assert_eq!(
+                    timeline_message,
+                    "No active sequence\nOpen a project or create a sequence to start editing"
+                );
+                assert_eq!(inspector_message, "No clip selected\nSelect a clip, layer or effect to adjust its parameters here.");
+            }
+            AppUiLocale::ZhCn => {
+                assert_eq!(timeline_message, "未载入序列\n打开项目或创建序列以开始编辑");
+                assert_eq!(
+                    inspector_message,
+                    "未选择剪辑\n选择剪辑、图层或效果后，可在这里调整参数。"
+                );
+            }
+            AppUiLocale::Pseudo => {
+                assert_ne!(timeline_message, "timeline-empty-no-sequence");
+                assert_ne!(timeline_message, "未载入序列\n打开项目或创建序列以开始编辑");
+                assert_ne!(inspector_message, "inspector-empty-selection");
+            }
+        }
+        let mut timeline = timeline_panel(&models.timeline, &localizer);
+        assert!(!timeline.can_focus());
+        assert_owned_panel_status_painted(&mut timeline, &timeline_message);
+        let mut inspector = inspector_panel(&models.inspector, &localizer);
+        assert_eq!(inspector.section_count(), 0);
+        assert_owned_panel_status_painted(&mut inspector, &inspector_message);
+    }
+    assert!(
+        !state.can_undo_action(),
+        "repainting retained model in another locale never authors an edit"
+    );
+}
+
+#[test]
+fn owned_panel_status_empty_tracks_localizes_real_canvas_and_keeps_track_entrypoints() {
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    let mut sequence = Sequence::new("User sequence 示例🙂");
+    sequence.video_tracks.clear();
+    sequence.audio_tracks.clear();
+    sequence.audio_program = mondrian_timeline::AudioProgram::for_tracks([]);
+    let original = sequence.clone();
+    let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+    assert!(model.enabled);
+    assert!(model.tracks.is_empty());
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let mut timeline = timeline_panel(&model, &localizer);
+        assert!(
+            timeline.can_focus(),
+            "zero tracks is an editable canvas, not an invalid sequence"
+        );
+        assert_owned_panel_status_painted(
+            &mut timeline,
+            &localizer.text("timeline-empty-no-tracks"),
+        );
+    }
+    assert!(sequence.author_state_eq_ignoring_revision(&original));
+    assert_eq!(sequence.name, "User sequence 示例🙂");
+}
+
+#[test]
+fn owned_panel_status_invalid_display_localizes_owned_context_and_preserves_typed_reason() {
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    let mut sequence = Sequence::new("User invalid display");
+    sequence.video_tracks.clear();
+    sequence.audio_tracks.clear();
+    sequence.audio_program = mondrian_timeline::AudioProgram::for_tracks([]);
+    sequence.settings.timeline_display =
+        TimelineDisplaySettings::timecode(SmpteCountingMode::DropFrame, 0);
+    let error = sequence
+        .settings
+        .timeline_display_contract()
+        .expect_err("25fps cannot count drop-frame");
+    let reason = AppMessage::from_error(&error);
+    let expected =
+        AppMessage::new("timeline-invalid-display").with_message("reason", reason.clone());
+    let original = sequence.clone();
+    let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+    assert!(!model.enabled);
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let mut timeline = timeline_panel(&model, &localizer);
+        assert!(!timeline.can_focus());
+        let text = localizer.message(&expected);
+        assert!(text.contains(&localizer.message(&reason)));
+        assert_owned_panel_status_painted(&mut timeline, &text);
+    }
+    assert!(sequence.author_state_eq_ignoring_revision(&original));
+}
+
+#[test]
+fn owned_panel_status_real_locale_projection_does_not_translate_user_clip_or_sequence_content() {
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    let mut state = AppState::new();
+    let sequence_name = "User: No active sequence / 用户🙂";
+    let clip_text = "Vendor🙂 未选择剪辑 / No clip selected";
+    let mut sequence = Sequence::new(sequence_name);
+    let mut clip = Clip::new_basic_title(clip_text, "Arial", TimelineTime::ZERO, TimelineTime::ONE)
+        .expect("title");
+    clip.label = Some(clip_text.to_owned());
+    let clip_id = clip.id;
+    sequence.video_tracks[0].add_clip(clip).expect("clip");
+    let original = sequence.clone();
+    state.test_set_sequence(Some(sequence));
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let models =
+            AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_preview_and_locale(
+                &state,
+                None,
+                None,
+                None,
+                Some(&localizer),
+            );
+        let mut timeline = timeline_panel(&models.timeline, &localizer);
+        let painted = owned_panel_status_painted_text(&mut timeline);
+        assert!(
+            painted.iter().any(|text| text == clip_text),
+            "clip content is opaque to the locale projector: {painted:?}"
+        );
+        let sequence = state.active_sequence().expect("sequence");
+        assert_eq!(sequence.name, sequence_name);
+        assert_eq!(sequence.video_tracks[0].clips[0].id, clip_id);
+        assert!(sequence.author_state_eq_ignoring_revision(&original));
+    }
+    assert!(!state.can_undo_action());
+}
+
+#[test]
+fn owned_panel_status_nonempty_invalid_display_paints_actionable_reason_over_retained_tracks() {
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    let mut sequence = Sequence::new("Nonempty invalid display");
+    sequence.settings.timeline_display =
+        TimelineDisplaySettings::timecode(SmpteCountingMode::DropFrame, 0);
+    let error = sequence.settings.timeline_display_contract().expect_err("invalid display");
+    let expected = AppMessage::new("timeline-invalid-display")
+        .with_message("reason", AppMessage::from_error(&error));
+    let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+    assert!(
+        !model.tracks.is_empty(),
+        "the retained tracks must not hide the actionable display failure"
+    );
+    assert!(!model.enabled);
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let mut timeline = timeline_panel(&model, &localizer);
+        assert_owned_panel_status_painted(&mut timeline, &localizer.message(&expected));
+    }
+}
+
+#[test]
+fn owned_panel_status_valid_nonempty_timeline_does_not_paint_empty_guidance() {
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    let mut sequence = Sequence::new("Visible valid timeline");
+    let mut clip = Clip::new_basic_title(
+        "Retained valid clip",
+        "Arial",
+        TimelineTime::ZERO,
+        TimelineTime::new(10, 1).expect("duration"),
+    )
+    .expect("clip");
+    clip.label = Some("Retained valid clip".to_owned());
+    sequence.video_tracks[0].add_clip(clip).expect("clip track");
+    let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+    assert!(model.enabled && !model.tracks.is_empty());
+    let mut widget = timeline_panel(&model, &chinese_localizer()).with_empty_message(
+        "Empty guidance must stay hidden\nA valid populated canvas is available",
+    );
+    let painted = owned_panel_status_painted_text(&mut widget);
+    assert!(painted.iter().any(|text| text == "Retained valid clip"));
+    assert!(!painted.iter().any(|text| text == "Empty guidance must stay hidden"));
+}
+
+#[test]
+fn owned_panel_status_disabled_nonempty_timeline_without_message_keeps_retained_clip_paint() {
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    let mut sequence = Sequence::new("Disabled inspection without status");
+    let mut clip = Clip::new_basic_title(
+        "Retained disabled clip",
+        "Arial",
+        TimelineTime::ZERO,
+        TimelineTime::new(10, 1).expect("duration"),
+    )
+    .expect("clip");
+    clip.label = Some("Retained disabled clip".to_owned());
+    sequence.video_tracks[0].add_clip(clip).expect("clip track");
+    let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+    let mut widget = timeline_panel(&model, &chinese_localizer()).disabled();
+    let painted = owned_panel_status_painted_text(&mut widget);
+    assert!(painted.iter().any(|text| text == "Retained disabled clip"));
+    assert!(!painted.iter().any(|text| text == "序列时间显示设置无效"));
 }

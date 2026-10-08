@@ -170,7 +170,7 @@ use crate::app::ui_actions::{
 };
 use crate::app::waveform_service::AudioWaveformSource;
 use crate::app::{
-    AppState, SelectedClipRef, SelectedVideoTransitionRef, VideoTransitionHandleState,
+    AppMessage, AppState, SelectedClipRef, SelectedVideoTransitionRef, VideoTransitionHandleState,
 };
 use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::audio_automation::{
@@ -1620,7 +1620,8 @@ pub struct TimelinePanelModel {
     pub out_point_frame: Option<i64>,
     pub timeline_display: TimelineDisplayContract,
     pub enabled: bool,
-    pub empty_message: Option<String>,
+    /// Language-neutral empty or invalid status, formatted using the current UI locale.
+    pub empty_message: Option<AppMessage>,
     edit_availability: Option<TimelineEditAvailability>,
     track_refs: Vec<AppTimelineTrackRef>,
     clip_refs: Vec<Vec<ClipId>>,
@@ -1868,13 +1869,12 @@ impl TimelinePanelModel {
         }
         let display = sequence.settings.timeline_display_contract();
         let display_valid = display.is_ok();
-        let display_error =
-            display.as_ref().err().map(|error| format!("序列时间显示设置无效\n{error}"));
-        let empty_message = display_error.or_else(|| {
-            tracks
-                .is_empty()
-                .then(|| "当前序列没有轨道\n添加视频轨道或音频轨道后开始编辑".to_owned())
+        let display_error = display.as_ref().err().map(|error| {
+            AppMessage::new("timeline-invalid-display")
+                .with_message("reason", AppMessage::from_error(error))
         });
+        let empty_message = display_error
+            .or_else(|| tracks.is_empty().then(|| AppMessage::new("timeline-empty-no-tracks")));
         Self {
             tracks,
             playhead_frame: sequence
@@ -1914,7 +1914,7 @@ impl TimelinePanelModel {
             out_point_frame: None,
             timeline_display: TimelineDisplayContract::default(),
             enabled: false,
-            empty_message: Some("未载入序列\n打开项目或创建序列以开始编辑".into()),
+            empty_message: Some(AppMessage::new("timeline-empty-no-sequence")),
             edit_availability: Some(TimelineEditAvailability::default()),
             track_refs: Vec::new(),
             clip_refs: Vec::new(),
@@ -2196,7 +2196,8 @@ pub struct InspectorPanelModel {
     /// Selected clip targeted by value edits, if the model is backed by app state.
     pub selected_clip: Option<SelectedClipRef>,
     /// Empty-state message shown instead of clip controls when no target exists.
-    pub empty_message: Option<String>,
+    /// Language-neutral empty or invalid status, formatted using the current UI locale.
+    pub empty_message: Option<AppMessage>,
     /// Selected effect nested inside the selected clip.
     pub selected_effect_id: Option<EffectId>,
     /// Selected Mask nested inside the selected video Clip.
@@ -2883,7 +2884,7 @@ impl InspectorPanelModel {
     pub fn empty() -> Self {
         Self {
             selected_clip: None,
-            empty_message: Some("未选择剪辑\n选择剪辑、图层或效果后，可在这里调整参数。".into()),
+            empty_message: Some(AppMessage::new("inspector-empty-selection")),
             selected_effect_id: None,
             selected_mask_id: None,
             is_editable: false,
@@ -5603,8 +5604,8 @@ fn timeline_panel(model: &TimelinePanelModel, localizer: &Localizer) -> Timeline
     } else {
         timeline
     };
-    let timeline = if let Some(message) = model.empty_message.clone() {
-        timeline.with_empty_message(message)
+    let timeline = if let Some(message) = &model.empty_message {
+        timeline.with_empty_message(localizer.message(message))
     } else {
         timeline
     };

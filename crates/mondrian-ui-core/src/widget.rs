@@ -268,6 +268,44 @@ pub const TEXT_INPUT_HISTORY_MAX_ENTRIES: usize = 100;
 /// Maximum retained UTF-8 snapshot allocation per local text history (16 MiB).
 pub const TEXT_INPUT_HISTORY_MAX_BYTES: usize = 16 * 1024 * 1024;
 
+/// Logical cluster supplying a caret's visual association at a BiDi seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextCaretAffinity {
+    /// The next logical grapheme supplies the caret position.
+    BeforeNext,
+    /// The previous logical grapheme supplies the caret position.
+    AfterPrevious,
+}
+
+/// A local single-line caret/selection endpoint, independent of layout pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextInputCaretPosition {
+    /// Logical grapheme offset in the owned draft.
+    pub grapheme_index: usize,
+    /// Logical adjacent cluster associated with this visual position.
+    pub affinity: TextCaretAffinity,
+}
+
+impl TextInputCaretPosition {
+    /// Default association for a programmatically synchronized logical boundary.
+    pub const fn at_logical_boundary(grapheme_index: usize) -> Self {
+        Self {
+            grapheme_index,
+            affinity: if grapheme_index == 0 {
+                TextCaretAffinity::BeforeNext
+            } else {
+                TextCaretAffinity::AfterPrevious
+            },
+        }
+    }
+}
+
+impl Default for TextInputCaretPosition {
+    fn default() -> Self {
+        Self::at_logical_boundary(0)
+    }
+}
+
 /// One bounded local text edit's reversible grapheme-based snapshots.
 /// This is inspection data, independent of author history and callbacks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,13 +315,13 @@ pub struct TextInputHistoryInspectionEntry {
     /// Text after the local edit.
     pub text_after: String,
     /// Grapheme caret before the local edit.
-    pub cursor_before: usize,
+    pub cursor_before: TextInputCaretPosition,
     /// Grapheme caret after the local edit.
-    pub cursor_after: usize,
+    pub cursor_after: TextInputCaretPosition,
     /// Selection anchor before the local edit.
-    pub anchor_before: Option<usize>,
+    pub anchor_before: Option<TextInputCaretPosition>,
     /// Selection anchor after the local edit.
-    pub anchor_after: Option<usize>,
+    pub anchor_after: Option<TextInputCaretPosition>,
 }
 /// Bounded local Undo/Redo snapshots admitted with the same numeric draft owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -303,10 +341,10 @@ pub struct TextInputHistoryInspectionState {
 pub struct TextInputDraftInspectionState {
     /// Unconfirmed single-line text.
     pub text: String,
-    /// Caret offset measured in grapheme clusters.
-    pub cursor: usize,
-    /// Selection anchor measured in grapheme clusters, when present.
-    pub selection_anchor: Option<usize>,
+    /// Caret grapheme offset and visual cluster association.
+    pub cursor: TextInputCaretPosition,
+    /// Selection anchor grapheme offset and visual cluster association, when present.
+    pub selection_anchor: Option<TextInputCaretPosition>,
     /// Bounded local history and its unconfirmed keyboard ownership.
     pub history: TextInputHistoryInspectionState,
 }

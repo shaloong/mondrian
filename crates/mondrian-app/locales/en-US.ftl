@@ -1519,3 +1519,13 @@ audio-sidechain-disconnect = Disconnect source
 audio-sidechain-missing-track = Missing track · { $identity }
 
 audio-sidechain-source = Source
+
+## Timeline / Inspector owned empty and invalid states
+timeline-empty-no-sequence = No active sequence
+    Open a project or create a sequence to start editing
+timeline-empty-no-tracks = This sequence has no tracks
+    Add a video or audio track to start editing
+timeline-invalid-display = Invalid sequence time display settings
+    { $reason }
+inspector-empty-selection = No clip selected
+    Select a clip, layer or effect to adjust its parameters here.

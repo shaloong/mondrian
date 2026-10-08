@@ -32,6 +32,6 @@ pub use widget::{
     AccessibilityValue, ControlInspectionState, CursorRequest, DrawCommandEncoder, EventContext,
     EventRequests, EyedropperRequest, KeyboardActivationKey, KeyboardActivationLease,
     NumericInputInspectionContract, NumericInputInspectionState, NumericInputInspectionValue,
-    PaintContext, TextInputDraftInspectionState, TextInputHistoryInspectionEntry,
-    TextInputHistoryInspectionState, Widget,
+    PaintContext, TextCaretAffinity, TextInputCaretPosition, TextInputDraftInspectionState,
+    TextInputHistoryInspectionEntry, TextInputHistoryInspectionState, Widget,
 };

@@ -6,6 +6,7 @@
 //! not enter Timeline compilation or the in-process Processor Host.
 
 mod clap_discovery;
+mod clap_parameter_events;
 mod clap_worker;
 mod protocol;
 mod supervisor;

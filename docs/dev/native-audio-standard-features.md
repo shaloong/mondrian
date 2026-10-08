@@ -12,12 +12,21 @@ canonical execution and authoring boundaries.
 - Official VST SDK release history lists **3.8.1, published 2026-08-11**.
   [Release history](https://steinbergmedia.github.io/vst3_dev_portal/pages/Versions/Index.html),
   [3.8.1 changes](https://steinbergmedia.github.io/vst3_dev_portal/pages/Versions/Version%2B3.8.1.html).
-- Official CLAP's current public version header declares **1.2.10**; its public
-  stable inventory is in `clap.h`, with drafts separately included by `all.h`.
-  This is a checked main-branch snapshot, not an invented immutable release ID.
-  [Version](https://github.com/free-audio/clap/blob/main/include/clap/version.h),
-  [stable inventory](https://github.com/free-audio/clap/blob/main/include/clap/clap.h),
-  [draft inventory](https://github.com/free-audio/clap/blob/main/include/clap/all.h).
+- Official CLAP's latest numeric public tag checked on 2026-10-09 is **1.2.10**,
+  resolved to commit `195b42a004144fab0b3cf95e9c067187d15365b7`. Its immutable version
+  header declares 1.2.10. That commit's committer timestamp is
+  **2026-07-13 09:51:20 UTC**; this is not an asserted release publication date.
+  The official source is MIT licensed. Stable interfaces are included by
+  `clap.h`; draft interfaces remain separately included by `all.h`.
+  [Tag](https://github.com/free-audio/clap/tree/1.2.10),
+  [pinned version](https://github.com/free-audio/clap/blob/195b42a004144fab0b3cf95e9c067187d15365b7/include/clap/version.h),
+  [pinned commit](https://github.com/free-audio/clap/commit/195b42a004144fab0b3cf95e9c067187d15365b7),
+  [MIT license](https://github.com/free-audio/clap/blob/195b42a004144fab0b3cf95e9c067187d15365b7/LICENSE),
+  [stable inventory](https://github.com/free-audio/clap/blob/195b42a004144fab0b3cf95e9c067187d15365b7/include/clap/clap.h),
+  [draft inventory](https://github.com/free-audio/clap/blob/195b42a004144fab0b3cf95e9c067187d15365b7/include/clap/all.h).
+  The independently checked main snapshot
+  `a47f6badb49d948fd009998f28309cdab78979c9` also declares 1.2.10;
+  a main-branch version alone is not evidence of a release tag.
 - VST3 runtime, vendored host and both owned VST3 fixtures resolve one canonical
   `vendor/vst3-sdk` package generated from verified official 3.8.1 inputs.
   Original generator exclusions remain explicit in the
@@ -50,7 +59,7 @@ method/thread/lifetime obligations become binding when exposed or consumed.
 
 | Key | Actual source / owner |
 | --- | --- |
-| CW | `crates/mondrian-audio/src/processor_isolation/clap_worker.rs`: host, lifecycle, input conversion and native processing |
+| CW | `crates/mondrian-audio/src/processor_isolation/{clap_worker,clap_parameter_events}.rs`: host, lifecycle, typed SDK parameter-event storage, input conversion and native processing |
 | CD | `crates/mondrian-audio/src/processor_isolation/clap_discovery.rs`: identity/state/mode/ports/parameters probe |
 | VW | `crates/mondrian-audio/src/processor_isolation/vst3_worker.rs`: native prepare/reset/process/buses |
 | VD | `crates/mondrian-audio/src/processor_isolation/vst3_discovery.rs`: class/state/mode/contract probe |
@@ -130,7 +139,7 @@ unless the row explicitly identifies an accepted core/output behavior gap.
 | [configurable-audio-ports](https://github.com/free-audio/clap/blob/main/include/clap/ext/configurable-audio-ports.h) | N | Explicit requested port layouts and actual native acceptance, not channel-count guesses. |
 | [ambisonic](https://github.com/free-audio/clap/blob/main/include/clap/ext/ambisonic.h) | N/R current layouts | Canonical order/normalization metadata, channel map and output/device matrix. |
 | [surround](https://github.com/free-audio/clap/blob/main/include/clap/ext/surround.h) | N/R current layouts | Exact channel roles/masks and multichannel graph routing. |
-| [params](https://github.com/free-audio/clap/blob/main/include/clap/ext/params.h) | P plugin metadata/plain sample values/stepped/hidden; N host rescan/clear/request_flush; CD/CW | Native value/text/module/flag semantics, UI-origin gestures, output values, modulation and native flush; bounded typed storage and measured allocation closure remain required. |
+| [params](https://github.com/free-audio/clap/blob/main/include/clap/ext/params.h) | P plugin metadata/plain sample values/stepped/hidden and bounded SDK ParamValueEvent/ordinal storage; N host rescan/clear/request_flush; CD/CW | Actual owner-capacity growth and warmed full-capacity/reset processing allocation/order/PCM gates pass for the owned fixture. Native value/text/module/flag semantics, UI-origin gestures, output values, modulation, native flush and full resource/deadline acceptance remain. |
 | [state](https://github.com/free-audio/clap/blob/main/include/clap/ext/state.h) | P/R bounded restore/save ≤64 KiB, captured factory state, canonical history; CD/CW | Larger resource state and native-editor-origin dirty changes; save/load is not mandatory DSP checkpoint. |
 | [state-context](https://github.com/free-audio/clap/blob/main/include/clap/ext/state-context.h) | N | Purpose-specific project/preset/duplicate context and matching resource lifetime. |
 | [render](https://github.com/free-audio/clap/blob/main/include/clap/ext/render.h) | P/R: RT/OFF selected inactive after state restore and before metadata/activation; hard-realtime/declined mode refused; CD/CW | Owned distinct quality/gain/latency modes and mode refusal are named references; arbitrary vendor quality/performance unqualified. |
@@ -199,7 +208,9 @@ is **unqualified**. Test-profile correctness evidence is separate from release
 performance evidence.
 
 The release harness measures the **public process call including parent IPC,
-child native DSP and PCM copy**, excluding setup/discovery/reset/warmup, PCM
+child native DSP and PCM copy**. Any native request preflight IPC at the root
+window is part of that timed production path; its round trip must not be exempted
+or replaced with stale cached flags. Exclude setup/discovery/reset/warmup, PCM
 oracle/input generation and report I/O. It checks independent weighted PCM,
 fixed/uneven buffers of 64/128/256/512/1024 frames, p50/p95/p99/max and the exact
 realtime deadline `elapsed_ns × sample_rate ≤ frames × 1e9`. Offline throughput
@@ -214,14 +225,16 @@ old/candidate coexistence must be accurately admitted, with shared Arc
 allocations counted once. Current native probes report zero session scratch
 bytes while omitting known owners; bounded shared mappings alone do not describe
 the full memory footprint. Unknown plugin heap/RSS requires separate observation.
-Typed CLAP event storage, recoverable deferred native requests, and the complete
-non-RT reprepare service are remaining implementation work.
+Typed CLAP scalar parameter-event storage has actual allocator qualification;
+recoverable deferred native requests and the complete non-RT reprepare service
+remain implementation work. This local storage result does not close the full
+native resource contract or establish a realtime deadline pass.
 
 ## Implementation priorities
 
-1. Close typed CLAP parameter storage allocation with an independent actual
-   allocator oracle. Account all known host owners and measure complete release
-   callbacks against the derived audio deadline.
+1. Account all known host owners and measure complete release callbacks
+   against the derived audio deadline. Preserve the qualified typed scalar-event
+   carrier as heterogeneous event admission is added.
 2. Consume legal VST restart and CLAP restart requests through typed deferred
    outcomes. Preserve the complete already-admitted processing window; defer
    the next window before nested/sibling DSP or destination mutation.
@@ -240,3 +253,24 @@ non-RT reprepare service are remaining implementation work.
    optional control/exchange services. Each requires explicit platform/vendor
    oracles and resource/deadline evidence. Stable and draft families retain
    distinct negotiation and qualification.
+
+
+### Typed CLAP carrier correctness qualification (2026-10-09)
+
+The actual source-bound test-profile gates passed **20 CLAP worker tests**
+(four installed-plugin tests remained ignored in that filter) and **one typed
+storage test**. The preparation allocator oracle first failed with a measured
+growth of 13,547,520 bytes between 64 and 4096 maximum frames, versus the
+independent typed PCM/event/ordinal expectation of 580,608 bytes. With typed
+SDK ParamValueEvent owners and fixed insertion ordinals, that same oracle passed
+with the expected 580,608-byte growth. The warmed full-capacity two-parameter
+control retained equal-time insertion order and independently checked PCM
+through reset, positive/negative starts and both render modes with zero Rust
+allocations/reallocations in the measured process/reset calls.
+
+These are allocator-request and correctness results for the owned fixture.
+They do not measure arbitrary plugin heaps, full host-owned peak resources,
+native IPC deadline cost or release performance. The full worker log SHA-256 is
+`f275902bbb66fc740ea4ce5caace6c29f5a7e5a67c9207aee630c04a62ed4376`;
+the typed storage log SHA-256 is
+`70bf26830f52e95a3cfcb528ce83e394067a34f2e0da2a16e1a25b888d6d0606`.
