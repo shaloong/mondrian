@@ -1,5 +1,68 @@
 # Modal, resource and LUT acceptance
 
+## Causal sidechains and current clean workflow qualification
+
+The 2026-10-08 clean source `84e6eff9d036dc30da086b44785f0c398eea7ba3`
+passed the current Windows qualification below. Author validation and menu
+admission now retain pre/post channel stages; execution publishes each tap at its
+producer stage and preserves scratch buffers through their final consumer. A
+real RED demonstrated that a same-strip pre-fader source was previously rejected
+for a post-fader processor. Another Mixer regression used the same coarse
+assumption; its oracle now admits the pre-fader forward send and still hides
+final-tap feedback for enabled and disabled retained sidechains.
+
+Source regressions passed: Timeline **246**, Audio **118** (**15 ignored**),
+input observation/connection **9**, shared sidechain controls **3**, Rack **11**,
+Mixer **8**, modal **16**, resource **103** (**5 ignored**), portable **11**,
+group pointer **6**. The varying-signal Audio cases independently check same-strip,
+reciprocal pre-to-post and pre-fader main-send/Bus-return graphs across realtime
+and offline, scalar and SIMD, partitions and fresh continuity entries. Strict
+workspace/all-target/all-feature Clippy with `-D warnings` passed in **4 min 06 s**;
+fmt and diff checks passed.
+
+The rebuilt product then passed all explicitly selected native gates:
+
+| Gate | Passed | Runtime |
+| --- | ---: | ---: |
+| CLAP/VST3 sidechain author history and fresh archive PCM | 4 | 39.64 s |
+| Native SDK bus/state/delay/partition/reset contracts | 2 | 10.81 s |
+| Modal focus/resource workflows | 16 | 24.22 s |
+| Modal event routing | 1 | 0.00 s |
+| Resource source regressions | 103 (5 ignored) | 25.69 s |
+| Explicit native resource helpers, cancellation and output | 5 | 8.90 s |
+| Portable LUT/OCIO/media source-removal and output | 11 | 8.85 s |
+| Native workspace/startup window role cycle | 1 | 9.31 s |
+| Native constrained audio group history/save/reopen PCM | 2 | 203.17 s |
+| Actual Host group-pointer/history workflows | 6 | 18.94 s |
+
+All gates had zero failures. The five ignored resource cases were run explicitly
+with the current product; this does not qualify every other ignored workspace
+case. The owned sidechain oracle is `gain * (2 main + 3 first auxiliary + 5 second
+auxiliary)`. Same-strip pre-to-post connections produced the independent **0.625**
+stereo reference, while the retained external-detector case produced **0.4375**.
+Undo, saving the undone state with live Redo, Redo and separate Unicode archive
+reopens preserved exact author identities and realtime/offline partitioned PCM.
+These cases exercise real packaged workers, not the controlled query factories.
+
+Complete Golden passed **3/3**, each with all **7** required stages, distinct
+projects/run IDs, natural exit code zero and no forced post-report termination.
+Build time was **1,160,156 ms**; run times were **123,497 / 121,240 / 120,169 ms**.
+The aggregate is baseline eligible with clean, unchanged source attestation.
+Each color roundtrip's final H.264 maximum channel error was **4/255**, within its
+encoding gate; this is not a zero-copy or throughput qualification.
+
+- Product SHA256: `334a4be9f3ba4d69bd91b35786eb7cdb0a7ab0c311f52d6d3cbd2a7a8467e5a7`.
+- Golden runner SHA256: `7b907fa03b232145480f05304fb4be664c729862d95942f87497d575e2be065a`.
+- Aggregate: `E:/dev/mondrian/target/validation/nle-backlog-complete/20261008T010540Z-complete-golden-27d25303/complete-golden-consecutive-report.json`.
+- Hash-verified source/native receipts: `.scratch/curve-viewport/causal-stage-source-acceptance.json`
+  and `.scratch/curve-viewport/acceptance-causal-stage-current-modal-resource-lut.json`.
+
+The overall NLE goal remains active. Native port presentation, broader layouts
+and main-path compensation for late auxiliary arrivals, complete sidechain UI
+workflows, MIDI/editors, vendor/platform/performance matrices, remaining i18n
+and full current workspace/CI qualification remain separate open obligations.
+Historical evidence below remains bound to its named source and binaries.
+
 ## Captured menu switching and explicit submenu activation
 
 The 2026-10-07 UI follow-up to `2559c41` reproduced three runtime failures:
