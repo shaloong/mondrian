@@ -4203,7 +4203,13 @@ continuous redraw or synchronous native probe is added.
 
 Inspector and Mixer share `audio_sidechain` route projection and typed action
 construction. Every retained route appears independently with enable, exact
-static gain and disconnection; automation is displayed instead of overwritten.
+static gain and disconnection. Sidechain gain curves use the same exact
+`RouteGain` projection, curve widget, selection and authoring actions as principal
+route gain curves. Their viewport and current author time belong to the Sequence,
+including routes into a Processing Scope; a Scope parameter viewport must not
+reinterpret a route's time. Automated gain refuses scalar replacement. Source
+locks remain authoritative even for unavailable native inputs, and editing a
+curve does not require a native input observation or load a plugin.
 Native cached input contracts offer additive source menus, admitted by Timeline
 complete retained routing graph and source locks. Projection loads no native
 factory and creates no alternate author/routing state.

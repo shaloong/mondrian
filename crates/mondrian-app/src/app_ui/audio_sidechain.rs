@@ -1,9 +1,14 @@
 //! Shared processor sidechain projection over canonical routing admission.
 
+use super::audio_automation::{
+    project_audio_automation, sequence_automation_viewport, AudioAutomationCurveModel,
+    AudioAutomationTimeContext,
+};
 use super::localization::Localizer;
 use mondrian_core::{AudioProcessorInstanceId, AudioRouteId};
 use mondrian_editor_state::Action;
 use mondrian_timeline::audio::{AudioChannelStripOutputPort, AudioRouteSource};
+use mondrian_timeline::AudioAutomationTarget;
 use mondrian_timeline::{
     AudioRouteCandidateInspection, AudioRoutingEdit, AudioRoutingEditRequest, Sequence,
 };
@@ -19,6 +24,7 @@ pub(crate) struct SidechainRouteModel {
     pub(crate) enabled: bool,
     pub(crate) static_gain: Option<f64>,
     pub(crate) automation_key_count: usize,
+    pub(crate) gain_automation: Option<AudioAutomationCurveModel>,
     pub(crate) is_editable: bool,
     pub(crate) disabled_reason: Option<String>,
 }
@@ -45,6 +51,7 @@ pub(crate) fn retained_routes(
     sequence: &Sequence,
     processor_id: AudioProcessorInstanceId,
     localizer: &Localizer,
+    time_context: AudioAutomationTimeContext,
 ) -> Vec<SidechainRouteModel> {
     sequence
         .audio_program
@@ -79,6 +86,14 @@ pub(crate) fn retained_routes(
                     .gain_automation
                     .as_ref()
                     .map_or(0, |curve| curve.keyframes.len()),
+                gain_automation: sequence_automation_viewport(sequence).and_then(|viewport| {
+                    project_audio_automation(
+                        sequence,
+                        AudioAutomationTarget::RouteGain { route_id: route.id },
+                        viewport,
+                        time_context,
+                    )
+                }),
                 is_editable,
                 disabled_reason,
             }
@@ -345,6 +360,88 @@ mod tests {
     }
 
     #[test]
+    fn sidechain_gain_curve_projection_keeps_sequence_time_source_lock_and_selection() {
+        use mondrian_core::{
+            AuthoringTimeDomain, ExactAutomationCurve, ExactAutomationKeyframe, ParameterId,
+            TimelineTime,
+        };
+        let (mut sequence, id, source) = fixture();
+        let mut route = AudioProcessorSidechainRoute::new(source, id, "native.absent");
+        let route_id = route.id;
+        let mut curve = ExactAutomationCurve::new(
+            ParameterId::new_static(mondrian_timeline::audio::ROUTE_GAIN_DB_PARAMETER_ID),
+            0.0,
+        )
+        .expect("curve");
+        let key = ExactAutomationKeyframe::linear(
+            TimelineTime::new(1, 4).expect("time"),
+            -6.123456789123,
+        );
+        let key_id = key.id;
+        curve.set_keyframe(key).expect("key");
+        route.gain_automation = Some(curve.clone());
+        sequence.audio_program.sidechain_routes.push(route);
+        let time = TimelineTime::new(3, 4).expect("playhead");
+        let context = AudioAutomationTimeContext::at_sequence_time(&sequence, time);
+        let localizer = Localizer::new(AppUiLocale::EnUs).expect("catalog");
+        let projected = retained_routes(&sequence, id, &localizer, context);
+        assert!(
+            gain_action(&projected[0], 1.0).is_none(),
+            "scalar cannot replace author curve"
+        );
+        let model = projected[0].gain_automation.as_ref().expect("offline curve editable");
+        assert!(model.is_editable);
+        assert_eq!(model.source_curve, curve);
+        assert_eq!(
+            model.viewport.domain,
+            AuthoringTimeDomain::Sequence(sequence.id)
+        );
+        assert_eq!(
+            model.current_author_time.as_ref().expect("author time").time,
+            time
+        );
+        let mut state = AppState::new();
+        let sequence_id = sequence.id;
+        state.test_set_sequence(Some(sequence.clone()));
+        state.animation_selection.audio_curve = Some(crate::app::AudioCurveSelection {
+            sequence_id,
+            target: AudioAutomationTarget::RouteGain { route_id },
+            keyframe_ids: vec![key_id],
+        });
+        let panels = crate::app_ui::panels::AppUiPanelModels::from_app_state(&state);
+        let selected = panels
+            .mixer
+            .channels
+            .iter()
+            .flat_map(|channel| &channel.processor_racks)
+            .flat_map(|rack| &rack.processors)
+            .flat_map(|processor| &processor.sidechain_routes)
+            .find(|route| route.route_id == route_id)
+            .expect("shared Mixer projection");
+        assert_eq!(
+            selected.gain_automation.as_ref().expect("curve").selected_keyframe_ids,
+            vec![key_id]
+        );
+        assert!(!state.can_undo_action(), "projection is not an edit");
+        sequence.audio_tracks[0].is_locked = true;
+        let locked = retained_routes(&sequence, id, &localizer, context);
+        let locked_curve = locked[0].gain_automation.as_ref().expect("locked curve still visible");
+        assert!(!locked_curve.is_editable);
+        assert!(super::super::audio_automation::prepare_audio_curve_edit(
+            locked_curve,
+            mondrian_ui_widgets::CurveEdit::Insert {
+                keyframe_id: mondrian_core::KeyframeId::new(),
+                index: 1,
+                point: mondrian_ui_widgets::CurvePoint::new(0.5, -2.0),
+            }
+        )
+        .is_none());
+        assert_eq!(locked_curve.source_curve, curve);
+        sequence.audio_program.sidechain_routes.clear();
+        assert!(retained_routes(&sequence, id, &localizer, context).is_empty());
+    }
+
+    #[test]
     fn sidechain_controls_preserve_multiple_disabled_and_unavailable_bus_routes() {
         let (mut sequence, id, source) = fixture();
         let first = AudioProcessorSidechainRoute::new(source, id, "native.absent");
@@ -353,7 +450,15 @@ mod tests {
         sequence.audio_program.sidechain_routes.extend([first, second]);
         for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
             let localizer = Localizer::new(locale).expect("catalog");
-            let models = retained_routes(&sequence, id, &localizer);
+            let models = retained_routes(
+                &sequence,
+                id,
+                &localizer,
+                AudioAutomationTimeContext::at_sequence_time(
+                    &sequence,
+                    mondrian_core::TimelineTime::ZERO,
+                ),
+            );
             assert_eq!(models.len(), 2);
             assert_ne!(models[0].route_id, models[1].route_id);
             assert!(models[0].enabled);
@@ -369,6 +474,10 @@ mod tests {
             &sequence,
             id,
             &Localizer::new(AppUiLocale::EnUs).expect("catalog"),
+            AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                mondrian_core::TimelineTime::ZERO,
+            ),
         );
         for model in &models {
             assert!(!model.is_editable);
@@ -394,7 +503,15 @@ mod tests {
                 .expect("connect");
         }
         let localizer = Localizer::new(AppUiLocale::ZhCn).expect("catalog");
-        let routes = retained_routes(state.active_sequence().expect("Sequence"), id, &localizer);
+        let routes = retained_routes(
+            state.active_sequence().expect("Sequence"),
+            id,
+            &localizer,
+            AudioAutomationTimeContext::at_sequence_time(
+                state.active_sequence().expect("Sequence"),
+                mondrian_core::TimelineTime::ZERO,
+            ),
+        );
         let second = routes[1].route_id;
         let precise = -6.123456789123456_f64;
         state
@@ -538,7 +655,15 @@ mod tests {
                 Some(&admission),
                 &localizer,
             );
-            let mut routes = retained_routes(&sequence, id, &localizer);
+            let mut routes = retained_routes(
+                &sequence,
+                id,
+                &localizer,
+                AudioAutomationTimeContext::at_sequence_time(
+                    &sequence,
+                    mondrian_core::TimelineTime::ZERO,
+                ),
+            );
             bind_rewire_options(&mut routes, &inputs);
             assert!(!routes[0].rewire_options.is_empty());
             assert!(
@@ -593,7 +718,15 @@ mod tests {
         let before = serde_json::to_value(&sequence).expect("author snapshot");
         for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
             let localizer = Localizer::new(locale).expect("catalog");
-            let mut models = retained_routes(&sequence, id, &localizer);
+            let mut models = retained_routes(
+                &sequence,
+                id,
+                &localizer,
+                AudioAutomationTimeContext::at_sequence_time(
+                    &sequence,
+                    mondrian_core::TimelineTime::ZERO,
+                ),
+            );
             bind_retained_input_names(&mut models, &sequence, &contract, &names, &localizer);
             assert!(models[0].label.ends_with("压缩探测 🙂 (detector.11)"));
             assert!(models[1].label.ends_with("压缩探测 🙂 (detector.7)"));

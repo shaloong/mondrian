@@ -1509,6 +1509,7 @@ audio-sidechain-input = Auxiliary input · { $identity }
 audio-sidechain-bus = Bus · { $identity }
 audio-sidechain-add-source = Add source…
 audio-sidechain-level = Sidechain level
+audio-sidechain-level-curve = Sidechain level curve
 audio-sidechain-status = Sidechain status
 audio-sidechain-controls = Sidechain controls
 audio-sidechain-disconnect = Disconnect source

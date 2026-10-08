@@ -1162,6 +1162,13 @@ mod tests {
         );
         let rewired_path = root.path().join("原生侧链改线🙂.mdp");
         state.save_project_file_as(rewired_path.clone()).expect("save rewritten route");
+        assert_native_sidechain_gain_curve_history(
+            &mut state,
+            resolver.as_ref(),
+            processor_id,
+            route_id,
+            root.path(),
+        );
         drop(state);
         for (path, authored, expected, lookahead, output) in [
             (undone_path, &sequence, 0.25, 3, before),
@@ -1204,6 +1211,108 @@ mod tests {
         state: &AppState,
         processor_resolver: &dyn AudioProcessorResolver,
         expected: f32,
+        expected_lookahead: usize,
+    ) -> Vec<f32> {
+        assert_native_sidechain_delivery_samples(
+            state,
+            processor_resolver,
+            &[expected; 257],
+            expected_lookahead,
+        )
+    }
+
+    fn assert_native_sidechain_gain_curve_history(
+        state: &mut AppState,
+        resolver: &dyn AudioProcessorResolver,
+        processor_id: mondrian_core::AudioProcessorInstanceId,
+        route_id: mondrian_core::AudioRouteId,
+        root: &std::path::Path,
+    ) {
+        let before = state.active_sequence().expect("before gain curve").clone();
+        // Independent oracle: main .25, detector .03125; native weights 2 and 3,
+        // plugin gain .5. Route dB rises linearly from START_DB to 0 over one
+        // exact second. Evaluate delivered signal time, not physical PDC time.
+        const START_DB: f64 = -6.020_599_913_279_624;
+        for (x, value) in [(0.0, START_DB), (1.0, 0.0)] {
+            let action = crate::app_ui::test_utils::native_sidechain_gain_key_action(
+                state,
+                processor_id,
+                route_id,
+                x,
+                value,
+            );
+            state.dispatch_action(action).expect("shared native gain key");
+        }
+        state
+            .dispatch_action(
+                crate::app_ui::test_utils::native_sidechain_gain_linear_action(
+                    state,
+                    processor_id,
+                    route_id,
+                ),
+            )
+            .expect("shared native Linear menu");
+        let authored = state.active_sequence().expect("gain authored").clone();
+        let curve = authored.audio_program.sidechain_routes[0]
+            .gain_automation
+            .as_ref()
+            .expect("exact route curve");
+        assert_eq!(curve.keyframes.len(), 2);
+        assert_eq!(curve.keyframes[0].time, mondrian_core::TimelineTime::ZERO);
+        assert_eq!(curve.keyframes[1].time, mondrian_core::TimelineTime::ONE);
+        assert_eq!(curve.keyframes[0].value, START_DB);
+        assert_eq!(curve.keyframes[1].value, 0.0);
+        let expected: Vec<f32> = (0..257)
+            .map(|sample| {
+                let db = START_DB * (1.0 - f64::from(sample) / 48_000.0);
+                (0.25 + 0.046875 * 10.0_f64.powf(db / 20.0)) as f32
+            })
+            .collect();
+        let output = assert_native_sidechain_delivery_samples(state, resolver, &expected, 3);
+        assert!(state.undo_timeline().expect("Linear menu Undo"));
+        assert!(state.undo_timeline().expect("end key Undo"));
+        assert!(state.undo_timeline().expect("start key Undo"));
+        assert!(state
+            .active_sequence()
+            .expect("gain Undo")
+            .author_state_eq_ignoring_revision(&before));
+        let undone_path = root.join("侧链曲线撤销保存🙂.mdp");
+        state.save_project_file_as(undone_path.clone()).expect("save gain Undo");
+        assert!(state.can_redo_action(), "save preserves live gain Redo");
+        assert_native_sidechain_delivery(state, resolver, 0.296875, 3);
+        assert!(state.redo_timeline().expect("start key Redo"));
+        assert!(state.redo_timeline().expect("end key Redo"));
+        assert!(state.redo_timeline().expect("Linear menu Redo"));
+        assert!(state
+            .active_sequence()
+            .expect("gain Redo")
+            .author_state_eq_ignoring_revision(&authored));
+        assert_eq!(
+            assert_native_sidechain_delivery_samples(state, resolver, &expected, 3),
+            output
+        );
+        let edited_path = root.join("侧链曲线输出🙂.mdp");
+        state.save_project_file_as(edited_path.clone()).expect("save gain edited");
+        for (path, author, samples) in [
+            (undone_path, &before, vec![0.296875; 257]),
+            (edited_path, &authored, expected),
+        ] {
+            let mut reopened = AppState::new();
+            reopened.open_project_file(path).expect("fresh Unicode gain reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("reopened")
+                .author_state_eq_ignoring_revision(author));
+            assert!(!reopened.can_undo_action());
+            assert!(!reopened.can_redo_action());
+            assert_native_sidechain_delivery_samples(&reopened, resolver, &samples, 3);
+        }
+    }
+
+    fn assert_native_sidechain_delivery_samples(
+        state: &AppState,
+        processor_resolver: &dyn AudioProcessorResolver,
+        expected_samples: &[f32],
         expected_lookahead: usize,
     ) -> Vec<f32> {
         let sequence = state.active_sequence().expect("author sequence");
@@ -1251,6 +1360,7 @@ mod tests {
             }
             assert_eq!(output.len(), 514);
             for (frame, pair) in output.chunks_exact(2).enumerate() {
+                let expected = expected_samples[frame];
                 assert!(
                     (pair[0] - expected).abs() <= 1e-6,
                     "{mode:?} frame{frame} left{} != {expected}",
@@ -1261,6 +1371,30 @@ mod tests {
                     "{mode:?} frame{frame} right{} != {}",
                     pair[1],
                     -expected
+                );
+            }
+            delivery
+                .enter_state(AudioContinuityEpoch::new(2), 93)
+                .expect("native seek reset");
+            let mut seek_samples = [0.0; 62];
+            delivery
+                .render_into_cancellable(
+                    AudioRenderRequest { start_sample: 93, frames: 31 },
+                    &mut seek_samples,
+                    &cancellation,
+                )
+                .expect("native gain after seek");
+            for (offset, pair) in seek_samples.chunks_exact(2).enumerate() {
+                let expected = expected_samples[93 + offset];
+                assert!(
+                    (pair[0] - expected).abs() <= 1e-6,
+                    "{mode:?} seek signal sample {}",
+                    93 + offset
+                );
+                assert!(
+                    (pair[1] + expected).abs() <= 1e-6,
+                    "{mode:?} seek right signal sample {}",
+                    93 + offset
                 );
             }
             if let Some(reference) = &reference {

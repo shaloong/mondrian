@@ -510,6 +510,7 @@ fn project_processor(
             sequence,
             processor.id,
             localizer,
+            time_context,
         ),
         sidechain_inputs: Vec::new(),
         processor_id: processor.id,
@@ -753,6 +754,73 @@ mod tests {
             1,
         ));
         (sequence, clip_id)
+    }
+
+    #[test]
+    fn scope_sidechain_gain_uses_sequence_viewport_instead_of_scope_binding_time() {
+        use crate::app_ui::audio_automation::AudioAutomationTimeContext;
+        use mondrian_core::AuthoringTimeDomain;
+        use mondrian_timeline::audio::{
+            AudioChannelStripOutputPort, AudioProcessorSidechainRoute, AudioRouteSource,
+        };
+        let (mut sequence, _) = sequence_with_gain_scope();
+        sequence.audio_tracks[0].clips[0].audio_components[0].processing.scope_in =
+            TimelineTime::new(5, 1).expect("scope trim");
+        let scope_id = sequence.audio_tracks[0].clips[0].audio_components[0].processing.scope_id;
+        let processor_id = sequence
+            .audio_program
+            .processing_scopes
+            .iter()
+            .find(|scope| scope.id == scope_id)
+            .expect("scope")
+            .processors
+            .processors[0]
+            .id;
+        let detector_id = sequence.add_audio_track();
+        let source = AudioRouteSource::Track {
+            track_id: detector_id,
+            port: AudioChannelStripOutputPort::PreFader,
+        };
+        sequence.audio_program.sidechain_routes.push(AudioProcessorSidechainRoute::new(
+            source,
+            processor_id,
+            "offline.detector",
+        ));
+        mondrian_timeline::inspect_audio_route_candidates(&sequence)
+            .expect("independent detector keeps the Scope routing graph causal");
+        let rack = project_audio_processor_rack(
+            &sequence,
+            AudioProcessorRackAddress::ProcessingScope { scope_id },
+            &chinese(),
+            AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                TimelineTime::new(1, 2).expect("playhead"),
+            ),
+        );
+        let gain = rack.processors[0].sidechain_routes[0]
+            .gain_automation
+            .as_ref()
+            .expect("sidechain curve");
+        assert_eq!(
+            gain.viewport.domain,
+            AuthoringTimeDomain::Sequence(sequence.id)
+        );
+        assert_eq!(gain.viewport.range.start, TimelineTime::ZERO);
+        assert_eq!(gain.viewport.range.duration, TimelineTime::ONE);
+        assert_eq!(
+            gain.current_author_time.as_ref().expect("no Scope occurrence required").time,
+            TimelineTime::new(1, 2).expect("Sequence time")
+        );
+        let parameter =
+            rack.processors[0].parameters[0].automation.as_ref().expect("processor curve");
+        assert_eq!(
+            parameter.viewport.domain,
+            AuthoringTimeDomain::AudioProcessingScope(scope_id)
+        );
+        assert_eq!(
+            parameter.viewport.range.start,
+            TimelineTime::new(5, 1).expect("Scope time")
+        );
     }
 
     #[test]

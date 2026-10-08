@@ -1905,6 +1905,15 @@ pub(super) fn with_audio_processor_rack_sections(
                         ),
                     ));
                 }
+                if let Some(automation) = &route.gain_automation {
+                    section = section.with_row(
+                        PropertyRow::new(
+                            localizer.text("audio-sidechain-level-curve"),
+                            audio_automation_curve_control(automation, localizer),
+                        )
+                        .with_height(118.0),
+                    );
+                }
                 if let Some(reason) = &route.disabled_reason {
                     section = section.with_row(PropertyRow::new(
                         localizer.text("audio-sidechain-status"),
@@ -5811,6 +5820,159 @@ mod temporal_handle_tests {
                     .expect("Redo")
                     .author_state_eq_ignoring_revision(&committed));
             }
+        }
+    }
+
+    #[test]
+    fn sidechain_gain_panel_gesture_cancel_commit_and_keyboard_history() {
+        use crate::app_ui::audio_automation::AudioAutomationTimeContext;
+        use crate::app_ui::audio_processor_rack::project_audio_processor_rack;
+        use mondrian_timeline::audio::{
+            AudioChannelStripOutputPort, AudioProcessorInstance, AudioProcessorSidechainRoute,
+            AudioRouteSource, BUILTIN_GAIN_DEFINITION_ID,
+        };
+        use mondrian_timeline::{
+            AudioChannelStripOwner, AudioChannelStripRack, AudioProcessorRackAddress,
+        };
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        for locale in [
+            crate::app_ui::localization::AppUiLocale::EnUs,
+            crate::app_ui::localization::AppUiLocale::ZhCn,
+            crate::app_ui::localization::AppUiLocale::Pseudo,
+        ] {
+            let localizer = Localizer::new(locale).expect("catalog");
+            let mut sequence = mondrian_timeline::Sequence::new("侧链曲线 🙂");
+            let processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+            let processor_id = processor.id;
+            sequence.audio_program.outputs[0].strip.pre_fader.processors.push(processor);
+            let route = AudioProcessorSidechainRoute::new(
+                AudioRouteSource::Track {
+                    track_id: sequence.audio_tracks[0].id,
+                    port: AudioChannelStripOutputPort::PostMute,
+                },
+                processor_id,
+                "offline.detector",
+            );
+            let route_id = route.id;
+            sequence.audio_program.sidechain_routes.push(route);
+            let address = AudioProcessorRackAddress::ChannelStrip {
+                owner: AudioChannelStripOwner::ProgramOutput {
+                    output_id: sequence.audio_program.outputs[0].id,
+                },
+                rack: AudioChannelStripRack::PreFader,
+            };
+            let rack = project_audio_processor_rack(
+                &sequence,
+                address,
+                &localizer,
+                AudioAutomationTimeContext::at_sequence_time(&sequence, TimelineTime::ZERO),
+            );
+            let mut panel = with_audio_processor_rack_sections(
+                PropertyPanel::new("Rack"),
+                &[rack],
+                true,
+                &localizer,
+            );
+            let index = (0..panel.child_count())
+                .rev()
+                .find(|index| {
+                    panel
+                        .child(*index)
+                        .and_then(Widget::as_any)
+                        .is_some_and(|any| any.is::<CurveEditor>())
+                })
+                .expect("sidechain gain curve exposed in actual panel");
+            let editor = panel.child_mut(index).expect("curve widget");
+            editor.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+            let plot = editor
+                .as_any()
+                .expect("type")
+                .downcast_ref::<CurveEditor>()
+                .expect("curve")
+                .plot_bounds();
+            let position = Point::new(plot.x + plot.width * 0.25, plot.y + plot.height * 0.5);
+            let original = sequence.clone();
+            let mut state = AppState::new();
+            state.test_set_sequence(Some(sequence));
+            let mut router = EventRouter::new(editor.id());
+            let down = UiEvent::MouseDown {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::ctrl(),
+            };
+            route_temporal(editor, &mut router, &mut state, down.clone());
+            route_temporal(
+                editor,
+                &mut router,
+                &mut state,
+                UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            );
+            assert!(state
+                .active_sequence()
+                .expect("cancelled")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(!state.can_undo_action());
+            route_temporal(editor, &mut router, &mut state, down);
+            route_temporal(
+                editor,
+                &mut router,
+                &mut state,
+                UiEvent::MouseUp {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+            );
+            let committed = state.active_sequence().expect("commit").clone();
+            let route = committed
+                .audio_program
+                .sidechain_routes
+                .iter()
+                .find(|route| route.id == route_id)
+                .expect("retained route");
+            let key = route
+                .gain_automation
+                .as_ref()
+                .expect("route gain curve")
+                .keyframes
+                .iter()
+                .find(|key| key.time == TimelineTime::new(1, 4).expect("exact time"))
+                .expect("inserted key");
+            let key_id = key.id;
+            route_temporal(
+                editor,
+                &mut router,
+                &mut state,
+                UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+            );
+            let edited = state.active_sequence().expect("nudge").clone();
+            let edited_key = edited.audio_program.sidechain_routes[0]
+                .gain_automation
+                .as_ref()
+                .expect("curve")
+                .keyframes
+                .iter()
+                .find(|key| key.id == key_id)
+                .expect("stable ID");
+            assert_eq!(edited_key.time, key.time);
+            assert_ne!(edited_key.value, key.value);
+            assert!(state.undo_timeline().expect("undo nudge"));
+            assert!(state
+                .active_sequence()
+                .expect("restored")
+                .author_state_eq_ignoring_revision(&committed));
+            assert!(state.undo_timeline().expect("undo insert"));
+            assert!(state
+                .active_sequence()
+                .expect("original")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(!state.can_undo_action());
+            assert!(state.redo_timeline().expect("redo insert"));
+            assert!(state.redo_timeline().expect("redo nudge"));
+            assert!(state
+                .active_sequence()
+                .expect("edited")
+                .author_state_eq_ignoring_revision(&edited));
         }
     }
 

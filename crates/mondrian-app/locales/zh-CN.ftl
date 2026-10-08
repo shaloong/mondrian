@@ -1441,6 +1441,7 @@ audio-sidechain-input = 辅助输入 · { $identity }
 audio-sidechain-bus = 总线 · { $identity }
 audio-sidechain-add-source = 添加来源…
 audio-sidechain-level = 侧链电平
+audio-sidechain-level-curve = 侧链电平曲线
 audio-sidechain-status = 侧链状态
 audio-sidechain-controls = 侧链控制
 audio-sidechain-disconnect = 断开来源

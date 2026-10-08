@@ -433,6 +433,11 @@ impl AppUiPanelModels {
                 curve.project_selection(state);
             }
             for processor in &mut rack.processors {
+                for route in &mut processor.sidechain_routes {
+                    if let Some(curve) = &mut route.gain_automation {
+                        curve.project_selection(state);
+                    }
+                }
                 for parameter in &mut processor.parameters {
                     if let Some(curve) = &mut parameter.automation {
                         curve.project_selection(state);
