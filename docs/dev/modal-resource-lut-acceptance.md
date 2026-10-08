@@ -1,5 +1,59 @@
 # Modal, resource and LUT acceptance
 
+## Processing Scope and current modal/resource/LUT qualification
+
+Clean source `e65a1c25f5f42b63c2e2adbdf33da42ba24e3450` passed the
+2026-10-08 Windows qualification. Native CLAP and VST3 sidechain workflows now
+cover single Processing Scopes and two materializations of one authored Scope,
+with Scope offsets of 5 and 7 seconds and Sequence route automation at 0–1 second.
+VST3 evaluates distinct Scope gain keys; the state-only CLAP fixture restores its
+native gain and applies the second clip's authored placement gain. This fixture
+does not claim a CLAP parameter extension. Independent weighted stereo PCM,
+realtime/offline partitions, seek/reset, source replacement, exact key identity,
+Undo/Redo, saving after Undo and fresh Unicode archive reopening all pass.
+
+Fourteen Scope admission refusals cover creation and rewiring with wrong Scope,
+Track, Clip or component identity, another valid materialization, a deleted first
+occurrence and a rebound first occurrence while the other materialization remains.
+Every refusal preserves author state, generation, history and probe count. The
+actual gain panel also passes Output/Scope gestures in English, Chinese and pseudo
+locales, including cancellation without history and reversible key edits.
+
+The current product rebuilt in **499,469 ms**. All fourteen selected gates passed:
+
+| Gate | Passed | Test runtime |
+| --- | ---: | ---: |
+| Native SDK bus/state/delay/partition references | 2 | 10.62 s |
+| Native sidechain/Scope/source/gain/history/reopen/output | 10 | 284.38 s |
+| Localization | 26 | 0.51 s |
+| Actual localized Output/Scope gain-panel gesture | 1 | 3.05 s |
+| Observation admission and refusal | 12 | 7.63 s |
+| Shared sidechain controls | 6 | 0.55 s |
+| Shared Rack | 12 | 0.29 s |
+| Mixer projection and admission | 8 | 1.34 s |
+| Real native resource inspection/cancellation/reopen | 5 | 8.65 s |
+| Modal Tab/focus/resources/startup | 16 | 23.90 s |
+| Event modal replacement/empty/removal | 1 | 0.00 s |
+| Resource transactions and real LUT output | 103 (5 ignored here, executed above) | 25.33 s |
+| Portable LUT/OCIO/media and source-removal output | 11 | 8.65 s |
+| Native Auto/Continuous Bézier history and output | 2 | 169.25 s |
+
+Receipt: `.scratch/curve-viewport/scope-workflow-native-acceptance.json`, SHA-256
+`97D0FE581E8873F9FA626D9CE7EED0703D93320137C1C329E115601F54FC12DD`.
+All fourteen log hashes and six stable binary hashes were independently checked.
+Product SHA-256:
+`9EAB38EA728EDCF2CDC74F1165C4584C022A8F96CC841A10EE49813AC9329E5F`.
+Source remained clean and unchanged throughout. Source strict workspace/all-target/
+all-feature Clippy with `-D warnings`, fmt and diff checks passed before commit.
+Nothing was pushed.
+
+These results qualify the named authoring, actual widget, resource and native
+output workflows. Full physical Host/Scope pointer interaction, broader layouts
+and vendors, MIDI/editors, remaining i18n/OpenFX contexts, platform/device and
+performance matrices, full workspace runtime tests and current remote CI remain
+open. Complete Golden 3/3 remains bound to `9f0183a`, not relabelled as `e65a1c2`.
+The overall NLE goal is not complete.
+
 ## Sidechain gain curves and current modal/resource/LUT qualification
 
 Clean source `538ae6182d4b971837c527ef33640d8d83c5438b` passed the
