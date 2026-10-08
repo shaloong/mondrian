@@ -4187,3 +4187,10 @@ static gain and disconnection; automation is displayed instead of overwritten.
 Native cached input contracts offer additive source menus, admitted by Timeline
 complete retained routing graph and source locks. Projection loads no native
 factory and creates no alternate author/routing state.
+
+Connection source MenuItems carry the exact cached input binding and lower into
+the closed `ConnectProcessorInput` product action. They do not lower directly into
+an unqualified route creation request. App checks the live observation identity
+before entering the sole routing transaction, so a stale popup cannot silently
+connect a removed/replaced native input. Existing retained route controls remain
+available under canonical source locks without requiring the plugin to load.

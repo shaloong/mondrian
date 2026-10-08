@@ -1829,7 +1829,7 @@ pub(super) fn with_audio_processor_rack_sections(
                     .map(|option| {
                         MenuItem::new(
                             option.label.clone(),
-                            crate::app_ui::audio_sidechain::edit_action(option.edit.clone()),
+                            crate::app_ui::audio_sidechain::connection_action(option),
                         )
                     })
                     .collect();

@@ -215,6 +215,9 @@ pub const AUDIO_NAMESPACE: &str = "ui.audio";
 /// External read-only processor input control operation.
 pub const AUDIO_QUERY_PROCESSOR_INPUTS: &str = "query_processor_inputs";
 
+/// External author action for connecting a current observed processor input.
+pub const AUDIO_CONNECT_PROCESSOR_INPUT: &str = "connect_processor_input";
+
 /// External action name for one atomic Audio Processor Rack edit.
 pub const AUDIO_EDIT_PROCESSOR_RACK: &str = "edit_processor_rack";
 /// External action name for inserting one product-visible built-in Processor.
@@ -470,6 +473,8 @@ pub enum AudioProductAction {
     SelectScopeOccurrence(AudioScopeOccurrencePayload),
     /// Query or cancel transient processor input observation.
     QueryProcessorInputs(AudioProcessorInputQueryPayload),
+    /// Connect a source only to an exact current observed auxiliary input.
+    ConnectProcessorInput(AudioProcessorInputConnectionPayload),
     /// Change one transient Track audition flag without mutating author state.
     SetTrackSolo(AudioTrackSoloPayload),
     /// Apply one exact owner-time curve mutation.
@@ -734,6 +739,11 @@ impl ProductAction {
                 _ => Ok(None),
             },
             AUDIO_NAMESPACE => match name.as_str() {
+                AUDIO_CONNECT_PROCESSOR_INPUT => Ok(Some(Self::Audio(
+                    AudioProductAction::ConnectProcessorInput(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
                 AUDIO_QUERY_PROCESSOR_INPUTS => {
                     Ok(Some(Self::Audio(AudioProductAction::QueryProcessorInputs(
                         decode_payload(namespace, name, payload)?,
@@ -1127,6 +1137,11 @@ impl ProductAction {
     /// names or payloads.
     pub fn into_external_action(self) -> Action {
         let (namespace, name, payload) = match self {
+            Self::Audio(AudioProductAction::ConnectProcessorInput(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_CONNECT_PROCESSOR_INPUT,
+                serde_json::json!(payload),
+            ),
             Self::Audio(AudioProductAction::QueryProcessorInputs(payload)) => (
                 AUDIO_NAMESPACE,
                 AUDIO_QUERY_PROCESSOR_INPUTS,
@@ -5238,4 +5253,44 @@ pub struct AudioProcessorInputQueryPayload {
     pub processor_id: AudioProcessorInstanceId,
     /// Query or cancel transient observation work.
     pub operation: AudioProcessorInputQueryOperation,
+}
+
+/// Exact transient input contract that authorized a product connection menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioProcessorInputBinding {
+    /// In-memory session; reopening the same archive invalidates this binding.
+    pub session_id: mondrian_editor_state::AuthoringSessionId,
+    /// Canonical active Sequence identity.
+    pub sequence_id: SequenceId,
+    /// Canonical rack owner and explicit Scope occurrence.
+    pub target: mondrian_audio::AudioProcessorInputInspectionTarget,
+    /// Exact processor instance within the addressed rack.
+    pub processor_id: AudioProcessorInstanceId,
+    /// Identity minted for this exact successful control observation.
+    pub observation_id: mondrian_core::AudioProcessorInputObservationId,
+}
+
+impl AudioProcessorInputBinding {
+    pub(crate) fn query_payload(self) -> AudioProcessorInputQueryPayload {
+        AudioProcessorInputQueryPayload {
+            session_id: self.session_id,
+            sequence_id: self.sequence_id,
+            target: self.target,
+            processor_id: self.processor_id,
+            operation: AudioProcessorInputQueryOperation::Query,
+        }
+    }
+}
+
+/// Connect one source using a current realized input contract, then one author transaction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioProcessorInputConnectionPayload {
+    /// Exact menu authorization; never persisted in the project.
+    pub binding: AudioProcessorInputBinding,
+    /// Track/Bus output tap supplying the auxiliary signal.
+    pub source: mondrian_timeline::audio::AudioRouteSource,
+    /// Exact definition-owned key present in the observed contract.
+    pub bus_key: String,
 }

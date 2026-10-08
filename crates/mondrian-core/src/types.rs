@@ -69,6 +69,10 @@ define_id!(AudioTransitionId, "音频转场 ID");
 define_id!(VideoTransitionId, "视频转场 ID");
 define_id!(AudioRouteId, "音频路由 ID");
 define_id!(AudioProcessorInstanceId, "音频处理器实例 ID");
+define_id!(
+    AudioProcessorInputObservationId,
+    "Transient realized processor input observation identity"
+);
 define_id!(MixBusId, "混音总线 ID");
 define_id!(ProgramOutputId, "节目输出 ID");
 define_id!(AudioRoleId, "音频角色 ID");

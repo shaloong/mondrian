@@ -939,3 +939,11 @@ UI actions compare this exact identity, so reopening the same archive with the
 same Sequence/processor identities cannot accept a previous session's reply.
 ProjectDocument and archive schemas are unchanged; this adds no migration or
 compatibility owner.
+
+### Transient native input observation identity
+
+Core defines typed `AudioProcessorInputObservationId` using the common identity
+macro. App mints it when a control result enters the bounded observation cache;
+it is not a persisted author or archive identity. A connection action carries a
+closed session/Sequence/rack/processor/observation binding. Repeated cache reads
+retain its ID; refresh/replacement obtains a new ID even when the author is equal.

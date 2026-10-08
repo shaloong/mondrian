@@ -2805,3 +2805,41 @@ native SDK, physical GUI, encoded Golden or full goal completion is inferred.
 Final source gate 62414 passed strict workspace/all-target/all-feature Clippy
 `-D warnings` in 4m26s, format and diff checks. Native output and actual Host
 interaction qualification remain separate pending work.
+
+## Exact observation authorization for interactive sidechain creation
+
+Connection MenuItems now carry a typed in-memory session/Sequence/rack/processor/
+observation binding plus source tap and bus key. App requires an exact current
+successful cached observation and key membership before delegating once to the
+existing routing author transaction. Native probe work is not triggered by the
+connection action; source locks, addresses and cycles remain Timeline authority.
+Refresh produces a new observation identity even for equal author data, rejecting
+old popup actions. The cache stores successful facts as immutable `Arc` snapshots;
+reads preserve identity without copying port vectors or allocating boxed results.
+The observation ID is not stored in project archives or Undo state.
+
+Actual source failure lineage was retained: 44301 caught a test Vec-to-AuthoringList
+conversion; 30069 caught a test Track channel `.strip` field omission; 79134 ran
+**2 passed/1 failed** (1.86s) because its Undo assertion included monotonic revision.
+An independent decoded JSON comparison found only `/revision` (3 versus 1).
+The corrected test checks the exact next revision, then compares complete author
+content with that revision. No production rollback behavior was weakened.
+Pipeline 71468 passed new connections **3/0/0** (1.66s), the full query module
+**9/0/0** (1.97s, including those three), shared sidechains **3/0/0** (0.22s), Rack
+**11/0/0** (0.23s), Mixer **8/0/0** (0.72s), localization **26/0/0** (0.22s) and
+modal **16/0/0** (16.22s). Its strict lint caught the large Ready enum payload;
+shared immutable ownership corrected the size and per-read copying together.
+
+Final pipeline 1624 passed the full query/connection module **9/0/0** (2.06s),
+strict workspace/all-target/all-feature Clippy `-D warnings` (4m17s), format and
+diff checks. Tests cover stable repeated-read identities, refreshed result IDs,
+typed external action roundtrip, multiple real author connections and one-step
+Undo/Redo identity restoration, plus fourteen stale/unknown/locked refusal cases
+and valid-receipt self-feedback refusal. Refusal preserves serialized author,
+generation, empty history and resolver call count. Controlled factories qualify
+these source contracts, not native SDK output or physical GUI interaction.
+
+Native bus display names, source rewiring/automation UI and actual Host/Scope/
+fresh Unicode archive/native PCM workflows remain pending in the full goal.
+Historical native and Golden output evidence retains its exact revision/binary
+identity; none is attributed to this new product action by source tests alone.

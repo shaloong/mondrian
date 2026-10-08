@@ -22,7 +22,7 @@ pub(crate) struct SidechainRouteModel {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SidechainCreateOption {
     pub(crate) label: String,
-    pub(crate) edit: AudioRoutingEdit,
+    pub(crate) payload: crate::app::product_action::AudioProcessorInputConnectionPayload,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,7 +74,7 @@ pub(crate) fn retained_routes(
 
 pub(crate) fn input_options(
     sequence: &Sequence,
-    processor_id: AudioProcessorInstanceId,
+    binding: crate::app::product_action::AudioProcessorInputBinding,
     inputs: &mondrian_audio::AudioProcessorAuxiliaryInputContract,
     admission: Option<&AudioRouteCandidateInspection>,
     localizer: &Localizer,
@@ -112,7 +112,7 @@ pub(crate) fn input_options(
         }))
         .filter(|source| {
             admission.is_some_and(|admission| {
-                admission.allows_processor_sidechain_addition(*source, processor_id)
+                admission.allows_processor_sidechain_addition(*source, binding.processor_id)
             })
         })
         .collect::<Vec<_>>();
@@ -125,9 +125,9 @@ pub(crate) fn input_options(
                 .iter()
                 .map(|source| SidechainCreateOption {
                     label: source_label(sequence, *source, localizer),
-                    edit: AudioRoutingEdit::CreateProcessorSidechain {
+                    payload: crate::app::product_action::AudioProcessorInputConnectionPayload {
+                        binding,
                         source: *source,
-                        processor_id,
                         bus_key: bus.bus_key.clone(),
                     },
                 })
@@ -176,6 +176,15 @@ fn source_label(sequence: &Sequence, source: AudioRouteSource, localizer: &Local
         (_, true) => "audio-mixer-port-postfader",
     });
     format!("{name} · {port}")
+}
+
+pub(crate) fn connection_action(option: &SidechainCreateOption) -> Action {
+    crate::app::product_action::ProductAction::Audio(
+        crate::app::product_action::AudioProductAction::ConnectProcessorInput(
+            option.payload.clone(),
+        ),
+    )
+    .into_external_action()
 }
 
 pub(crate) fn edit_action(edit: AudioRoutingEdit) -> Action {
@@ -344,9 +353,23 @@ mod tests {
         };
         let admission =
             mondrian_timeline::inspect_audio_route_candidates(&sequence).expect("routing");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence.clone()));
+        let binding = crate::app::product_action::AudioProcessorInputBinding {
+            session_id: state.authoring_session_id().expect("Session"),
+            sequence_id: sequence.id,
+            target: mondrian_audio::AudioProcessorInputInspectionTarget::ChannelStrip {
+                owner: mondrian_timeline::AudioChannelStripOwner::ProgramOutput {
+                    output_id: sequence.audio_program.outputs[0].id,
+                },
+                rack: mondrian_timeline::AudioChannelStripRack::PreFader,
+            },
+            processor_id: id,
+            observation_id: mondrian_core::AudioProcessorInputObservationId::new(),
+        };
         let options = input_options(
             &sequence,
-            id,
+            binding,
             &contract,
             Some(&admission),
             &Localizer::new(AppUiLocale::EnUs).expect("catalog"),
@@ -354,21 +377,17 @@ mod tests {
         assert_eq!(options.len(), 1);
         assert!(!options[0].options.is_empty());
         for option in &options[0].options {
-            let AudioRoutingEdit::CreateProcessorSidechain { source, processor_id, bus_key } =
-                &option.edit
-            else {
-                panic!("creation")
-            };
-            assert_eq!(*processor_id, id);
-            assert_eq!(bus_key, "detector.7");
-            assert!(admission.allows_processor_sidechain_addition(*source, id));
+            let source = option.payload.source;
+            assert_eq!(option.payload.binding, binding);
+            assert_eq!(option.payload.bus_key, "detector.7");
+            assert!(admission.allows_processor_sidechain_addition(source, id));
             assert!(
-                !matches!(source, AudioRouteSource::Track { track_id, .. } if *track_id == sequence.audio_tracks[0].id)
+                !matches!(source, AudioRouteSource::Track { track_id, .. } if track_id == sequence.audio_tracks[0].id)
             );
         }
         assert!(input_options(
             &sequence,
-            id,
+            binding,
             &contract,
             None,
             &Localizer::new(AppUiLocale::EnUs).expect("catalog")

@@ -1936,3 +1936,20 @@ invalidation reject late replies. Errors are retained as quiet control state;
 explicit refresh retries. Native bus display metadata and source/disconnect
 controls remain subsequent work; available input counts alone do not complete
 sidechain routing or its native Undo/archive/output acceptance.
+
+### Connecting observed auxiliary inputs
+
+Product connection menus bind exact transient session, Sequence, rack/Scope
+occurrence, processor and successful observation ID. App requires the current
+cached Ready contract to match the complete binding and include the bus key,
+then delegates once to the existing routing author transaction. This admits no
+native probe, secondary author owner or optimistic event before validation.
+Refresh/catalog invalidation, author/render changes and project reopen invalidate
+old menus. Timeline still owns final source lock, address and retained-cycle
+admission. Generic author routing contracts retain unavailable native keys for
+storage/offline authoring; interactive creation uses observed input facts.
+
+Successful input observations are stored as shared immutable snapshots. Cache
+reads clone the `Arc`, preserving the result identity without copying port
+vectors or allocating another boxed payload. Only successful publication mints
+an observation ID; no identity is needed for a failed control result.

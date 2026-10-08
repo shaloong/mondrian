@@ -67,6 +67,9 @@ impl AppState {
         action: AudioProductAction,
     ) -> Result<()> {
         match action {
+            AudioProductAction::ConnectProcessorInput(payload) => {
+                self.connect_observed_processor_input(payload)
+            }
             AudioProductAction::QueryProcessorInputs(payload) => {
                 self.query_audio_processor_inputs(payload)
             }
@@ -480,6 +483,46 @@ impl AppState {
             }
         }
         Ok(())
+    }
+
+    fn connect_observed_processor_input(
+        &mut self,
+        payload: super::product_action::AudioProcessorInputConnectionPayload,
+    ) -> Result<()> {
+        let failure = |reason: &str| MondrianError::WorkflowStepFailed {
+            step_id: "audio_connect_processor_input".to_owned(),
+            reason: reason.to_owned(),
+        };
+        let super::audio_input_observation::AudioInputObservation::Ready(observed) =
+            self.audio_processor_input_observation(payload.binding.query_payload())
+        else {
+            return Err(failure(
+                "Processor input observation is unavailable; inspect inputs again",
+            ));
+        };
+        if observed.binding != payload.binding {
+            return Err(failure(
+                "Processor input observation has changed; refresh the connection menu",
+            ));
+        }
+        if !observed
+            .inputs
+            .auxiliary_inputs
+            .buses
+            .iter()
+            .any(|bus| bus.bus_key == payload.bus_key)
+        {
+            return Err(failure(
+                "Requested auxiliary input is absent from the observed contract",
+            ));
+        }
+        self.edit_audio_routing(AudioRoutingEditRequest {
+            edit: mondrian_timeline::AudioRoutingEdit::CreateProcessorSidechain {
+                source: payload.source,
+                processor_id: payload.binding.processor_id,
+                bus_key: payload.bus_key,
+            },
+        })
     }
 
     fn edit_audio_routing(&mut self, request: AudioRoutingEditRequest) -> Result<()> {

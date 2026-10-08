@@ -1349,10 +1349,11 @@ pub(crate) fn bind_processor_input_queries(
                         localizer.text("audio-input-pending"),
                     )
                 }
-                AudioInputObservation::Ready(inputs) => {
+                AudioInputObservation::Ready(observed) => {
+                    let inputs = &observed.inputs;
                     processor.sidechain_inputs = super::audio_sidechain::input_options(
                         sequence,
-                        processor.processor_id,
+                        observed.binding,
                         &inputs.auxiliary_inputs,
                         routing.or_else(|| {
                             local_routing
