@@ -363,8 +363,20 @@ identical decoded codes. It does not prove which independent ProRes decoder is
 the reference or erase the existing cross-decoder failure. Keep the
 source/capture provenance and raw byte hashes with the external test evidence.
 
-Keep the independent-decoder test explicitly Failed until reconstruction
-fidelity is resolved. Its ignored default state is NotRun, never Passed.
+The 2026-10-10 repeat with the repository's private FFmpeg 8.1.2
+`mondrian-prores12` runtime passed all 72 profile/color/seek comparisons at the
+unchanged `1/1024` tolerance (maximum difference `0.0009765625`). Every native
+sample reported observed hardware execution. The runtime preserves twelve-bit
+software reconstruction and the full component interval instead of clipping
+that reconstruction to the earlier ten-bit bounds. All twelve new 1080p30
+fixtures had sixty distinct motion frames and matching container/coded-frame
+CICP; their hashes, complete decode checks and raw native evidence are retained
+in the external macOS audit `phase770` evidence. These are new functional
+fixtures, not a claim of identity with the original failed corpus or a sustained
+performance qualification. Keep those earlier failed records intact.
+
+Classify the independent-decoder test from the actual runtime and fixture-bound
+execution. Its ignored default state is NotRun, never Passed.
 Record all individual seek
 differences, exact worst RGBA components, actual path/hardware evidence, fixture
 hashes and complete logs. These development diagnostics do not qualify physical
