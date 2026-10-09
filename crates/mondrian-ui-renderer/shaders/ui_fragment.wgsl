@@ -42,6 +42,13 @@ fn ui_output(value: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(ui_linear_to_surface_linear(value.rgb), value.a);
 }
 
+// The caller proves sharp Shape coverage and alpha=1 for every vertex.
+// Keep the same primary conversion without unreachable texture/SDF branches.
+@fragment
+fn main_opaque_shape(in: VertexOutput) -> @location(0) vec4<f32> {
+    return ui_output(in.color);
+}
+
 /// Uniform corner radius (original path for shadows & lines).
 fn sd_rounded_box_px(p: vec2<f32>, size: vec2<f32>, r: f32) -> f32 {
     let half = size * 0.5;

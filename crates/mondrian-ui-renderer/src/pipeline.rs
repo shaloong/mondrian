@@ -20,6 +20,7 @@ fn ui_primitive_state() -> wgpu::PrimitiveState {
 /// 2D UI 渲染管线
 pub struct UiPipeline {
     pub render_pipeline: wgpu::RenderPipeline,
+    pub opaque_shape_pipeline: wgpu::RenderPipeline,
     pub encoded_code_value_pipeline: wgpu::RenderPipeline,
     pub device_code_value_pipeline: wgpu::RenderPipeline,
     pub bind_group_layout: wgpu::BindGroupLayout,
@@ -84,7 +85,7 @@ impl UiPipeline {
             immediate_size: 0,
         });
 
-        let create_pipeline = |label: &'static str, entry_point: &'static str| {
+        let create_pipeline = |label: &'static str, entry_point: &'static str, blend| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pipeline_layout),
@@ -99,7 +100,7 @@ impl UiPipeline {
                     entry_point: Some(entry_point),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: surface_format,
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        blend,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                     compilation_options: Default::default(),
@@ -111,14 +112,24 @@ impl UiPipeline {
                 cache: None,
             })
         };
-        let render_pipeline = create_pipeline("ui_pipeline", "main");
-        let encoded_code_value_pipeline =
-            create_pipeline("ui_encoded_code_value_pipeline", "main_encoded_code_values");
-        let device_code_value_pipeline =
-            create_pipeline("ui_device_code_value_pipeline", "main_device_code_values");
+        let alpha_blend = Some(wgpu::BlendState::ALPHA_BLENDING);
+        let render_pipeline = create_pipeline("ui_pipeline", "main", alpha_blend);
+        let opaque_shape_pipeline =
+            create_pipeline("ui_opaque_shape_pipeline", "main_opaque_shape", None);
+        let encoded_code_value_pipeline = create_pipeline(
+            "ui_encoded_code_value_pipeline",
+            "main_encoded_code_values",
+            alpha_blend,
+        );
+        let device_code_value_pipeline = create_pipeline(
+            "ui_device_code_value_pipeline",
+            "main_device_code_values",
+            alpha_blend,
+        );
 
         Self {
             render_pipeline,
+            opaque_shape_pipeline,
             encoded_code_value_pipeline,
             device_code_value_pipeline,
             bind_group_layout,

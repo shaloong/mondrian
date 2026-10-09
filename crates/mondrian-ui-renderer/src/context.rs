@@ -15,7 +15,7 @@ use crate::command::{
     diagnose_draw_commands, raster_image_payload_len, DrawCommand, ExternalTextureKey,
 };
 use crate::pipeline::UiPipeline;
-use crate::shape::RectVertex;
+use crate::shape::{RectVertex, RenderMode};
 use crate::surface_presentation::{
     UiSurfaceCarrier, UiSurfacePresentation, UiSurfacePresentationError,
 };
@@ -1038,7 +1038,6 @@ impl UiRenderer {
 
             for (batch, (x, y, width, height), vertex_range) in draws {
                 rpass.set_scissor_rect(x, y, width, height);
-                rpass.set_pipeline(self.pipeline_for_batch_key(batch.texture_key.as_deref()));
                 let Some(texture_bind_group) =
                     self.texture_bind_group_for_batch_key(batch.texture_key.as_deref())
                 else {
@@ -1074,8 +1073,18 @@ impl UiRenderer {
                         .expect("drawable batch has packed vertices")
                         .slice(vertex_range),
                 );
-                rpass.draw(0..batch.vertices.len() as u32, 0..1);
-                stats.submitted_batches = stats.submitted_batches.saturating_add(1);
+                let ranges = shape_blend_ranges(&batch.vertices);
+                stats.batch_count =
+                    stats.batch_count.saturating_add(ranges.len().saturating_sub(1));
+                for (range, opaque) in ranges {
+                    rpass.set_pipeline(if opaque {
+                        &self.pipeline.opaque_shape_pipeline
+                    } else {
+                        self.pipeline_for_batch_key(batch.texture_key.as_deref())
+                    });
+                    rpass.draw(range, 0..1);
+                    stats.submitted_batches = stats.submitted_batches.saturating_add(1);
+                }
                 stats.submitted_vertices =
                     stats.submitted_vertices.saturating_add(batch.vertices.len());
             }
@@ -1097,6 +1106,36 @@ impl UiRenderer {
 
 fn elapsed_micros(started: Instant) -> u64 {
     started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+fn shape_blend_ranges(vertices: &[RectVertex]) -> Vec<(std::ops::Range<u32>, bool)> {
+    // Only ordinary finite, sharp shapes prove alpha=1 at every covered MSAA
+    // sample. Images, glyphs, rounded coverage, shadows and lines retain their
+    // original blend. Split in painter order without changing any vertices.
+    let opaque = |triangle: &[RectVertex]| {
+        triangle.iter().all(|vertex| {
+            vertex.render_mode == RenderMode::Shape as u32
+                && vertex.color[3] == 1.0
+                && vertex.color[..3].iter().all(|channel| (0.0..=1.0).contains(channel))
+                && vertex.corner_radii_px == [0.0; 4]
+        })
+    };
+    debug_assert_eq!(vertices.len() % 3, 0);
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    let mut previous = None;
+    for (index, triangle) in vertices.chunks_exact(3).enumerate() {
+        let current = opaque(triangle);
+        if previous.is_some_and(|previous| previous != current) {
+            ranges.push((start..(index * 3) as u32, previous.unwrap()));
+            start = (index * 3) as u32;
+        }
+        previous = Some(current);
+    }
+    if let Some(previous) = previous {
+        ranges.push((start..vertices.len() as u32, previous));
+    }
+    ranges
 }
 
 #[cfg(test)]
@@ -2474,6 +2513,159 @@ mod tests {
     }
 
     static OFFSCREEN_GPU_TEST_OWNER: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    #[test]
+    #[ignore = "explicit real Metal comparison against the original alpha-blending pipeline"]
+    fn opaque_shapes_preserve_msaa_and_blended_painter_pixels() {
+        for (format, presentation, bytes) in [
+            (
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                Some((wgpu::SurfaceColorSpace::Srgb, ColorSpace::Srgb)),
+                4,
+            ),
+            (wgpu::TextureFormat::Rgba16Float, None, 8),
+            (
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                Some((wgpu::SurfaceColorSpace::DisplayP3, ColorSpace::DisplayP3)),
+                4,
+            ),
+            (
+                wgpu::TextureFormat::Rgb10a2Unorm,
+                Some((wgpu::SurfaceColorSpace::Bt2100Pq, ColorSpace::Rec2100Pq)),
+                4,
+            ),
+            (
+                wgpu::TextureFormat::Rgba16Float,
+                Some((wgpu::SurfaceColorSpace::Bt2100Hlg, ColorSpace::Rec2100Hlg)),
+                8,
+            ),
+            (
+                wgpu::TextureFormat::Rgba16Float,
+                Some((
+                    wgpu::SurfaceColorSpace::ExtendedSrgbLinear,
+                    ColorSpace::Rec2100Pq,
+                )),
+                8,
+            ),
+            (
+                wgpu::TextureFormat::Rgba16Float,
+                Some((
+                    wgpu::SurfaceColorSpace::ExtendedSrgbLinear,
+                    ColorSpace::Rec2100Hlg,
+                )),
+                8,
+            ),
+        ] {
+            let mut h = OffscreenHarness::with_presentation(96, 64, format, presentation)
+                .expect("real Metal UI comparison device");
+            assert_eq!(h.adapter_info.backend, wgpu::Backend::Metal);
+            let key = ExternalTextureKey::new("opaque-shape-parity-viewer").unwrap();
+            let source = h.external_texture_f16([0.2, 0.7, 0.3, 0.6]);
+            let view = source.create_view(&Default::default());
+            h.renderer
+                .register_external_texture_view(
+                    &h.device,
+                    key.clone(),
+                    &view,
+                    if presentation.is_some() {
+                        ExternalTextureTransfer::SurfaceCodeValues
+                    } else {
+                        ExternalTextureTransfer::Linear
+                    },
+                )
+                .unwrap();
+            let mut draw = DrawEncoder::new();
+            draw.draw_rect(
+                Rect::new(0.0, 0.0, 96.0, 64.0),
+                Color { r: 0.13, g: 0.37, b: 0.73, a: 0.4 },
+                0.0,
+            );
+            draw.draw_rect(Rect::new(3.25, 2.75, 85.5, 57.5), Color::WHITE, 0.0);
+            draw.push_clip(Rect::new(8.25, 7.75, 77.5, 45.5));
+            draw.push_translate(glam::Vec2::new(0.5, -0.25));
+            draw.draw_soft_shadow(
+                Rect::new(16.25, 14.75, 44.5, 30.5),
+                Color::BLACK,
+                4.0,
+                5.0,
+                0.0,
+                glam::Vec2::new(0.0, 2.0),
+            );
+            draw.draw_rect(
+                Rect::new(18.25, 15.75, 43.5, 29.5),
+                Color { r: 0.4, g: 0.6, b: 0.2, a: 1.0 },
+                5.0,
+            );
+            draw.draw_gradient_rect(
+                Rect::new(11.25, 11.75, 69.5, 24.5),
+                [
+                    Color::BLACK,
+                    Color::WHITE,
+                    Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 },
+                    Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 },
+                ],
+                0.0,
+            );
+            draw.draw_rect(
+                Rect::new(21.25, 9.75, 41.5, 31.5),
+                Color { r: 0.8, g: 0.3, b: 0.1, a: 0.5 },
+                0.0,
+            );
+            draw.draw_external_texture(
+                key,
+                Rect::new(26.25, 12.75, 25.5, 27.5),
+                Rect::new(0.0, 0.0, 1.0, 1.0),
+                Color::WHITE,
+            );
+            draw.draw_triangles(
+                &[
+                    Point::new(14.25, 22.75),
+                    Point::new(72.75, 39.25),
+                    Point::new(22.25, 50.75),
+                ],
+                Color { r: 0.0, g: 0.5, b: 0.25, a: 1.0 },
+            );
+            draw.draw_line(
+                Point::new(12.25, 10.75),
+                Point::new(69.75, 41.25),
+                1.25,
+                Color::WHITE,
+            );
+            draw.draw_rect(
+                Rect::new(19.25, 19.75, 37.5, 21.5),
+                Color { r: 1.0, g: 0.0, b: 1.0, a: 0.0 },
+                0.0,
+            );
+            draw.draw_gradient_rect(
+                Rect::new(14.25, 8.75, 47.5, 36.5),
+                [
+                    Color::BLACK,
+                    Color::WHITE,
+                    Color { r: 0.3, g: 0.6, b: 0.9, a: 0.25 },
+                    Color::WHITE,
+                ],
+                0.0,
+            );
+            draw.draw_rect(
+                Rect::new(31.25, 17.75, 29.5, 23.5),
+                Color { r: -0.25, g: 1.5, b: 3.0, a: 1.0 },
+                0.0,
+            );
+            draw.pop_transform();
+            draw.pop_clip();
+            let commands = draw.finish();
+            let opaque = h.renderer.pipeline.opaque_shape_pipeline.clone();
+            h.renderer.pipeline.opaque_shape_pipeline = h.renderer.pipeline.render_pipeline.clone();
+            let reference = h.render_raw(commands.clone(), bytes);
+            h.renderer.pipeline.opaque_shape_pipeline = opaque;
+            let actual = h.render_raw(commands, bytes);
+            assert_eq!(
+                actual, reference,
+                "original blended painter/MSAA bits for {format:?}/{presentation:?}"
+            );
+            eprintln!("opaque shape parity: adapter={:?} format={format:?} presentation={presentation:?} bytes={} bit differences=0; sharp fractional coverage/gradient/triangle, clipping/translation, rounded/shadow/line, zero-alpha RGB and Viewer coverage", h.adapter_info, actual.len());
+        }
+    }
 
     #[test]
     #[ignore = "short physical Metal UI carrier diagnostic; no Window qualification"]
