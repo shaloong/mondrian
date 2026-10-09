@@ -17,8 +17,10 @@ The executable reexecutes `/proc/self/exe` with
 `VK_LOADER_DISABLE_DYNAMIC_LIBRARY_UNLOADING=1` when the variable is absent.
 This is the loader's documented option (supported from loader 1.3.259). An
 explicit value other than `1` is a structured startup error, not silently
-overridden. An already established value returns immediately. Other operating
-systems do nothing. A loader predating that option is outside this workaround's
+overridden. An already established value returns immediately. macOS establishes
+its native application role in this same executable-entry function; see the
+[Playback scheduling contract](playback-engine.md). A loader predating that
+option is outside this workaround's
 verified environment; setting the variable alone is not evidence of support.
 
 `Command::env` builds the replacement environment without changing the running

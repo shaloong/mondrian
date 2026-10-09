@@ -2036,6 +2036,26 @@ only after that residency ends. This seam does not elevate decode/analysis
 workers, alter process priority, or change the system timer period, so resource
 arbitration and bounded domain queues remain authoritative.
 
+Before any owner starts, graphics executables call the same
+`prepare_graphics_process` entry policy. On macOS this observes the public Mach
+application role and assigns `TASK_DEFAULT_APPLICATION` only when it is
+unspecified. Existing roles are retained; AppKit owns subsequent visibility
+transitions. This process-lifetime admission is distinct from the thread-local
+Playback guard and has no restore-to-unspecified operation. Libraries cannot
+apply it from an already running session or an embedding worker. Native setter
+failure and mismatched role readback are structured startup errors.
+
+Apple's published [XNU task policy](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/task_policy.c)
+limits application tasks without a role to legacy QoS, even when a pthread
+requests user-interactive QoS. A disposable probe on the audit M4 observed
+requested QoS 33 with base priority 31, then base priority 46 after the public
+default-role admission. This is evidence of the process ceiling, not a bounded
+wake guarantee or a stability qualification. No foreground role, realtime
+thread class, Audio clock, deadline, workload quality or qualification threshold
+is inferred from this policy. Fresh-process regression tests exercise native
+role readback, idempotence, stable PID and preservation of an existing background
+application role.
+
 Each coordinator turn applies the newest coherent Audio Device callback
 observation before advancing the video Clock and deriving a new Frame Demand.
 This ordering is part of the Clock-Master contract: deriving the demand first
