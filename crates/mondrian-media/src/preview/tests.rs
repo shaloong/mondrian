@@ -4173,6 +4173,9 @@ fn isolated_demux_survives_codec_family_retirement_until_full_clear() {
     let mut context = bootstrap.build();
     for (mode, frame_index) in [
         (PreviewDecodeAccessMode::RandomAccessStillFrame, 8),
+        // The retained demuxer has already consumed packets. A new codec
+        // requesting the origin must seek, even though it has no last PTS.
+        (PreviewDecodeAccessMode::PlaybackCursor, 0),
         (PreviewDecodeAccessMode::PlaybackCursor, 2),
     ] {
         let request = covering_decode_request(
@@ -4189,6 +4192,9 @@ fn isolated_demux_survives_codec_family_retirement_until_full_clear() {
             panic!("CPU fixture must return an RGBA frame");
         };
         assert_eq!(frame.diagnostics.selected_pts, Some(frame_index * 1_024));
+        if mode == PreviewDecodeAccessMode::PlaybackCursor && frame_index == 0 {
+            assert!(frame.diagnostics.seek_performed);
+        }
         drop(frame);
         if mode == PreviewDecodeAccessMode::RandomAccessStillFrame {
             context.clear_family(crate::PreviewDecodeSessionFamily::Interactive);

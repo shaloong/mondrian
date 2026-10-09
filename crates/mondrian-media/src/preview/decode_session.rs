@@ -1742,6 +1742,10 @@ impl PreviewDecodeSession {
         interrupt_state: Arc<PreviewDecodeInterruptState>,
         retained_source: Option<PreviewPacketSourceOpen>,
     ) -> std::result::Result<Self, PreviewPacketSourceOpenError> {
+        // Codec retirement does not rewind a retained packet source. Only a
+        // freshly opened demuxer owns the pristine prefix that permits the
+        // first-picture request to bypass seeking.
+        let at_demux_origin = retained_source.is_none();
         let source = match retained_source {
             Some(source) => source,
             None => PreviewPacketSource::open(
@@ -1754,14 +1758,16 @@ impl PreviewDecodeSession {
                 should_cancel,
             )?,
         };
-        Self::from_packet_source(
+        let mut session = Self::from_packet_source(
             source,
             interrupt_state,
             request,
             resources.hardware_device_context_pool(),
             resources.native_output_tracker(),
         )
-        .map_err(PreviewPacketSourceOpenError::Failed)
+        .map_err(PreviewPacketSourceOpenError::Failed)?;
+        session.at_demux_origin = at_demux_origin;
+        Ok(session)
     }
 
     fn from_packet_source(
