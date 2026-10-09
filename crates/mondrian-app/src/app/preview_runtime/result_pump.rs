@@ -42,6 +42,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         if expired.is_empty() {
             return PreviewWorkPoll::default();
         }
+        // Observe the exact retired bindings before the next candidate can
+        // replace their loading reason or move to another frame coordinate.
+        tracing::debug!(
+            ?pending_playback_demand,
+            ?expired,
+            worker_queue = ?self.jobs.diagnostics(),
+            "expired current Preview media publication bindings"
+        );
         // Expiration synchronously removes the Broker publication owner. Any
         // retained Timeline evaluation that names that exact producer can no
         // longer make progress, even when an in-flight attempt is retained
