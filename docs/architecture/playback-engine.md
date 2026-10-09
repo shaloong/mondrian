@@ -564,11 +564,12 @@ absence, preroll, and recovery.
 Physical audio queue service and audio-clock observation are two explicit App
 Adapter stages. Ordinary product pumping performs both in order. The Headless
 AV coordinator may poll and refill the same concrete Audio Playback owner while
-an exact current picture is still resolving, but it holds the resulting clock
-snapshot until that picture has physical Ready evidence. Device lifecycle
-events are still applied immediately. This prevents callback starvation without
-allowing audio queue maintenance to advance transport past an unresolved video
-opportunity.
+an exact current picture is still resolving. Before Audio Device handoff, that
+operation fills PCM without publishing device-clock authority. After handoff,
+it refreshes the live Audio Device observation, which may advance transport
+past an unresolved picture. That expired picture is recorded as stale; its
+deadline is neither renewed nor used to freeze the Audio Device clock. Device
+lifecycle events are applied immediately in both cases.
 
 ### Time representation
 
