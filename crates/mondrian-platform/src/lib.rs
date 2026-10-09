@@ -51,6 +51,10 @@ pub use native_application::{
     install_macos_quit_handler, prepare_macos_application, MacApplicationError,
     MacApplicationQuitHandler,
 };
+#[cfg(target_os = "macos")]
+pub use playback_scheduling::{
+    observe_macos_playback_task_role, observe_macos_playback_thread, MacPlaybackThreadObservation,
+};
 pub use playback_scheduling::{
     PlaybackThreadScheduling, PlaybackThreadSchedulingError, PlaybackThreadSchedulingStatus,
 };
