@@ -707,22 +707,35 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires native GPU pipelines for scopes preparation qualification"]
     async fn backend_preparation_returns_scope_modes_without_frame_allocation() {
+        use crate::GpuColorFrameTextureFormat::{Rgba16Float, Rgba8Unorm};
+
         mondrian_core::ensure_mondrian_default_ocio_loaded().unwrap();
         let context = crate::GpuContext::new().await.expect("real backend adapter");
         eprintln!("adapter={:?}", context.adapter.get_info());
         let mut owner = ViewerBackendOwner::new(RenderGpuOutputBoundaryRuntime::new().unwrap());
         let before = owner.diagnostics();
-        // Hidden panels do not compile scopes; switching each visible mode uses
-        // the same worker/cache while buffers and frame publication stay absent.
+        // Hidden scopes use the encoded display carrier; visible scopes require
+        // an unclamped float carrier. Those two target formats need distinct
+        // output pipelines, while scope modes share the same retained bundle.
         let mut luma_pipeline = None;
-        for mode in [
-            None,
-            Some(WaveformMode::Luma),
-            Some(WaveformMode::RgbParade),
-            Some(WaveformMode::Luma),
+        for (mode, output_format, output_pipelines, scope_bundles) in [
+            (None, Rgba8Unorm, 1, 0),
+            (Some(WaveformMode::Luma), Rgba16Float, 2, 1),
+            (Some(WaveformMode::RgbParade), Rgba16Float, 2, 1),
+            (Some(WaveformMode::Luma), Rgba16Float, 2, 1),
+            (None, Rgba8Unorm, 2, 1),
         ] {
             let mut requested = plan(ColorSpace::Rec709);
             requested.waveform_mode = mode;
+            assert_eq!(
+                requested.output_precision.program_texture_format(
+                    &requested.monitor_adaptation,
+                    mode.is_some(),
+                    requested.signal_monitoring_active,
+                ),
+                output_format,
+                "visible scopes must retain the unquantized Program Output carrier"
+            );
             let deadline = Instant::now() + Duration::from_secs(5);
             while owner
                 .request(&context.device, &context.queue, requested.clone(), || {})
@@ -733,12 +746,12 @@ mod tests {
                 thread::sleep(Duration::from_millis(1));
             }
             let scopes = owner.scopes_diagnostics();
-            assert_eq!(scopes.pipeline_creations, u64::from(mode.is_some()));
+            assert_eq!(scopes.pipeline_creations, scope_bundles);
             assert_eq!(scopes.frames_recorded, 0);
             assert_eq!(scopes.buffer_allocations, 0);
             assert_eq!(scopes.texture_allocations, 0);
             assert_eq!(owner.diagnostics().next_frame_id, before.next_frame_id);
-            assert_eq!(owner.diagnostics().backend_objects.misses, 1);
+            assert_eq!(owner.diagnostics().backend_objects.misses, output_pipelines);
             if mode == Some(WaveformMode::Luma) {
                 let pipeline = owner
                     .scopes
