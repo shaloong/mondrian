@@ -2451,6 +2451,25 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
                 // actual boundary below; do not renew the picture or hold Audio.
                 if state.playback_epoch() != sampled_epoch || state.current_frame() != sampled_frame
                 {
+                    // Capture the unresolved owner state before boundary
+                    // reconciliation replaces its candidate and loading reason.
+                    // This optional diagnostic observes an already expired
+                    // picture; it does not renew its deadline or hold Audio.
+                    tracing::debug!(
+                        ?sampled_epoch,
+                        sampled_frame,
+                        advanced_epoch = ?state.playback_epoch(),
+                        advanced_frame = state.current_frame(),
+                        diagnostics = %headless_recovery_diagnostics(
+                            driver,
+                            preview_service,
+                            gpu_adapter,
+                            state,
+                            sampled_intent,
+                            safety_deadline_instant,
+                        ),
+                        "Headless audio boundary advanced before current picture proof"
+                    );
                     break 'preclock_picture;
                 }
                 let pump_outcome = pump_playback_preview(state, preview_service);
