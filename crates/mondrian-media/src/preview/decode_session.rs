@@ -1721,6 +1721,7 @@ impl PreviewDecodeSession {
             requested_video_stream_index: self.requested_video_stream_index,
             opened: PreviewPacketSourceOpen {
                 source,
+                at_demux_origin: self.at_demux_origin,
                 parameters: self.source_parameters.clone(),
                 stream_index: self.stream_index,
                 stream_tb: self.stream_tb,
@@ -1742,10 +1743,6 @@ impl PreviewDecodeSession {
         interrupt_state: Arc<PreviewDecodeInterruptState>,
         retained_source: Option<PreviewPacketSourceOpen>,
     ) -> std::result::Result<Self, PreviewPacketSourceOpenError> {
-        // Codec retirement does not rewind a retained packet source. Only a
-        // freshly opened demuxer owns the pristine prefix that permits the
-        // first-picture request to bypass seeking.
-        let at_demux_origin = retained_source.is_none();
         let source = match retained_source {
             Some(source) => source,
             None => PreviewPacketSource::open(
@@ -1758,16 +1755,14 @@ impl PreviewDecodeSession {
                 should_cancel,
             )?,
         };
-        let mut session = Self::from_packet_source(
+        Self::from_packet_source(
             source,
             interrupt_state,
             request,
             resources.hardware_device_context_pool(),
             resources.native_output_tracker(),
         )
-        .map_err(PreviewPacketSourceOpenError::Failed)?;
-        session.at_demux_origin = at_demux_origin;
-        Ok(session)
+        .map_err(PreviewPacketSourceOpenError::Failed)
     }
 
     fn from_packet_source(
@@ -1803,6 +1798,7 @@ impl PreviewDecodeSession {
         }
         let PreviewPacketSourceOpen {
             source,
+            at_demux_origin,
             parameters,
             stream_index,
             stream_tb,
@@ -2100,7 +2096,7 @@ impl PreviewDecodeSession {
             stream_tb,
             stream_start_pts,
             frame_duration_pts,
-            at_demux_origin: true,
+            at_demux_origin,
             target_width,
             target_height,
             _hardware_decode_context_state: hardware_decode_context_state,
@@ -2218,7 +2214,8 @@ impl PreviewDecodeSession {
     /// The codec allocation and immutable hardware device remain reusable, but
     /// demux/codec position cannot: cancellation may have occurred after a
     /// packet was submitted or while reordered output was only partly drained.
-    /// Clearing position forces the next request through indexed seek + flush.
+    /// Clearing decoded position forces indexed seek + flush unless the source
+    /// still owns its untouched initial packet prefix.
     fn recover_after_cancellation(&mut self) {
         // SAFETY: this worker exclusively owns the open decoder and calls flush
         // only after the interrupted decode operation has returned.

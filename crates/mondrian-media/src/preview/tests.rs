@@ -4168,6 +4168,61 @@ fn isolated_demux_survives_codec_family_retirement_until_full_clear() {
     let path = root.path().join("family-retirement-h264.mp4");
     std::fs::write(&path, FIXTURE).expect("write synthetic fixture");
     let fingerprint = MediaFileFingerprint::capture(&path);
+    // Cancellation before the first packet must preserve the initial decode
+    // prefix across codec retirement, including its negative-DTS preroll.
+    {
+        let (bootstrap, observer) =
+            PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker.clone());
+        let mut context = bootstrap.build();
+        let request = covering_decode_request(
+            &path,
+            TimelineTime::ZERO,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            test_source_color(),
+        )
+        .with_fingerprint(fingerprint)
+        .with_video_stream_index(0)
+        .with_max_size(Some(64), Some(64));
+        let cancellation_observer = observer.clone();
+        let outcome = context
+            .decode_cancellable(request, move || {
+                cancellation_observer.snapshot().stage == PreviewDecodeExecutionStage::CacheLookup
+            })
+            .expect("cancel before consuming the packet prefix");
+        let PreviewDecodeOutcome::Canceled(cancellation) = outcome else {
+            panic!("origin request must cancel before its first packet");
+        };
+        assert_eq!(
+            cancellation.source,
+            PreviewDecodeCancellationSource::CooperativeCheckpoint,
+        );
+        assert_eq!(observer.snapshot().isolated_demux.completed_reads, 0);
+        context.clear_family(crate::PreviewDecodeSessionFamily::Interactive);
+        assert_eq!(context.resident_session_count(), 0);
+        let request = PreviewDecodeRequest {
+            access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+            ..request
+        };
+        let outcome = context.decode_cancellable(request, || false).expect("origin retry");
+        let PreviewDecodeOutcome::Frame(frame) = outcome else {
+            panic!("CPU fixture must return the exact origin frame");
+        };
+        assert_eq!(frame.diagnostics.selected_pts, Some(0));
+        assert!(!frame.diagnostics.temporal_approximation);
+        assert!(
+            !frame.diagnostics.seek_performed,
+            "an untouched packet source must retain its initial decode prefix"
+        );
+        drop(frame);
+        context.clear();
+        let evidence = observer.snapshot().isolated_demux;
+        assert!(evidence.completed_reads > 0);
+        assert_eq!(evidence.completed_seeks, 0);
+        assert_eq!(evidence.session_launches, if cfg!(windows) { 2 } else { 1 });
+        assert_eq!(evidence.reaped_sessions(), evidence.session_launches);
+        assert_eq!(evidence.active_sessions, 0);
+        assert_eq!(evidence.failure_terminations, 0);
+    }
     let (bootstrap, observer) =
         PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker);
     let mut context = bootstrap.build();

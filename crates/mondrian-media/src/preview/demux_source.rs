@@ -35,6 +35,8 @@ pub(super) enum PreviewPacketSource {
 
 pub(super) struct PreviewPacketSourceOpen {
     pub source: PreviewPacketSource,
+    /// Whether the packet cursor still owns the untouched initial decode prefix.
+    pub at_demux_origin: bool,
     pub parameters: ffmpeg::codec::Parameters,
     pub stream_index: usize,
     pub stream_tb: ffmpeg::Rational,
@@ -97,6 +99,7 @@ impl PreviewPacketSource {
                         });
                     Ok(PreviewPacketSourceOpen {
                         source: Self::Isolated(Box::new(open.source)),
+                        at_demux_origin: true,
                         parameters: stream.parameters,
                         stream_index: stream.stream_index,
                         stream_tb: stream.time_base,
@@ -305,6 +308,7 @@ impl PreviewPacketSource {
         };
         Ok(PreviewPacketSourceOpen {
             source: Self::Direct(input),
+            at_demux_origin: true,
             parameters,
             stream_index,
             stream_tb,
