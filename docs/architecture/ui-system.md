@@ -4511,7 +4511,7 @@ projection has no author lease and cannot produce a scalar edit. Ambiguous Scope
 materializations require explicit selection; a single binding follows the same
 implicit occurrence contract as the existing Inspector projection.
 
-The shared numeric adapter recognizes the closed SetAudioParameter scalar intent
+The shared numeric adapter recognizes the closed SetAudioScalar scalar intent
 and lowers pointer Begin/Update/Finish/Cancel through the existing parameter
 interaction protocol. Keyboard nudges and confirmed NumberInput text are discrete
 scalar intents. Widget refresh keeps fresh callbacks; inspection never carries
@@ -4550,3 +4550,61 @@ ParameterGesture adapter or non-Parameter callbacks. No second author history is
 created. Accessible numeric names/units and native assistive-technology action
 adapters remain independent follow-up work; a synchronized Text node is evidence
 of the actual NumberInput readout, not a native AT qualification claim.
+
+
+### Numeric semantic inspection
+
+`AccessibilityValue::Number` stores Float64 and `Integer` retains exact signed
+64-bit values. Generic Slider and DockSplitter coordinate ranges promote their
+Float32 coordinates without rounding; concrete numeric pairs explicitly expose
+their current declared scalar with the same admitted NumberInput hard range.
+The presentation pair reads `committed_value()` and `range()` directly from the
+sole numeric model. Formatted text is not parsed to invent an author baseline.
+
+The numeric Slider's fresh pure value adapter follows the same live scalar used
+by its actual adjacent readout. NumberInput continues to expose its real raw
+Text draft and existing disabled, confirmation, cancellation, selection and IME
+contracts. That UI scalar is pending presentation intent; canonical author
+transactions and exact owner/session admission still determine author success.
+
+Rack scalar parameter names come from the same localized parameter label and
+unit painted by the current row. Sidechain level uses its current localized
+label and declared dB unit for both paint and numeric semantic names. Labels,
+value adapters and callbacks are fresh projection data and are not restored by
+focus or numeric draft inspection. Other numeric rows still require explicit
+name adoption; this stage does not claim complete application accessibility.
+
+These are platform-neutral AccessibilityNode contracts only. Native assistive
+technology publication, numeric range/action delivery and physical screen
+reader qualification remain separate unfinished adapters.
+
+
+### Closed audio scalar control owners
+
+Processor parameters, Channel input Trim, static Fader, ordinary Route level and
+processor sidechain level use one `SetAudioScalar` intent and the same continuous
+parameter interaction protocol. The closed owner enum carries only each field's
+actual authority: a processor parameter owns its exact definition and one
+schema; Trim/Fader own a Channel Strip address; routes own exact endpoints; a
+processor sidechain also owns its exact inspected occurrence, definition and bus.
+No fake parameter schema, arbitrary nested edit or compatibility alias is used.
+
+Concrete App projections bind a current author session/Sequence lease to their
+explicit source Sequence. Pure Sequence projections cannot authorize edits.
+Absent leases, locked owners and automated scalar values disable the appropriate
+controls. Factories capture only the closed target rather than whole Channels,
+Racks, source menus or runtime observations. Target identity and control role
+form the semantic focus/draft key; current values, captions and list order do not.
+
+The adjacent numeric pair still follows its actual typed scalar and sole
+NumberInputModel. Mixer Trim/Fader/Route and Sidechain controls adopt the same
+current localized painted dB label for their neutral semantic names. Native AT
+publication and range/action delivery remain separate unfinished adapters.
+
+Begin/Update/Finish/Cancel enter the existing canonical author Session. A complete
+drag seals one Undo entry; Cancel restores the current gesture origin without
+adding author history. Session/Sequence replacement, endpoint/definition/schema
+rebind, automation and lock/delete boundaries refuse stale owners before author
+mutation. Discrete keyboard nudges and confirmed numeric text remain separate
+scalar commands. Host regression receipts, rather than this source description,
+qualify the actual Router/capture/author behavior.

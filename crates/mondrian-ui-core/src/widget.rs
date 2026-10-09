@@ -127,8 +127,12 @@ pub struct AccessibilityState {
 pub enum AccessibilityValue {
     /// Editable or readable text value.
     Text(String),
-    /// Numeric value with an inclusive range.
-    Number { value: f32, min: f32, max: f32 },
+    /// Floating value with an inclusive range, preserving f64 domain precision.
+    /// Generic control coordinates may be promoted here; a declared domain
+    /// adapter supplies its actual value and range instead.
+    Number { value: f64, min: f64, max: f64 },
+    /// Exact signed integer value and inclusive range, without a float roundtrip.
+    Integer { value: i64, min: i64, max: i64 },
     /// Scroll position and range.
     Scroll {
         x: f32,
@@ -943,6 +947,14 @@ pub trait Widget {
     /// of focus, accessibility, and whether the interaction has changed a value.
     /// Return false after release, cancellation, or programmatic disable.
     fn has_active_pointer_interaction(&self) -> bool {
+        false
+    }
+
+    /// Supply a fresh model-owned accessible name when this control supports it.
+    ///
+    /// Names do not identify author controls and are never restored by semantic
+    /// inspection. Return false when the control has no name override.
+    fn set_accessible_name(&mut self, _name: Option<String>) -> bool {
         false
     }
 

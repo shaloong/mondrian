@@ -184,14 +184,13 @@ use crate::app_ui::audio_component_mapping::{
 use crate::app_ui::audio_mixer::{
     create_bus_action as audio_mixer_create_bus_action,
     create_route_action as audio_mixer_create_route_action,
+    fader_target as audio_mixer_fader_target, input_trim_target as audio_mixer_input_trim_target,
     remove_bus_action as audio_mixer_remove_bus_action,
     remove_route_action as audio_mixer_remove_route_action,
     rename_bus_action as audio_mixer_rename_bus_action,
     rewire_route_action as audio_mixer_rewire_route_action,
-    set_fader_action as audio_mixer_set_fader_action,
-    set_input_trim_action as audio_mixer_set_input_trim_action,
+    route_gain_target as audio_mixer_route_gain_target,
     set_route_enabled_action as audio_mixer_set_route_enabled_action,
-    set_route_gain_action as audio_mixer_set_route_gain_action,
     set_track_mute_action as audio_mixer_set_track_mute_action,
     set_track_solo_action as audio_mixer_set_track_solo_action, AudioMixerChannelKind,
     AudioMixerGainModel, AudioMixerPanelModel,
@@ -2785,7 +2784,7 @@ impl InspectorPanelModel {
                 if let Ok(descriptors) = state.installed_vst3_processors() {
                     append_vst3_insert_options(&mut racks, &descriptors);
                 }
-                super::audio_processor_rack::bind_parameter_author_lease(&mut racks, state);
+                super::audio_processor_rack::bind_audio_scalar_author_lease(&mut racks, state);
                 super::audio_processor_rack::bind_processor_input_queries(
                     &mut racks, state, localizer, None,
                 );

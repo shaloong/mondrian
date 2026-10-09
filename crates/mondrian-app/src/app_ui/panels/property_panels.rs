@@ -97,37 +97,21 @@ pub(super) fn audio_mixer_panel(
             localizer.text("mixer-level"),
             Box::new(Label::new(audio_mixer_meter_label(channel, localizer)).muted()),
         ));
-        let trim_channel = channel.clone();
+        let trim_label = format!("{} (dB)", localizer.text("mixer-input-trim"));
         section = section.with_row(PropertyRow::new(
-            localizer.text("mixer-input-trim"),
-            numeric_slider_input_control_with_hard_range(
+            trim_label.clone(),
+            audio_gain_scalar_control(
                 channel.input_trim_db,
-                -60.0,
-                12.0,
-                AUDIO_GAIN_DB_MIN,
-                AUDIO_GAIN_DB_MAX,
-                Some(0.1),
-                1,
-                channel.is_editable,
-                move |value| audio_mixer_set_input_trim_action(&trim_channel, value),
+                audio_mixer_input_trim_target(channel),
+                &trim_label,
             ),
         ));
         match channel.fader {
             AudioMixerGainModel::Static { value_db } => {
-                let fader_channel = channel.clone();
+                let label = format!("{} (dB)", localizer.text("mixer-fader"));
                 section = section.with_row(PropertyRow::new(
-                    localizer.text("mixer-fader"),
-                    numeric_slider_input_control_with_hard_range(
-                        value_db,
-                        -60.0,
-                        12.0,
-                        AUDIO_GAIN_DB_MIN,
-                        AUDIO_GAIN_DB_MAX,
-                        Some(0.1),
-                        1,
-                        channel.is_editable,
-                        move |value| audio_mixer_set_fader_action(&fader_channel, value),
-                    ),
+                    label.clone(),
+                    audio_gain_scalar_control(value_db, audio_mixer_fader_target(channel), &label),
                 ));
             }
             AudioMixerGainModel::Automated { keyframe_count } => {
@@ -247,19 +231,13 @@ pub(super) fn audio_mixer_panel(
                     ));
             match route.gain {
                 AudioMixerGainModel::Static { value_db } => {
-                    let gain_route = route.clone();
+                    let label = format!("{} (dB)", localizer.text("mixer-level"));
                     route_section = route_section.with_row(PropertyRow::new(
-                        localizer.text("mixer-level"),
-                        numeric_slider_input_control_with_hard_range(
+                        label.clone(),
+                        audio_gain_scalar_control(
                             value_db,
-                            -60.0,
-                            12.0,
-                            AUDIO_GAIN_DB_MIN,
-                            AUDIO_GAIN_DB_MAX,
-                            Some(0.1),
-                            1,
-                            route.is_editable,
-                            move |value| audio_mixer_set_route_gain_action(&gain_route, value),
+                            audio_mixer_route_gain_target(route),
+                            &label,
                         ),
                     ));
                 }
@@ -1902,17 +1880,16 @@ pub(super) fn with_audio_processor_rack_sections(
                         .minimal()
                         .enabled(can_reset)
                         .on_click(Some(reset_action));
+                    let mut scalar = audio_processor_static_parameter_control(
+                        rack,
+                        processor,
+                        parameter,
+                        numeric,
+                        rack_can_edit,
+                    );
+                    name_numeric_control(scalar.as_mut(), &label);
                     let value = FlexContainer::row(vec![
-                        FlexChild::flex(
-                            audio_processor_static_parameter_control(
-                                rack,
-                                processor,
-                                parameter,
-                                numeric,
-                                rack_can_edit,
-                            ),
-                            1.0,
-                        ),
+                        FlexChild::flex(scalar, 1.0),
                         FlexChild::fixed(Box::new(reset)),
                     ])
                     .with_gap(mondrian_ui_theme::current_theme().spacing.xs);
@@ -2007,32 +1984,10 @@ pub(super) fn with_audio_processor_rack_sections(
                     ),
                 ));
                 if let Some(value) = route.static_gain {
-                    let gain_route = route.clone();
-                    let mut gain_control = numeric_slider_input_control_with_hard_range(
-                        value,
-                        -60.0,
-                        12.0,
-                        AUDIO_GAIN_DB_MIN,
-                        AUDIO_GAIN_DB_MAX,
-                        Some(0.1),
-                        1,
-                        route.is_editable,
-                        move |value| {
-                            crate::app_ui::audio_sidechain::gain_action(&gain_route, value)
-                        },
-                    );
-                    assign_numeric_control_inspection_key(
-                        gain_control.as_mut(),
-                        audio_rack_control_inspection_key(
-                            rack,
-                            Some(processor),
-                            "sidechain-gain",
-                            AudioRackControlSubject::Route(route.route_id),
-                        ),
-                    );
+                    let label = format!("{} (dB)", localizer.text("audio-sidechain-level"));
                     section = section.with_row(PropertyRow::new(
-                        localizer.text("audio-sidechain-level"),
-                        gain_control,
+                        label.clone(),
+                        audio_gain_scalar_control(value, route.scalar_target.clone(), &label),
                     ));
                 } else {
                     section = section.with_row(PropertyRow::new(
@@ -2081,6 +2036,52 @@ pub(super) fn with_audio_processor_rack_sections(
         }
     }
     panel
+}
+
+// This single gain adapter captures only the closed scalar owner. It does
+// not retain a Channel/Rack, routes, native metadata or old callbacks.
+fn audio_gain_scalar_control(
+    value_db: f64,
+    target: Option<crate::app::parameter_gesture::AudioScalarGestureTarget>,
+    label: &str,
+) -> Box<dyn Widget> {
+    let key = target
+        .as_ref()
+        .and_then(|target| serde_json::to_string(&("audio-scalar-control", target)).ok());
+    let enabled = target.is_some();
+    let mut control = numeric_slider_input_control_with_hard_range(
+        value_db,
+        -60.0,
+        12.0,
+        AUDIO_GAIN_DB_MIN,
+        AUDIO_GAIN_DB_MAX,
+        Some(0.1),
+        1,
+        enabled,
+        move |value| target.as_ref()?.set_action(value),
+    );
+    assign_numeric_control_inspection_key(control.as_mut(), key);
+    name_numeric_control(control.as_mut(), label);
+    control
+}
+
+// Adopt the same current localized label painted by this concrete property
+// row. Names are presentation metadata and never participate in owner identity.
+fn name_numeric_control(widget: &mut dyn Widget, name: &str) {
+    if widget.accessibility().is_some_and(|node| {
+        matches!(
+            node.role,
+            mondrian_ui_core::AccessibilityRole::Slider
+                | mondrian_ui_core::AccessibilityRole::TextInput
+        )
+    }) {
+        widget.set_accessible_name(Some(name.to_owned()));
+    }
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child_mut(index) {
+            name_numeric_control(child, name);
+        }
+    }
 }
 
 /// Format parameter units using localized words and standard scientific symbols.
@@ -2501,6 +2502,14 @@ where
     if let Some(step) = step {
         input = input.with_step(step);
     }
+    // The admitted model, rather than formatted text, owns the numeric
+    // baseline and hard range used by this current presentation pair.
+    presented_value.set(input.committed_value());
+    let (entry_min, entry_max) = input.range();
+    let semantic_value = Rc::clone(&presented_value);
+    slider = slider.with_accessible_value(move || {
+        semantic_value.get().accessibility_value(entry_min, entry_max)
+    });
     let input_action = Rc::clone(&action);
     let input_value = Rc::clone(&presented_value);
     input = input.on_change(move |value| {

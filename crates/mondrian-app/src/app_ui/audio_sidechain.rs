@@ -15,6 +15,7 @@ use mondrian_timeline::{
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SidechainRouteModel {
+    pub(crate) scalar_target: Option<crate::app::parameter_gesture::AudioScalarGestureTarget>,
     pub(crate) route_id: AudioRouteId,
     pub(crate) source: AudioRouteSource,
     pub(crate) source_label: String,
@@ -71,6 +72,7 @@ pub(crate) fn retained_routes(
                 Err(error) => Some(error.to_string()),
             };
             SidechainRouteModel {
+                scalar_target: None,
                 route_id: route.id,
                 source: route.source,
                 source_label: source_label(sequence, route.source, localizer),
@@ -315,21 +317,6 @@ pub(crate) fn enabled_action(route: &SidechainRouteModel, enabled: bool) -> Opti
     })
 }
 
-pub(crate) fn gain_action(route: &SidechainRouteModel, value: f64) -> Option<Action> {
-    (route.is_editable
-        && route.static_gain.is_some()
-        && value.is_finite()
-        && (mondrian_timeline::audio::AUDIO_GAIN_DB_MIN
-            ..=mondrian_timeline::audio::AUDIO_GAIN_DB_MAX)
-            .contains(&value))
-    .then(|| {
-        edit_action(AudioRoutingEdit::SetProcessorSidechainGainDb {
-            route_id: route.route_id,
-            value,
-        })
-    })
-}
-
 pub(crate) fn remove_action(route: &SidechainRouteModel) -> Option<Action> {
     route.is_editable.then(|| {
         edit_action(AudioRoutingEdit::RemoveProcessorSidechain { route_id: route.route_id })
@@ -361,6 +348,27 @@ mod tests {
         (sequence, id, source)
     }
 
+    fn author_bound_routes(
+        state: &AppState,
+        processor_id: AudioProcessorInstanceId,
+        localizer: &Localizer,
+    ) -> Vec<SidechainRouteModel> {
+        let model =
+            super::super::audio_mixer::AudioMixerPanelModel::from_app_state(state, localizer);
+        let (rack, processor) = model
+            .channels
+            .iter()
+            .flat_map(|channel| &channel.processor_racks)
+            .flat_map(|rack| rack.processors.iter().map(move |processor| (rack, processor)))
+            .find(|(_, processor)| processor.processor_id == processor_id)
+            .expect("real author-bound processor");
+        assert!(
+            rack.scalar_author_lease.is_some(),
+            "negative controls use a genuine App source lease"
+        );
+        processor.sidechain_routes.clone()
+    }
+
     #[test]
     fn sidechain_gain_curve_projection_keeps_sequence_time_source_lock_and_selection() {
         use mondrian_core::{
@@ -387,10 +395,14 @@ mod tests {
         let context = AudioAutomationTimeContext::at_sequence_time(&sequence, time);
         let localizer = Localizer::new(AppUiLocale::EnUs).expect("catalog");
         let projected = retained_routes(&sequence, id, &localizer, context);
+        let mut bound_state = AppState::new();
+        bound_state.test_set_sequence(Some(sequence.clone()));
+        let bound = author_bound_routes(&bound_state, id, &localizer);
         assert!(
-            gain_action(&projected[0], 1.0).is_none(),
-            "scalar cannot replace author curve"
+            bound[0].scalar_target.is_none(),
+            "an author-bound scalar cannot replace the existing curve"
         );
+        assert!(!bound_state.can_undo_action());
         let model = projected[0].gain_automation.as_ref().expect("offline curve editable");
         assert!(model.is_editable);
         assert_eq!(model.source_curve, curve);
@@ -486,8 +498,20 @@ mod tests {
             assert!(model.disabled_reason.is_some());
             assert!(remove_action(model).is_none());
             assert!(enabled_action(model, true).is_none());
-            assert!(gain_action(model, 1.0).is_none());
+            assert!(model.scalar_target.is_none());
         }
+        let mut bound_state = AppState::new();
+        bound_state.test_set_sequence(Some(sequence));
+        let bound = author_bound_routes(
+            &bound_state,
+            id,
+            &Localizer::new(AppUiLocale::EnUs).expect("catalog"),
+        );
+        assert!(
+            bound.iter().all(|route| route.scalar_target.is_none()),
+            "a genuine source lease cannot override the canonical Track lock"
+        );
+        assert!(!bound_state.can_undo_action());
     }
 
     #[test]
@@ -505,19 +529,17 @@ mod tests {
                 .expect("connect");
         }
         let localizer = Localizer::new(AppUiLocale::ZhCn).expect("catalog");
-        let routes = retained_routes(
-            state.active_sequence().expect("Sequence"),
-            id,
-            &localizer,
-            AudioAutomationTimeContext::at_sequence_time(
-                state.active_sequence().expect("Sequence"),
-                mondrian_core::TimelineTime::ZERO,
-            ),
-        );
+        let routes = author_bound_routes(&state, id, &localizer);
         let second = routes[1].route_id;
         let precise = -6.123456789123456_f64;
         state
-            .dispatch_action(gain_action(&routes[0], precise).expect("gain action"))
+            .dispatch_action(
+                routes[0]
+                    .scalar_target
+                    .as_ref()
+                    .and_then(|target| target.set_action(precise))
+                    .expect("gain action"),
+            )
             .expect("gain");
         assert_eq!(
             state.active_sequence().expect("Sequence").audio_program.sidechain_routes[0].gain_db,
@@ -554,7 +576,11 @@ mod tests {
             f64::INFINITY,
             mondrian_timeline::audio::AUDIO_GAIN_DB_MAX + 1.0,
         ] {
-            assert!(gain_action(&routes[0], invalid).is_none());
+            assert!(routes[0]
+                .scalar_target
+                .as_ref()
+                .and_then(|target| target.set_action(invalid))
+                .is_none());
         }
     }
 

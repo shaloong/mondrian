@@ -95,19 +95,28 @@ pub(crate) fn normalized_static_parameter_value(
 
 /// Attach only the author lifetime observed in the concrete App projection.
 /// A missing session or active Sequence remains non-authorizing.
-pub(crate) fn bind_parameter_author_lease(
+pub(crate) fn bind_audio_scalar_author_lease(
     racks: &mut [AudioProcessorRackModel],
     state: &crate::app::AppState,
 ) {
-    let lease = state.authoring_session_id().zip(state.active_sequence_id()).map(
-        |(session_id, sequence_id)| crate::app::parameter_gesture::AudioParameterAuthorLease {
-            session_id,
-            sequence_id,
-        },
-    );
     for rack in racks {
-        rack.parameter_author_lease =
-            lease.filter(|lease| lease.sequence_id == rack.source_sequence_id);
+        rack.scalar_author_lease =
+            crate::app::parameter_gesture::AudioScalarAuthorLease::from_state(
+                state,
+                rack.source_sequence_id,
+            );
+        for processor in &mut rack.processors {
+            for route in &mut processor.sidechain_routes {
+                route.scalar_target = rack.scalar_author_lease.filter(|_| rack.is_editable && route.is_editable && route.static_gain.is_some())
+                    .zip(rack.input_inspection_target).map(|(lease, owner)| crate::app::parameter_gesture::AudioScalarGestureTarget {
+                        lease,
+                        owner: crate::app::parameter_gesture::AudioScalarOwner::ProcessorSidechainLevel {
+                            route_id: route.route_id, source: route.source, bus_key: route.bus_key.clone(),
+                            owner, processor_id: processor.processor_id, definition: processor.definition.clone(),
+                        },
+                    });
+            }
+        }
     }
 }
 
@@ -130,8 +139,7 @@ pub(crate) struct AudioProcessorRackModel {
     /// Exact source of this immutable Rack projection.
     pub(crate) source_sequence_id: mondrian_core::SequenceId,
     /// Fresh author lifetime; pure Sequence projections cannot authorize controls.
-    pub(crate) parameter_author_lease:
-        Option<crate::app::parameter_gesture::AudioParameterAuthorLease>,
+    pub(crate) scalar_author_lease: Option<crate::app::parameter_gesture::AudioScalarAuthorLease>,
     pub(crate) input_inspection_target: Option<mondrian_audio::AudioProcessorInputInspectionTarget>,
     pub(crate) title: String,
     pub(crate) ownership_label: String,
@@ -311,7 +319,7 @@ pub(crate) fn project_audio_processor_rack(
     AudioProcessorRackModel {
         address,
         source_sequence_id: sequence.id,
-        parameter_author_lease: None,
+        scalar_author_lease: None,
         input_inspection_target: match address {
             AudioProcessorRackAddress::ChannelStrip { owner, rack } => Some(
                 mondrian_audio::AudioProcessorInputInspectionTarget::ChannelStrip { owner, rack },
@@ -733,7 +741,7 @@ pub(crate) fn static_parameter_target(
     rack: &AudioProcessorRackModel,
     processor: &AudioProcessorInstanceModel,
     parameter: &AudioProcessorParameterModel,
-) -> Option<crate::app::parameter_gesture::AudioParameterGestureTarget> {
+) -> Option<crate::app::parameter_gesture::AudioScalarGestureTarget> {
     if !rack.is_editable
         || !parameter.is_static_editable()
         || parameter.parameter_id != parameter.schema.parameter_id
@@ -741,34 +749,32 @@ pub(crate) fn static_parameter_target(
         return None;
     }
     let lease = rack
-        .parameter_author_lease
+        .scalar_author_lease
         .filter(|lease| lease.sequence_id == rack.source_sequence_id)?;
-    let target = crate::app::parameter_gesture::AudioParameterGestureTarget {
+    let target = crate::app::parameter_gesture::AudioScalarGestureTarget {
         lease,
-        owner: rack.input_inspection_target?,
-        processor_id: processor.processor_id,
-        definition: processor.definition.clone(),
-        parameter_schema: parameter.schema.clone(),
+        owner: crate::app::parameter_gesture::AudioScalarOwner::Parameter {
+            owner: rack.input_inspection_target?,
+            processor_id: processor.processor_id,
+            definition: processor.definition.clone(),
+            parameter_schema: Box::new(parameter.schema.clone()),
+        },
     };
-    (target.rack_address() == rack.address).then_some(target)
+    (target.owner.processor_address() == Some(rack.address)).then_some(target)
 }
 
 /// Build one closed scalar intent from an explicitly captured control owner.
 /// No current App state or arbitrary nested Rack operation is inferred here.
 pub(crate) fn set_static_parameter_action(
-    target: &crate::app::parameter_gesture::AudioParameterGestureTarget,
+    target: &crate::app::parameter_gesture::AudioScalarGestureTarget,
     value: f64,
 ) -> Option<Action> {
-    let value = normalized_static_parameter_value(&target.parameter_schema, value)?;
-    Some(
-        crate::app::parameter_gesture::ParameterGestureAction::SetAudioParameter {
-            edit: crate::app::parameter_gesture::AudioParameterValueEdit {
-                target: Box::new(target.clone()),
-                value,
-            },
-        }
-        .action(),
-    )
+    let crate::app::parameter_gesture::AudioScalarOwner::Parameter { parameter_schema, .. } =
+        &target.owner
+    else {
+        return None;
+    };
+    target.set_action(normalized_static_parameter_value(parameter_schema, value)?)
 }
 
 fn rack_edit_action(address: AudioProcessorRackAddress, edit: AudioProcessorRackEdit) -> Action {
@@ -1027,9 +1033,28 @@ mod tests {
             .is_some_and(|reason| reason.contains("已锁定")));
     }
 
+    fn static_parameter_parts(
+        target: &crate::app::parameter_gesture::AudioScalarGestureTarget,
+    ) -> (
+        mondrian_audio::AudioProcessorInputInspectionTarget,
+        mondrian_core::AudioProcessorInstanceId,
+        &mondrian_core::automation::ParameterSchema,
+    ) {
+        let crate::app::parameter_gesture::AudioScalarOwner::Parameter {
+            owner,
+            processor_id,
+            parameter_schema,
+            ..
+        } = &target.owner
+        else {
+            panic!("exact processor parameter owner")
+        };
+        (*owner, *processor_id, parameter_schema)
+    }
+
     fn static_parameter_author_fixture() -> (
         crate::app::AppState,
-        crate::app::parameter_gesture::AudioParameterGestureTarget,
+        crate::app::parameter_gesture::AudioScalarGestureTarget,
     ) {
         let (sequence, clip_id) = sequence_with_gain_scope();
         let mut state = crate::app::AppState::new();
@@ -1048,7 +1073,7 @@ mod tests {
         let (mut state, target) = static_parameter_author_fixture();
         let value = -6.123456789123456_f64;
         let action = set_static_parameter_action(&target, value).expect("value");
-        let Some(crate::app::parameter_gesture::ParameterGestureAction::SetAudioParameter { edit }) =
+        let Some(crate::app::parameter_gesture::ParameterGestureAction::SetAudioScalar { edit }) =
             crate::app::parameter_gesture::ParameterGestureAction::decode(&action)
                 .expect("typed codec")
         else {
@@ -1059,11 +1084,11 @@ mod tests {
         let snapshot = |state: &crate::app::AppState| {
             mondrian_audio::inspect_audio_processor_input_author(
                 state.active_sequence().expect("Sequence"),
-                target.owner,
-                target.processor_id,
+                static_parameter_parts(&target).0,
+                static_parameter_parts(&target).1,
             )
             .expect("exact canonical processor")
-            .parameters[&target.parameter_schema.parameter_id]
+            .parameters[&static_parameter_parts(&target).2.parameter_id]
                 .automation
                 .default_value
         };
@@ -1081,10 +1106,12 @@ mod tests {
         let (mut state, target) = static_parameter_author_fixture();
         let action = set_static_parameter_action(&target, -6.0).expect("valid static edit");
         assert!(
-            matches!(crate::app::parameter_gesture::ParameterGestureAction::decode(&action).expect("typed codec"), Some(crate::app::parameter_gesture::ParameterGestureAction::SetAudioParameter { edit }) if *edit.target == target && edit.value == -6.0)
+            matches!(crate::app::parameter_gesture::ParameterGestureAction::decode(&action).expect("typed codec"), Some(crate::app::parameter_gesture::ParameterGestureAction::SetAudioScalar { edit }) if *edit.target == target && edit.value == -6.0)
         );
         assert!(set_static_parameter_action(&target, -121.0).is_none());
-        let AudioProcessorRackAddress::ProcessingScope { scope_id } = target.rack_address() else {
+        let AudioProcessorRackAddress::ProcessingScope { scope_id } =
+            target.owner.processor_address().expect("Parameter Rack")
+        else {
             panic!("Scope")
         };
         state
@@ -1098,7 +1125,7 @@ mod tests {
             .processors
             .processors[0]
             .parameters
-            .get_mut(&target.parameter_schema.parameter_id)
+            .get_mut(&static_parameter_parts(&target).2.parameter_id)
             .expect("parameter")
             .automation
             .set_keyframe(ExactAutomationKeyframe::linear(TimelineTime::ZERO, -3.0))
@@ -1404,25 +1431,39 @@ mod tests {
                         other_state.authoring_session_id().expect("other lifetime")
                 }
                 1 => stale.lease.sequence_id = mondrian_core::SequenceId::new(),
-                2 => stale.processor_id = AudioProcessorInstanceId::new(),
-                3 => {
-                    let AudioProcessorDefinitionRef::BuiltIn { schema_version, .. } =
-                        &mut stale.definition
-                    else {
-                        panic!("built-in")
-                    };
-                    *schema_version += 1;
-                }
-                4 => stale.parameter_schema.schema_version += 1,
-                5 => {
-                    let mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
-                        occurrence,
-                        ..
+                2..=5 => {
+                    let crate::app::parameter_gesture::AudioScalarOwner::Parameter {
+                        owner,
+                        processor_id,
+                        definition,
+                        parameter_schema,
                     } = &mut stale.owner
                     else {
-                        panic!("Scope")
+                        panic!("exact processor parameter owner")
                     };
-                    occurrence.edit_id = mondrian_core::AudioComponentEditId::new();
+                    match boundary {
+                        2 => *processor_id = AudioProcessorInstanceId::new(),
+                        3 => {
+                            let AudioProcessorDefinitionRef::BuiltIn { schema_version, .. } =
+                                definition
+                            else {
+                                panic!("built-in")
+                            };
+                            *schema_version += 1;
+                        }
+                        4 => parameter_schema.schema_version += 1,
+                        5 => {
+                            let mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+                                occurrence,
+                                ..
+                            } = owner
+                            else {
+                                panic!("Scope")
+                            };
+                            occurrence.edit_id = mondrian_core::AudioComponentEditId::new();
+                        }
+                        _ => unreachable!(),
+                    }
                 }
                 _ => unreachable!(),
             }
@@ -1454,7 +1495,7 @@ mod tests {
         };
         payload["edit"].as_object_mut().expect("closed scalar fields").insert(
             "rack_operation".into(),
-            serde_json::json!({"operation":"remove","processor_id":target.processor_id}),
+            serde_json::json!({"operation":"remove","processor_id":static_parameter_parts(&target).1}),
         );
         assert!(
             crate::app::parameter_gesture::ParameterGestureAction::decode(&action).is_err(),
@@ -1465,13 +1506,13 @@ mod tests {
     #[test]
     fn typed_static_parameter_late_cancel_cannot_rollback_intervening_author_edit() {
         use crate::app::parameter_gesture::{
-            AudioParameterValueEdit, ParameterGestureAction, ParameterGestureEdit,
+            AudioScalarValueEdit, ParameterGestureAction, ParameterGestureEdit,
         };
         let (mut state, target) = static_parameter_author_fixture();
         let original = state.active_sequence().expect("origin").clone();
         let gesture_id = mondrian_core::AuthoringGestureId::new();
         let edit = |value| {
-            ParameterGestureEdit::AudioParameter(AudioParameterValueEdit {
+            ParameterGestureEdit::AudioScalar(AudioScalarValueEdit {
                 target: Box::new(target.clone()),
                 value,
             })
@@ -1487,9 +1528,9 @@ mod tests {
         state
             .dispatch_action(audio_processor_rack_edit_action(
                 AudioProcessorRackEditRequest {
-                    address: target.rack_address(),
+                    address: target.owner.processor_address().expect("Parameter Rack"),
                     edit: AudioProcessorRackEdit::SetBypassed {
-                        processor_id: target.processor_id,
+                        processor_id: static_parameter_parts(&target).1,
                         bypassed: true,
                     },
                 },
@@ -1534,13 +1575,13 @@ mod tests {
     #[test]
     fn typed_static_parameter_stale_begin_cannot_seal_another_live_gesture() {
         use crate::app::parameter_gesture::{
-            AudioParameterValueEdit, ParameterGestureAction, ParameterGestureEdit,
+            AudioScalarValueEdit, ParameterGestureAction, ParameterGestureEdit,
         };
         let (mut state, target) = static_parameter_author_fixture();
         let original = state.active_sequence().expect("origin").clone();
         let gesture_id = mondrian_core::AuthoringGestureId::new();
         let edit = |value| {
-            ParameterGestureEdit::AudioParameter(AudioParameterValueEdit {
+            ParameterGestureEdit::AudioScalar(AudioScalarValueEdit {
                 target: Box::new(target.clone()),
                 value,
             })
@@ -1557,7 +1598,7 @@ mod tests {
             .dispatch_action(
                 ParameterGestureAction::Begin {
                     gesture_id: mondrian_core::AuthoringGestureId::new(),
-                    edit: ParameterGestureEdit::AudioParameter(AudioParameterValueEdit {
+                    edit: ParameterGestureEdit::AudioScalar(AudioScalarValueEdit {
                         target: Box::new(stale),
                         value: -30.0,
                     }),

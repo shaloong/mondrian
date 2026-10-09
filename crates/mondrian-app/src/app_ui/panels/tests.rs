@@ -14108,12 +14108,12 @@ fn typed_static_parameter_widget_without_app_lease_is_disabled_and_has_no_author
         racks[0].is_editable,
         "Timeline author admission alone is not a concrete control lifetime"
     );
-    assert!(racks[0].parameter_author_lease.is_none());
+    assert!(racks[0].scalar_author_lease.is_none());
     let mut wrong_source = racks.clone();
     wrong_source[0].source_sequence_id = mondrian_core::SequenceId::new();
-    crate::app_ui::audio_processor_rack::bind_parameter_author_lease(&mut wrong_source, &state);
+    crate::app_ui::audio_processor_rack::bind_audio_scalar_author_lease(&mut wrong_source, &state);
     assert!(
-        wrong_source[0].parameter_author_lease.is_none(),
+        wrong_source[0].scalar_author_lease.is_none(),
         "a Rack projected from another Sequence cannot be stamped with the current App lease"
     );
     let mut control = typed_static_parameter_widget_for_rack(&racks[0]);
@@ -14200,7 +14200,7 @@ fn typed_static_parameter_widget_ambiguous_scope_requires_choice_and_uses_fresh_
     };
     let model = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
     let rack = &model.audio_processor_racks[0];
-    assert!(rack.parameter_author_lease.is_some());
+    assert!(rack.scalar_author_lease.is_some());
     assert!(
         rack.input_inspection_target.is_none(),
         "two materializations require explicit choice"
@@ -14263,14 +14263,19 @@ fn typed_static_parameter_widget_ambiguous_scope_requires_choice_and_uses_fresh_
         "fresh confirmed input emits one scalar intent"
     );
     let action = actions.borrow_mut().remove(0);
-    let Some(crate::app::parameter_gesture::ParameterGestureAction::SetAudioParameter { edit }) =
+    let Some(crate::app::parameter_gesture::ParameterGestureAction::SetAudioScalar { edit }) =
         crate::app::parameter_gesture::ParameterGestureAction::decode(&action)
             .expect("typed scalar")
     else {
         panic!("Set scalar")
     };
+    let crate::app::parameter_gesture::AudioScalarOwner::Parameter { owner, .. } =
+        &edit.target.owner
+    else {
+        panic!("exact processor parameter owner")
+    };
     assert_eq!(
-        edit.target.owner,
+        *owner,
         mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
             scope_id,
             occurrence: second_address
@@ -14436,4 +14441,246 @@ fn numeric_peer_outside_soft_range_drag_cancel_preserves_exact_entry_baseline() 
         "Cancel retains the exact author baseline even beyond slider's soft range"
     );
     assert!(router.captured().is_none());
+}
+
+#[test]
+fn numeric_accessibility_integer_pair_confirms_exact_values_beyond_float64_precision() {
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    let values = Rc::new(RefCell::new(Vec::<i64>::new()));
+    let observed = Rc::clone(&values);
+    let initial = 9_007_199_254_740_993_i64;
+    let mut widget = numeric_slider_input_control_with_hard_range(
+        initial,
+        -10_i64,
+        10_i64,
+        i64::MIN,
+        i64::MAX,
+        Some(1_i64),
+        0,
+        true,
+        move |value| {
+            observed.borrow_mut().push(value);
+            None::<Action>
+        },
+    );
+    widget.layout(Rect::new(0.0, 0.0, 280.0, 28.0));
+    let slider_value = |widget: &dyn Widget| {
+        widget
+            .child(0)
+            .expect("paired Slider")
+            .accessibility()
+            .expect("numeric Slider")
+            .value
+            .expect("declared integer")
+    };
+    let text_value = |widget: &dyn Widget| {
+        let Some(mondrian_ui_core::AccessibilityValue::Text(text)) = widget
+            .child(1)
+            .expect("NumberInput")
+            .accessibility()
+            .expect("entry semantics")
+            .value
+        else {
+            panic!("real numeric Text")
+        };
+        text.parse::<i64>().expect("exact entry")
+    };
+    assert_eq!(
+        slider_value(widget.as_ref()),
+        mondrian_ui_core::AccessibilityValue::Integer {
+            value: initial,
+            min: i64::MIN,
+            max: i64::MAX
+        }
+    );
+    assert_eq!(text_value(widget.as_ref()), initial);
+    let mut router = EventRouter::new(widget.id());
+    let dispatch = |_: Action| {};
+    for _ in 0..2 {
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+            &mut WidgetTreeView::new(widget.as_mut()),
+            &dispatch,
+        );
+    }
+    assert_eq!(router.focused(), Some(widget.child(1).expect("entry").id()));
+    for exact in [i64::MIN, i64::MAX] {
+        for event in [
+            UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+            },
+            UiEvent::TextInput(exact.to_string()),
+        ] {
+            router.route(event, &mut WidgetTreeView::new(widget.as_mut()), &dispatch);
+        }
+        // A live text draft keeps its scalar peer at the admitted baseline.
+        let expected_before = values.borrow().last().copied().unwrap_or(initial);
+        assert_eq!(
+            slider_value(widget.as_ref()),
+            mondrian_ui_core::AccessibilityValue::Integer {
+                value: expected_before,
+                min: i64::MIN,
+                max: i64::MAX
+            }
+        );
+        assert_eq!(text_value(widget.as_ref()), exact);
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut WidgetTreeView::new(widget.as_mut()),
+            &dispatch,
+        );
+        assert_eq!(
+            slider_value(widget.as_ref()),
+            mondrian_ui_core::AccessibilityValue::Integer {
+                value: exact,
+                min: i64::MIN,
+                max: i64::MAX
+            }
+        );
+        assert_eq!(text_value(widget.as_ref()), exact);
+    }
+    assert_eq!(
+        &*values.borrow(),
+        &[i64::MIN, i64::MAX],
+        "only confirmation emits the two exact UI intents; no author f64 conversion"
+    );
+}
+
+#[test]
+fn numeric_accessibility_disabled_pair_reports_admitted_hard_range_and_real_entry() {
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    let values = Rc::new(RefCell::new(Vec::<f64>::new()));
+    let observed = Rc::clone(&values);
+    let mut widget = numeric_slider_input_control_with_hard_range(
+        1000.0_f64,
+        0.0,
+        1.0,
+        10.0,
+        -10.0,
+        None,
+        2,
+        false,
+        move |value| {
+            observed.borrow_mut().push(value);
+            None::<Action>
+        },
+    );
+    widget.layout(Rect::new(0.0, 0.0, 280.0, 28.0));
+    for index in [0, 1] {
+        let node = widget.child(index).expect("peer").accessibility().expect("numeric semantics");
+        assert!(node.state.disabled && !node.state.focusable && !node.state.focused);
+    }
+    assert_eq!(
+        widget
+            .child(0)
+            .expect("Slider")
+            .accessibility()
+            .expect("scalar semantics")
+            .value,
+        Some(mondrian_ui_core::AccessibilityValue::Number { value: 10.0, min: -10.0, max: 10.0 })
+    );
+    assert_eq!(
+        widget.child(1).expect("NumberInput").accessibility().expect("raw Text").value,
+        Some(mondrian_ui_core::AccessibilityValue::Text(
+            "10.00".to_owned()
+        ))
+    );
+    let mut router = EventRouter::new(widget.id());
+    let dispatch = |_: Action| {};
+    for event in [
+        UiEvent::MouseDown {
+            position: Point::new(80.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+        UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+        UiEvent::TextInput("7".to_owned()),
+    ] {
+        router.route(event, &mut WidgetTreeView::new(widget.as_mut()), &dispatch);
+    }
+    assert!(router.focused().is_none() && router.captured().is_none());
+    assert!(values.borrow().is_empty());
+}
+
+#[test]
+fn typed_audio_scalar_mixer_missing_or_mismatched_lease_disables_real_numeric_adapters() {
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(mondrian_timeline::Sequence::new(
+        "Explicit Mixer lease",
+    )));
+    let localizer = Localizer::new(AppUiLocale::EnUs).expect("catalog");
+    let model = AudioMixerPanelModel::from_app_state(&state, &localizer);
+    let names = ["mixer-input-trim", "mixer-fader", "mixer-level"]
+        .map(|key| format!("{} (dB)", localizer.text(key)));
+    for wrong_source in [false, true] {
+        let mut missing = model.clone();
+        missing.channels.truncate(1);
+        let channel = &mut missing.channels[0];
+        assert!(channel.is_editable && channel.scalar_author_lease.is_some());
+        if wrong_source {
+            channel.source_sequence_id = mondrian_core::SequenceId::new();
+        } else {
+            channel.scalar_author_lease = None;
+        }
+        for route in &mut channel.outbound_routes {
+            assert!(route.scalar_author_lease.is_some());
+            if wrong_source {
+                route.source_sequence_id = mondrian_core::SequenceId::new();
+            } else {
+                route.scalar_author_lease = None;
+            }
+        }
+        assert!(crate::app_ui::audio_mixer::input_trim_target(channel).is_none());
+        assert!(crate::app_ui::audio_mixer::fader_target(channel).is_none());
+        assert!(channel
+            .outbound_routes
+            .iter()
+            .all(|route| crate::app_ui::audio_mixer::route_gain_target(route).is_none()));
+        let mut panel = audio_mixer_panel(&missing, &localizer);
+        panel.layout(Rect::new(0.0, 0.0, 640.0, 2000.0));
+        let nodes = mondrian_ui_core::widget::collect_accessibility_nodes(&panel);
+        for name in &names {
+            for role in [
+                mondrian_ui_core::AccessibilityRole::Slider,
+                mondrian_ui_core::AccessibilityRole::TextInput,
+            ] {
+                let numeric = nodes
+                    .iter()
+                    .find(|node| node.role == role && node.name.as_deref() == Some(name.as_str()))
+                    .expect("actual named numeric adapter");
+                assert!(
+                    numeric.state.disabled && !numeric.state.focusable,
+                    "explicit missing or mismatched projection lifetime disables both adapters"
+                );
+                assert!(
+                    numeric.value.is_some(),
+                    "disabled author controls retain a readable admitted value"
+                );
+            }
+        }
+    }
+    let panel = audio_mixer_panel(&model, &localizer);
+    let nodes = mondrian_ui_core::widget::collect_accessibility_nodes(&panel);
+    for name in &names {
+        for role in [
+            mondrian_ui_core::AccessibilityRole::Slider,
+            mondrian_ui_core::AccessibilityRole::TextInput,
+        ] {
+            let numeric = nodes
+                .iter()
+                .find(|node| node.role == role && node.name.as_deref() == Some(name.as_str()))
+                .expect("actual current numeric adapter");
+            assert!(
+                !numeric.state.disabled && numeric.state.focusable,
+                "a genuine current App lease enables both adapters"
+            );
+        }
+    }
+    assert!(
+        !state.can_undo_action(),
+        "projection admission itself cannot mutate author history"
+    );
 }

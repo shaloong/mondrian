@@ -476,7 +476,11 @@ impl Widget for DockSplitter {
                     pressed: Some(self.dragging),
                     ..AccessibilityState::default()
                 })
-                .with_value(AccessibilityValue::Number { value: self.ratio, min: 0.1, max: 0.9 }),
+                .with_value(AccessibilityValue::Number {
+                    value: f64::from(self.ratio),
+                    min: f64::from(0.1_f32),
+                    max: f64::from(0.9_f32),
+                }),
         )
     }
 }
@@ -622,7 +626,11 @@ mod tests {
         assert_eq!(node.state.pressed, Some(true));
         assert_eq!(
             node.value,
-            Some(AccessibilityValue::Number { value: 0.5, min: 0.1, max: 0.9 })
+            Some(AccessibilityValue::Number {
+                value: 0.5,
+                min: f64::from(0.1_f32),
+                max: f64::from(0.9_f32)
+            })
         );
     }
 

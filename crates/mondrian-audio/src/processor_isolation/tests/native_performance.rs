@@ -208,6 +208,8 @@ fn native_plugin_isolated_worker_callback_acceptance() {
         serde_json::from_slice(&fs::read(&context_path).expect("read performance receipt"))
             .expect("machine/build receipt JSON");
     validate_context(&context);
+    let test_binary = std::env::current_exe().expect("performance harness executable");
+    verify_artifact(&context, "audio_test_executable", &test_binary);
     let machine_identity_complete = context["machine"]["cpu_identity_and_ram_available"]
         .as_bool()
         .expect("explicit hardware-receipt completeness");
@@ -219,7 +221,6 @@ fn native_plugin_isolated_worker_callback_acceptance() {
     verify_artifact(&context, "vst3_worker", &vst3_worker);
     verify_artifact(&context, "clap_fixture", &clap_plugin);
     verify_artifact(&context, "vst3_fixture", &vst3_plugin);
-    let test_binary = std::env::current_exe().expect("performance harness executable");
     let output = required_path("MONDRIAN_NATIVE_PERF_OUTPUT");
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent).expect("report directory");

@@ -22,6 +22,10 @@ pub type SliderChangeAction = dyn Fn(f32) -> Option<Action>;
 /// Adapter for value changes and explicit pointer interaction boundaries.
 pub type SliderEditAction = dyn Fn(ValueEdit, f32) -> Option<Action>;
 
+/// Pure, fresh model projection for a slider's declared domain value.
+/// This presentation adapter must not dispatch or mutate author state.
+pub type SliderAccessibleValue = dyn Fn() -> AccessibilityValue;
+
 /// Slider Widget —— 拖拽滑块控制数值
 pub struct Slider {
     id: WidgetId,
@@ -35,6 +39,8 @@ pub struct Slider {
     geometry: Cell<SliderGeometry>,
     on_change: Option<Box<SliderChangeAction>>,
     on_edit: Option<Box<SliderEditAction>>,
+    accessible_name: Option<String>,
+    accessible_value: Option<Box<SliderAccessibleValue>>,
     gesture: Option<mondrian_core::AuthoringGestureId>,
     drag_start: Option<f32>,
     visual: Cell<SliderVisualTokens>,
@@ -103,10 +109,25 @@ impl Slider {
             geometry: Cell::new(SliderVisualTokens::default().geometry()),
             on_change: None,
             on_edit: None,
+            accessible_name: None,
+            accessible_value: None,
             gesture: None,
             drag_start: None,
             visual: Cell::new(SliderVisualTokens::default()),
         }
+    }
+
+    /// Supply the current value in the declared domain for semantic inspection.
+    ///
+    /// Without this adapter the slider reports its own coordinate and range.
+    /// The adapter belongs to the fresh widget and is never carried across a
+    /// model/owner replacement by focus or draft inspection.
+    pub fn with_accessible_value(
+        mut self,
+        value: impl Fn() -> AccessibilityValue + 'static,
+    ) -> Self {
+        self.accessible_value = Some(Box::new(value));
+        self
     }
 
     /// Return the current value.
@@ -477,21 +498,29 @@ impl Widget for Slider {
         true
     }
 
+    fn set_accessible_name(&mut self, name: Option<String>) -> bool {
+        self.accessible_name = name.filter(|name| !name.is_empty());
+        true
+    }
+
     fn accessibility(&self) -> Option<AccessibilityNode> {
         Some(
             AccessibilityNode::new(self.id, AccessibilityRole::Slider)
-                .with_name("Slider")
+                .with_name(self.accessible_name.as_deref().unwrap_or("Slider"))
                 .with_state(AccessibilityState {
                     focusable: self.enabled,
                     focused: self.focused,
                     disabled: !self.enabled,
                     ..AccessibilityState::default()
                 })
-                .with_value(AccessibilityValue::Number {
-                    value: self.value(),
-                    min: self.model.min(),
-                    max: self.model.max(),
-                }),
+                .with_value(self.accessible_value.as_ref().map_or_else(
+                    || AccessibilityValue::Number {
+                        value: f64::from(self.value()),
+                        min: f64::from(self.model.min()),
+                        max: f64::from(self.model.max()),
+                    },
+                    |value| value(),
+                )),
         )
     }
 }
@@ -1318,5 +1347,92 @@ mod tests {
             )
         );
         assert_eq!(encoder.rect_colors[2].a, visual.focus_halo_alpha);
+    }
+
+    #[test]
+    fn numeric_accessibility_generic_slider_retains_exact_coordinate_contract() {
+        let value = 0.12345679_f32;
+        let min = -0.1_f32;
+        let max = 0.9_f32;
+        let slider = Slider::new(value, min, max).disabled();
+        let node = slider.accessibility().expect("coordinate semantics");
+        assert_eq!(
+            node.value,
+            Some(AccessibilityValue::Number {
+                value: f64::from(value),
+                min: f64::from(min),
+                max: f64::from(max)
+            })
+        );
+        assert!(node.state.disabled && !node.state.focusable);
+    }
+
+    #[test]
+    fn numeric_accessibility_slider_reprojection_uses_fresh_domain_name_value_and_callback() {
+        use std::rc::Rc;
+        let old_calls = Rc::new(Cell::new(0));
+        let new_calls = Rc::new(Cell::new(0));
+        let old_value = Rc::new(Cell::new(12.123456789012344_f64));
+        let new_value = Rc::new(Cell::new(-42.123456789012344_f64));
+        let old_read = Rc::clone(&old_value);
+        let old_edits = Rc::clone(&old_calls);
+        let mut old = Slider::new(0.25, 0.0, 1.0)
+            .with_accessible_value(move || AccessibilityValue::Number {
+                value: old_read.get(),
+                min: -100.0,
+                max: 100.0,
+            })
+            .on_change(move |_| {
+                old_edits.set(old_edits.get() + 1);
+                None::<Action>
+            });
+        old.set_control_inspection_key(Some("same-scalar-owner".to_owned()));
+        old.set_accessible_name(Some("Gain (dB)".to_owned()));
+        let mut ctx = event_ctx();
+        old.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        let state = old.control_inspection_state().expect("focus inspection");
+        let fresh_read = Rc::clone(&new_value);
+        let fresh_edits = Rc::clone(&new_calls);
+        let mut fresh = Slider::new(0.75, 0.0, 1.0)
+            .with_accessible_value(move || AccessibilityValue::Number {
+                value: fresh_read.get(),
+                min: -100.0,
+                max: 100.0,
+            })
+            .on_change(move |_| {
+                fresh_edits.set(fresh_edits.get() + 1);
+                None::<Action>
+            });
+        fresh.set_control_inspection_key(Some("same-scalar-owner".to_owned()));
+        fresh.set_accessible_name(Some("增益 (dB)".to_owned()));
+        assert!(fresh.restore_control_inspection_state(&state));
+        assert_eq!(
+            fresh.value(),
+            0.75,
+            "focus inspection never replaces current presentation coordinate"
+        );
+        for value in [-42.123456789012344_f64, 99.12345678901234] {
+            new_value.set(value);
+            old_value.set(-88.0);
+            let node = fresh.accessibility().expect("fresh semantics");
+            assert_eq!(node.name.as_deref(), Some("增益 (dB)"));
+            let Some(AccessibilityValue::Number { value: announced, min, max }) = node.value else {
+                panic!("domain Float64")
+            };
+            assert_eq!(announced.to_bits(), value.to_bits());
+            assert_eq!((min, max), (-100.0, 100.0));
+        }
+        fresh.event(
+            &UiEvent::KeyDown { key: KeyCode::Left, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(old_calls.get(), 0);
+        assert_eq!(new_calls.get(), 1);
+        let mut different = Slider::new(0.5, 0.0, 1.0);
+        different.set_control_inspection_key(Some("different-owner".to_owned()));
+        assert!(!different.restore_control_inspection_state(&state));
+        let mut disabled = Slider::new(0.5, 0.0, 1.0).disabled();
+        disabled.set_control_inspection_key(Some("same-scalar-owner".to_owned()));
+        assert!(!disabled.restore_control_inspection_state(&state));
     }
 }

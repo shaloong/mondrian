@@ -10036,7 +10036,7 @@ mod tests {
         if in_inspector && widget.can_focus() && widget.accessibility().is_some_and(|node| {
             node.role == role && match name {
                 Some(name) => node.name.as_deref() == Some(name),
-                None => matches!(node.value, Some(mondrian_ui_core::AccessibilityValue::Number { value, .. }) if (value - (-18.4_f32 + 60.0) / 72.0).abs() < 0.00001),
+                None => matches!(node.value, Some(mondrian_ui_core::AccessibilityValue::Number { value, .. }) if value.to_bits() == (-18.4_f64).to_bits()),
             }
         }) { return Some(widget.id()); }
         (0..widget.child_count()).find_map(|index| {
@@ -10958,10 +10958,10 @@ mod tests {
     fn inspection_numeric_value_control(
         widget: &dyn Widget,
         in_inspector: bool,
-        value: f32,
+        value: f64,
     ) -> Option<mondrian_ui_core::WidgetId> {
         let in_inspector = in_inspector || widget.panel_kind() == Some(PanelKind::Inspector);
-        if in_inspector && widget.can_focus() && widget.accessibility().is_some_and(|node| node.role == mondrian_ui_core::AccessibilityRole::Slider && matches!(node.value, Some(mondrian_ui_core::AccessibilityValue::Number { value: current, .. }) if (current-value).abs()<0.00001)) { return Some(widget.id()); }
+        if in_inspector && widget.can_focus() && widget.accessibility().is_some_and(|node| node.role == mondrian_ui_core::AccessibilityRole::Slider && matches!(node.value, Some(mondrian_ui_core::AccessibilityValue::Number { value: current, .. }) if current.to_bits() == value.to_bits())) { return Some(widget.id()); }
         (0..widget.child_count()).find_map(|index| {
             widget
                 .child(index)
@@ -11043,9 +11043,8 @@ mod tests {
         let _guard = crate::app_ui::test_utils::theme_test_guard();
         let bounds = Rect::new(0.0, 0.0, 1280.0, 1800.0);
         let (mut host, _, route_id) = inspection_sidechain_host_fixture("sidechain-keyboard-gain");
-        let slider_id =
-            inspection_numeric_value_control(host.active_root(), false, (-29.2_f32 + 60.0) / 72.0)
-                .expect("actual sidechain gain Slider");
+        let slider_id = inspection_numeric_value_control(host.active_root(), false, -29.2_f64)
+            .expect("actual sidechain gain Slider");
         let pending = PendingUiActions::default();
         let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
         inspection_focus_by_tab(&mut host, &mut router, slider_id, &pending);
@@ -14188,5 +14187,611 @@ mod tests {
             .active_sequence()
             .expect("undone author state")
             .author_state_eq_ignoring_revision(&initial));
+    }
+
+    #[track_caller]
+    fn numeric_accessibility_current_node(
+        host: &mut AppUiHost,
+        key: &str,
+    ) -> mondrian_ui_core::AccessibilityNode {
+        let id = rack_static_gesture_find_owner(host.active_root(), key).unwrap_or_else(|| {
+            fn inspect_keys(widget: &dyn Widget, keys: &mut Vec<String>) {
+                if let Some(state) = widget.control_inspection_state() {
+                    keys.push(state.key);
+                }
+                for index in 0..widget.child_count() {
+                    if let Some(child) = widget.child(index) {
+                        inspect_keys(child, keys);
+                    }
+                }
+            }
+            let mut keys = Vec::new();
+            inspect_keys(host.active_root(), &mut keys);
+            panic!("exact admitted control owner missing: {key}; current owners: {keys:?}")
+        });
+        numeric_accessibility_node(host, id)
+    }
+
+    #[track_caller]
+    fn numeric_accessibility_node(
+        host: &mut AppUiHost,
+        id: mondrian_ui_core::WidgetId,
+    ) -> mondrian_ui_core::AccessibilityNode {
+        use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+        WidgetTreeView::new(host.active_root_mut())
+            .get(id)
+            .expect("live owner")
+            .accessibility()
+            .expect("numeric semantics")
+    }
+
+    fn numeric_accessibility_author_value(node: &mondrian_ui_core::AccessibilityNode) -> f64 {
+        match node.value.as_ref().expect("readable value") {
+            mondrian_ui_core::AccessibilityValue::Text(text) => {
+                text.parse().expect("exact authored numeric text")
+            }
+            mondrian_ui_core::AccessibilityValue::Number { value, .. } => *value,
+            other => panic!("unexpected numeric value: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn numeric_accessibility_rack_names_are_current_localized_parameter_labels_with_units() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 2560.0, 1800.0);
+        let (mut host, _, _) = inspection_host_fixture("numeric-accessible-rack-names");
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let slider = inspection_control(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Slider,
+            None,
+        )
+        .expect("Gain");
+        let input = inspection_scope_numeric_entry_id(&mut host);
+        let slider_key = rack_static_gesture_control_key(&mut host, slider);
+        let input_key = rack_static_gesture_control_key(&mut host, input);
+        let pending = PendingUiActions::default();
+        for (preference, locale) in [
+            (
+                crate::app_ui::localization::AppUiLocalePreference::EnUs,
+                crate::app_ui::localization::AppUiLocale::EnUs,
+            ),
+            (
+                crate::app_ui::localization::AppUiLocalePreference::Pseudo,
+                crate::app_ui::localization::AppUiLocale::Pseudo,
+            ),
+            (
+                crate::app_ui::localization::AppUiLocalePreference::ZhCn,
+                crate::app_ui::localization::AppUiLocale::ZhCn,
+            ),
+        ] {
+            let before = host.app_state().active_sequence().expect("before locale").clone();
+            let history = host.app_state().authoring_history().expect("history").diagnostics();
+            pending.push(
+                crate::app::ui_actions::app_shell_preferences_locale_changed_action(preference),
+            );
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+            // Built-in gain's declared decibel unit is a standard symbol. The
+            // parameter's localized label is the same catalog authority as paint.
+            let expected = format!(
+                "{} (dB)",
+                Localizer::new(locale).expect("catalog").text("audio-parameter-gain")
+            );
+            for key in [&slider_key, &input_key] {
+                let node = numeric_accessibility_current_node(&mut host, key);
+                assert_eq!(node.name.as_deref(), Some(expected.as_str()), "actual numeric control exposes its current parameter label and unit, not a generic or empty name");
+                assert!(!node.state.disabled && node.state.focusable);
+            }
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("after locale")
+                .author_state_eq_ignoring_revision(&before));
+            assert_eq!(
+                host.app_state().authoring_history().expect("history").diagnostics(),
+                history
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_accessibility_rack_slider_announces_exact_scalar_after_keyboard_and_pointer_updates()
+    {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 2560.0, 1800.0);
+        let (mut host, scope_id, processor_id) =
+            inspection_host_fixture("numeric-accessible-live-scalar");
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let slider = inspection_control(
+            host.active_root(),
+            false,
+            mondrian_ui_core::AccessibilityRole::Slider,
+            None,
+        )
+        .expect("Gain");
+        let input = inspection_scope_numeric_entry_id(&mut host);
+        let slider_key = rack_static_gesture_control_key(&mut host, slider);
+        let input_key = rack_static_gesture_control_key(&mut host, input);
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, slider, &pending);
+        for event in [
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::Right,
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            inspection_key_event(&mut host, &mut router, &pending, bounds, event);
+            let author = inspection_scope_gain(&host.app_state(), scope_id, processor_id);
+            for key in [&slider_key, &input_key] {
+                let node = numeric_accessibility_current_node(&mut host, key);
+                assert_eq!(numeric_accessibility_author_value(&node).to_bits(), author.to_bits(), "numeric semantics must report the actual declared scalar, never Slider's 0..1 coordinate");
+            }
+        }
+        let slider = rack_static_gesture_find_owner(host.active_root(), &slider_key)
+            .expect("fresh same-owner slider");
+        let input = rack_static_gesture_find_owner(host.active_root(), &input_key)
+            .expect("fresh same-owner numeric entry");
+        let positions = rack_static_gesture_pointer_positions(&mut host, slider, bounds);
+        for event in [
+            UiEvent::MouseDown {
+                position: positions[0],
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseMove {
+                position: positions[2],
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            inspection_key_event(&mut host, &mut router, &pending, bounds, event);
+            assert_eq!(router.captured(), Some(slider));
+            let author = inspection_scope_gain(&host.app_state(), scope_id, processor_id);
+            // A captured Slider deliberately refuses restoration snapshots.
+            // Its live ID and capture prove ownership during the interaction;
+            // exact semantic keys are verified before capture and after Cancel.
+            for id in [slider, input] {
+                assert_eq!(
+                    numeric_accessibility_author_value(&numeric_accessibility_node(&mut host, id))
+                        .to_bits(),
+                    author.to_bits()
+                );
+            }
+        }
+        inspection_key_event(
+            &mut host,
+            &mut router,
+            &pending,
+            bounds,
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::Escape,
+                modifiers: Modifiers::none(),
+            },
+        );
+        let author = inspection_scope_gain(&host.app_state(), scope_id, processor_id);
+        for key in [&slider_key, &input_key] {
+            assert_eq!(
+                numeric_accessibility_author_value(&numeric_accessibility_current_node(
+                    &mut host, key
+                ))
+                .to_bits(),
+                author.to_bits()
+            );
+        }
+        assert!(router.captured().is_none());
+    }
+
+    #[derive(Clone, Copy)]
+    enum AudioScalarDragField {
+        Sidechain,
+        Trim,
+        Fader,
+        Route,
+    }
+
+    struct AudioScalarDragFixture {
+        host: AppUiHost,
+        track_id: mondrian_core::TrackId,
+        route_id: mondrian_core::AudioRouteId,
+        panel: PanelKind,
+        field: AudioScalarDragField,
+    }
+
+    impl AudioScalarDragFixture {
+        fn value(&self) -> f64 {
+            if matches!(self.field, AudioScalarDragField::Sidechain) {
+                return self
+                    .host
+                    .app_state()
+                    .active_sequence()
+                    .expect("Sequence")
+                    .audio_program
+                    .sidechain_routes
+                    .iter()
+                    .find(|route| route.id == self.route_id)
+                    .expect("same exact sidechain route")
+                    .gain_db;
+            }
+            let state = self.host.app_state();
+            let model = crate::app_ui::audio_mixer::AudioMixerPanelModel::from_app_state(
+                &state,
+                &Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs).expect("catalog"),
+            );
+            let channel = model
+                .channels
+                .iter()
+                .find(|channel| {
+                    channel.owner
+                        == mondrian_timeline::AudioChannelStripOwner::Track {
+                            track_id: self.track_id,
+                        }
+                })
+                .expect("same exact Track channel");
+            if matches!(self.field, AudioScalarDragField::Trim) {
+                return channel.input_trim_db;
+            }
+            let gain = if matches!(self.field, AudioScalarDragField::Fader) {
+                channel.fader
+            } else {
+                channel
+                    .outbound_routes
+                    .iter()
+                    .find(|route| route.route_id == self.route_id)
+                    .expect("same exact ordinary route")
+                    .gain
+            };
+            let crate::app_ui::audio_mixer::AudioMixerGainModel::Static { value_db } = gain else {
+                panic!("static scalar fixture")
+            };
+            value_db
+        }
+
+        fn new(field: AudioScalarDragField) -> Self {
+            if matches!(field, AudioScalarDragField::Sidechain) {
+                let (host, _, route_id) =
+                    inspection_sidechain_host_fixture("audio-scalar-sidechain-drag");
+                let track_id =
+                    host.app_state().active_sequence().expect("Sequence").audio_tracks[0].id;
+                return Self {
+                    host,
+                    track_id,
+                    route_id,
+                    panel: PanelKind::Inspector,
+                    field,
+                };
+            }
+            let mut state = workspace_app_state_with_timed_solid();
+            let track_id = state.active_sequence().expect("Sequence").audio_tracks[0].id;
+            let localizer =
+                Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs).expect("catalog");
+            let model = crate::app_ui::audio_mixer::AudioMixerPanelModel::from_app_state(
+                &state, &localizer,
+            );
+            let channel = model
+                .channels
+                .iter()
+                .find(|channel| {
+                    channel.owner == mondrian_timeline::AudioChannelStripOwner::Track { track_id }
+                })
+                .expect("real Mixer channel");
+            let route = channel.outbound_routes.first().expect("Sequence principal route");
+            let route_id = route.route_id;
+            let action = match field {
+                AudioScalarDragField::Trim => {
+                    crate::app_ui::audio_mixer::input_trim_target(channel)
+                        .and_then(|target| target.set_action(-18.4))
+                }
+                AudioScalarDragField::Fader => crate::app_ui::audio_mixer::fader_target(channel)
+                    .and_then(|target| target.set_action(-23.6)),
+                AudioScalarDragField::Route => crate::app_ui::audio_mixer::route_gain_target(route)
+                    .and_then(|target| target.set_action(-29.2)),
+                AudioScalarDragField::Sidechain => unreachable!(),
+            }
+            .expect("fresh canonical scalar action");
+            state.dispatch_action(action).expect("canonical fixture gain");
+            let mut host = AppUiHost::new_with_preferences_path(
+                state,
+                AppUiPreferences {
+                    workspace_preset: WorkspacePreset::Audio,
+                    locale_preference: crate::app_ui::localization::AppUiLocalePreference::EnUs,
+                    ..AppUiPreferences::default()
+                },
+                temp_preferences_path("audio-scalar-mixer-drag"),
+            );
+            host.preview_service.shutdown();
+            host.preview_service = WindowPreviewAdapter::new_without_workers_for_test();
+            Self {
+                host,
+                track_id,
+                route_id,
+                panel: PanelKind::Mixer,
+                field,
+            }
+        }
+
+        fn drag(
+            &mut self,
+            router: &mut mondrian_ui_events::EventRouter,
+            pending: &PendingUiActions,
+            bounds: Rect,
+            finish: bool,
+        ) -> mondrian_ui_core::WidgetId {
+            TreeWalker::layout(self.host.active_root_mut(), bounds);
+            let initial = self.value();
+            let id = audio_scalar_drag_slider(self.host.active_root(), self.panel, false, initial)
+                .expect("actual numeric pair with exact canonical baseline");
+            let positions = rack_static_gesture_pointer_positions(&mut self.host, id, bounds);
+            for (index, position) in positions.into_iter().enumerate() {
+                let before = self.value();
+                inspection_key_event(
+                    &mut self.host,
+                    router,
+                    pending,
+                    bounds,
+                    if index == 0 {
+                        UiEvent::MouseDown {
+                            position,
+                            button: MouseButton::Left,
+                            modifiers: Modifiers::none(),
+                        }
+                    } else {
+                        UiEvent::MouseMove { position, modifiers: Modifiers::none() }
+                    },
+                );
+                assert_eq!(
+                    router.captured(),
+                    Some(id),
+                    "root route and every ancestor clip own this live scalar drag"
+                );
+                let current = self.value();
+                if index == 0 {
+                    assert_ne!(
+                        current.to_bits(),
+                        initial.to_bits(),
+                        "Down creates a real canonical edit"
+                    );
+                } else {
+                    assert!(
+                        current > before,
+                        "each actual pointer update reaches the same scalar author owner"
+                    );
+                }
+            }
+            if finish {
+                inspection_key_event(
+                    &mut self.host,
+                    router,
+                    pending,
+                    bounds,
+                    UiEvent::MouseUp {
+                        position: positions[2],
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                );
+                assert!(router.captured().is_none());
+            }
+            id
+        }
+    }
+
+    fn audio_scalar_drag_slider(
+        widget: &dyn Widget,
+        panel: PanelKind,
+        in_panel: bool,
+        scalar: f64,
+    ) -> Option<mondrian_ui_core::WidgetId> {
+        let in_panel = in_panel || widget.panel_kind() == Some(panel);
+        if in_panel && widget.child_count() == 2 {
+            let slider = widget.child(0)?;
+            let input = widget.child(1)?;
+            if slider.accessibility().is_some_and(|node| node.role == mondrian_ui_core::AccessibilityRole::Slider)
+                && input.accessibility().is_some_and(|node| matches!(node.value, Some(mondrian_ui_core::AccessibilityValue::Text(ref text)) if text.parse::<f64>().is_ok_and(|value| value.to_bits() == scalar.to_bits()))) {
+                return Some(slider.id());
+            }
+        }
+        (0..widget.child_count()).find_map(|index| {
+            widget
+                .child(index)
+                .and_then(|child| audio_scalar_drag_slider(child, panel, in_panel, scalar))
+        })
+    }
+
+    fn assert_audio_scalar_drag_one_undo(field: AudioScalarDragField) {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 2560.0, 3600.0);
+        let mut fixture = AudioScalarDragFixture::new(field);
+        let original = fixture.host.app_state().active_sequence().expect("origin").clone();
+        let history = fixture.host.app_state().authoring_history().expect("history").diagnostics();
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(fixture.host.active_root().id());
+        fixture.drag(&mut router, &pending, bounds, true);
+        let committed = fixture.host.app_state().active_sequence().expect("committed").clone();
+        assert_eq!(
+            fixture
+                .host
+                .app_state()
+                .authoring_history()
+                .expect("history")
+                .diagnostics()
+                .undo_entries,
+            history.undo_entries + 1,
+            "one complete scalar drag must commit exactly one canonical Undo entry"
+        );
+        assert!(fixture.host.app_state.borrow_mut().undo_timeline().expect("single Undo"));
+        assert!(fixture
+            .host
+            .app_state()
+            .active_sequence()
+            .expect("restored")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(fixture.host.app_state.borrow_mut().redo_timeline().expect("single Redo"));
+        assert!(fixture
+            .host
+            .app_state()
+            .active_sequence()
+            .expect("redone")
+            .author_state_eq_ignoring_revision(&committed));
+    }
+
+    fn assert_audio_scalar_second_drag_escape(field: AudioScalarDragField) {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 2560.0, 3600.0);
+        let mut fixture = AudioScalarDragFixture::new(field);
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(fixture.host.active_root().id());
+        fixture.drag(&mut router, &pending, bounds, true);
+        let origin =
+            fixture.host.app_state().active_sequence().expect("second drag origin").clone();
+        let history = fixture
+            .host
+            .app_state()
+            .authoring_history()
+            .expect("first committed history")
+            .diagnostics();
+        fixture.drag(&mut router, &pending, bounds, false);
+        inspection_key_event(
+            &mut fixture.host,
+            &mut router,
+            &pending,
+            bounds,
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::Escape,
+                modifiers: Modifiers::none(),
+            },
+        );
+        assert!(router.captured().is_none());
+        assert!(
+            fixture
+                .host
+                .app_state()
+                .active_sequence()
+                .expect("cancelled")
+                .author_state_eq_ignoring_revision(&origin),
+            "Escape restores this drag's exact parameter origin"
+        );
+        assert_eq!(
+            fixture
+                .host
+                .app_state()
+                .authoring_history()
+                .expect("cancelled history")
+                .diagnostics(),
+            history,
+            "cancelled scalar drag must create no canonical author history"
+        );
+    }
+
+    #[test]
+    fn audio_scalar_sidechain_live_drag_has_one_undo_through_actual_host() {
+        assert_audio_scalar_drag_one_undo(AudioScalarDragField::Sidechain);
+    }
+    #[test]
+    fn audio_scalar_trim_live_drag_has_one_undo_through_actual_host() {
+        assert_audio_scalar_drag_one_undo(AudioScalarDragField::Trim);
+    }
+    #[test]
+    fn audio_scalar_fader_live_drag_has_one_undo_through_actual_host() {
+        assert_audio_scalar_drag_one_undo(AudioScalarDragField::Fader);
+    }
+    #[test]
+    fn audio_scalar_route_live_drag_has_one_undo_through_actual_host() {
+        assert_audio_scalar_drag_one_undo(AudioScalarDragField::Route);
+    }
+    #[test]
+    fn audio_scalar_sidechain_second_drag_escape_preserves_origin_and_history() {
+        assert_audio_scalar_second_drag_escape(AudioScalarDragField::Sidechain);
+    }
+    #[test]
+    fn audio_scalar_trim_second_drag_escape_preserves_origin_and_history() {
+        assert_audio_scalar_second_drag_escape(AudioScalarDragField::Trim);
+    }
+    #[test]
+    fn audio_scalar_fader_second_drag_escape_preserves_origin_and_history() {
+        assert_audio_scalar_second_drag_escape(AudioScalarDragField::Fader);
+    }
+    #[test]
+    fn audio_scalar_route_second_drag_escape_preserves_origin_and_history() {
+        assert_audio_scalar_second_drag_escape(AudioScalarDragField::Route);
+    }
+
+    fn assert_audio_scalar_keyboard_stays_discrete(field: AudioScalarDragField) {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 2560.0, 3600.0);
+        let mut fixture = AudioScalarDragFixture::new(field);
+        TreeWalker::layout(fixture.host.active_root_mut(), bounds);
+        let initial = fixture.value();
+        let original = fixture.host.app_state().active_sequence().expect("origin").clone();
+        let history = fixture.host.app_state().authoring_history().expect("history").diagnostics();
+        let id =
+            audio_scalar_drag_slider(fixture.host.active_root(), fixture.panel, false, initial)
+                .expect("current scalar control");
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(fixture.host.active_root().id());
+        inspection_focus_by_tab(&mut fixture.host, &mut router, id, &pending);
+        for _ in 0..2 {
+            let before = fixture.value();
+            inspection_key_event(
+                &mut fixture.host,
+                &mut router,
+                &pending,
+                bounds,
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Left,
+                    modifiers: Modifiers::none(),
+                },
+            );
+            assert!(
+                fixture.value() < before,
+                "each actual key reaches its fresh canonical scalar owner"
+            );
+            assert!(router.captured().is_none());
+            assert!(
+                !fixture.host.app_state().parameter_gesture_is_current(),
+                "keyboard steps remain independent author commands"
+            );
+        }
+        assert_eq!(
+            fixture
+                .host
+                .app_state()
+                .authoring_history()
+                .expect("history")
+                .diagnostics()
+                .undo_entries,
+            history.undo_entries + 2
+        );
+        for _ in 0..2 {
+            assert!(fixture
+                .host
+                .app_state
+                .borrow_mut()
+                .undo_timeline()
+                .expect("Undo keyboard step"));
+        }
+        assert!(fixture
+            .host
+            .app_state()
+            .active_sequence()
+            .expect("origin")
+            .author_state_eq_ignoring_revision(&original));
+    }
+
+    #[test]
+    fn typed_audio_scalar_trim_keyboard_steps_keep_two_canonical_undo_entries() {
+        assert_audio_scalar_keyboard_stays_discrete(AudioScalarDragField::Trim);
+    }
+    #[test]
+    fn typed_audio_scalar_fader_keyboard_steps_keep_two_canonical_undo_entries() {
+        assert_audio_scalar_keyboard_stays_discrete(AudioScalarDragField::Fader);
+    }
+    #[test]
+    fn typed_audio_scalar_route_keyboard_steps_keep_two_canonical_undo_entries() {
+        assert_audio_scalar_keyboard_stays_discrete(AudioScalarDragField::Route);
     }
 }

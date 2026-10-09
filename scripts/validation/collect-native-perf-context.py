@@ -10,7 +10,7 @@ import datetime
 import ctypes
 import hashlib
 import json
-import locale
+import uuid
 import os
 from pathlib import Path
 import platform
@@ -23,9 +23,51 @@ def run(*command: str, cwd: Path | None = None, encoding: str = "utf-8") -> str:
     return subprocess.check_output(command, cwd=cwd, text=True, encoding=encoding).strip()
 
 
+def source_files(*directories: str, cwd: Path) -> set[str]:
+    """Use one repository path spelling for rg membership, dedup and receipts."""
+    return {path.replace("\\", "/") for path in
+            run("rg", "--files", "--hidden", "--no-ignore", *directories, cwd=cwd).splitlines()}
+
+
 def digest(path: Path) -> str:
     with path.open("rb") as source:
         return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def windows_active_power_scheme() -> dict:
+    """Copy the documented native active-scheme GUID, then release its owner.
+
+    PowerGetActiveScheme returns its Win32 status directly; the GUID allocation
+    from a successful call must be released with LocalFree. No shell text or
+    system code page participates in this receipt.
+    """
+    class Guid(ctypes.Structure):
+        _fields_ = [("Data1", ctypes.c_uint32), ("Data2", ctypes.c_uint16),
+                    ("Data3", ctypes.c_uint16), ("Data4", ctypes.c_ubyte * 8)]
+
+    power = ctypes.WinDLL("PowrProf.dll", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32.dll", use_last_error=True)
+    get_active = power.PowerGetActiveScheme
+    get_active.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.POINTER(Guid))]
+    get_active.restype = ctypes.c_uint32
+    free = kernel.LocalFree
+    free.argtypes = [ctypes.c_void_p]
+    free.restype = ctypes.c_void_p
+    active = ctypes.POINTER(Guid)()
+    status = get_active(None, ctypes.byref(active))
+    if status != 0:
+        raise OSError(status, f"PowerGetActiveScheme returned Win32 status {status}")
+    if not active:
+        raise RuntimeError("PowerGetActiveScheme succeeded without a GUID allocation")
+    try:
+        # GUID's three integer members use Windows little-endian storage; Data4
+        # is the eight-byte sequence defined by guiddef.h, with no text decoding.
+        guid = str(uuid.UUID(bytes_le=ctypes.string_at(active, ctypes.sizeof(Guid))))
+        return {"source": "PowrProf.dll!PowerGetActiveScheme", "guid": guid}
+    finally:
+        if free(ctypes.cast(active, ctypes.c_void_p)):
+            status = ctypes.get_last_error()
+            raise OSError(status, f"LocalFree of active power-scheme GUID failed with Win32 status {status}")
 
 
 def windows_machine() -> dict:
@@ -97,10 +139,10 @@ def windows_machine() -> dict:
     except (OSError, AttributeError) as error:
         result["limitations"].append(f"Documented memory/timer API unavailable: {error}")
     try:
-        result["power_plan"] = run("powercfg", "/getactivescheme", encoding=locale.getpreferredencoding(False))
-    except (OSError, subprocess.CalledProcessError) as error:
+        result["power_plan"] = windows_active_power_scheme()
+    except (OSError, AttributeError, RuntimeError, ValueError) as error:
         result["power_plan"] = None
-        result["limitations"].append(f"Read-only power plan unavailable (no retry): {error}")
+        result["limitations"].append(f"Read-only active power-scheme GUID unavailable (no retry): {error}")
     return result
 
 
@@ -148,6 +190,7 @@ def main() -> None:
     parser.add_argument("--vst3-worker", type=Path)
     parser.add_argument("--clap-fixture", type=Path)
     parser.add_argument("--vst3-fixture", type=Path)
+    parser.add_argument("--audio-test-executable", type=Path)
     parser.add_argument("--openfx-worker", type=Path)
     parser.add_argument("--openfx-reference", type=Path)
     parser.add_argument("--openfx-test-executable", type=Path)
@@ -160,19 +203,19 @@ def main() -> None:
     sdk_packages = [entry for entry in lock["package"] if entry["name"] in
                     {"clack-common", "clack-host", "clack-plugin", "clack-extensions", "clap-sys", "vst3-host", "vst3"}]
     source_dirs = ("crates/mondrian-audio/src", "crates/mondrian-core/src", "crates/mondrian-timeline/src", "vendor/vst3-host/src", "vendor/vst3-sdk")
-    sources = set(run("rg", "--files", "--hidden", "--no-ignore", *source_dirs, cwd=worktree).splitlines())
-    audio_artifacts = (args.clap_worker, args.vst3_worker, args.clap_fixture, args.vst3_fixture)
+    sources = source_files(*source_dirs, cwd=worktree)
+    audio_artifacts = (args.clap_worker, args.vst3_worker, args.clap_fixture, args.vst3_fixture, args.audio_test_executable)
     openfx_artifacts = (args.openfx_worker, args.openfx_reference, args.openfx_test_executable)
     if any(audio_artifacts) and not all(audio_artifacts):
-        raise RuntimeError("Supply all four audio worker/fixture artifact paths together")
+        raise RuntimeError("Supply audio worker/fixture/test-executable paths together")
     if any(openfx_artifacts) and not all(openfx_artifacts):
         raise RuntimeError("Supply OpenFX worker/reference/test-executable paths together")
     if not any(audio_artifacts) and not any(openfx_artifacts):
         raise RuntimeError("Select at least one native artifact group")
     if args.openfx_worker:
-        sources.update(run("rg", "--files", "crates/mondrian-effects/src", "crates/mondrian-renderer/src", cwd=worktree).splitlines())
-        sources.update(run("rg", "--files", "--hidden", "--no-ignore",
-                           "crates/mondrian-app/native/openfx/host", "crates/mondrian-app/native/openfx/vendor", cwd=worktree).splitlines())
+        sources.update(source_files("crates/mondrian-effects/src", "crates/mondrian-renderer/src", cwd=worktree))
+        sources.update(source_files("crates/mondrian-app/native/openfx/host",
+                                    "crates/mondrian-app/native/openfx/vendor", cwd=worktree))
         sources.update({"crates/mondrian-app/build.rs", "crates/mondrian-app/src/openfx_host.rs",
                         "crates/mondrian-app/Cargo.toml", "crates/mondrian-effects/Cargo.toml",
                         "crates/mondrian-renderer/Cargo.toml", "crates/mondrian-app/src/openfx_adapter.rs",
@@ -225,7 +268,8 @@ def main() -> None:
     artifacts = [{"role": role, "path": str(path.resolve(strict=True)),
                   "sha256": digest(path.resolve(strict=True)), "bytes": path.stat().st_size}
                  for role, path in (("clap_worker", args.clap_worker), ("vst3_worker", args.vst3_worker),
-                                    ("clap_fixture", args.clap_fixture), ("vst3_fixture", args.vst3_fixture)) if path]
+                                    ("clap_fixture", args.clap_fixture), ("vst3_fixture", args.vst3_fixture),
+                                    ("audio_test_executable", args.audio_test_executable)) if path]
     if args.openfx_worker:
         for role, path in (("openfx_worker", args.openfx_worker), ("openfx_reference", args.openfx_reference),
                            ("openfx_test_executable", args.openfx_test_executable)):

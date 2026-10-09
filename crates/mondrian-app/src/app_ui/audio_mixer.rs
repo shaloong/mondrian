@@ -12,20 +12,23 @@ use mondrian_core::{AudioRouteId, MixBusId, TrackId};
 use mondrian_editor_state::Action;
 use mondrian_timeline::audio::{
     AudioChannelStripOutputPort, AudioChannelStripOwner, AudioRouteDestination, AudioRouteSource,
-    ProgramOutputMainSource, AUDIO_GAIN_DB_MAX, AUDIO_GAIN_DB_MIN,
+    ProgramOutputMainSource,
 };
 use mondrian_timeline::{
     inspect_audio_channel_strip, inspect_audio_mix_buses, inspect_audio_route,
     inspect_audio_route_candidates, AudioAutomationTarget, AudioBusRemovalPolicy,
-    AudioChannelStripEdit, AudioChannelStripEditBlocker, AudioChannelStripEditRequest,
-    AudioChannelStripRack, AudioProcessorRackAddress, AudioRouteCandidateInspection,
-    AudioRoutingEdit, AudioRoutingEditBlocker, AudioRoutingEditRequest,
+    AudioChannelStripEditBlocker, AudioChannelStripRack, AudioProcessorRackAddress,
+    AudioRouteCandidateInspection, AudioRoutingEdit, AudioRoutingEditBlocker,
+    AudioRoutingEditRequest,
 };
+
+#[cfg(test)]
+use mondrian_timeline::audio::AUDIO_GAIN_DB_MIN;
 
 use crate::app::product_action::AudioTrackSoloPayload;
 use crate::app::ui_actions::{
-    audio_channel_strip_edit_action, audio_routing_edit_action, audio_track_solo_action,
-    track_set_author_control_action, TrackAuthorControl, TrackSetAuthorControlPayload,
+    audio_routing_edit_action, audio_track_solo_action, track_set_author_control_action,
+    TrackAuthorControl, TrackSetAuthorControlPayload,
 };
 use crate::app::AppState;
 
@@ -73,6 +76,8 @@ pub(crate) struct AudioMixerRouteCreateOption {
 /// One existing principal Route or parallel send shown by the Mixer.
 #[derive(Debug, Clone)]
 pub(crate) struct AudioMixerRouteModel {
+    pub(crate) source_sequence_id: mondrian_core::SequenceId,
+    pub(crate) scalar_author_lease: Option<crate::app::parameter_gesture::AudioScalarAuthorLease>,
     pub(crate) route_id: AudioRouteId,
     pub(crate) source: AudioRouteSource,
     pub(crate) destination: AudioRouteDestination,
@@ -97,6 +102,8 @@ pub(crate) struct AudioMixerBusRemovalModel {
 /// One Track, Bus, or Program Output Channel Strip shown by the Mixer.
 #[derive(Debug, Clone)]
 pub(crate) struct AudioMixerChannelModel {
+    pub(crate) source_sequence_id: mondrian_core::SequenceId,
+    pub(crate) scalar_author_lease: Option<crate::app::parameter_gesture::AudioScalarAuthorLease>,
     pub(crate) owner: AudioChannelStripOwner,
     pub(crate) kind: AudioMixerChannelKind,
     pub(crate) name: String,
@@ -199,7 +206,17 @@ impl AudioMixerPanelModel {
             }
         }
         for channel in &mut channels {
-            super::audio_processor_rack::bind_parameter_author_lease(
+            channel.scalar_author_lease =
+                crate::app::parameter_gesture::AudioScalarAuthorLease::from_state(
+                    state,
+                    channel.source_sequence_id,
+                );
+            for route in &mut channel.outbound_routes {
+                route.scalar_author_lease = channel
+                    .scalar_author_lease
+                    .filter(|lease| lease.sequence_id == route.source_sequence_id);
+            }
+            super::audio_processor_rack::bind_audio_scalar_author_lease(
                 &mut channel.processor_racks,
                 state,
             );
@@ -286,6 +303,8 @@ fn project_channel(
         AudioChannelStripOwner::Track { .. } | AudioChannelStripOwner::ProgramOutput { .. } => None,
     };
     AudioMixerChannelModel {
+        source_sequence_id: sequence.id,
+        scalar_author_lease: None,
         owner,
         kind,
         name,
@@ -418,6 +437,8 @@ fn project_route(
         ),
     };
     AudioMixerRouteModel {
+        source_sequence_id: sequence.id,
+        scalar_author_lease: None,
         route_id: route.id,
         source: route.source,
         destination: route.destination,
@@ -710,13 +731,22 @@ pub(crate) fn set_route_enabled_action(
     })
 }
 
-pub(crate) fn set_route_gain_action(route: &AudioMixerRouteModel, value_db: f64) -> Option<Action> {
-    let value = normalized_gain(value_db)?;
-    (route.is_editable && matches!(route.gain, AudioMixerGainModel::Static { .. })).then(|| {
-        audio_routing_edit_action(AudioRoutingEditRequest {
-            edit: AudioRoutingEdit::SetRouteGainDb { route_id: route.route_id, value },
-        })
-    })
+/// One static Route owner with exact endpoints and open author lifetime.
+pub(crate) fn route_gain_target(
+    route: &AudioMixerRouteModel,
+) -> Option<crate::app::parameter_gesture::AudioScalarGestureTarget> {
+    (route.is_editable && matches!(route.gain, AudioMixerGainModel::Static { .. })).then_some(
+        crate::app::parameter_gesture::AudioScalarGestureTarget {
+            lease: route
+                .scalar_author_lease
+                .filter(|lease| lease.sequence_id == route.source_sequence_id)?,
+            owner: crate::app::parameter_gesture::AudioScalarOwner::RouteLevel {
+                route_id: route.route_id,
+                source: route.source,
+                destination: route.destination,
+            },
+        },
+    )
 }
 
 pub(crate) fn remove_route_action(route: &AudioMixerRouteModel) -> Option<Action> {
@@ -727,27 +757,30 @@ pub(crate) fn remove_route_action(route: &AudioMixerRouteModel) -> Option<Action
     })
 }
 
-pub(crate) fn set_input_trim_action(
+/// Exact input-trim owner from an author-bound immutable channel projection.
+pub(crate) fn input_trim_target(
     channel: &AudioMixerChannelModel,
-    value_db: f64,
-) -> Option<Action> {
-    let value = normalized_gain(value_db)?;
-    channel.is_editable.then(|| {
-        audio_channel_strip_edit_action(AudioChannelStripEditRequest {
-            owner: channel.owner,
-            edit: AudioChannelStripEdit::SetInputTrimDb { value },
+) -> Option<crate::app::parameter_gesture::AudioScalarGestureTarget> {
+    channel
+        .is_editable
+        .then_some(crate::app::parameter_gesture::AudioScalarGestureTarget {
+            lease: channel
+                .scalar_author_lease
+                .filter(|lease| lease.sequence_id == channel.source_sequence_id)?,
+            owner: crate::app::parameter_gesture::AudioScalarOwner::Trim { owner: channel.owner },
         })
-    })
 }
 
-pub(crate) fn set_fader_action(channel: &AudioMixerChannelModel, value_db: f64) -> Option<Action> {
-    let value = normalized_gain(value_db)?;
-    (channel.is_editable && matches!(channel.fader, AudioMixerGainModel::Static { .. })).then(
-        || {
-            audio_channel_strip_edit_action(AudioChannelStripEditRequest {
-                owner: channel.owner,
-                edit: AudioChannelStripEdit::SetFaderDb { value },
-            })
+/// Static fader owner; keyed faders retain their curve authority.
+pub(crate) fn fader_target(
+    channel: &AudioMixerChannelModel,
+) -> Option<crate::app::parameter_gesture::AudioScalarGestureTarget> {
+    (channel.is_editable && matches!(channel.fader, AudioMixerGainModel::Static { .. })).then_some(
+        crate::app::parameter_gesture::AudioScalarGestureTarget {
+            lease: channel
+                .scalar_author_lease
+                .filter(|lease| lease.sequence_id == channel.source_sequence_id)?,
+            owner: crate::app::parameter_gesture::AudioScalarOwner::Fader { owner: channel.owner },
         },
     )
 }
@@ -762,10 +795,6 @@ pub(crate) fn set_track_mute_action(track_id: TrackId, muted: bool) -> Action {
 
 pub(crate) fn set_track_solo_action(track_id: TrackId, soloed: bool) -> Action {
     audio_track_solo_action(AudioTrackSoloPayload { track_id, soloed })
-}
-
-fn normalized_gain(value: f64) -> Option<f64> {
-    (value.is_finite() && (AUDIO_GAIN_DB_MIN..=AUDIO_GAIN_DB_MAX).contains(&value)).then_some(value)
 }
 
 #[cfg(test)]
@@ -883,9 +912,10 @@ mod tests {
             let model = AudioMixerPanelModel::from_app_state(&state, &chinese());
             let channel = &model.channels[0];
             let action = match field {
-                0 => set_input_trim_action(channel, precise),
-                1 => set_fader_action(channel, precise),
-                _ => set_route_gain_action(&channel.outbound_routes[0], precise),
+                0 => input_trim_target(channel).and_then(|target| target.set_action(precise)),
+                1 => fader_target(channel).and_then(|target| target.set_action(precise)),
+                _ => route_gain_target(&channel.outbound_routes[0])
+                    .and_then(|target| target.set_action(precise)),
             }
             .expect("gain action");
             let before = snapshot(&state, field);
@@ -895,12 +925,15 @@ mod tests {
             assert_eq!(snapshot(&state, field), before);
             assert!(state.redo_timeline().expect("redo"));
             assert_eq!(snapshot(&state, field), precise);
-            assert!(set_input_trim_action(channel, f64::NAN).is_none());
-            assert!(set_fader_action(channel, f64::INFINITY).is_none());
-            assert!(
-                set_route_gain_action(&channel.outbound_routes[0], AUDIO_GAIN_DB_MIN - 1.0)
-                    .is_none()
-            );
+            assert!(input_trim_target(channel)
+                .and_then(|target| target.set_action(f64::NAN))
+                .is_none());
+            assert!(fader_target(channel)
+                .and_then(|target| target.set_action(f64::INFINITY))
+                .is_none());
+            assert!(route_gain_target(&channel.outbound_routes[0])
+                .and_then(|target| target.set_action(AUDIO_GAIN_DB_MIN - 1.0))
+                .is_none());
         }
     }
 
@@ -1019,8 +1052,8 @@ mod tests {
             channel.fader,
             AudioMixerGainModel::Automated { .. }
         ));
-        assert!(set_fader_action(channel, -6.0).is_none());
-        assert!(set_input_trim_action(channel, -6.0).is_none());
+        assert!(fader_target(channel).and_then(|target| target.set_action(-6.0)).is_none());
+        assert!(input_trim_target(channel).and_then(|target| target.set_action(-6.0)).is_none());
         assert!(channel.route_create_options.is_empty());
         assert!(channel.outbound_routes.iter().all(|route| !route.is_editable));
         let bus = model
@@ -1052,15 +1085,14 @@ mod tests {
             .fader_automation = None;
         state.test_set_sequence(Some(sequence));
         let channel = &AudioMixerPanelModel::from_app_state(&state, &chinese()).channels[0];
-        let action = set_fader_action(channel, -6.0).expect("static fader action");
+        let action = fader_target(channel)
+            .and_then(|target| target.set_action(-6.0))
+            .expect("static fader action");
         assert!(matches!(
-            ProductAction::decode_external(&action).expect("decode"),
-            Some(ProductAction::Audio(AudioProductAction::EditChannelStrip(
-                AudioChannelStripEditRequest {
-                    owner: AudioChannelStripOwner::Track { track_id: projected },
-                    edit: AudioChannelStripEdit::SetFaderDb { value: -6.0 },
-                }
-            ))) if projected == track_id
+            crate::app::parameter_gesture::ParameterGestureAction::decode(&action).expect("typed scalar codec"),
+            Some(crate::app::parameter_gesture::ParameterGestureAction::SetAudioScalar { edit })
+                if edit.target.owner == (crate::app::parameter_gesture::AudioScalarOwner::Fader { owner: AudioChannelStripOwner::Track { track_id } })
+                    && edit.value.to_bits() == (-6.0_f64).to_bits()
         ));
     }
 
@@ -1097,7 +1129,7 @@ mod tests {
         ));
         let route = &track.outbound_routes[0];
         assert!(set_route_enabled_action(route, false).is_some());
-        assert!(set_route_gain_action(route, -6.0).is_some());
+        assert!(route_gain_target(route).and_then(|target| target.set_action(-6.0)).is_some());
         assert!(remove_route_action(route).is_some());
         let current = track
             .route_create_options
@@ -1299,5 +1331,611 @@ mod tests {
             .route_create_options
             .iter()
             .any(|option| matches!(option.destination, AudioRouteDestination::Output(_))));
+    }
+}
+
+#[cfg(test)]
+mod scalar_contract_tests {
+    use super::*;
+    use crate::app::parameter_gesture::{
+        AudioScalarGestureTarget, AudioScalarOwner, AudioScalarValueEdit, ParameterGestureAction,
+        ParameterGestureEdit,
+    };
+    use mondrian_core::{AuthoringGestureId, SequenceId, TimelineTime};
+    use mondrian_timeline::Sequence;
+
+    #[derive(Clone, Copy, Debug)]
+    enum ScalarContractField {
+        Parameter,
+        Trim,
+        Fader,
+        Route,
+        Sidechain,
+    }
+
+    struct ScalarContractFixture {
+        state: AppState,
+        track_id: mondrian_core::TrackId,
+        processor_id: mondrian_core::AudioProcessorInstanceId,
+        route_id: mondrian_core::AudioRouteId,
+        sidechain_id: mondrian_core::AudioRouteId,
+    }
+
+    impl ScalarContractFixture {
+        fn new() -> Self {
+            use mondrian_timeline::audio::{
+                AudioChannelStripOutputPort, AudioProcessorInstance, AudioProcessorSidechainRoute,
+                AudioRouteSource, BUILTIN_GAIN_DEFINITION_ID,
+            };
+            let mut sequence = Sequence::new("Closed scalar contracts");
+            let track_id = sequence.audio_tracks[0].id;
+            let processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+            let processor_id = processor.id;
+            sequence.audio_program.outputs[0].strip.pre_fader.processors.push(processor);
+            let sidechain = AudioProcessorSidechainRoute::new(
+                AudioRouteSource::Track {
+                    track_id,
+                    port: AudioChannelStripOutputPort::PostMute,
+                },
+                processor_id,
+                "retained.absent.detector",
+            );
+            let sidechain_id = sidechain.id;
+            sequence.audio_program.sidechain_routes.push(sidechain);
+            let route_id = sequence.audio_program.routes.iter().find(|route| matches!(route.source, AudioRouteSource::Track { track_id: id, .. } if id == track_id)).expect("principal route").id;
+            let mut state = AppState::new();
+            state.test_set_sequence(Some(sequence));
+            Self {
+                state,
+                track_id,
+                processor_id,
+                route_id,
+                sidechain_id,
+            }
+        }
+
+        fn target(&self, field: ScalarContractField) -> Option<AudioScalarGestureTarget> {
+            use crate::app_ui::{
+                audio_mixer::{
+                    fader_target, input_trim_target, route_gain_target, AudioMixerPanelModel,
+                },
+                audio_processor_rack::static_parameter_target,
+                localization::{AppUiLocale, Localizer},
+            };
+            let model = AudioMixerPanelModel::from_app_state(
+                &self.state,
+                &Localizer::new(AppUiLocale::EnUs).expect("catalog"),
+            );
+            let track = model
+                .channels
+                .iter()
+                .find(|channel| {
+                    channel.owner
+                        == mondrian_timeline::AudioChannelStripOwner::Track {
+                            track_id: self.track_id,
+                        }
+                })
+                .expect("current Track channel");
+            match field {
+                ScalarContractField::Trim => input_trim_target(track),
+                ScalarContractField::Fader => fader_target(track),
+                ScalarContractField::Route => route_gain_target(
+                    track.outbound_routes.iter().find(|route| route.route_id == self.route_id)?,
+                ),
+                ScalarContractField::Parameter | ScalarContractField::Sidechain => {
+                    let (rack, processor) = model
+                        .channels
+                        .iter()
+                        .flat_map(|channel| &channel.processor_racks)
+                        .find_map(|rack| {
+                            rack.processors
+                                .iter()
+                                .find(|processor| processor.processor_id == self.processor_id)
+                                .map(|processor| (rack, processor))
+                        })?;
+                    if matches!(field, ScalarContractField::Parameter) {
+                        static_parameter_target(
+                            rack,
+                            processor,
+                            processor.parameters.iter().find(|parameter| {
+                                parameter.parameter_id.as_str()
+                                    == mondrian_timeline::audio::GAIN_DB_PARAMETER_ID
+                            })?,
+                        )
+                    } else {
+                        processor
+                            .sidechain_routes
+                            .iter()
+                            .find(|route| route.route_id == self.sidechain_id)?
+                            .scalar_target
+                            .clone()
+                    }
+                }
+            }
+        }
+
+        fn value(&self, field: ScalarContractField) -> f64 {
+            let sequence = self.state.active_sequence().expect("Sequence");
+            match field {
+                ScalarContractField::Parameter => {
+                    sequence.audio_program.outputs[0]
+                        .strip
+                        .pre_fader
+                        .processors
+                        .iter()
+                        .find(|processor| processor.id == self.processor_id)
+                        .expect("same processor")
+                        .parameters[&mondrian_core::ParameterId::new_static(
+                        mondrian_timeline::audio::GAIN_DB_PARAMETER_ID,
+                    )]
+                        .automation
+                        .default_value
+                }
+                ScalarContractField::Trim => {
+                    sequence.audio_program.track_channels[&self.track_id].strip.input_trim_db
+                }
+                ScalarContractField::Fader => {
+                    sequence.audio_program.track_channels[&self.track_id].strip.fader_db
+                }
+                ScalarContractField::Route => {
+                    sequence
+                        .audio_program
+                        .routes
+                        .iter()
+                        .find(|route| route.id == self.route_id)
+                        .expect("same route")
+                        .gain_db
+                }
+                ScalarContractField::Sidechain => {
+                    sequence
+                        .audio_program
+                        .sidechain_routes
+                        .iter()
+                        .find(|route| route.id == self.sidechain_id)
+                        .expect("same sidechain")
+                        .gain_db
+                }
+            }
+        }
+
+        fn edit(target: &AudioScalarGestureTarget, value: f64) -> ParameterGestureEdit {
+            ParameterGestureEdit::AudioScalar(AudioScalarValueEdit {
+                target: Box::new(target.clone()),
+                value,
+            })
+        }
+
+        fn assert_refused(&mut self, target: &AudioScalarGestureTarget) {
+            let before = self.state.active_sequence().expect("refusal baseline").clone();
+            let history = self.state.authoring_history().expect("history").diagnostics();
+            assert!(self
+                .state
+                .dispatch_action(target.set_action(-7.0).expect("closed finite queued intent"))
+                .is_err());
+            assert!(self
+                .state
+                .active_sequence()
+                .expect("refusal")
+                .author_state_eq_ignoring_revision(&before));
+            assert_eq!(
+                self.state.authoring_history().expect("history").diagnostics(),
+                history
+            );
+        }
+    }
+
+    const SCALAR_CONTRACT_FIELDS: [ScalarContractField; 5] = [
+        ScalarContractField::Parameter,
+        ScalarContractField::Trim,
+        ScalarContractField::Fader,
+        ScalarContractField::Route,
+        ScalarContractField::Sidechain,
+    ];
+
+    #[test]
+    fn typed_audio_scalar_discrete_edits_preserve_exact_values_and_independent_undo() {
+        for field in SCALAR_CONTRACT_FIELDS {
+            let mut fixture = ScalarContractFixture::new();
+            let original = fixture.state.active_sequence().expect("origin").clone();
+            let history = fixture.state.authoring_history().expect("history").diagnostics();
+            let target = fixture.target(field).expect("genuine current author lease");
+            for value in [-6.123456789123456_f64, -3.234567891234567_f64] {
+                fixture
+                    .state
+                    .dispatch_action(target.set_action(value).expect("precise intent"))
+                    .expect("discrete canonical author action");
+                assert_eq!(
+                    fixture.value(field).to_bits(),
+                    value.to_bits(),
+                    "{field:?} retains the authored f64"
+                );
+                assert!(!fixture.state.parameter_gesture_is_current());
+            }
+            let committed = fixture.state.active_sequence().expect("commit").clone();
+            assert_eq!(
+                fixture.state.authoring_history().expect("history").diagnostics().undo_entries,
+                history.undo_entries + 2
+            );
+            for _ in 0..2 {
+                assert!(fixture.state.undo_timeline().expect("independent Undo"));
+            }
+            assert!(fixture
+                .state
+                .active_sequence()
+                .expect("origin restored")
+                .author_state_eq_ignoring_revision(&original));
+            for _ in 0..2 {
+                assert!(fixture.state.redo_timeline().expect("independent Redo"));
+            }
+            assert!(fixture
+                .state
+                .active_sequence()
+                .expect("commit restored")
+                .author_state_eq_ignoring_revision(&committed));
+            assert!(
+                target.set_action(f64::NAN).is_none() && target.set_action(f64::INFINITY).is_none()
+            );
+            if !matches!(field, ScalarContractField::Parameter) {
+                assert!(target
+                    .set_action(mondrian_timeline::audio::AUDIO_GAIN_DB_MIN - 1.0)
+                    .is_none());
+                assert!(target
+                    .set_action(mondrian_timeline::audio::AUDIO_GAIN_DB_MAX + 1.0)
+                    .is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn typed_audio_scalar_reopened_session_and_sequence_leases_refuse_queued_values() {
+        for field in SCALAR_CONTRACT_FIELDS {
+            let mut fixture = ScalarContractFixture::new();
+            let target = fixture.target(field).expect("old concrete lease");
+            let same_ids = fixture.state.active_sequence().expect("Sequence").clone();
+            fixture.state.test_set_sequence(None);
+            fixture.state.test_set_sequence(Some(same_ids));
+            let fresh = fixture.target(field).expect("reopened concrete lease");
+            assert_eq!(
+                target.owner, fresh.owner,
+                "{field:?}: identical IDs are not a lifetime lease"
+            );
+            assert_ne!(target.lease.session_id, fresh.lease.session_id);
+            fixture.assert_refused(&target);
+            let mut same_entities_in_other_sequence =
+                fixture.state.active_sequence().expect("reopened Sequence").clone();
+            same_entities_in_other_sequence.id = SequenceId::new();
+            let other_sequence_id = same_entities_in_other_sequence.id;
+            fixture.state.test_add_sequence(same_entities_in_other_sequence);
+            fixture.state.test_set_active_sequence(other_sequence_id);
+            let other = fixture.target(field).expect("same typed entities in the other Sequence");
+            assert_eq!(fresh.owner, other.owner);
+            assert_eq!(fresh.lease.session_id, other.lease.session_id);
+            assert_ne!(fresh.lease.sequence_id, other.lease.sequence_id);
+            fixture.assert_refused(&fresh);
+        }
+    }
+
+    #[test]
+    fn typed_audio_scalar_stale_begin_never_seals_another_valid_live_owner() {
+        for field in SCALAR_CONTRACT_FIELDS {
+            let mut fixture = ScalarContractFixture::new();
+            let target = fixture.target(field).expect("current scalar");
+            let original = fixture.state.active_sequence().expect("origin").clone();
+            let gesture_id = AuthoringGestureId::new();
+            fixture
+                .state
+                .dispatch_action(
+                    ParameterGestureAction::Begin {
+                        gesture_id,
+                        edit: ScalarContractFixture::edit(&target, -6.0),
+                    }
+                    .action(),
+                )
+                .expect("current Begin");
+            let history = fixture.state.authoring_history().expect("live history").diagnostics();
+            let mut stale = target.clone();
+            stale.lease.sequence_id = SequenceId::new();
+            fixture
+                .state
+                .dispatch_action(
+                    ParameterGestureAction::Begin {
+                        gesture_id: AuthoringGestureId::new(),
+                        edit: ScalarContractFixture::edit(&stale, -30.0),
+                    }
+                    .action(),
+                )
+                .expect("safe stale Begin refusal");
+            assert!(
+                fixture.state.parameter_gesture_is_current()
+                    && fixture.state.parameter_gesture_owns(gesture_id),
+                "{field:?}: original exact gesture still owns its author transaction"
+            );
+            assert_eq!(
+                fixture.state.authoring_history().expect("history").diagnostics(),
+                history
+            );
+            fixture
+                .state
+                .dispatch_action(
+                    ParameterGestureAction::Update {
+                        gesture_id,
+                        edit: ScalarContractFixture::edit(&target, -3.0),
+                    }
+                    .action(),
+                )
+                .expect("original Update");
+            fixture
+                .state
+                .dispatch_action(ParameterGestureAction::Cancel { gesture_id }.action())
+                .expect("original Cancel");
+            assert!(fixture
+                .state
+                .active_sequence()
+                .expect("cancel")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(
+                !fixture.state.can_undo_action(),
+                "{field:?}: canceled live updates publish no author Undo"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_audio_scalar_intervening_edit_keeps_independent_history_and_blocks_late_cancel() {
+        for field in SCALAR_CONTRACT_FIELDS {
+            let mut fixture = ScalarContractFixture::new();
+            let target = fixture.target(field).expect("current scalar");
+            let original = fixture.state.active_sequence().expect("origin").clone();
+            let gesture_id = AuthoringGestureId::new();
+            for action in [
+                ParameterGestureAction::Begin {
+                    gesture_id,
+                    edit: ScalarContractFixture::edit(&target, -6.0),
+                },
+                ParameterGestureAction::Update {
+                    gesture_id,
+                    edit: ScalarContractFixture::edit(&target, -3.0),
+                },
+            ] {
+                fixture.state.dispatch_action(action.action()).expect("live scalar authoring");
+            }
+            let dragged = fixture.state.active_sequence().expect("dragged").clone();
+            fixture
+                .state
+                .dispatch_action(crate::app::ui_actions::audio_routing_edit_action(
+                    mondrian_timeline::AudioRoutingEditRequest {
+                        edit: mondrian_timeline::AudioRoutingEdit::SetRouteEnabled {
+                            route_id: fixture.route_id,
+                            enabled: false,
+                        },
+                    },
+                ))
+                .expect("independent route switch");
+            let intervening = fixture.state.active_sequence().expect("independent edit").clone();
+            let history = fixture.state.authoring_history().expect("history").diagnostics();
+            assert!(!fixture.state.parameter_gesture_is_current());
+            for action in [
+                ParameterGestureAction::Update {
+                    gesture_id,
+                    edit: ScalarContractFixture::edit(&target, -15.0),
+                },
+                ParameterGestureAction::Cancel { gesture_id },
+                ParameterGestureAction::Finish { gesture_id },
+            ] {
+                fixture
+                    .state
+                    .dispatch_action(action.action())
+                    .expect("late intent safely refused");
+            }
+            assert!(fixture
+                .state
+                .active_sequence()
+                .expect("late refusal")
+                .author_state_eq_ignoring_revision(&intervening));
+            assert_eq!(
+                fixture.state.authoring_history().expect("history").diagnostics(),
+                history
+            );
+            assert!(fixture.state.undo_timeline().expect("Undo independent switch"));
+            assert!(fixture
+                .state
+                .active_sequence()
+                .expect("drag remains")
+                .author_state_eq_ignoring_revision(&dragged));
+            assert!(fixture.state.undo_timeline().expect("Undo drag"));
+            assert!(
+                fixture
+                    .state
+                    .active_sequence()
+                    .expect("origin")
+                    .author_state_eq_ignoring_revision(&original),
+                "{field:?}: no whole-Rack fallback restoration"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_audio_scalar_keyed_fields_and_source_locks_refuse_previously_queued_static_values() {
+        use mondrian_timeline::{
+            AudioAutomationEdit, AudioAutomationEditRequest, AudioAutomationTarget,
+        };
+        for field in [
+            ScalarContractField::Parameter,
+            ScalarContractField::Fader,
+            ScalarContractField::Route,
+            ScalarContractField::Sidechain,
+        ] {
+            let mut fixture = ScalarContractFixture::new();
+            let target = fixture.target(field).expect("previous static owner");
+            let automation = match &target.owner {
+                AudioScalarOwner::Parameter { processor_id, parameter_schema, .. } => {
+                    AudioAutomationTarget::ProcessorParameter {
+                        rack: target.owner.processor_address().expect("exact rack"),
+                        processor_id: *processor_id,
+                        parameter_id: parameter_schema.parameter_id.clone(),
+                    }
+                }
+                AudioScalarOwner::Fader { owner } => {
+                    AudioAutomationTarget::ChannelFader { owner: *owner }
+                }
+                AudioScalarOwner::RouteLevel { route_id, .. }
+                | AudioScalarOwner::ProcessorSidechainLevel { route_id, .. } => {
+                    AudioAutomationTarget::RouteGain { route_id: *route_id }
+                }
+                AudioScalarOwner::Trim { .. } => unreachable!(),
+            };
+            fixture
+                .state
+                .dispatch_action(crate::app::ui_actions::audio_automation_edit_action(
+                    AudioAutomationEditRequest {
+                        target: automation,
+                        edit: AudioAutomationEdit::UpsertKeyframe {
+                            keyframe: mondrian_core::ExactAutomationKeyframe::linear(
+                                TimelineTime::ZERO,
+                                -3.0,
+                            ),
+                        },
+                    },
+                ))
+                .expect("canonical curve becomes author authority");
+            assert!(
+                fixture.target(field).is_none(),
+                "{field:?}: keyed control cannot acquire a static author lease"
+            );
+            fixture.assert_refused(&target);
+        }
+        for field in [
+            ScalarContractField::Trim,
+            ScalarContractField::Fader,
+            ScalarContractField::Route,
+            ScalarContractField::Sidechain,
+        ] {
+            let mut fixture = ScalarContractFixture::new();
+            let target = fixture.target(field).expect("previous editable owner");
+            fixture
+                .state
+                .dispatch_action(crate::app::ui_actions::track_set_author_control_action(
+                    crate::app::ui_actions::TrackSetAuthorControlPayload {
+                        track_id: fixture.track_id,
+                        control: crate::app::ui_actions::TrackAuthorControl::Lock,
+                        enabled: true,
+                    },
+                ))
+                .expect("canonical persistent Track lock");
+            assert!(
+                fixture.target(field).is_none(),
+                "{field:?}: fresh projection disables a locked scalar"
+            );
+            fixture.assert_refused(&target);
+        }
+    }
+
+    #[test]
+    fn typed_audio_scalar_routes_require_exact_retained_endpoints_and_live_identity() {
+        use mondrian_timeline::audio::{AudioChannelStripOutputPort, AudioRouteSource};
+        use mondrian_timeline::{AudioRoutingEdit, AudioRoutingEditRequest};
+        for field in [ScalarContractField::Route, ScalarContractField::Sidechain] {
+            let mut fixture = ScalarContractFixture::new();
+            let old = fixture.target(field).expect("original endpoint owner");
+            let source = AudioRouteSource::Track {
+                track_id: fixture.track_id,
+                port: AudioChannelStripOutputPort::PreFader,
+            };
+            let edit = match &old.owner {
+                AudioScalarOwner::RouteLevel { route_id, destination, .. } => {
+                    AudioRoutingEdit::SetRouteEndpoints {
+                        route_id: *route_id,
+                        source,
+                        destination: *destination,
+                    }
+                }
+                AudioScalarOwner::ProcessorSidechainLevel { route_id, processor_id, .. } => {
+                    AudioRoutingEdit::SetProcessorSidechainEndpoints {
+                        route_id: *route_id,
+                        source,
+                        processor_id: *processor_id,
+                        bus_key: "retained.rebound.detector".into(),
+                    }
+                }
+                _ => unreachable!(),
+            };
+            fixture
+                .state
+                .dispatch_action(crate::app::ui_actions::audio_routing_edit_action(
+                    AudioRoutingEditRequest { edit },
+                ))
+                .expect("canonical same-ID rewire");
+            let fresh = fixture.target(field).expect("new exact endpoint owner");
+            assert_eq!(old.lease, fresh.lease);
+            assert_ne!(
+                old.owner, fresh.owner,
+                "changing endpoints is a new control binding"
+            );
+            fixture.assert_refused(&old);
+            let edit = match &fresh.owner {
+                AudioScalarOwner::RouteLevel { route_id, .. } => {
+                    AudioRoutingEdit::RemoveRoute { route_id: *route_id }
+                }
+                AudioScalarOwner::ProcessorSidechainLevel { route_id, .. } => {
+                    AudioRoutingEdit::RemoveProcessorSidechain { route_id: *route_id }
+                }
+                _ => unreachable!(),
+            };
+            fixture
+                .state
+                .dispatch_action(crate::app::ui_actions::audio_routing_edit_action(
+                    AudioRoutingEditRequest { edit },
+                ))
+                .expect("canonical route deletion");
+            assert!(fixture.target(field).is_none());
+            fixture.assert_refused(&fresh);
+        }
+    }
+
+    #[test]
+    fn typed_audio_scalar_codec_is_closed_and_does_not_infer_opaque_author_intents() {
+        let fixture = ScalarContractFixture::new();
+        for field in SCALAR_CONTRACT_FIELDS {
+            let target = fixture.target(field).expect("author-bound target");
+            let mut action = target.set_action(-6.0).expect("closed scalar action");
+            assert!(matches!(
+                ParameterGestureEdit::from_action(&action),
+                Some(ParameterGestureEdit::AudioScalar(_))
+            ));
+            let Action::Custom { payload, .. } = &mut action else {
+                panic!("explicit typed namespace")
+            };
+            payload["edit"].as_object_mut().expect("closed fields").insert(
+                "author_operation".into(),
+                serde_json::json!({"operation":"remove_route","route_id":fixture.route_id}),
+            );
+            assert!(
+                ParameterGestureAction::decode(&action).is_err(),
+                "{field:?}: nested author commands are not admitted"
+            );
+        }
+        for raw in [
+            crate::app::ui_actions::audio_channel_strip_edit_action(
+                mondrian_timeline::AudioChannelStripEditRequest {
+                    owner: mondrian_timeline::AudioChannelStripOwner::Track {
+                        track_id: fixture.track_id,
+                    },
+                    edit: mondrian_timeline::AudioChannelStripEdit::SetInputTrimDb { value: -6.0 },
+                },
+            ),
+            crate::app::ui_actions::audio_routing_edit_action(
+                mondrian_timeline::AudioRoutingEditRequest {
+                    edit: mondrian_timeline::AudioRoutingEdit::SetRouteGainDb {
+                        route_id: fixture.route_id,
+                        value: -6.0,
+                    },
+                },
+            ),
+        ] {
+            assert!(
+                ParameterGestureEdit::from_action(&raw).is_none(),
+                "arbitrary AudioProductAction envelopes remain discrete author commands"
+            );
+        }
     }
 }

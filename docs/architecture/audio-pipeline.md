@@ -2152,6 +2152,45 @@ The App intent contains only typed session/Sequence identity, the exact Rack or
 Scope component occurrence, processor definition, parameter schema and scalar.
 It cannot embed arbitrary Rack edits, native state or opaque nested actions.
 Same-ID reopen/rebind, lock/deletion, schema change and Scope occurrence changes
-refuse old queued controls before author mutation. This scope covers Rack scalar
-values; sidechain gain, channel trim/fader and native editor gestures require
-independent author interaction qualification and are not implied by it.
+refuse old queued controls before author mutation. The closed scalar family also includes input Trim, static Fader, ordinary Route
+level and processor sidechain level. Native editor gestures remain a separate
+unfinished author interaction path and are not implied by these controls.
+
+### Native performance harness identity
+
+The release audio callback gate requires a five-artifact audio group in the
+shared collector: the exact CLAP/VST3 worker executables, both owned reference
+fixtures, and `--audio-test-executable`. Before discovery, worker startup or
+measurement, the audio test verifies its actual `current_exe()` path and SHA256
+against that unique build receipt role. Its JSONL also records that same binary
+identity. A missing or stale executable receipt cannot qualify a callback run.
+OpenFX-only collection keeps its existing separate three-artifact group.
+
+The collector artifact-group regression uses controlled temporary source and
+binary-byte fixtures with mocked read-only version/machine queries; it is a
+receipt-format oracle and does not execute those fixtures or claim native
+performance acceptance. The actual release gate still requires completed current
+build commands/transcript, immutable source hashes, exact PCM and each real
+audio deadline.
+
+
+### Closed scalar audio author lowering
+
+`SetAudioScalar` contains an explicit open-author session/Sequence lease and one
+closed owner: processor parameter, Channel Trim, Channel Fader, ordinary Route
+level or processor sidechain level. App admission reuses canonical Timeline
+strip/Rack/route inspections, exact processor definition/schema, currently
+selected Scope occurrence, route endpoints/bus and static automation authority.
+It lowers only the corresponding existing `SetParameterStaticValue`,
+`SetInputTrimDb`, `SetFaderDb`, `SetRouteGainDb` or
+`SetProcessorSidechainGainDb` request. No opaque nested action can acquire an
+author gesture, and no native metadata request supplies author authority.
+
+All five scalar fields share the existing AuthoringSession gesture and bounded
+Undo history. Valid pointer updates reconcile the same canonical audio program;
+Cancel reconciles the Session-restored author origin. Stale or independently
+superseded groups do not restore an older whole Rack/Channel snapshot over newer
+edits. Control projection performs no realtime worker work, and callbacks retain
+only the precise owner instead of copying complete projection collections.
+Actual Host gesture, typed refusal and performance receipts qualify this seam
+separately from source design and native plugin/editor feature matrices.

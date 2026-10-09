@@ -14,6 +14,9 @@ mod sealed {
 pub trait NumberInputValue: sealed::Sealed + Copy + PartialEq + PartialOrd + 'static {
     /// Exact typed representation used to admit local draft inspection.
     fn inspection_value(self) -> mondrian_ui_core::NumericInputInspectionValue;
+    /// Exact semantic numeric projection, independent of a Slider coordinate.
+    /// Bounds come from the same admitted numeric model as the displayed value.
+    fn accessibility_value(self, min: Self, max: Self) -> mondrian_ui_core::AccessibilityValue;
     /// Default valid bounds used if supplied floating bounds are non-finite.
     fn fallback_range() -> (Self, Self);
     /// Whether this value can be displayed and edited.
@@ -37,10 +40,21 @@ pub trait NumberInputValue: sealed::Sealed + Copy + PartialEq + PartialOrd + 'st
 }
 
 macro_rules! floating_input_value {
-    ($ty:ty, $inspection_variant:ident) => {
+    ($ty:ty, $inspection_variant:ident, $widen:path) => {
         impl NumberInputValue for $ty {
             fn inspection_value(self) -> mondrian_ui_core::NumericInputInspectionValue {
                 mondrian_ui_core::NumericInputInspectionValue::$inspection_variant(self.to_bits())
+            }
+            fn accessibility_value(
+                self,
+                min: Self,
+                max: Self,
+            ) -> mondrian_ui_core::AccessibilityValue {
+                mondrian_ui_core::AccessibilityValue::Number {
+                    value: $widen(self),
+                    min: $widen(min),
+                    max: $widen(max),
+                }
             }
             fn fallback_range() -> (Self, Self) {
                 (0.0, 1.0)
@@ -105,12 +119,15 @@ macro_rules! floating_input_value {
         }
     };
 }
-floating_input_value!(f32, Float32);
-floating_input_value!(f64, Float64);
+floating_input_value!(f32, Float32, f64::from);
+floating_input_value!(f64, Float64, std::convert::identity);
 
 impl NumberInputValue for i64 {
     fn inspection_value(self) -> mondrian_ui_core::NumericInputInspectionValue {
         mondrian_ui_core::NumericInputInspectionValue::Integer(self)
+    }
+    fn accessibility_value(self, min: Self, max: Self) -> mondrian_ui_core::AccessibilityValue {
+        mondrian_ui_core::AccessibilityValue::Integer { value: self, min, max }
     }
     fn fallback_range() -> (Self, Self) {
         (Self::MIN, Self::MAX)
@@ -225,6 +242,9 @@ impl<T: NumberInputValue> NumberInputModel<T> {
     }
     pub(super) fn display_text(&self) -> String {
         self.committed_value.format(self.decimals)
+    }
+    pub(super) fn range(&self) -> (T, T) {
+        (self.min, self.max)
     }
     pub(super) fn committed_value(&self) -> T {
         self.committed_value

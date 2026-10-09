@@ -36,56 +36,121 @@ pub(crate) enum ParameterGestureEdit {
     ClipCurve(ClipEditNumericCurvePayload),
     EffectCurve(VisualEffectEditNumericCurvePayload),
     AudioCurve(AudioAutomationEditRequest),
-    AudioParameter(AudioParameterValueEdit),
+    AudioScalar(AudioScalarValueEdit),
 }
 
-/// Exact open-author lifetime captured by a fresh Rack control projection.
+/// Exact open-author lifetime captured by a fresh audio scalar control projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AudioParameterAuthorLease {
+pub(crate) struct AudioScalarAuthorLease {
     /// A reopened project is a new author lifetime even when every entity ID matches.
     pub(crate) session_id: AuthoringSessionId,
     /// Parameter edits cannot transfer onto another active Sequence.
     pub(crate) sequence_id: SequenceId,
 }
 
-/// Complete scalar control owner, without widget presentation or native runtime state.
+/// Closed author owner of one scalar control, without presentation or runtime state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct AudioParameterGestureTarget {
-    /// Author lifetime captured at model projection, never inferred during dispatch.
-    pub(crate) lease: AudioParameterAuthorLease,
-    /// Exact Rack or materialized Scope occurrence represented by this control.
-    pub(crate) owner: mondrian_audio::AudioProcessorInputInspectionTarget,
-    /// Stable instance in that Rack.
-    pub(crate) processor_id: mondrian_core::AudioProcessorInstanceId,
-    /// Rebinding the same instance invalidates its old control.
-    pub(crate) definition: mondrian_timeline::audio::AudioProcessorDefinitionRef,
-    /// Exact parameter contract captured in the author instance.
-    pub(crate) parameter_schema: mondrian_core::automation::ParameterSchema,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum AudioScalarOwner {
+    /// One static processor parameter with its exact materialization and definition contract.
+    Parameter {
+        owner: mondrian_audio::AudioProcessorInputInspectionTarget,
+        processor_id: mondrian_core::AudioProcessorInstanceId,
+        definition: mondrian_timeline::audio::AudioProcessorDefinitionRef,
+        parameter_schema: Box<mondrian_core::automation::ParameterSchema>,
+    },
+    /// Channel input trim is a distinct canonical field, without a fabricated schema.
+    Trim {
+        owner: mondrian_timeline::AudioChannelStripOwner,
+    },
+    /// Channel fader must remain static to accept scalar edits.
+    Fader {
+        owner: mondrian_timeline::AudioChannelStripOwner,
+    },
+    /// One ordinary principal/send route, including its exact endpoints.
+    RouteLevel {
+        route_id: mondrian_core::AudioRouteId,
+        source: mondrian_timeline::audio::AudioRouteSource,
+        destination: mondrian_timeline::audio::AudioRouteDestination,
+    },
+    /// One retained processor input route in the currently inspected occurrence.
+    ProcessorSidechainLevel {
+        route_id: mondrian_core::AudioRouteId,
+        source: mondrian_timeline::audio::AudioRouteSource,
+        bus_key: String,
+        owner: mondrian_audio::AudioProcessorInputInspectionTarget,
+        processor_id: mondrian_core::AudioProcessorInstanceId,
+        definition: mondrian_timeline::audio::AudioProcessorDefinitionRef,
+    },
 }
 
-impl AudioParameterGestureTarget {
-    /// Canonical mutation address derived from the exact occurrence owner.
-    pub(crate) fn rack_address(&self) -> AudioProcessorRackAddress {
-        match self.owner {
-            mondrian_audio::AudioProcessorInputInspectionTarget::ChannelStrip { owner, rack } => {
-                AudioProcessorRackAddress::ChannelStrip { owner, rack }
+/// Exact open-author lifetime and closed scalar owner captured by a fresh control.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AudioScalarGestureTarget {
+    pub(crate) lease: AudioScalarAuthorLease,
+    pub(crate) owner: AudioScalarOwner,
+}
+
+impl AudioScalarAuthorLease {
+    /// Bind only a concrete projection of the current open Sequence.
+    pub(crate) fn from_state(state: &AppState, source_sequence_id: SequenceId) -> Option<Self> {
+        (state.active_sequence_id() == Some(source_sequence_id)).then_some(Self {
+            session_id: state.authoring_session_id()?,
+            sequence_id: source_sequence_id,
+        })
+    }
+}
+
+impl AudioScalarOwner {
+    /// Canonical Rack address when this scalar belongs to a processor owner.
+    pub(crate) fn processor_address(&self) -> Option<AudioProcessorRackAddress> {
+        match self {
+            Self::Parameter { owner, .. } | Self::ProcessorSidechainLevel { owner, .. } => {
+                Some(audio_scalar_processor_rack_address(*owner))
             }
-            mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
-                scope_id,
-                ..
-            } => AudioProcessorRackAddress::ProcessingScope { scope_id },
+            Self::Trim { .. } | Self::Fader { .. } | Self::RouteLevel { .. } => None,
         }
     }
 }
 
-/// One definition-domain scalar intent; it cannot contain an arbitrary Rack operation.
+impl AudioScalarGestureTarget {
+    /// Encode one finite scalar intent; owner/range admission remains canonical.
+    pub(crate) fn set_action(&self, value: f64) -> Option<Action> {
+        let valid = value.is_finite()
+            && (matches!(&self.owner, AudioScalarOwner::Parameter { .. })
+                || (mondrian_timeline::audio::AUDIO_GAIN_DB_MIN
+                    ..=mondrian_timeline::audio::AUDIO_GAIN_DB_MAX)
+                    .contains(&value));
+        valid.then(|| {
+            ParameterGestureAction::SetAudioScalar {
+                edit: AudioScalarValueEdit { target: Box::new(self.clone()), value },
+            }
+            .action()
+        })
+    }
+}
+
+fn audio_scalar_processor_rack_address(
+    owner: mondrian_audio::AudioProcessorInputInspectionTarget,
+) -> AudioProcessorRackAddress {
+    match owner {
+        mondrian_audio::AudioProcessorInputInspectionTarget::ChannelStrip { owner, rack } => {
+            AudioProcessorRackAddress::ChannelStrip { owner, rack }
+        }
+        mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+            scope_id, ..
+        } => AudioProcessorRackAddress::ProcessingScope { scope_id },
+    }
+}
+
+/// One closed-domain scalar intent; it cannot contain an arbitrary nested author operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AudioParameterValueEdit {
+pub(crate) struct AudioScalarValueEdit {
     /// Captured fresh owner; boxing keeps ordinary gesture messages compact.
-    pub(crate) target: Box<AudioParameterGestureTarget>,
+    pub(crate) target: Box<AudioScalarGestureTarget>,
     /// Canonical numeric value, validated by the existing Timeline mutation.
     pub(crate) value: f64,
 }
@@ -130,9 +195,9 @@ impl ParameterCurveGestureTarget {
 #[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
 /// Explicit lifecycle events; no nested or opaque author commands are admitted.
 pub(crate) enum ParameterGestureAction {
-    /// Confirm a single exact Rack parameter value from keyboard or numeric input.
-    SetAudioParameter {
-        edit: AudioParameterValueEdit,
+    /// Confirm one exact audio scalar value from keyboard or numeric input.
+    SetAudioScalar {
+        edit: AudioScalarValueEdit,
     },
     BeginCurve {
         gesture_id: AuthoringGestureId,
@@ -170,7 +235,7 @@ enum ParameterGestureKind {
 enum ParameterGestureTarget {
     Visual(VisualParameterGestureTarget),
     AudioCurve(AudioAutomationTarget),
-    AudioParameter(Box<AudioParameterGestureTarget>),
+    AudioScalar(Box<AudioScalarGestureTarget>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,10 +266,10 @@ pub(crate) enum ParameterGestureCommand {
 impl ParameterGestureEdit {
     /// Extract only canonical parameter edits from a widget action.
     pub(crate) fn from_action(action: &Action) -> Option<Self> {
-        if let Ok(Some(ParameterGestureAction::SetAudioParameter { edit })) =
+        if let Ok(Some(ParameterGestureAction::SetAudioScalar { edit })) =
             ParameterGestureAction::decode(action)
         {
-            return Some(Self::AudioParameter(edit));
+            return Some(Self::AudioScalar(edit));
         }
         match ProductAction::decode_external(action).ok().flatten()? {
             ProductAction::Clip(ClipProductAction::WriteParameterValues(edit)) => {
@@ -233,16 +298,28 @@ impl ParameterGestureEdit {
             Self::AudioCurve(edit) => {
                 ProductAction::Audio(AudioProductAction::EditAutomation(edit))
             }
-            Self::AudioParameter(edit) => ProductAction::Audio(
-                AudioProductAction::EditProcessorRack(AudioProcessorRackEditRequest {
-                    address: edit.target.rack_address(),
-                    edit: AudioProcessorRackEdit::SetParameterStaticValue {
-                        processor_id: edit.target.processor_id,
-                        parameter_id: edit.target.parameter_schema.parameter_id,
-                        value: edit.value,
-                    },
-                }),
-            ),
+            Self::AudioScalar(edit) => {
+                let value = edit.value;
+                let action = match edit.target.owner {
+                    AudioScalarOwner::Parameter { owner, processor_id, parameter_schema, .. } => {
+                        AudioProductAction::EditProcessorRack(AudioProcessorRackEditRequest {
+                            address: audio_scalar_processor_rack_address(owner),
+                            edit: AudioProcessorRackEdit::SetParameterStaticValue {
+                                processor_id, parameter_id: parameter_schema.parameter_id, value,
+                            },
+                        })
+                    }
+                    AudioScalarOwner::Trim { owner } => AudioProductAction::EditChannelStrip(
+                        mondrian_timeline::AudioChannelStripEditRequest { owner, edit: mondrian_timeline::AudioChannelStripEdit::SetInputTrimDb { value } }),
+                    AudioScalarOwner::Fader { owner } => AudioProductAction::EditChannelStrip(
+                        mondrian_timeline::AudioChannelStripEditRequest { owner, edit: mondrian_timeline::AudioChannelStripEdit::SetFaderDb { value } }),
+                    AudioScalarOwner::RouteLevel { route_id, .. } => AudioProductAction::EditRouting(
+                        mondrian_timeline::AudioRoutingEditRequest { edit: mondrian_timeline::AudioRoutingEdit::SetRouteGainDb { route_id, value } }),
+                    AudioScalarOwner::ProcessorSidechainLevel { route_id, .. } => AudioProductAction::EditRouting(
+                        mondrian_timeline::AudioRoutingEditRequest { edit: mondrian_timeline::AudioRoutingEdit::SetProcessorSidechainGainDb { route_id, value } }),
+                };
+                ProductAction::Audio(action)
+            }
             Self::ClipCurve(edit) => {
                 ProductAction::Clip(ClipProductAction::EditNumericCurve(Box::new(edit)))
             }
@@ -276,9 +353,7 @@ impl ParameterGestureEdit {
         };
         match self {
             Self::AudioCurve(edit) => ParameterGestureTarget::AudioCurve(edit.target.clone()),
-            Self::AudioParameter(edit) => {
-                ParameterGestureTarget::AudioParameter(edit.target.clone())
-            }
+            Self::AudioScalar(edit) => ParameterGestureTarget::AudioScalar(edit.target.clone()),
             Self::ClipCurve(edit) => ParameterCurveGestureTarget::Clip {
                 clip_id: edit.clip_id,
                 parameter: edit.parameter.clone(),
@@ -339,7 +414,60 @@ impl ParameterGestureAction {
 }
 
 impl AppState {
-    fn audio_parameter_target_is_current(&self, target: &AudioParameterGestureTarget) -> bool {
+    fn current_audio_scalar_processor(
+        &self,
+        owner: mondrian_audio::AudioProcessorInputInspectionTarget,
+        processor_id: mondrian_core::AudioProcessorInstanceId,
+        definition: &mondrian_timeline::audio::AudioProcessorDefinitionRef,
+    ) -> Option<&mondrian_timeline::audio::AudioProcessorInstance> {
+        let sequence = self.active_sequence()?;
+        if !mondrian_timeline::inspect_audio_processor_rack(
+            sequence,
+            &audio_scalar_processor_rack_address(owner),
+        )
+        .is_ok_and(|inspection| inspection.is_editable())
+        {
+            return None;
+        }
+        if let mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+            scope_id,
+            occurrence,
+        } = owner
+        {
+            if self.primary_selected_clip().is_none_or(|selected| {
+                selected.is_video_track || selected.clip_id != occurrence.clip_id
+            }) {
+                return None;
+            }
+            if let Some(selected) =
+                self.selection.audio_scope_occurrences.get(&(sequence.id, scope_id))
+            {
+                if *selected != occurrence {
+                    return None;
+                }
+            } else {
+                // Match the existing Inspector projection: only one binding may
+                // be selected implicitly. Ambiguous materializations need an
+                // explicit occurrence, never a guessed first component.
+                let clip = sequence.find_clip(occurrence.clip_id)?;
+                let mut bindings = clip
+                    .audio_components
+                    .iter()
+                    .filter(|edit| edit.processing.scope_id == scope_id);
+                if bindings.next().is_none_or(|edit| edit.id != occurrence.edit_id)
+                    || bindings.next().is_some()
+                {
+                    return None;
+                }
+            }
+        }
+        let processor =
+            mondrian_audio::inspect_audio_processor_input_author(sequence, owner, processor_id)
+                .ok()?;
+        (processor.definition == *definition).then_some(processor)
+    }
+
+    fn audio_scalar_target_is_current(&self, target: &AudioScalarGestureTarget) -> bool {
         if self.authoring_session_id() != Some(target.lease.session_id)
             || self.active_sequence_id() != Some(target.lease.sequence_id)
         {
@@ -348,67 +476,67 @@ impl AppState {
         let Some(sequence) = self.active_sequence() else {
             return false;
         };
-        if !mondrian_timeline::inspect_audio_processor_rack(sequence, &target.rack_address())
-            .is_ok_and(|inspection| inspection.is_editable())
-        {
-            return false;
-        }
-        if let mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
-            scope_id,
-            occurrence,
-        } = target.owner
-        {
-            if self.primary_selected_clip().is_none_or(|selected| {
-                selected.is_video_track || selected.clip_id != occurrence.clip_id
-            }) {
-                return false;
+        match &target.owner {
+            AudioScalarOwner::Parameter { owner, processor_id, definition, parameter_schema } => {
+                self.current_audio_scalar_processor(*owner, *processor_id, definition)
+                    .is_some_and(|processor| {
+                        processor.parameters.get(&parameter_schema.parameter_id).is_some_and(
+                            |parameter| {
+                                parameter.schema == **parameter_schema
+                                    && parameter.schema.numeric.is_some()
+                                    && parameter.automation.keyframes.is_empty()
+                            },
+                        )
+                    })
             }
-            if let Some(selected) =
-                self.selection.audio_scope_occurrences.get(&(sequence.id, scope_id))
-            {
-                if *selected != occurrence {
-                    return false;
-                }
-            } else {
-                // Match the existing Inspector projection: only one binding may
-                // be selected implicitly. Ambiguous materializations need an
-                // explicit occurrence, never a guessed first component.
-                let Some(clip) = sequence.find_clip(occurrence.clip_id) else {
-                    return false;
-                };
-                let mut bindings = clip
-                    .audio_components
-                    .iter()
-                    .filter(|edit| edit.processing.scope_id == scope_id);
-                if bindings.next().is_none_or(|edit| edit.id != occurrence.edit_id)
-                    || bindings.next().is_some()
-                {
-                    return false;
-                }
+            AudioScalarOwner::Trim { owner } => {
+                mondrian_timeline::inspect_audio_channel_strip(sequence, *owner)
+                    .is_ok_and(|inspection| inspection.is_editable())
             }
-        }
-        mondrian_audio::inspect_audio_processor_input_author(
-            sequence,
-            target.owner,
-            target.processor_id,
-        )
-        .is_ok_and(|processor| {
-            processor.definition == target.definition
-                && processor.parameters.get(&target.parameter_schema.parameter_id).is_some_and(
-                    |parameter| {
-                        parameter.schema == target.parameter_schema
-                            && parameter.schema.numeric.is_some()
-                            && parameter.automation.keyframes.is_empty()
+            AudioScalarOwner::Fader { owner } => mondrian_timeline::inspect_audio_channel_strip(
+                sequence, *owner,
+            )
+            .is_ok_and(|inspection| {
+                inspection.is_editable() && inspection.strip().fader_automation.is_none()
+            }),
+            AudioScalarOwner::RouteLevel { route_id, source, destination } => {
+                mondrian_timeline::inspect_audio_route(sequence, *route_id).is_ok_and(
+                    |inspection| {
+                        let route = inspection.route();
+                        inspection.is_editable()
+                            && route.source == *source
+                            && route.destination == *destination
+                            && route.gain_automation.is_none()
                     },
                 )
-        })
+            }
+            AudioScalarOwner::ProcessorSidechainLevel {
+                route_id,
+                source,
+                bus_key,
+                owner,
+                processor_id,
+                definition,
+            } => {
+                self.current_audio_scalar_processor(*owner, *processor_id, definition).is_some()
+                    && mondrian_timeline::inspect_audio_processor_sidechain(sequence, *route_id)
+                        .is_ok_and(|inspection| {
+                            let route = inspection.route();
+                            inspection.is_editable()
+                                && route.processor_id == *processor_id
+                                && route.source == *source
+                                && route.bus_key == *bus_key
+                                && route.gain_automation.is_none()
+                        })
+            }
+        }
     }
 
     fn parameter_target_is_current(&self, target: &ParameterGestureTarget) -> bool {
         let target = match target {
             ParameterGestureTarget::Visual(target) => target,
-            ParameterGestureTarget::AudioParameter(target) => {
-                return self.audio_parameter_target_is_current(target);
+            ParameterGestureTarget::AudioScalar(target) => {
+                return self.audio_scalar_target_is_current(target);
             }
             ParameterGestureTarget::AudioCurve(target) => {
                 let Some(sequence) = self.active_sequence() else {
@@ -560,9 +688,10 @@ impl AppState {
         if !self.parameter_gesture_is_current() {
             return self.finish_parameter_gesture();
         }
-        let audio_parameter = self.active_parameter_gesture.as_ref().is_some_and(|active| {
-            matches!(&active.target, ParameterGestureTarget::AudioParameter(_))
-        });
+        let audio_parameter = self
+            .active_parameter_gesture
+            .as_ref()
+            .is_some_and(|active| matches!(&active.target, ParameterGestureTarget::AudioScalar(_)));
         let commit = self
             .authoring
             .as_mut()
@@ -572,7 +701,7 @@ impl AppState {
         if let Some(commit) = commit {
             self.consume_authoring_commit(commit);
             if audio_parameter {
-                self.reconcile_audio_after_committed_authoring_change("audio_parameter_cancel");
+                self.reconcile_audio_after_committed_authoring_change("audio_scalar_cancel");
             }
         }
         Ok(())
@@ -584,13 +713,13 @@ impl AppState {
         action: ParameterGestureAction,
     ) -> Result<()> {
         let (id, edit, begin) = match action {
-            ParameterGestureAction::SetAudioParameter { edit } => {
-                if !self.audio_parameter_target_is_current(&edit.target) {
-                    return Err(gesture_error("audio parameter author owner changed"));
+            ParameterGestureAction::SetAudioScalar { edit } => {
+                if !self.audio_scalar_target_is_current(&edit.target) {
+                    return Err(gesture_error("audio scalar author owner changed"));
                 }
                 self.finish_parameter_gesture()?;
                 return self.dispatch_product_action(
-                    ParameterGestureEdit::AudioParameter(edit).into_product(),
+                    ParameterGestureEdit::AudioScalar(edit).into_product(),
                 );
             }
             ParameterGestureAction::BeginCurve { gesture_id, target } => {
@@ -615,9 +744,9 @@ impl AppState {
         };
         let target = edit.target();
         if begin {
-            // Reject a queued stale Rack start before sealing any other live
+            // Reject a queued stale scalar start before sealing any other live
             // gesture. A refused control cannot advance author history.
-            if matches!(&target, ParameterGestureTarget::AudioParameter(_))
+            if matches!(&target, ParameterGestureTarget::AudioScalar(_))
                 && !self.parameter_target_is_current(&target)
             {
                 return Ok(());
@@ -775,7 +904,7 @@ mod tests {
             ParameterGestureEdit::ClipCurve(_)
             | ParameterGestureEdit::EffectCurve(_)
             | ParameterGestureEdit::AudioCurve(_)
-            | ParameterGestureEdit::AudioParameter(_) => {
+            | ParameterGestureEdit::AudioScalar(_) => {
                 panic!("scalar fixture expected")
             }
         };

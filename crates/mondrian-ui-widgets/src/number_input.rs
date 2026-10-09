@@ -28,6 +28,7 @@ pub struct NumberInput<T: NumberInputValue = f64> {
     focus_visible: bool,
     width: f32,
     on_change: Option<Box<NumberInputChangeAction<T>>>,
+    accessible_name: Option<String>,
 }
 
 impl<T: NumberInputValue> NumberInput<T> {
@@ -43,6 +44,7 @@ impl<T: NumberInputValue> NumberInput<T> {
             focus_visible: false,
             width: 200.0,
             on_change: None,
+            accessible_name: None,
         }
     }
 
@@ -106,6 +108,16 @@ impl<T: NumberInputValue> NumberInput<T> {
     /// Current parsed and normalized value, if the raw text is numeric.
     pub fn value(&self) -> Option<T> {
         self.model.normalized_text_value(self.input.text())
+    }
+
+    /// Current admitted baseline without parsing the display or local draft.
+    pub fn committed_value(&self) -> T {
+        self.model.committed_value()
+    }
+
+    /// Inclusive hard range after the sole numeric model's normalization.
+    pub fn range(&self) -> (T, T) {
+        self.model.range()
     }
 
     /// Update an unfocused field from its fresh numeric presentation model.
@@ -350,8 +362,18 @@ impl<T: NumberInputValue> Widget for NumberInput<T> {
         true
     }
 
+    fn set_accessible_name(&mut self, name: Option<String>) -> bool {
+        self.accessible_name = name.filter(|name| !name.is_empty());
+        true
+    }
+
     fn accessibility(&self) -> Option<mondrian_ui_core::AccessibilityNode> {
-        self.input.accessibility()
+        self.input.accessibility().map(|mut node| {
+            if let Some(name) = &self.accessible_name {
+                node.name = Some(name.clone());
+            }
+            node
+        })
     }
 
     fn accepts_text_input(&self) -> bool {
@@ -1599,6 +1621,150 @@ mod tests {
             &*values.borrow(),
             &[42.0],
             "synchronized baseline is not a second author edit"
+        );
+    }
+
+    #[test]
+    fn numeric_accessibility_typed_baseline_and_range_do_not_parse_local_drafts() {
+        let exact = 0.12345678901234568_f64;
+        let mut input = NumberInput::new(exact, 100.0, -100.0).with_decimals(2);
+        assert_eq!(input.committed_value().to_bits(), exact.to_bits());
+        assert_eq!(input.range(), (-100.0, 100.0));
+        let dispatch = |_: Action| {};
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        input.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::test_utils::primary_text_modifiers(),
+            },
+            &mut ctx,
+        );
+        input.event(&UiEvent::TextInput("incomplete -".to_owned()), &mut ctx);
+        assert_eq!(input.value(), None);
+        assert_eq!(input.committed_value().to_bits(), exact.to_bits());
+        assert_eq!(input.range(), (-100.0, 100.0));
+        assert_eq!(
+            input.accessibility().expect("actual draft node").value,
+            Some(mondrian_ui_core::AccessibilityValue::Text(
+                "incomplete -".to_owned()
+            ))
+        );
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(input.committed_value().to_bits(), exact.to_bits());
+        let invalid = NumberInput::new(f64::NAN, f64::INFINITY, f64::NAN);
+        assert_eq!(invalid.range(), (0.0, 1.0));
+        assert_eq!(invalid.committed_value(), 0.0);
+        let clamped = NumberInput::new(1000.0_f64, 10.0, -10.0);
+        assert_eq!(clamped.committed_value(), 10.0);
+        assert_eq!(clamped.range(), (-10.0, 10.0));
+        let integer = NumberInput::new(i64::MAX, i64::MAX, i64::MIN);
+        assert_eq!(integer.committed_value(), i64::MAX);
+        assert_eq!(integer.range(), (i64::MIN, i64::MAX));
+        let signed_zero = NumberInput::new(-0.0_f64, -1.0, 1.0);
+        assert_eq!(
+            signed_zero.committed_value().to_bits(),
+            (-0.0_f64).to_bits()
+        );
+    }
+
+    #[test]
+    fn numeric_accessibility_projections_preserve_declared_float_and_integer_precision() {
+        use mondrian_ui_core::AccessibilityValue;
+        for exact in [0.12345678901234568_f64, -0.0, f64::MAX, f64::MIN_POSITIVE] {
+            let AccessibilityValue::Number { value, min, max } =
+                exact.accessibility_value(-f64::MAX, f64::MAX)
+            else {
+                panic!("Float64 projection")
+            };
+            assert_eq!(value.to_bits(), exact.to_bits());
+            assert_eq!(min.to_bits(), (-f64::MAX).to_bits());
+            assert_eq!(max.to_bits(), f64::MAX.to_bits());
+        }
+        let original = 0.12345679_f32;
+        assert_eq!(
+            original.accessibility_value(-1.0, 1.0),
+            AccessibilityValue::Number { value: f64::from(original), min: -1.0, max: 1.0 }
+        );
+        for exact in [
+            i64::MIN,
+            -9_007_199_254_740_993,
+            9_007_199_254_740_993,
+            i64::MAX,
+        ] {
+            assert_eq!(
+                exact.accessibility_value(i64::MIN, i64::MAX),
+                AccessibilityValue::Integer { value: exact, min: i64::MIN, max: i64::MAX }
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_accessibility_name_refresh_retains_only_admitted_draft_and_fresh_callback() {
+        let old_values = Rc::new(RefCell::new(Vec::new()));
+        let new_values = Rc::new(RefCell::new(Vec::new()));
+        let dispatch = |_: Action| {};
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut old =
+            NumberInput::new(12.0, -100.0, 100.0).on_change(record_value(Rc::clone(&old_values)));
+        old.set_control_inspection_key(Some("exact-numeric-accessible-owner".to_owned()));
+        assert!(old.set_accessible_name(Some("Gain (dB)".to_owned())));
+        for event in [
+            UiEvent::focus_gained_keyboard(),
+            UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::test_utils::primary_text_modifiers(),
+            },
+            UiEvent::TextInput("42.123456789012344".to_owned()),
+        ] {
+            old.event(&event, &mut ctx);
+        }
+        let state = old.control_inspection_state().expect("admitted draft");
+        let mut fresh =
+            NumberInput::new(12.0, -100.0, 100.0).on_change(record_value(Rc::clone(&new_values)));
+        fresh.set_control_inspection_key(Some("exact-numeric-accessible-owner".to_owned()));
+        assert!(fresh.set_accessible_name(Some("增益 (dB)".to_owned())));
+        assert!(fresh.restore_control_inspection_state(&state));
+        let node = fresh.accessibility().expect("fresh node");
+        assert_eq!(node.name.as_deref(), Some("增益 (dB)"));
+        assert_eq!(
+            node.value,
+            Some(mondrian_ui_core::AccessibilityValue::Text(
+                "42.123456789012344".to_owned()
+            ))
+        );
+        assert_eq!(fresh.committed_value(), 12.0);
+        assert_eq!(fresh.range(), (-100.0, 100.0));
+        fresh.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert!(old_values.borrow().is_empty());
+        assert_eq!(&*new_values.borrow(), &[42.123456789012344]);
+        let mut different = NumberInput::new(12.0_f64, -100.0, 100.0);
+        different.set_control_inspection_key(Some("different-owner".to_owned()));
+        different.set_accessible_name(Some("Other (dB)".to_owned()));
+        assert!(!different.restore_control_inspection_state(&state));
+        assert_eq!(different.text(), "12");
+        let mut disabled = NumberInput::new(12.0_f64, -100.0, 100.0).disabled();
+        disabled.set_control_inspection_key(Some("exact-numeric-accessible-owner".to_owned()));
+        disabled.set_accessible_name(Some("Read only (dB)".to_owned()));
+        assert!(!disabled.restore_control_inspection_state(&state));
+        let node = disabled.accessibility().expect("readable disabled node");
+        assert!(node.state.disabled && !node.state.focusable && !node.state.focused);
+        assert_eq!(node.name.as_deref(), Some("Read only (dB)"));
+        assert_eq!(
+            node.value,
+            Some(mondrian_ui_core::AccessibilityValue::Text("12".to_owned()))
         );
     }
 }
