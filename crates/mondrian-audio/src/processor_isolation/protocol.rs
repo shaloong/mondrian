@@ -265,10 +265,12 @@ impl WorkerResponse {
         let detail = detail.as_bytes();
         let detail_len = u32::try_from(detail.len())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Worker detail too large"))?;
-        writer.write_all(&RESPONSE_MAGIC.to_le_bytes())?;
-        writer.write_all(&PROTOCOL_VERSION.to_le_bytes())?;
-        writer.write_all(&status.to_le_bytes())?;
-        writer.write_all(&detail_len.to_le_bytes())?;
+        let mut header = [0_u8; 16];
+        header[0..4].copy_from_slice(&RESPONSE_MAGIC.to_le_bytes());
+        header[4..8].copy_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+        header[8..12].copy_from_slice(&status.to_le_bytes());
+        header[12..16].copy_from_slice(&detail_len.to_le_bytes());
+        writer.write_all(&header)?;
         writer.write_all(detail)?;
         writer.flush()
     }
@@ -407,4 +409,170 @@ fn align_up(value: usize, alignment: usize) -> Result<usize, AudioProcessorHostE
         .checked_add(mask)
         .map(|value| value & !mask)
         .ok_or_else(|| invalid_contract("shared-storage alignment overflowed"))
+}
+
+#[cfg(test)]
+mod response_write_qualification {
+    use super::*;
+    use std::io::Cursor;
+
+    struct RecordedWriter {
+        bytes: [u8; MAX_WORKER_DETAIL_BYTES + 16],
+        length: usize,
+        nonempty_writes: usize,
+        flushes: usize,
+        max_write: usize,
+        interrupts: usize,
+        write_error: Option<io::ErrorKind>,
+        flush_error: Option<io::ErrorKind>,
+    }
+
+    impl RecordedWriter {
+        fn new(max_write: usize) -> Self {
+            Self {
+                bytes: [0; MAX_WORKER_DETAIL_BYTES + 16],
+                length: 0,
+                nonempty_writes: 0,
+                flushes: 0,
+                max_write,
+                interrupts: 0,
+                write_error: None,
+                flush_error: None,
+            }
+        }
+
+        fn written(&self) -> &[u8] {
+            &self.bytes[..self.length]
+        }
+    }
+
+    impl Write for RecordedWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if bytes.is_empty() {
+                return Ok(0);
+            }
+            self.nonempty_writes += 1;
+            if self.interrupts > 0 {
+                self.interrupts -= 1;
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+            if let Some(error) = self.write_error {
+                return Err(io::Error::from(error));
+            }
+            let accepted = bytes.len().min(self.max_write);
+            if accepted > self.bytes.len() - self.length {
+                return Err(io::Error::from(io::ErrorKind::OutOfMemory));
+            }
+            self.bytes[self.length..self.length + accepted].copy_from_slice(&bytes[..accepted]);
+            self.length += accepted;
+            Ok(accepted)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            self.flush_error.map_or(Ok(()), |error| Err(io::Error::from(error)))
+        }
+    }
+
+    // Independent protocol-v2 wire bytes: MAPR, version=2, success=0, detail=0.
+    const COMPLETED_WIRE: [u8; 16] = [77, 65, 80, 82, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+    #[test]
+    fn native_response_wire_completed_has_one_nonempty_header_write() -> io::Result<()> {
+        let mut writer = RecordedWriter::new(usize::MAX);
+        WorkerResponse::Completed.write_to(&mut writer)?;
+        assert_eq!(writer.written(), COMPLETED_WIRE);
+        assert_eq!(writer.nonempty_writes, 1);
+        assert_eq!(writer.flushes, 1);
+        assert_eq!(
+            WorkerResponse::read_from(&mut Cursor::new(writer.written()))?,
+            WorkerResponse::Completed
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn native_response_wire_failed_has_one_header_and_one_body_write() -> io::Result<()> {
+        let mut writer = RecordedWriter::new(usize::MAX);
+        WorkerResponse::Failed("bad-λ".to_owned()).write_to(&mut writer)?;
+        let expected = [
+            77, 65, 80, 82, 2, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
+        ];
+        assert_eq!(writer.written(), expected);
+        assert_eq!(writer.nonempty_writes, 2);
+        assert_eq!(writer.flushes, 1);
+        assert_eq!(
+            WorkerResponse::read_from(&mut Cursor::new(writer.written()))?,
+            WorkerResponse::Failed("bad-λ".to_owned()),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn native_response_wire_partial_header_and_detail_keep_exact_order() -> io::Result<()> {
+        let mut writer = RecordedWriter::new(3);
+        WorkerResponse::Failed("bad-λ".to_owned()).write_to(&mut writer)?;
+        let expected = [
+            77, 65, 80, 82, 2, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
+        ];
+        assert_eq!(writer.written(), expected);
+        assert_eq!(writer.nonempty_writes, 8);
+        assert_eq!(writer.flushes, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn native_response_wire_interrupted_write_retries_without_duplicate_bytes() -> io::Result<()> {
+        let mut writer = RecordedWriter::new(usize::MAX);
+        writer.interrupts = 1;
+        WorkerResponse::Completed.write_to(&mut writer)?;
+        assert_eq!(writer.written(), COMPLETED_WIRE);
+        assert_eq!(writer.nonempty_writes, 2);
+        assert_eq!(writer.flushes, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn native_response_wire_utf8_bound_is_unchanged() -> io::Result<()> {
+        let mut writer = RecordedWriter::new(usize::MAX);
+        WorkerResponse::Failed("界".repeat(1367)).write_to(&mut writer)?;
+        // 4096 cannot divide a three-byte UTF-8 code point: retain exactly 4095.
+        assert_eq!(writer.length, 16 + 4095);
+        assert_eq!(&writer.written()[12..16], &[255, 15, 0, 0]);
+        assert_eq!(writer.nonempty_writes, 2);
+        assert_eq!(
+            WorkerResponse::read_from(&mut Cursor::new(writer.written()))?,
+            WorkerResponse::Failed("界".repeat(1365)),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn native_response_wire_zero_write_refuses_without_flush() {
+        let mut writer = RecordedWriter::new(0);
+        let result = WorkerResponse::Completed.write_to(&mut writer);
+        assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::WriteZero));
+        assert_eq!(writer.length, 0);
+        assert_eq!(writer.flushes, 0);
+    }
+
+    #[test]
+    fn native_response_wire_terminal_write_error_preserves_failure() {
+        let mut writer = RecordedWriter::new(usize::MAX);
+        writer.write_error = Some(io::ErrorKind::BrokenPipe);
+        let result = WorkerResponse::Completed.write_to(&mut writer);
+        assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::BrokenPipe));
+        assert_eq!(writer.length, 0);
+        assert_eq!(writer.flushes, 0);
+    }
+
+    #[test]
+    fn native_response_wire_flush_error_does_not_claim_completion() {
+        let mut writer = RecordedWriter::new(usize::MAX);
+        writer.flush_error = Some(io::ErrorKind::ConnectionReset);
+        let result = WorkerResponse::Completed.write_to(&mut writer);
+        assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::ConnectionReset));
+        assert_eq!(writer.written(), COMPLETED_WIRE);
+        assert_eq!(writer.flushes, 1);
+    }
 }

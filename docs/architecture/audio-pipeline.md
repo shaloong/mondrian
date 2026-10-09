@@ -2194,3 +2194,32 @@ edits. Control projection performs no realtime worker work, and callbacks retain
 only the precise owner instead of copying complete projection collections.
 Actual Host gesture, typed refusal and performance receipts qualify this seam
 separately from source design and native plugin/editor feature matrices.
+
+
+### Native audio control-channel overhead
+
+The worker control protocol retains its exact version-2 layout. A response writes
+one stack-owned 16-byte header before the existing bounded UTF-8 detail, using
+`write_all` for partial and interrupted writes. Success still carries no detail.
+The reader's allocation and framing rules are unchanged. Instrumented writer
+qualification checks independent literal wire bytes, write-call counts, partial
+writes, UTF-8 bounds and propagation of write/flush failures; it is not a network
+packet or operating-system syscall trace.
+
+Each parent control socket enables TCP_NODELAY once after successful acceptance.
+Its cached timeout records a read/write pair only after both socket setters
+succeed. Repeated operations with the installed budget need no socket-option
+update. EnterState, normal operations and bounded shutdown still select their
+existing budgets; any partial timeout update invalidates the cache and closes
+the worker. Shutdown refuses the exchange if its short budget cannot be installed,
+then terminates/reaps instead of potentially using an earlier longer timeout.
+Callback deadlines, scheduling priority and protocol semantics are unchanged.
+
+The recorded release baseline independently passed PCM correctness and exposed
+21 missed 8-sample callback deadlines across the two max-64 Uneven realtime cases.
+Repeated socket-option updates and fragmented headers are proven avoidable work,
+but their contribution to those tails is not established by writer/option-count
+qualification. The full current-source isolated-worker release gate must still
+pass every original audio deadline with all observations retained. Native pending
+root preflight adds another control round trip when applied; that cost belongs
+inside the same production measurement and may not be exempted.
