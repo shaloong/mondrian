@@ -41,6 +41,20 @@ with the existing FFmpeg codec adapter; the direct adapter cannot discard
 auxiliary layers to manufacture a supported single-layer stream. FFmpeg's
 VideoToolbox output retains unknown hardware execution when not observed.
 
+The direct adapter submits compressed packets with public asynchronous
+decompression, without enabling temporal processing. The existing SPS reorder
+depth plus one bounds all submitted HEVC packets, including completed callbacks
+whose surfaces have not been taken; ProRes retains its single-packet bound.
+`PreviewCodec` selects the smallest exact packet PTS from all submissions and
+awaits only that callback. Later packets can decode while the existing downstream
+owners process the current output. Callback slots and compressed samples remain
+session-owned, and emitted CVPixelBuffers retain independent references.
+EOF, reset and consuming close join the native session before retiring callback
+storage; HEVC reset then recreates its temporal owner. Coded HEVC CICP must agree
+with the frozen source contract before session creation, and each output still
+requires matching color attachments and observed hardware execution. This
+transport adds no Timeline, cache, playback clock or color authority.
+
 Media metadata discovery and first-frame HDR supplements share one opened FFmpeg
 input. Stream discovery retains its packets; the HDR supplement dispatches that
 same packet stream to the requested video decoders until each has its first

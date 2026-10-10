@@ -4,18 +4,31 @@
 #include <VideoToolbox/VideoToolbox.h>
 #include <limits.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The accepted SPS bounds reorder depth to at most 15. Stable slot addresses
+ * outlive every native callback, including unexpected late callbacks. */
+#define MDN_VT_MAX_PENDING 16
+typedef struct {
+    int active;
+    int64_t token;
+    CMSampleBufferRef sample;
+    CVPixelBufferRef output;
+    CMTime expected, timestamp;
+    OSStatus status;
+    uint32_t callbacks;
+} MdnVtPending;
 
 struct MdnVtDecoder {
     VTDecompressionSessionRef session;
     CMVideoFormatDescriptionRef format;
     pthread_mutex_t lock;
-    CVPixelBufferRef output;
-    CMTime timestamp;
-    OSStatus callback_status;
-    uint32_t callbacks;
-    int failed;
+    pthread_cond_t changed;
+    atomic_int failed;
+    uint32_t pending_limit;
+    MdnVtPending pending[MDN_VT_MAX_PENDING];
     MdnVtContract contract;
     CFStringRef primaries, transfer, matrix;
 };
@@ -28,16 +41,22 @@ static int fail(MdnVtError *error, uint32_t stage, OSStatus status) {
 static void decoded(void *opaque, void *source, OSStatus status,
                     VTDecodeInfoFlags flags, CVImageBufferRef image,
                     CMTime timestamp, CMTime duration) {
-    (void)source; (void)duration;
+    (void)duration;
     MdnVtDecoder *decoder = opaque;
     pthread_mutex_lock(&decoder->lock);
-    if (decoder->callbacks != UINT32_MAX) decoder->callbacks++;
-    if (decoder->callbacks == 1) {
-        decoder->callback_status = status;
-        decoder->timestamp = timestamp;
+    MdnVtPending *pending = source;
+    if (!pending || !pending->active || pending->callbacks != 0 ||
+        (!status && (!CMTIME_IS_NUMERIC(timestamp) ||
+            CMTimeCompare(timestamp, pending->expected)))) {
+        decoder->failed = 1;
+    } else {
+        pending->callbacks = 1;
+        pending->status = status;
+        pending->timestamp = timestamp;
         if (!status && !(flags & kVTDecodeInfo_FrameDropped) && image)
-            decoder->output = CVPixelBufferRetain(image);
+            pending->output = CVPixelBufferRetain(image);
     }
+    pthread_cond_broadcast(&decoder->changed);
     pthread_mutex_unlock(&decoder->lock);
 }
 
@@ -93,9 +112,12 @@ done:
 }
 
 MdnVtDecoder *mdn_vt_create(const MdnVtContract *contract,
-    const MdnVtParameterSet *sets, size_t count, int nal_length, MdnVtError *error) {
+    const MdnVtParameterSet *sets, size_t count, int nal_length,
+    uint32_t pending_limit, MdnVtError *error) {
     if (error) *error = (MdnVtError){0};
-    if (!contract || !contract->width || !contract->height ||
+    if (!contract || !pending_limit || pending_limit > MDN_VT_MAX_PENDING ||
+        (contract->codec != kCMVideoCodecType_HEVC && pending_limit != 1) ||
+        !contract->width || !contract->height ||
         contract->width > INT32_MAX || contract->height > INT32_MAX ||
         contract->chroma_format_idc < 1 || contract->chroma_format_idc > 3 ||
         (contract->codec == kCMVideoCodecType_HEVC ?
@@ -125,6 +147,12 @@ MdnVtDecoder *mdn_vt_create(const MdnVtContract *contract,
     if (pthread_mutex_init(&decoder->lock, NULL)) {
         free(decoder); fail(error, MDN_VT_SESSION, -70002); return NULL;
     }
+    if (pthread_cond_init(&decoder->changed, NULL)) {
+        pthread_mutex_destroy(&decoder->lock);
+        free(decoder); fail(error, MDN_VT_SESSION, -70002); return NULL;
+    }
+    atomic_init(&decoder->failed, 0);
+    decoder->pending_limit = pending_limit;
     decoder->contract = *contract;
     decoder->primaries = pri; decoder->transfer = trc; decoder->matrix = matrix;
     OSStatus status = -70001;
@@ -139,7 +167,7 @@ MdnVtDecoder *mdn_vt_create(const MdnVtContract *contract,
             pointers[i] = sets[i].bytes; sizes[i] = sets[i].size;
         }
         /* Parse real coded dimensions/metadata. Do not override source VUI
-         * with the caller's expected CICP contract. Output is checked below. */
+         * with the caller's expected CICP contract. Every output is also checked. */
         status = CMVideoFormatDescriptionCreateFromHEVCParameterSets(NULL,
             count, pointers, sizes, nal_length, NULL, &decoder->format);
         if (status) goto done;
@@ -149,6 +177,18 @@ MdnVtDecoder *mdn_vt_create(const MdnVtContract *contract,
         if (dimensions.width != (int32_t)contract->width ||
             dimensions.height != (int32_t)contract->height ||
             (full && CFEqual(full, kCFBooleanTrue))) {
+            status = -70001; goto done;
+        }
+        stage = MDN_VT_METADATA;
+        CFTypeRef coded_pri = CMFormatDescriptionGetExtension(decoder->format,
+            kCMFormatDescriptionExtension_ColorPrimaries);
+        CFTypeRef coded_trc = CMFormatDescriptionGetExtension(decoder->format,
+            kCMFormatDescriptionExtension_TransferFunction);
+        CFTypeRef coded_matrix = CMFormatDescriptionGetExtension(decoder->format,
+            kCMFormatDescriptionExtension_YCbCrMatrix);
+        if (!coded_pri || !CFEqual(coded_pri, pri) ||
+            !coded_trc || !CFEqual(coded_trc, trc) ||
+            !coded_matrix || !CFEqual(coded_matrix, matrix)) {
             status = -70001; goto done;
         }
     } else {
@@ -216,60 +256,14 @@ static int validate_packet_contract(const MdnVtContract *contract,
     return 1;
 }
 
-int mdn_vt_decode(MdnVtDecoder *decoder, const uint8_t *bytes, size_t size,
-                     int64_t pts_value, int32_t pts_scale,
-                     MdnVtOutput *output, MdnVtError *error) {
-    if (error) *error = (MdnVtError){0};
-    if (output) *output = (MdnVtOutput){0};
-    if (!decoder || !output || !bytes || !size || pts_scale <= 0 || decoder->failed)
-        return fail(error, MDN_VT_ARGUMENT, 0);
-    if (decoder->contract.codec != kCMVideoCodecType_HEVC &&
-        !validate_packet_contract(&decoder->contract, bytes, size, error)) {
-        decoder->failed = 1;
-        return 0;
-    }
-    pthread_mutex_lock(&decoder->lock);
-    decoder->callbacks = 0; decoder->callback_status = 0;
-    decoder->timestamp = kCMTimeInvalid;
-    pthread_mutex_unlock(&decoder->lock);
-    CMBlockBufferRef block = NULL;
-    CMSampleBufferRef sample = NULL;
-    /* Own compressed bytes through completion; never lock or copy pixel data. */
-    OSStatus status = CMBlockBufferCreateWithMemoryBlock(NULL, NULL, size,
-        kCFAllocatorDefault, NULL, 0, size, 0, &block);
-    uint32_t stage = MDN_VT_PACKET;
-    if (status) goto done;
-    status = CMBlockBufferReplaceDataBytes(bytes, block, 0, size);
-    if (status) goto done;
-    CMSampleTimingInfo timing = {kCMTimeInvalid, CMTimeMake(pts_value, pts_scale), kCMTimeInvalid};
-    status = CMSampleBufferCreateReady(NULL, block, decoder->format,
-        1, 1, &timing, 1, &size, &sample);
-    if (status) goto done;
-    stage = MDN_VT_DECODE;
-    status = VTDecompressionSessionDecodeFrame(decoder->session, sample, 0, NULL, NULL);
-    /* Join submitted work even when submission reports an error. Preserve the
-     * first failure while completing callback ownership before returning. */
-    OSStatus finished = decoder->contract.codec == kCMVideoCodecType_HEVC ? 0 :
-        VTDecompressionSessionFinishDelayedFrames(decoder->session);
-    OSStatus waited = VTDecompressionSessionWaitForAsynchronousFrames(decoder->session);
-    if (status) goto done;
-    stage = MDN_VT_FINISH;
-    status = finished;
-    if (status) goto done;
-    stage = MDN_VT_WAIT;
-    status = waited;
-    if (status) goto done;
-    pthread_mutex_lock(&decoder->lock);
-    CVPixelBufferRef image = decoder->output;
-    status = decoder->callback_status;
-    uint32_t callbacks = decoder->callbacks;
-    CMTime timestamp = decoder->timestamp;
-    pthread_mutex_unlock(&decoder->lock);
-    stage = MDN_VT_CALLBACK;
-    if (!status && (callbacks != 1 || !image || !CMTIME_IS_NUMERIC(timestamp) ||
-        CMTimeCompare(timestamp, timing.presentationTimeStamp))) status = -70001;
-    if (status) goto done;
-    stage = MDN_VT_SURFACE;
+/* Every codec uses this one physical surface/attachment contract. The caller
+ * retains image ownership on error; success transfers that same +1 reference. */
+static int validate_output(MdnVtDecoder *decoder, CVPixelBufferRef image,
+    OSStatus status, uint32_t callbacks, CMTime timestamp, CMTime expected,
+    MdnVtOutput *output, MdnVtError *error) {
+    if (status || callbacks != 1 || !image || !CMTIME_IS_NUMERIC(timestamp) ||
+        CMTimeCompare(timestamp, expected))
+        return fail(error, MDN_VT_CALLBACK, status);
     int hevc = decoder->contract.codec == kCMVideoCodecType_HEVC;
     int is422 = prores422(decoder->contract.codec);
     OSType expected_pixel = output_pixel(&decoder->contract);
@@ -277,9 +271,8 @@ int mdn_vt_decode(MdnVtDecoder *decoder, const uint8_t *bytes, size_t size,
     if (CVPixelBufferGetPixelFormatType(image) != expected_pixel ||
         CVPixelBufferGetWidth(image) != decoder->contract.width ||
         CVPixelBufferGetHeight(image) != decoder->contract.height ||
-        CVPixelBufferGetPlaneCount(image) != planes || !CVPixelBufferGetIOSurface(image)) {
-        status = -70001; goto done;
-    }
+        CVPixelBufferGetPlaneCount(image) != planes || !CVPixelBufferGetIOSurface(image))
+        return fail(error, MDN_VT_SURFACE, 0);
     for (size_t plane = 0; plane < planes; plane++) {
         size_t width = (hevc || is422) && plane && decoder->contract.chroma_format_idc != 3 ?
             (decoder->contract.width + 1) / 2 : decoder->contract.width;
@@ -289,36 +282,144 @@ int mdn_vt_decode(MdnVtDecoder *decoder, const uint8_t *bytes, size_t size,
         size_t bytes_per_pixel = component_bytes * (plane == 1 ? 2 : 1);
         if (CVPixelBufferGetWidthOfPlane(image, plane) != width ||
             CVPixelBufferGetHeightOfPlane(image, plane) != height ||
-            CVPixelBufferGetBytesPerRowOfPlane(image, plane) < width * bytes_per_pixel) {
-            status = -70001; goto done;
-        }
+            CVPixelBufferGetBytesPerRowOfPlane(image, plane) < width * bytes_per_pixel)
+            return fail(error, MDN_VT_SURFACE, 0);
     }
-    stage = MDN_VT_METADATA;
     if (!attachment_matches(image, kCVImageBufferColorPrimariesKey, decoder->primaries) ||
         !attachment_matches(image, kCVImageBufferTransferFunctionKey, decoder->transfer) ||
-        !attachment_matches(image, kCVImageBufferYCbCrMatrixKey, decoder->matrix)) {
-        status = -70001; goto done;
-    }
-    stage = MDN_VT_HARDWARE;
+        !attachment_matches(image, kCVImageBufferYCbCrMatrixKey, decoder->matrix))
+        return fail(error, MDN_VT_METADATA, 0);
     CFTypeRef hardware = NULL;
     status = VTSessionCopyProperty(decoder->session,
         kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder, NULL, &hardware);
     int observed = !status && hardware && CFGetTypeID(hardware) == CFBooleanGetTypeID() &&
         CFBooleanGetValue((CFBooleanRef)hardware);
     if (hardware) CFRelease(hardware);
-    if (!observed) { if (!status) status = -70001; goto done; }
+    if (!observed) return fail(error, MDN_VT_HARDWARE, status);
     *output = (MdnVtOutput){image, CVPixelBufferGetDataSize(image),
         decoder->contract.width, decoder->contract.height,
         CVPixelBufferGetPixelFormatType(image), callbacks, 1};
-    pthread_mutex_lock(&decoder->lock);
-    decoder->output = NULL; /* transfer the callback's +1 reference */
-    pthread_mutex_unlock(&decoder->lock);
-done:
-    if (status) decoder->failed = 1;
-    if (sample) CFRelease(sample);
-    if (block) CFRelease(block);
-    if (status) return fail(error, stage, status);
     return 1;
+}
+
+int mdn_vt_submit(MdnVtDecoder *decoder, const uint8_t *bytes, size_t size,
+    int64_t pts_value, int32_t pts_scale, int64_t token, MdnVtError *error) {
+    if (error) *error = (MdnVtError){0};
+    if (!decoder || decoder->failed || !bytes || !size || pts_scale <= 0)
+        return fail(error, MDN_VT_ARGUMENT, 0);
+    if (decoder->contract.codec != kCMVideoCodecType_HEVC &&
+        !validate_packet_contract(&decoder->contract, bytes, size, error)) {
+        decoder->failed = 1;
+        return 0;
+    }
+    pthread_mutex_lock(&decoder->lock);
+    MdnVtPending *pending = NULL;
+    size_t active = 0;
+    for (size_t i = 0; i < decoder->pending_limit; i++) {
+        MdnVtPending *slot = &decoder->pending[i];
+        if (slot->active) {
+            active++;
+            if (slot->token == token) {
+                pthread_mutex_unlock(&decoder->lock);
+                return fail(error, MDN_VT_ARGUMENT, 0);
+            }
+        } else if (!pending) pending = slot;
+    }
+    if (!pending || active >= decoder->pending_limit) {
+        pthread_mutex_unlock(&decoder->lock);
+        return fail(error, MDN_VT_ARGUMENT, 0);
+    }
+    /* Retain the previous compressed sample until slot reuse. Callback context
+     * storage itself stays alive through consuming session shutdown. */
+    if (pending->sample) CFRelease(pending->sample);
+    *pending = (MdnVtPending){.active = 1, .token = token,
+        .expected = CMTimeMake(pts_value, pts_scale), .timestamp = kCMTimeInvalid};
+    pthread_mutex_unlock(&decoder->lock);
+    CMBlockBufferRef block = NULL;
+    OSStatus status = CMBlockBufferCreateWithMemoryBlock(NULL, NULL, size,
+        kCFAllocatorDefault, NULL, 0, size, 0, &block);
+    uint32_t stage = MDN_VT_PACKET;
+    if (status) goto done;
+    status = CMBlockBufferReplaceDataBytes(bytes, block, 0, size);
+    if (status) goto done;
+    CMSampleTimingInfo timing = {kCMTimeInvalid, pending->expected, kCMTimeInvalid};
+    status = CMSampleBufferCreateReady(NULL, block, decoder->format,
+        1, 1, &timing, 1, &size, &pending->sample);
+    if (status) goto done;
+    stage = MDN_VT_DECODE;
+    VTDecodeInfoFlags flags = 0;
+    status = VTDecompressionSessionDecodeFrame(decoder->session, pending->sample,
+        kVTDecodeFrame_EnableAsynchronousDecompression, pending, &flags);
+    if (decoder->contract.codec != kCMVideoCodecType_HEVC) {
+        OSStatus finished = VTDecompressionSessionFinishDelayedFrames(decoder->session);
+        if (!status && finished) { stage = MDN_VT_FINISH; status = finished; }
+    }
+    if (!status && (flags & kVTDecodeInfo_FrameDropped)) {
+        stage = MDN_VT_CALLBACK; status = -70001;
+    }
+done:
+    if (block) CFRelease(block);
+    if (status) {
+        /* Failed submission still retains stable slots until close joins every
+         * other submitted callback. No partial continuation after a failure. */
+        decoder->failed = 1;
+        return fail(error, stage, status);
+    }
+    return 1;
+}
+
+int mdn_vt_take(MdnVtDecoder *decoder, int64_t token,
+    MdnVtOutput *output, MdnVtError *error) {
+    if (error) *error = (MdnVtError){0};
+    if (output) *output = (MdnVtOutput){0};
+    if (!decoder || !output) {
+        return fail(error, MDN_VT_ARGUMENT, 0);
+    }
+    pthread_mutex_lock(&decoder->lock);
+    MdnVtPending *pending = NULL;
+    for (size_t i = 0; i < decoder->pending_limit; i++) {
+        if (decoder->pending[i].active && decoder->pending[i].token == token) {
+            pending = &decoder->pending[i]; break;
+        }
+    }
+    if (!pending) {
+        pthread_mutex_unlock(&decoder->lock);
+        return fail(error, MDN_VT_ARGUMENT, 0);
+    }
+    while (!pending->callbacks && !decoder->failed)
+        pthread_cond_wait(&decoder->changed, &decoder->lock);
+    if (decoder->failed) {
+        pthread_mutex_unlock(&decoder->lock);
+        return fail(error, MDN_VT_CALLBACK, 0);
+    }
+    CVPixelBufferRef image = pending->output;
+    OSStatus status = pending->status;
+    uint32_t callbacks = pending->callbacks;
+    CMTime timestamp = pending->timestamp, expected = pending->expected;
+    pending->output = NULL;
+    pending->active = 0;
+    pthread_mutex_unlock(&decoder->lock);
+    if (!validate_output(decoder, image, status, callbacks, timestamp, expected, output, error)) {
+        if (image) CVPixelBufferRelease(image);
+        decoder->failed = 1;
+        return 0;
+    }
+    if (decoder->failed) {
+        CVPixelBufferRelease(image);
+        *output = (MdnVtOutput){0};
+        return fail(error, MDN_VT_CALLBACK, 0);
+    }
+    return 1;
+}
+
+/* Only after the session-wide native join, never while callbacks can run. */
+static void clear_pending(MdnVtDecoder *decoder) {
+    for (size_t i = 0; i < decoder->pending_limit; i++) {
+        MdnVtPending *pending = &decoder->pending[i];
+        if (pending->output) CVPixelBufferRelease(pending->output);
+        if (pending->sample) CFRelease(pending->sample);
+        *pending = (MdnVtPending){0};
+    }
 }
 
 int mdn_vt_finish(MdnVtDecoder *decoder, MdnVtError *error) {
@@ -330,18 +431,18 @@ int mdn_vt_finish(MdnVtDecoder *decoder, MdnVtError *error) {
         decoder->failed = 1;
         return fail(error, finish ? MDN_VT_FINISH : MDN_VT_WAIT, finish ? finish : wait);
     }
+    if (decoder->failed) return fail(error, MDN_VT_CALLBACK, 0);
     return 1;
 }
 
 int mdn_vt_reset(MdnVtDecoder *decoder, MdnVtError *error) {
     if (!mdn_vt_finish(decoder, error)) return 0;
+    clear_pending(decoder);
     if (decoder->contract.codec != kCMVideoCodecType_HEVC) return 1;
     /* Join and invalidate the old temporal owner before constructing another.
      * Retained output buffers are independent of this session and remain live. */
     VTDecompressionSessionInvalidate(decoder->session);
     CFRelease(decoder->session); decoder->session = NULL;
-    if (decoder->output) { CVPixelBufferRelease(decoder->output); decoder->output = NULL; }
-    decoder->callbacks = 0; decoder->callback_status = 0; decoder->timestamp = kCMTimeInvalid;
     OSStatus status = create_session(decoder);
     if (status) { decoder->failed = 1; return fail(error, MDN_VT_SESSION, status); }
     return 1;
@@ -357,8 +458,9 @@ int mdn_vt_close(MdnVtDecoder *decoder, MdnVtError *error) {
         VTDecompressionSessionInvalidate(decoder->session);
         CFRelease(decoder->session);
     }
-    if (decoder->output) CVPixelBufferRelease(decoder->output);
+    clear_pending(decoder);
     if (decoder->format) CFRelease(decoder->format);
+    pthread_cond_destroy(&decoder->changed);
     pthread_mutex_destroy(&decoder->lock);
     free(decoder);
     if (finish) return fail(error, MDN_VT_FINISH, finish);

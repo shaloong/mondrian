@@ -34,7 +34,7 @@ pub(super) struct VideoToolboxCodec {
     contract: super::videotoolbox::VideoToolboxContract,
     time_base: ffmpeg::Rational,
     chroma_location: ffmpeg::ffi::AVChromaLocation,
-    pending: BTreeMap<i64, NativePendingFrame>,
+    submitted: BTreeMap<i64, NativeSubmittedPacket>,
     hevc: Option<HevcConfiguration>,
     last_emitted_pts: Option<i64>,
     failure: Option<super::videotoolbox::VideoToolboxError>,
@@ -43,15 +43,14 @@ pub(super) struct VideoToolboxCodec {
 }
 
 #[cfg(target_os = "macos")]
-struct NativePendingFrame {
-    frame: ffmpeg::util::frame::video::Video,
+struct NativeSubmittedPacket {
+    duration: i64,
     facts: HevcPacketFacts,
 }
 
 #[cfg(target_os = "macos")]
 impl Drop for VideoToolboxCodec {
     fn drop(&mut self) {
-        self.pending.clear();
         if let Some(decoder) = self.decoder.take()
             && let Err(error) = decoder.close()
         {
@@ -153,7 +152,7 @@ impl PreviewCodec {
             contract,
             time_base,
             chroma_location: raw.chroma_location,
-            pending: BTreeMap::new(),
+            submitted: BTreeMap::new(),
             hevc,
             last_emitted_pts: None,
             failure: None,
@@ -174,7 +173,7 @@ impl PreviewCodec {
                     return Err(ffmpeg::Error::Eof.into());
                 }
                 let reorder_depth = codec.hevc.as_ref().map_or(0, |c| c.reorder_depth);
-                if codec.pending.len() > reorder_depth {
+                if codec.submitted.len() > reorder_depth {
                     return Err(ffmpeg::Error::Other { errno: ffmpeg::error::EAGAIN }.into());
                 }
                 let pts = packet.pts().ok_or(PreviewCodecError::Packet("missing PTS"))?;
@@ -212,33 +211,22 @@ impl PreviewCodec {
                     None => HevcPacketFacts { key: true, reference: true },
                 };
                 if codec.last_emitted_pts.is_some_and(|last| pts <= last)
-                    || codec.pending.contains_key(&pts)
+                    || codec.submitted.contains_key(&pts)
                 {
                     codec.failure =
                         Some(super::videotoolbox::VideoToolboxError { status: -70016, stage: 8 });
                     return Err(PreviewCodecError::Packet("duplicate or late native PTS"));
                 }
-                let output = codec
+                codec
                     .decoder
                     .as_mut()
-                    .expect("codec remains owned until consuming drop")
-                    .decode_packet(data, native_pts, codec.time_base.denominator())
-                    .inspect_err(|error| {
-                        codec.failure = Some(*error);
-                    })?;
-                let mut frame = output.into_av_frame(
+                    .expect("live native codec")
+                    .submit_packet(data, native_pts, codec.time_base.denominator(), pts)
+                    .inspect_err(|error| codec.failure = Some(*error))?;
+                codec.submitted.insert(
                     pts,
-                    packet.duration(),
-                    codec.time_base,
-                    ffmpeg::ffi::AVFieldOrder::AV_FIELD_PROGRESSIVE,
-                )?;
-                // SAFETY: Sole AVFrame owner. This is the frozen source fact,
-                // not a platform-created chroma interpretation. HEVC parameter
-                // changes were rejected before decode.
-                unsafe {
-                    (*frame.as_mut_ptr()).chroma_location = codec.chroma_location;
-                }
-                codec.pending.insert(pts, NativePendingFrame { frame, facts });
+                    NativeSubmittedPacket { duration: packet.duration(), facts },
+                );
                 Ok(())
             }
         }
@@ -257,23 +245,51 @@ impl PreviewCodec {
                 }
                 let reorder_depth = codec.hevc.as_ref().map_or(0, |c| c.reorder_depth);
                 loop {
-                    if codec.pending.len() <= reorder_depth && !codec.eof {
+                    if codec.submitted.len() <= reorder_depth && !codec.eof {
                         return Err(ffmpeg::Error::Other { errno: ffmpeg::error::EAGAIN });
                     }
-                    let Some((pts, output)) = codec.pending.pop_first() else {
+                    // Select from all submitted packets, not whichever callback
+                    // finished first. Await only the smallest exact PTS; later
+                    // packets can decode during downstream GPU/Playback work.
+                    let Some((&pts, _)) = codec.submitted.first_key_value() else {
                         return Err(if codec.eof {
                             ffmpeg::Error::Eof
                         } else {
                             ffmpeg::Error::Other { errno: ffmpeg::error::EAGAIN }
                         });
                     };
+                    let output =
+                        match codec.decoder.as_mut().expect("live native codec").take_packet(pts) {
+                            Ok(output) => output,
+                            Err(error) => {
+                                codec.failure = Some(error);
+                                return Err(ffmpeg::Error::InvalidData);
+                            }
+                        };
+                    let metadata = codec.submitted.remove(&pts).expect("exact submitted token");
+                    let mut decoded = output
+                        .into_av_frame(
+                            pts,
+                            metadata.duration,
+                            codec.time_base,
+                            ffmpeg::ffi::AVFieldOrder::AV_FIELD_PROGRESSIVE,
+                        )
+                        .map_err(|error| {
+                            codec.failure = Some(error);
+                            ffmpeg::Error::InvalidData
+                        })?;
+                    // SAFETY: Sole AVFrame owner; preserve the frozen source
+                    // chroma fact. Platform transport adds no interpretation.
+                    unsafe {
+                        (*decoded.as_mut_ptr()).chroma_location = codec.chroma_location;
+                    }
                     codec.last_emitted_pts = Some(pts);
                     use ffmpeg::codec::discard::Discard;
                     let suppressed = matches!(codec.discard, Discard::All)
-                        || (codec.discard == Discard::NonKey && !output.facts.key)
-                        || (codec.discard == Discard::NonReference && !output.facts.reference);
+                        || (codec.discard == Discard::NonKey && !metadata.facts.key)
+                        || (codec.discard == Discard::NonReference && !metadata.facts.reference);
                     if !suppressed {
-                        *frame = output.frame;
+                        *frame = decoded;
                         return Ok(());
                     }
                 }
@@ -307,7 +323,7 @@ impl PreviewCodec {
             Self::Ffmpeg(decoder) => decoder.flush(),
             #[cfg(target_os = "macos")]
             Self::VideoToolbox(codec) => {
-                codec.pending.clear();
+                codec.submitted.clear();
                 codec.last_emitted_pts = None;
                 codec.eof = false;
                 if codec.failure.is_none()
@@ -603,7 +619,7 @@ mod native_codec_tests {
             native.send_packet(packet).unwrap();
             if let PreviewCodec::VideoToolbox(codec) = &native {
                 assert!(
-                    codec.pending.len() <= 3,
+                    codec.submitted.len() <= 3,
                     "bounded coded reorder plus current output"
                 );
             }
@@ -628,6 +644,12 @@ mod native_codec_tests {
         assert!(matches!(native.send_eof(), Err(ffmpeg::Error::Eof)));
         // Real seek reset consumes old temporal state, then restarts at an IDR.
         native.flush();
+        for packet in &packets[..2] {
+            native.send_packet(packet).unwrap();
+        }
+        // Reset with real submissions whose callback surfaces were not taken.
+        // Reusing PTS zero must not receive any old-session callback or image.
+        native.flush();
         let mut restarted = Vec::new();
         for packet in &packets[..8] {
             native.send_packet(packet).unwrap();
@@ -640,7 +662,13 @@ mod native_codec_tests {
         for frame in &restarted {
             assert_eq!(hash_pixels(frame), oracle[&frame.pts().unwrap()]);
         }
-        drop(native); // actual consuming native close; retained frames still own their pixels
+        native.flush();
+        for packet in &packets[..2] {
+            native.send_packet(packet).unwrap();
+        }
+        // Consuming close must join untaken submissions. Previously emitted
+        // surfaces remain independently retained after that native join.
+        drop(native);
         for frame in frames.iter().take(5) {
             assert_eq!(hash_pixels(frame), oracle[&frame.pts().unwrap()]);
         }
@@ -699,14 +727,14 @@ mod native_codec_tests {
             (*conflict.as_mut_ptr()).color_trc =
                 ffmpeg::ffi::AVColorTransferCharacteristic::AVCOL_TRC_ARIB_STD_B67;
         }
-        let mut codec =
-            PreviewCodec::videotoolbox(&conflict, tb, crate::DecodedVideoRange::Limited).unwrap();
-        assert!(matches!(
-            codec.send_packet(&packets[0]),
-            Err(PreviewCodecError::VideoToolbox(
-                super::super::videotoolbox::VideoToolboxError { stage: 11, .. }
-            ))
-        ));
-        assert!(codec.send_packet(&packets[0]).is_err());
+        assert!(
+            matches!(
+                PreviewCodec::videotoolbox(&conflict, tb, crate::DecodedVideoRange::Limited),
+                Err(PreviewCodecError::VideoToolbox(
+                    super::super::videotoolbox::VideoToolboxError { stage: 11, .. }
+                ))
+            ),
+            "coded CICP conflicts fail before native submission"
+        );
     }
 }

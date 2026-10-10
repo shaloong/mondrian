@@ -104,14 +104,21 @@ unsafe extern "C" {
         sets: *const NativeParameterSet,
         count: usize,
         nal_length: i32,
+        pending_limit: u32,
         error: *mut VideoToolboxError,
     ) -> *mut c_void;
-    fn mdn_vt_decode(
+    fn mdn_vt_submit(
         decoder: *mut c_void,
         data: *const u8,
         size: usize,
         pts_value: i64,
         pts_scale: i32,
+        token: i64,
+        error: *mut VideoToolboxError,
+    ) -> i32;
+    fn mdn_vt_take(
+        decoder: *mut c_void,
+        token: i64,
         output: *mut NativeOutput,
         error: *mut VideoToolboxError,
     ) -> i32;
@@ -179,6 +186,7 @@ impl VideoToolboxDecoder {
                 sets.as_ptr(),
                 sets.len(),
                 configuration.map_or(0, |c| c.length_size as i32),
+                configuration.map_or(1, |c| (c.reorder_depth + 1) as u32),
                 &mut error,
             )
         };
@@ -212,31 +220,75 @@ impl VideoToolboxDecoder {
     /// Decode one complete packet at an exact rational presentation time.
     /// Native completion is awaited before returning. A codec failure
     /// poisons the session; the caller must consume it rather than retry it.
+    #[cfg(test)]
     pub(super) fn decode_packet(
         &mut self,
         packet: &[u8],
         pts_value: i64,
         pts_scale: i32,
     ) -> Result<VideoToolboxFrame, VideoToolboxError> {
-        let mut output = NativeOutput::default();
+        self.submit_packet(packet, pts_value, pts_scale, pts_value)?;
+        self.take_packet(pts_value)
+    }
+
+    /// Submit within the same SPS-derived output bound. The native adapter
+    /// owns compressed bytes and stable callback storage until consuming close.
+    pub(super) fn submit_packet(
+        &mut self,
+        packet: &[u8],
+        pts_value: i64,
+        pts_scale: i32,
+        token: i64,
+    ) -> Result<(), VideoToolboxError> {
         let mut error = VideoToolboxError::default();
-        let pointer = self.pointer.expect("live decoder before consuming close");
-        // SAFETY: Exclusive decoder borrow, live packet, initialized out fields.
-        // Native code copies compressed bytes and joins all callbacks on return.
-        let success = unsafe {
-            mdn_vt_decode(
-                pointer.as_ptr(),
+        // SAFETY: Exclusive live session and borrowed bytes; native code copies
+        // compressed input before returning and retains its callback storage.
+        if unsafe {
+            mdn_vt_submit(
+                self.pointer.expect("live decoder").as_ptr(),
                 packet.as_ptr(),
                 packet.len(),
                 pts_value,
                 pts_scale,
+                token,
+                &mut error,
+            )
+        } == 0
+        {
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Await one exact packet, retaining all other native owners.
+    pub(super) fn take_packet(
+        &mut self,
+        token: i64,
+    ) -> Result<VideoToolboxFrame, VideoToolboxError> {
+        let mut output = NativeOutput::default();
+        let mut error = VideoToolboxError::default();
+        // SAFETY: Exclusive live session and initialized outputs. The native
+        // adapter transfers exactly one retained surface only on success.
+        let success = unsafe {
+            mdn_vt_take(
+                self.pointer.expect("live decoder").as_ptr(),
+                token,
                 &mut output,
                 &mut error,
             )
         };
         if success == 0 {
-            return Err(error);
+            Err(error)
+        } else {
+            self.validate_output(output)
         }
+    }
+
+    fn validate_output(
+        &self,
+        output: NativeOutput,
+    ) -> Result<VideoToolboxFrame, VideoToolboxError> {
         if output.pixel_buffer.is_null()
             || output.allocation_bytes == 0
             || output.width != self.contract.width

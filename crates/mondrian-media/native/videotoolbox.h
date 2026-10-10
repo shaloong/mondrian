@@ -48,13 +48,19 @@ typedef struct {
 /* Explicit CICP and limited-range native output. Hardware is required;
  * successful output additionally carries the observed property, not intent. */
 MdnVtDecoder *mdn_vt_create(const MdnVtContract *,
-    const MdnVtParameterSet *, size_t count, int nal_length, MdnVtError *);
+    const MdnVtParameterSet *, size_t count, int nal_length,
+    uint32_t pending_limit, MdnVtError *);
 int mdn_vt_finish(MdnVtDecoder *, MdnVtError *);
 int mdn_vt_reset(MdnVtDecoder *, MdnVtError *);
-/* Packet PTS is an exact rational, not a floating-point timestamp. */
-int mdn_vt_decode(MdnVtDecoder *, const uint8_t *, size_t,
-                     int64_t pts_value, int32_t pts_scale,
-                     MdnVtOutput *, MdnVtError *);
+/* Packet PTS is an exact rational. SPS reorder depth bounds HEVC submissions;
+ * ProRes has one outstanding packet. Tokens identify codec packets, never
+ * Timeline demands. Compressed bytes and callback slots stay session-owned. */
+int mdn_vt_submit(MdnVtDecoder *, const uint8_t *, size_t,
+    int64_t pts_value, int32_t pts_scale, int64_t token, MdnVtError *);
+/* One exact token: 1 transfers a surface, 0 is failure.
+ * Waiting joins only that callback; reset/close still join the whole session. */
+int mdn_vt_take(MdnVtDecoder *, int64_t token,
+    MdnVtOutput *, MdnVtError *);
 /* Consumes the decoder even on error. No callback state survives this call. */
 int mdn_vt_close(MdnVtDecoder *, MdnVtError *);
 void mdn_vt_surface_release(void *);
