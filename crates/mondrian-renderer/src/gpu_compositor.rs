@@ -1777,7 +1777,10 @@ impl GpuFrameCompositor {
                 resource_pool,
             )?)
         };
-        if !opaque_normal_accumulator {
+        // A first layer blends over canonical transparent black. Use the
+        // existing immutable zero texture instead of clearing an accumulator
+        // that is otherwise unused until a later layer writes it.
+        if !opaque_normal_accumulator && execution.layers.is_empty() {
             clear_working_texture(
                 encoder,
                 &target_a.resource().texture_view,
@@ -1891,7 +1894,7 @@ impl GpuFrameCompositor {
                 device,
                 queue,
                 encoder,
-                if opaque_normal_accumulator {
+                if opaque_normal_accumulator || layer_execution.initializes_accumulator {
                     GpuCompositeTextureBinding::ProceduralDummy
                 } else {
                     GpuCompositeTextureBinding::Resource(accum.resource())
@@ -5395,13 +5398,13 @@ mod tests {
         let after_second = compositor.texture_binding_diagnostics();
         assert_eq!(
             after_second.bind_group_creations - after_first.bind_group_creations,
-            2,
-            "only the two new accumulator textures should need bindings"
+            1,
+            "only the accumulator read by the second layer needs a new binding"
         );
         assert_eq!(
             after_second.cache_hits - after_first.cache_hits,
-            2,
-            "both pooled input textures should reuse their layer bindings"
+            3,
+            "both pooled inputs and the immutable zero texture reuse their bindings"
         );
         assert_eq!(pool.diagnostics().hits, 2);
     }

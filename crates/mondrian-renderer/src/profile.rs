@@ -418,6 +418,21 @@ impl GpuTimestampStageTimer {
     ) -> Result<(u64, GpuTimestampStageDurations), GpuTimestampReadError> {
         self.read_mapped_query_bytes(layout.query_count, |bytes| {
             timestamp_stage_durations(bytes, layout, pass_timestamps, self.timestamp_period_ns)
+                .map_err(|source| {
+                    let counters: Vec<_> = bytes
+                        .chunks_exact(8)
+                        .map(|counter| {
+                            u64::from_ne_bytes(counter.try_into().expect("eight-byte counter"))
+                        })
+                        .collect();
+                    GpuTimestampReadError::FrameCounters {
+                        query_count: layout.query_count,
+                        boundaries: layout.boundaries,
+                        pass_timestamps,
+                        counters,
+                        source: Box::new(source),
+                    }
+                })
         })?
     }
 }
@@ -1097,6 +1112,16 @@ pub enum GpuTimestampRingError {
 /// Failure reading a completed hardware timestamp query.
 #[derive(Debug, thiserror::Error)]
 pub enum GpuTimestampReadError {
+    /// Retain the bounded mapped evidence when a completed frame's counters are invalid.
+    #[error("{source}; query_count={query_count}, boundaries={boundaries:?}, pass_timestamps={pass_timestamps}, counters={counters:?}")]
+    FrameCounters {
+        query_count: u32,
+        boundaries: [u32; 8],
+        pass_timestamps: bool,
+        counters: Vec<u64>,
+        #[source]
+        source: Box<GpuTimestampReadError>,
+    },
     /// The consuming interval receipt belongs to a different timer.
     #[error("GPU timestamp interval receipt belongs to another timer")]
     ForeignInterval,

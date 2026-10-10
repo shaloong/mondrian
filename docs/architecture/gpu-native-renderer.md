@@ -8,7 +8,10 @@ untyped RGBA8 `RenderPipeline`/`FrameCompositor` prototypes are not alternate
 production paths. UI rendering remains independently owned by
 `mondrian-ui-renderer`.
 
-The working compositor clears its accumulation target to transparent black.
+The working compositor starts from transparent black. The first scheduled Layer
+uses the existing immutable zero texture as its accumulator input; its destination
+is cleared in the same render pass that draws the Layer. An empty plan explicitly
+clears its output. A nonempty plan does not clear an unused initial accumulator.
 Opaque viewer or export backgrounds are explicit downstream presentation or
 delivery operations; they are never baked into the shared GPU Program frame.
 
