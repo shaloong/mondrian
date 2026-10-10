@@ -1,4 +1,7 @@
-use super::{DecodedRgbaFrameContract, PreviewSourceColorContract};
+use super::{
+    CpuYuvChromaPlaneLayout, CpuYuvChromaSubsampling, CpuYuvSampleFormat, DecodedRgbaFrameContract,
+    PreviewSourceColorContract,
+};
 use crate::decoder::{
     decoded_video_range_from_ffmpeg, DecodedVideoChromaLocation, DecodedVideoMatrix,
     DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
@@ -6,6 +9,108 @@ use crate::decoder::{
 use ffmpeg_next as ffmpeg;
 use mondrian_core::{MondrianError, Result};
 use std::path::Path;
+
+pub(super) fn compact_yuv_layout(
+    pixel: ffmpeg::util::format::pixel::Pixel,
+) -> Option<(
+    CpuYuvChromaSubsampling,
+    CpuYuvSampleFormat,
+    CpuYuvChromaPlaneLayout,
+)> {
+    use ffmpeg::util::format::pixel::Pixel;
+    Some(match pixel {
+        Pixel::YUV420P => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm8,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV420P10LE => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm16Lsb10,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV420P12LE => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm16Lsb12,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV420P16LE => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm16,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV422P10LE => (
+            CpuYuvChromaSubsampling::Cs422,
+            CpuYuvSampleFormat::Unorm16Lsb10,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV422P12LE => (
+            CpuYuvChromaSubsampling::Cs422,
+            CpuYuvSampleFormat::Unorm16Lsb12,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV422P16LE => (
+            CpuYuvChromaSubsampling::Cs422,
+            CpuYuvSampleFormat::Unorm16,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV422P => (
+            CpuYuvChromaSubsampling::Cs422,
+            CpuYuvSampleFormat::Unorm8,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV444P => (
+            CpuYuvChromaSubsampling::Cs444,
+            CpuYuvSampleFormat::Unorm8,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV444P10LE => (
+            CpuYuvChromaSubsampling::Cs444,
+            CpuYuvSampleFormat::Unorm16Lsb10,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV444P12LE | Pixel::YUVA444P12LE => (
+            CpuYuvChromaSubsampling::Cs444,
+            CpuYuvSampleFormat::Unorm16Lsb12,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV444P16LE => (
+            CpuYuvChromaSubsampling::Cs444,
+            CpuYuvSampleFormat::Unorm16,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::NV12 => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm8,
+            CpuYuvChromaPlaneLayout::Interleaved,
+        ),
+        Pixel::P010LE => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm16Msb10,
+            CpuYuvChromaPlaneLayout::Interleaved,
+        ),
+        _ => return None,
+    })
+}
+
+/// Resolve the existing compact CPU sampling policy without changing raw
+/// metadata or native decoder admission. Explicit stream siting always wins.
+pub(super) fn cpu_chroma_location_from_frame(
+    frame: &ffmpeg::util::frame::video::Video,
+) -> ffmpeg::util::chroma::Location {
+    use ffmpeg::util::chroma::Location;
+    let location = frame.chroma_location();
+    if location == Location::Unspecified
+        && compact_yuv_layout(frame.format())
+            .is_some_and(|(subsampling, _, _)| subsampling != CpuYuvChromaSubsampling::Cs444)
+    {
+        // Preserve the existing MPEG-family compact-layout Left fallback in
+        // every CPU representation. Other layouts keep FFmpeg's own default.
+        Location::Left
+    } else {
+        location
+    }
+}
 
 pub(super) fn decoded_surface_format_from_pixel(
     pixel: ffmpeg::util::format::pixel::Pixel,
@@ -88,7 +193,7 @@ fn decoded_bit_depth_from_pixel(pixel: ffmpeg::util::format::pixel::Pixel) -> Op
     u8::try_from(depth).ok().filter(|depth| *depth > 0)
 }
 
-fn decoded_chroma_location_from_ffmpeg(
+pub(super) fn decoded_chroma_location_from_ffmpeg(
     location: ffmpeg::util::chroma::Location,
 ) -> DecodedVideoChromaLocation {
     match location {

@@ -1,18 +1,18 @@
 use super::frame_contract::{
-    configure_preview_rgba_scaler, decoded_surface_format_from_pixel,
+    compact_yuv_layout, configure_preview_rgba_scaler, cpu_chroma_location_from_frame,
+    decoded_chroma_location_from_ffmpeg, decoded_surface_format_from_pixel,
     decoded_video_sampling_from_frame, decoded_video_sampling_from_frame_and_surface,
     resolve_cpu_rgba_contract,
 };
 use super::native_frame::PreviewDecodeSessionOutputLease;
 use super::{
     duration_us, preview_create_rgba_scaler, preview_hardware_frame_format, preview_trace,
-    CpuYuvChromaPlaneLayout, CpuYuvChromaSubsampling, CpuYuvFrame, CpuYuvSampleFormat,
-    DecodedRgbaFrameContract, FfmpegNativeDecodedFrameResource,
-    FfmpegNativeDecodedFrameResourceError, FloatRgbaFrame, PreviewDecodeDiagnostics,
-    PreviewDecodePath, PreviewDecodeRepresentation, PreviewDecodeStageDurations,
-    PreviewDecodedFramePayload, PreviewHardwareDecodePlan, PreviewNativeDecodeFallback,
-    PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
-    PreviewSourceColorContract, RgbaFrame, Unorm16RgbaFrame,
+    CpuYuvChromaSubsampling, CpuYuvFrame, DecodedRgbaFrameContract,
+    FfmpegNativeDecodedFrameResource, FfmpegNativeDecodedFrameResourceError, FloatRgbaFrame,
+    PreviewDecodeDiagnostics, PreviewDecodePath, PreviewDecodeRepresentation,
+    PreviewDecodeStageDurations, PreviewDecodedFramePayload, PreviewHardwareDecodePlan,
+    PreviewNativeDecodeFallback, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError,
+    PreviewNativeDecodedFrameHandle, PreviewSourceColorContract, RgbaFrame, Unorm16RgbaFrame,
 };
 use crate::decoder::{
     DecodedVideoChromaLocation, DecodedVideoSurfaceChromaSubsampling, DecodedVideoSurfaceFormat,
@@ -22,89 +22,6 @@ use mondrian_core::{MondrianError, Result};
 use std::path::Path;
 use std::ptr::NonNull;
 use std::time::Instant;
-
-fn compact_yuv_layout(
-    pixel: ffmpeg::util::format::pixel::Pixel,
-) -> Option<(
-    CpuYuvChromaSubsampling,
-    CpuYuvSampleFormat,
-    CpuYuvChromaPlaneLayout,
-)> {
-    use ffmpeg::util::format::pixel::Pixel;
-    Some(match pixel {
-        Pixel::YUV420P => (
-            CpuYuvChromaSubsampling::Cs420,
-            CpuYuvSampleFormat::Unorm8,
-            CpuYuvChromaPlaneLayout::Planar,
-        ),
-        Pixel::YUV420P10LE => (
-            CpuYuvChromaSubsampling::Cs420,
-            CpuYuvSampleFormat::Unorm16Lsb10,
-            CpuYuvChromaPlaneLayout::Planar,
-        ),
-        Pixel::YUV420P12LE => (
-            CpuYuvChromaSubsampling::Cs420,
-            CpuYuvSampleFormat::Unorm16Lsb12,
-            CpuYuvChromaPlaneLayout::Planar,
-        ),
-        Pixel::YUV420P16LE => (
-            CpuYuvChromaSubsampling::Cs420,
-            CpuYuvSampleFormat::Unorm16,
-            CpuYuvChromaPlaneLayout::Planar,
-        ),
-        Pixel::YUV422P10LE => (
-            CpuYuvChromaSubsampling::Cs422,
-            CpuYuvSampleFormat::Unorm16Lsb10,
-            CpuYuvChromaPlaneLayout::Planar,
-        ),
-        Pixel::YUV422P12LE => (
-            CpuYuvChromaSubsampling::Cs422,
-            CpuYuvSampleFormat::Unorm16Lsb12,
-            CpuYuvChromaPlaneLayout::Planar,
-        ),
-        Pixel::YUV422P16LE => (
-            CpuYuvChromaSubsampling::Cs422,
-            CpuYuvSampleFormat::Unorm16,
-            CpuYuvChromaPlaneLayout::Planar,
-        ),
-        Pixel::YUV422P => (
-            CpuYuvChromaSubsampling::Cs422,
-            CpuYuvSampleFormat::Unorm8,
-            CpuYuvChromaPlaneLayout::Planar,
-        ),
-        Pixel::YUV444P => (
-            CpuYuvChromaSubsampling::Cs444,
-            CpuYuvSampleFormat::Unorm8,
-            CpuYuvChromaPlaneLayout::Planar,
-        ),
-        Pixel::YUV444P10LE => (
-            CpuYuvChromaSubsampling::Cs444,
-            CpuYuvSampleFormat::Unorm16Lsb10,
-            CpuYuvChromaPlaneLayout::Planar,
-        ),
-        Pixel::YUV444P12LE | Pixel::YUVA444P12LE => (
-            CpuYuvChromaSubsampling::Cs444,
-            CpuYuvSampleFormat::Unorm16Lsb12,
-            CpuYuvChromaPlaneLayout::Planar,
-        ),
-        Pixel::YUV444P16LE => (
-            CpuYuvChromaSubsampling::Cs444,
-            CpuYuvSampleFormat::Unorm16,
-            CpuYuvChromaPlaneLayout::Planar,
-        ),
-        Pixel::NV12 => (
-            CpuYuvChromaSubsampling::Cs420,
-            CpuYuvSampleFormat::Unorm8,
-            CpuYuvChromaPlaneLayout::Interleaved,
-        ),
-        Pixel::P010LE => (
-            CpuYuvChromaSubsampling::Cs420,
-            CpuYuvSampleFormat::Unorm16Msb10,
-            CpuYuvChromaPlaneLayout::Interleaved,
-        ),
-        _ => return None,
-    })
-}
 
 fn convert_decoded_to_compact_yuv(
     decoded: &ffmpeg::util::frame::video::Video,
@@ -119,14 +36,8 @@ fn convert_decoded_to_compact_yuv(
     let mut video_sampling = decoded_video_sampling_from_frame(decoded);
     video_sampling.matrix = color_contract.applied_matrix;
     video_sampling.range = color_contract.applied_range;
-    if subsampling != CpuYuvChromaSubsampling::Cs444
-        && video_sampling.chroma_location == DecodedVideoChromaLocation::Unknown
-    {
-        // FFmpeg's conventional MPEG-family planar layouts are horizontally
-        // left-sited when stream metadata omits a more local fact. Bind that
-        // fallback explicitly so the renderer never invents sampling policy.
-        video_sampling.chroma_location = DecodedVideoChromaLocation::Left;
-    }
+    video_sampling.chroma_location =
+        decoded_chroma_location_from_ffmpeg(cpu_chroma_location_from_frame(decoded));
     let width = decoded.width();
     let height = decoded.height();
     let chroma_width = match subsampling {
@@ -1422,10 +1333,21 @@ mod rgba64_direct_scale_tests {
     fn rgba64_cpu_scale_honors_left_chroma_siting_at_color_edges() {
         use ffmpeg::util::format::pixel::Pixel;
 
-        let mut decoded = ffmpeg::util::frame::video::Video::new(Pixel::YUV420P10LE, 16, 4);
+        for format in [Pixel::YUV420P10LE, Pixel::YUV422P10LE] {
+            assert_cpu_chroma_edge(format);
+        }
+    }
+
+    fn assert_cpu_chroma_edge(format: ffmpeg::util::format::pixel::Pixel) {
+        use ffmpeg::util::format::pixel::Pixel;
+
+        let chroma_height = if format == Pixel::YUV420P10LE { 2 } else { 4 };
+        let mut decoded = ffmpeg::util::frame::video::Video::new(format, 16, 4);
         decoded.set_color_space(ffmpeg::util::color::Space::BT2020NCL);
         decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
-        for (plane, (width, height)) in [(16, 4), (8, 2), (8, 2)].into_iter().enumerate() {
+        for (plane, (width, height)) in
+            [(16, 4), (8, chroma_height), (8, chroma_height)].into_iter().enumerate()
+        {
             let stride = decoded.stride(plane);
             for row in decoded.data_mut(plane).chunks_exact_mut(stride).take(height) {
                 for (x, sample) in row.chunks_exact_mut(2).take(width).enumerate() {
@@ -1441,25 +1363,40 @@ mod rgba64_direct_scale_tests {
             }
         }
         let path = Path::new("left-chroma-edge.mov");
-        let mut scaler =
-            preview_create_rgba_scaler(Pixel::YUV420P10LE, Pixel::RGBA64LE, 16, 4, 16, 4, path)
-                .expect("production scaler");
+        let mut scaler = preview_create_rgba_scaler(format, Pixel::RGBA64LE, 16, 4, 16, 4, path)
+            .expect("production scaler");
         let mut color_contract = None;
+        let mut scaler8 = preview_create_rgba_scaler(format, Pixel::RGBA, 16, 4, 16, 4, path)
+            .expect("production RGBA8 scaler");
+        let mut color_contract8 = None;
         for (location, cb_code, cr_code) in [
             (ffmpeg::util::chroma::Location::Left, 279.0_f32, 274.0_f32),
             (ffmpeg::util::chroma::Location::Center, 308.0, 400.0),
+            (ffmpeg::util::chroma::Location::Unspecified, 279.0, 274.0),
             (ffmpeg::util::chroma::Location::Left, 279.0, 274.0),
         ] {
             // SAFETY: the test exclusively owns the same frame across layout changes.
             unsafe { (*decoded.as_mut_ptr()).chroma_location = location.into() };
+            let source_color = PreviewSourceColorContract::automatic(
+                ColorSpace::Rec2100Hlg,
+                DecodedVideoRange::Limited,
+            );
+            let compact = convert_decoded_to_compact_yuv(&decoded, path, source_color)
+                .expect("typed compact source")
+                .expect("supported compact layout");
+            assert_eq!(
+                compact.video_sampling.chroma_location,
+                if location == ffmpeg::util::chroma::Location::Center {
+                    DecodedVideoChromaLocation::Center
+                } else {
+                    DecodedVideoChromaLocation::Left
+                }
+            );
             let output = convert_decoded_to_encoded_unorm16_rgba(
                 &decoded,
                 &mut scaler,
                 path,
-                PreviewSourceColorContract::automatic(
-                    ColorSpace::Rec2100Hlg,
-                    DecodedVideoRange::Limited,
-                ),
+                source_color,
                 &mut color_contract,
             )
             .expect("typed RGBA64 output");
@@ -1474,8 +1411,21 @@ mod rgba64_direct_scale_tests {
                     - 2.0 * 0.2627 * (1.0 - 0.2627) / 0.6780 * cr,
                 y + 2.0 * (1.0 - 0.0593) * cb,
             ];
+            let output8 = convert_decoded_to_rgba(
+                &decoded,
+                &mut scaler8,
+                path,
+                source_color,
+                &mut color_contract8,
+            )
+            .expect("typed RGBA8 output");
             let pixel = &output.rgba()[(2 * 16 + 8) * 4..(2 * 16 + 9) * 4];
+            let pixel8 = &output8.rgba()[(2 * 16 + 8) * 4..(2 * 16 + 9) * 4];
             for (channel, expected) in expected.into_iter().enumerate() {
+                assert!(
+                    pixel8[channel].abs_diff((expected * 255.0).round() as u8) <= 2,
+                    "{format:?} {location:?}: RGBA8={pixel8:?}"
+                );
                 let expected = (expected * 65535.0).round() as u16;
                 assert!(
                     pixel[channel].abs_diff(expected) <= 512,

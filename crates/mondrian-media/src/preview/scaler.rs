@@ -65,7 +65,7 @@ impl PreviewScaler {
         {
             return Err(ffmpeg::Error::InputChanged);
         }
-        let chroma_location = frame.chroma_location();
+        let chroma_location = super::frame_contract::cpu_chroma_location_from_frame(frame);
         if self
             .prepared
             .as_ref()
