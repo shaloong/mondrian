@@ -237,17 +237,25 @@ mod platform {
         }
         // SAFETY: Mach reported a complete structure.
         let statistics = unsafe { statistics.assume_init() };
-        let available_pages = u64::from(statistics.free_count)
-            .checked_add(u64::from(statistics.inactive_count))
-            .and_then(|value| value.checked_add(u64::from(statistics.speculative_count)))
-            .ok_or_else(|| String::from("available-page count overflowed"))?;
-        let available = available_pages
-            .checked_mul(page_size)
-            .ok_or_else(|| String::from("available-memory byte count overflowed"))?
-            .min(total);
+        let available = available_memory_bytes(&statistics, page_size, total)?;
         let load = u32::try_from(total.saturating_sub(available).saturating_mul(100) / total)
             .unwrap_or(100);
         Ok((total, available, load))
+    }
+
+    fn available_memory_bytes(
+        statistics: &libc::vm_statistics64,
+        page_size: u64,
+        total: u64,
+    ) -> Result<u64, String> {
+        // Mach free_count already includes speculative_count.
+        let available_pages = u64::from(statistics.free_count)
+            .checked_add(u64::from(statistics.inactive_count))
+            .ok_or_else(|| String::from("available-page count overflowed"))?;
+        available_pages
+            .checked_mul(page_size)
+            .map(|bytes| bytes.min(total))
+            .ok_or_else(|| String::from("available-memory byte count overflowed"))
     }
 
     fn sysctl_u64(name: &CStr) -> Result<u64, String> {
@@ -278,6 +286,31 @@ mod platform {
             ));
         }
         Ok(value)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn speculative_pages_are_not_counted_twice() {
+            // SAFETY: vm_statistics64 contains only integer counters.
+            let mut statistics: libc::vm_statistics64 = unsafe { mem::zeroed() };
+            statistics.free_count = 32_000;
+            statistics.inactive_count = 20_000;
+            statistics.speculative_count = 20_000;
+            let available = available_memory_bytes(&statistics, 16_384, 17_179_869_184)
+                .expect("valid Mach page counters");
+            assert_eq!(available, 851_968_000);
+
+            // Speculative pages are a subset of the same reported free_count.
+            statistics.speculative_count = 0;
+            assert_eq!(
+                available_memory_bytes(&statistics, 16_384, 17_179_869_184)
+                    .expect("same available pages"),
+                available
+            );
+        }
     }
 }
 
