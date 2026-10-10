@@ -3820,6 +3820,124 @@ fn test_preview_decode_diagnostics(
 }
 
 #[test]
+fn scrub_generation_retirement_preserves_in_flight_pixels_and_exact_cache() {
+    let mut store = test_cpu_frame_store(8, 1024 * 1024, 4);
+    let approximate_key = test_media_key(17);
+    let exact_key = test_media_key(18);
+    let mut frame = test_media_frame(17);
+    frame.set_presentation_quality(mondrian_playback::FramePresentationQuality::Degraded);
+    assert!(admit_test_media_frame(
+        &mut store,
+        approximate_key.clone(),
+        frame,
+        MediaPreviewRequestPriority::Current,
+    ));
+    assert!(admit_test_media_frame(
+        &mut store,
+        exact_key.clone(),
+        test_media_frame(18),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+    let retained = store.media_frame(&approximate_key).expect("drag picture");
+    let before = store.diagnostics();
+    store.retire_approximate_media_frames();
+    assert!(store.media_frame(&approximate_key).is_none());
+    assert!(store.media_frame(&exact_key).is_some());
+    let retired = store.diagnostics();
+    assert_eq!(retired.media_entries, before.media_entries - 1);
+    assert_eq!(
+        retired.media_aggregate_entries,
+        before.media_aggregate_entries
+    );
+    assert_eq!(
+        retired.media_aggregate_reserved_bytes,
+        before.media_aggregate_reserved_bytes
+    );
+    assert_eq!(
+        retained.presentation_quality(),
+        mondrian_playback::FramePresentationQuality::Degraded
+    );
+    drop(retained);
+    assert_eq!(
+        store.diagnostics().media_aggregate_entries,
+        before.media_aggregate_entries - 1
+    );
+}
+
+#[test]
+fn approximate_scrub_frame_cannot_enter_cross_call_reuse() {
+    let mut frame = test_media_frame(17);
+    assert!(frame.permits_cross_call_reuse());
+    frame.set_presentation_quality(mondrian_playback::FramePresentationQuality::Degraded);
+    assert!(!frame.permits_cross_call_reuse());
+    assert!(!frame.clone().with_cross_call_reuse(true).permits_cross_call_reuse());
+    frame.set_presentation_quality(mondrian_playback::FramePresentationQuality::Ready);
+    assert!(frame.permits_cross_call_reuse());
+    assert!(!frame.with_cross_call_reuse(false).permits_cross_call_reuse());
+}
+
+#[test]
+fn generation_rotation_retires_transient_evaluations_and_preserves_exact_reuse() {
+    let mut set = EvaluationWorkingSet::new();
+    let sequence = Sequence::new("scrub release reuse");
+    let key = FrameEvaluationKey {
+        sequence_id: sequence.id,
+        sequence_revision: sequence.revision,
+        author_generation: 0,
+        frame: 4,
+        width: 640,
+        height: 360,
+        runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        raster_requirement: PreviewRasterRequirement::Viewer,
+        display_color_space: ColorSpace::Srgb,
+        display_contract_identity: None,
+    };
+    for reuse_policy in [
+        EvaluationReusePolicy::Transient,
+        EvaluationReusePolicy::Reusable,
+    ] {
+        let evaluation = Arc::new(ResolvedFrameEvaluation {
+            cpu_materialization_active_bytes: 0,
+            key,
+            output_key: PreviewOutputKey::new(
+                key.sequence_id,
+                key.width,
+                key.height,
+                test_preview_semantic_identity(17),
+            ),
+            elements: Arc::from([]),
+            color_context: test_color_context(ColorSpace::Srgb),
+            resolved_quality: ResolvedFrameQuality::Full,
+            reuse_policy,
+            dependencies: Arc::from([]),
+            render_cache_identity: None,
+        });
+        set.insert(key, Arc::clone(&evaluation), 1);
+        assert!(Arc::ptr_eq(
+            &set.get(key, 2).expect("same generation reuse"),
+            &evaluation
+        ));
+        set.insert_waiting(
+            FrameEvaluationKey { frame: 5, ..key },
+            MediaPreviewRequestPriority::Current,
+            Arc::from([EvaluationDependency::MediaProducer(test_media_key(5))]),
+        );
+        set.retire_generation_work();
+        assert_eq!(
+            set.get(key, 3).is_some(),
+            reuse_policy == EvaluationReusePolicy::Reusable
+        );
+        assert!(set
+            .waiting_for(
+                FrameEvaluationKey { frame: 5, ..key },
+                MediaPreviewRequestPriority::Current
+            )
+            .is_none());
+        set.clear();
+    }
+}
+
+#[test]
 fn nearest_keyframe_scrub_is_explicitly_degraded_until_settled() {
     let mut diagnostics = test_preview_decode_diagnostics(
         PreviewDecodeAccessMode::ScrubCursor,

@@ -3914,7 +3914,7 @@ fn run_preview_media_access_mode_probe_with_media_info(
             )?;
 
             let scrub_case = run_case(
-                "preview_media.active_scrub_ready_window",
+                "preview_media.active_scrub_and_settled_ready_window",
                 1,
                 scrub_threshold_ms,
                 || {
@@ -3926,7 +3926,8 @@ fn run_preview_media_access_mode_probe_with_media_info(
                             scenario,
                             Some(preview_service),
                         )?;
-                        wait_for_headless_gpu_ready(
+                        wait_for_headless_scrub_then_settle(
+                            frame as i64,
                             preview_service,
                             state,
                             gpu_adapter,
@@ -4715,13 +4716,24 @@ fn run_preview_media_resolution_scale_decode_stability_probe(
                         TimelineSeekSource::Settled
                     };
                     state.seek_with_source(target as i64, source)?;
-                    wait_for_headless_gpu_ready(
-                        preview_service,
-                        state,
-                        gpu_adapter,
-                        &mut gpu_summary,
-                        ready_timeout,
-                    )?;
+                    if source == TimelineSeekSource::PointerDrag {
+                        wait_for_headless_scrub_then_settle(
+                            target as i64,
+                            preview_service,
+                            state,
+                            gpu_adapter,
+                            &mut gpu_summary,
+                            ready_timeout,
+                        )?;
+                    } else {
+                        wait_for_headless_gpu_ready(
+                            preview_service,
+                            state,
+                            gpu_adapter,
+                            &mut gpu_summary,
+                            ready_timeout,
+                        )?;
+                    }
                 }
                 wait_for_preview_work_quiescence(preview_service, state, ready_timeout)?;
                 let diagnostics = preview_service.diagnostics();
@@ -8919,6 +8931,104 @@ fn settle_headless_preview_and_release_transport_media(
     wait_for_preview_idle_residency_release(preview_service, state, timeout)
 }
 
+// Pointer motion may publish a near-keyframe Degraded ticket. Complete the
+// actual drag/release lifecycle, then require the exact frame within the same
+// original per-sample budget; Degraded never becomes a Ready observation.
+fn wait_for_headless_scrub_then_settle(
+    frame: i64,
+    preview_service: &HeadlessPreviewRuntime,
+    state: &mut AppState,
+    gpu_adapter: &mut HeadlessViewerGpuAdapter,
+    gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + timeout;
+    wait_for_headless_gpu_ready_observation_impl(
+        preview_service,
+        state,
+        gpu_adapter,
+        gpu_summary,
+        timeout,
+        true,
+    )
+    .context("observe the bound drag presentation before release")?;
+    state.seek(frame)?;
+    wait_for_headless_gpu_ready(
+        preview_service,
+        state,
+        gpu_adapter,
+        gpu_summary,
+        deadline.saturating_duration_since(Instant::now()),
+    )
+    .context("require an exact Ready picture after the settled release")
+}
+
+fn headless_scrub_presentation_matches_sample(
+    status: HeadlessGpuCandidateStatus,
+    binding: Option<HeadlessGpuCandidateBinding>,
+    intent: HeadlessGpuCandidateIntent,
+    output_binding_matches: bool,
+) -> bool {
+    status == HeadlessGpuCandidateStatus::PresentedDegraded
+        && output_binding_matches
+        && binding.is_some_and(|binding| {
+            binding.state == HeadlessGpuCandidateBindingState::Satisfied
+                && binding.covers_current(intent)
+        })
+}
+
+#[test]
+fn degraded_scrub_observation_requires_its_exact_delivered_gpu_binding() {
+    let intent = headless_candidate_test_intent(7);
+    let binding = HeadlessGpuCandidateBinding {
+        intent,
+        state: HeadlessGpuCandidateBindingState::Satisfied,
+    };
+    let status = HeadlessGpuCandidateStatus::PresentedDegraded;
+    assert!(headless_scrub_presentation_matches_sample(
+        status,
+        Some(binding),
+        intent,
+        true
+    ));
+    assert!(!headless_candidate_is_ready_for_sample(
+        status,
+        Some(binding),
+        intent,
+        true
+    ));
+    assert!(!headless_scrub_presentation_matches_sample(
+        status, None, intent, true
+    ));
+    assert!(!headless_scrub_presentation_matches_sample(
+        status,
+        Some(binding),
+        intent,
+        false
+    ));
+    assert!(!headless_scrub_presentation_matches_sample(
+        status,
+        Some(HeadlessGpuCandidateBinding {
+            state: HeadlessGpuCandidateBindingState::Attempted,
+            ..binding
+        }),
+        intent,
+        true,
+    ));
+    assert!(!headless_scrub_presentation_matches_sample(
+        status,
+        Some(binding),
+        HeadlessGpuCandidateIntent { frame: 8, ..intent },
+        true,
+    ));
+    assert!(!headless_scrub_presentation_matches_sample(
+        HeadlessGpuCandidateStatus::Unavailable,
+        Some(binding),
+        intent,
+        true,
+    ));
+}
+
 fn wait_for_headless_gpu_ready(
     preview_service: &HeadlessPreviewRuntime,
     state: &mut AppState,
@@ -8949,6 +9059,7 @@ fn wait_for_headless_gpu_ready_observation(
         gpu_adapter,
         gpu_summary,
         timeout,
+        false,
     )
 }
 
@@ -8958,6 +9069,7 @@ fn wait_for_headless_gpu_ready_observation_impl(
     gpu_adapter: &mut HeadlessViewerGpuAdapter,
     gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
     timeout: Duration,
+    allow_scrub_presentation: bool,
 ) -> anyhow::Result<HeadlessPreviewSample> {
     let deadline = Instant::now() + timeout;
     let work_watch = preview_service.work_watch();
@@ -9002,14 +9114,23 @@ fn wait_for_headless_gpu_ready_observation_impl(
             candidate_output_binding.as_ref(),
             preview_service,
         );
-        if headless_candidate_is_ready_for_sample(
+        let current_gpu_ready = headless_candidate_is_ready_for_sample(
             candidate_status,
             candidate_binding,
             sampled_intent,
             output_binding_matches,
-        ) {
+        );
+        let scrub_presented = allow_scrub_presentation
+            && state.last_timeline_seek_source == TimelineSeekSource::PointerDrag
+            && headless_scrub_presentation_matches_sample(
+                candidate_status,
+                candidate_binding,
+                sampled_intent,
+                output_binding_matches,
+            );
+        if current_gpu_ready || scrub_presented {
             return Ok(HeadlessPreviewSample {
-                current_gpu_ready: true,
+                current_gpu_ready,
                 stale_output_available: preview_service.has_retained_gpu_output(),
                 unavailable: false,
             });

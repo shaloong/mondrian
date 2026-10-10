@@ -1513,6 +1513,25 @@ where
         self.current_media_overflow_lru.clear();
     }
 
+    /// Retire caller-classified media payloads from optional residency.
+    /// Independent candidate/submission leases keep their physical allocation
+    /// charged until their last owner releases it. Viewer output is retained.
+    pub fn clear_media_frames_matching(&mut self, mut matches: impl FnMut(&MK, &M) -> bool) {
+        let keys = self
+            .media
+            .entries
+            .iter()
+            .filter(|&(key, entry)| matches(key, &entry.payload))
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.media.remove_entry(&key);
+        }
+        self.current_media_overflow.retain(|key, entry| !matches(key, &entry.payload));
+        self.current_media_overflow_lru
+            .retain(|key| self.current_media_overflow.contains_key(key));
+    }
+
     /// Release only media payloads that retain decoder-owned resources.
     ///
     /// CPU frames have zero resource units and remain reusable across

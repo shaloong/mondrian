@@ -240,6 +240,14 @@ impl PreviewFrameStoreAdapter {
         self.store.clear_media_frames();
     }
 
+    /// A near-keyframe scrub payload proves no exact source-sample residency
+    /// in the next generation. Preserve exact CPU frames and final output.
+    pub(crate) fn retire_approximate_media_frames(&mut self) {
+        self.store.clear_media_frames_matching(|_, frame| {
+            frame.presentation_quality() == mondrian_playback::FramePresentationQuality::Degraded
+        });
+    }
+
     /// Release native decoder resources while retaining ordinary CPU frames.
     pub(crate) fn clear_decoder_resource_media_frames(&mut self) {
         self.store.clear_decoder_resource_media_frames();

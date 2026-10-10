@@ -308,9 +308,10 @@ impl MediaPreviewFrame {
         self
     }
 
-    /// Whether this frame may participate in semantic cross-call cache reuse.
+    /// Approximate scrub pictures cannot satisfy a later exact source sample.
     pub(crate) const fn permits_cross_call_reuse(&self) -> bool {
         self.cross_call_reusable
+            && matches!(self.presentation_quality, FramePresentationQuality::Ready)
     }
 
     /// Restrict this frame to one concrete execution when an upstream nested

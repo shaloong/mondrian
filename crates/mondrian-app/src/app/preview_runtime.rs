@@ -2527,7 +2527,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             | PreviewGenerationBinding::Rotated(generation) => generation,
         };
         if matches!(binding, PreviewGenerationBinding::Rotated(_)) {
-            self.evaluation_working_set.borrow_mut().retire_producer_waits();
+            self.evaluation_working_set.borrow_mut().retire_generation_work();
+            self.frame_store.borrow_mut().retire_approximate_media_frames();
             self.decode_residency_waiting.set(None);
             self.media_aggregate_capacity_waiting.set(false);
             self.media_existing_work_waiters.borrow_mut().clear();
@@ -2545,7 +2546,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     }
 
     fn invalidate_preview_generation(&self) {
-        self.evaluation_working_set.borrow_mut().retire_producer_waits();
+        self.evaluation_working_set.borrow_mut().retire_generation_work();
+        self.frame_store.borrow_mut().retire_approximate_media_frames();
         self.decode_residency_waiting.set(None);
         self.media_aggregate_capacity_waiting.set(false);
         self.media_existing_work_waiters.borrow_mut().clear();

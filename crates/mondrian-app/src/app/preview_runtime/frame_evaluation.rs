@@ -307,6 +307,14 @@ impl EvaluationWorkingSet {
         self.waiting.clear();
     }
 
+    /// A transient evaluation belongs to its producing generation. Exact,
+    /// reusable pictures still survive transport and Viewer-only transitions.
+    pub(crate) fn retire_generation_work(&mut self) {
+        self.retire_producer_waits();
+        self.entries
+            .retain(|entry| entry.evaluation.reuse_policy == EvaluationReusePolicy::Reusable);
+    }
+
     /// Retire scheduling-owned media leases while preserving resource-free semantics.
     pub(crate) fn retire_media_work(&mut self) {
         self.retire_producer_waits();
