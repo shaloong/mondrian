@@ -46,7 +46,7 @@ pub(super) fn run(root: PathBuf, output: PathBuf) -> anyhow::Result<PathBuf> {
                     ..SequenceSettings::default()
                 },
                 ProjectColorEnvironment::default(),
-                ProjectSettings::default(),
+                ProjectSettings { proxy_enabled: false, ..ProjectSettings::default() },
             )?;
             cleanup.track(state.project_runtime_dir().map(Path::to_path_buf));
             author(
