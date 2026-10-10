@@ -111,6 +111,18 @@ handoff does the gate reset its Viewer counters and measure 30 continuous
 minutes on the final generation, so recovery work cannot satisfy the final
 callback or headless-GPU duration requirement.
 
+On macOS, the CPAL external smoke and professional A/V gate run their exact
+test in a fresh child process. Before creating App, Preview, GPU or Audio owners,
+the child calls the product's `prepare_graphics_process` entry policy. The parent
+retains the performance lock while waiting and verifies that its own native role
+is unchanged. This avoids testing under libtest's unspecified application role,
+which caps the requested playback QoS. Child failure still fails the original
+test; the two libtest success records represent one probe and its launcher.
+The existing `MONDRIAN_PREVIEW_WAIT_DIAGNOSTICS=1` and
+`MONDRIAN_PLAYBACK_CPU_DIAGNOSTICS=1` switches enable scoped warning capture in
+these tests. The professional report also retains raw coordinator stage timing;
+none of these diagnostics changes the qualification policy.
+
 Playback Evidence schema 4 replaces the old target-versus-latest-clock drift
 aggregate with completion-time phase evidence partitioned by Clock Master. The
 CPAL recovery gate requires Audio Device and Synthetic point-error,

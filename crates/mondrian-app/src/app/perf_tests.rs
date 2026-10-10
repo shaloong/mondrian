@@ -2621,6 +2621,55 @@ fn perf_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+#[cfg(target_os = "macos")]
+fn run_macos_graphics_test_entry(test_name: &str) -> anyhow::Result<bool> {
+    const CHILD: &str = "MONDRIAN_MACOS_GRAPHICS_PERF_TEST_CHILD";
+    if std::env::var(CHILD).is_ok_and(|value| value == test_name) {
+        // Only this exact test runs in the fresh child. Establish the same
+        // process-lifetime policy as the product before creating any owners.
+        mondrian_platform::prepare_graphics_process()?;
+        return Ok(false);
+    }
+    // Never change the parent libtest process: other tests can own native
+    // resources there, and the unspecified role cannot be restored publicly.
+    let _guard = perf_lock().lock().expect("perf lock poisoned");
+    let parent_role = mondrian_platform::observe_macos_playback_task_role()?;
+    let status = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            test_name,
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD, test_name)
+        .status()?;
+    anyhow::ensure!(
+        mondrian_platform::observe_macos_playback_task_role()? == parent_role,
+        "isolated graphics test changed the parent process role"
+    );
+    anyhow::ensure!(status.success(), "isolated graphics test failed: {status}");
+    Ok(true)
+}
+
+fn playback_diagnostic_tracing() -> Option<tracing::subscriber::DefaultGuard> {
+    [
+        "MONDRIAN_PREVIEW_WAIT_DIAGNOSTICS",
+        "MONDRIAN_PLAYBACK_CPU_DIAGNOSTICS",
+    ]
+    .into_iter()
+    .any(|key| std::env::var(key).is_ok_and(|value| value == "1"))
+    .then(|| {
+        tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::WARN)
+                .with_ansi(false)
+                .with_writer(std::io::stderr)
+                .finish(),
+        )
+    })
+}
+
 fn env_usize_clamped(key: &str, default: usize, min: usize, max: usize) -> usize {
     env_usize(key, default).clamp(min, max)
 }
@@ -4900,6 +4949,10 @@ fn audio_bounded_source_external_render_smoke() -> anyhow::Result<()> {
 #[test]
 #[ignore = "development production CPAL + headless Viewer smoke; requires real external audio and an output device"]
 fn playback_cpal_av_external_smoke() -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    if run_macos_graphics_test_entry("app::perf_tests::playback_cpal_av_external_smoke")? {
+        return Ok(());
+    }
     let Some(media_path) =
         std::env::var_os("MONDRIAN_AUDIO_EXTERNAL_MEDIA_PATH").map(PathBuf::from)
     else {
@@ -4984,6 +5037,7 @@ fn run_cpal_av_external_smoke(
     ) -> anyhow::Result<(u64, serde_json::Value)>,
 ) -> anyhow::Result<()> {
     let _guard = perf_lock().lock().expect("perf lock poisoned");
+    let _diagnostic_tracing = playback_diagnostic_tracing();
     let media_info = probe_media_info(&media_path)?;
     let video_source = media_info.video_streams.first().cloned();
     anyhow::ensure!(
@@ -5182,7 +5236,12 @@ fn run_cpal_av_external_smoke(
 #[cfg(feature = "validation")]
 #[ignore = "professional 30-minute production CPAL + headless Viewer A/V gate; requires long real audio and an output device"]
 fn playback_professional_cpal_av_gate() -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    if run_macos_graphics_test_entry("app::perf_tests::playback_professional_cpal_av_gate")? {
+        return Ok(());
+    }
     let _guard = perf_lock().lock().expect("perf lock poisoned");
+    let _diagnostic_tracing = playback_diagnostic_tracing();
     let media_path = std::env::var_os("MONDRIAN_PLAYBACK_PROFESSIONAL_AUDIO_MEDIA_PATH")
         .map(PathBuf::from)
         .context(
@@ -5253,7 +5312,7 @@ fn run_professional_cpal_av_probe(
 ) -> anyhow::Result<()> {
     let state =
         build_professional_cpal_av_state(root_dir, media_path, media_info, sequence_frame_count)?;
-    let (report, closure) = run_with_realtime_perf_gpu_factory(
+    let ((report, coordinator_timing), closure) = run_with_realtime_perf_gpu_factory(
         state,
         HeadlessViewerGpuAdapter::new,
         |state, realtime| {
@@ -5437,11 +5496,12 @@ fn run_professional_cpal_av_probe(
                     video_coordinator: coordinator_timing.professional_observation(),
                     gpu_presented_frames: gpu_summary.presented_unique_frame_completions as u64,
                 });
-            Ok(report)
+            Ok((report, coordinator_timing))
         },
     )?;
     let mut published_report = serde_json::to_value(&report)?;
     published_report["owner_closure"] = serde_json::to_value(closure)?;
+    published_report["coordinator_timing"] = serde_json::to_value(coordinator_timing)?;
     let report_json = serde_json::to_string(&published_report)?;
     eprintln!("MONDRIAN_PERF_JSON={report_json}");
     write_report_if_needed(&report_json)?;
