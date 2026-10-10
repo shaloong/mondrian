@@ -9,6 +9,9 @@ mod contract;
 mod dcp_xyz;
 mod package;
 mod toolchain;
+mod verifier;
+
+pub(crate) use verifier::validate_dcp_verifier_output;
 
 pub use contract::{
     resolve_professional_delivery, DeliverableLayout, ProfessionalDeliveryAdmissionError,

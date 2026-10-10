@@ -3228,7 +3228,11 @@ fn execute_professional_delivery_export(
             }
             report(ExportProgress::validating(0.975));
             let mut verify = toolchain.dcp_package_validation_command(staging.path());
-            if let Err(outcome) = run_dcp_package_validator(&mut verify, cancel) {
+            if let Err(outcome) = run_dcp_package_validator(
+                &mut verify,
+                cancel,
+                Instant::now() + Duration::from_secs(6 * 60 * 60),
+            ) {
                 return outcome;
             }
             publish_professional_directory(staging, final_output, cancel, execution_gate, report)
@@ -3563,38 +3567,25 @@ fn run_professional_tool_capture(
     Ok(String::from_utf8_lossy(&combined).into_owned())
 }
 
-fn run_dcp_package_validator(
+pub(crate) fn run_dcp_package_validator(
     command: &mut impl mondrian_media::SupervisedCommand,
     cancel: &ExecutionCancellationToken,
-) -> Result<(), JobExecutionResult> {
+    deadline: Instant,
+) -> Result<String, JobExecutionResult> {
     let policy = SupervisedProcessPolicy {
         stdout: SupervisedStreamCapture::Head { limit_bytes: 2 * 1024 * 1024, reject_excess: true },
-        stderr: SupervisedStreamCapture::Tail { limit_bytes: 2 * 1024 * 1024 },
-        deadline: Some(Instant::now() + Duration::from_secs(6 * 60 * 60)),
+        stderr: SupervisedStreamCapture::Head { limit_bytes: 2 * 1024 * 1024, reject_excess: true },
+        deadline: Some(deadline),
         ..SupervisedProcessPolicy::default()
     };
     let output = run_supervised_command(command, None, policy, cancel)
         .map_err(|error| process_supervision_failure("DCP package verification", error))?;
-    let mut combined = output.stdout.clone();
-    combined.extend_from_slice(&output.stderr);
-    let report = String::from_utf8_lossy(&combined);
-    if report.lines().any(|line| line.trim_start().starts_with("Error:")) {
-        return Err(JobExecutionResult::Failed(
-            "DCP package verification reported a SMPTE interoperability error".to_owned(),
-        ));
-    }
-    if !output.status.success()
-        && !report.lines().any(|line| {
-            let line = line.trim_start();
-            line.starts_with("Bv2.1 error:") || line.starts_with("Warning:")
-        })
-    {
-        return Err(JobExecutionResult::Failed(format!(
-            "DCP package verification failed: {}",
+    crate::professional_delivery::validate_dcp_verifier_output(&output).map_err(|reason| {
+        JobExecutionResult::Failed(format!(
+            "DCP package verification rejected: {reason}; {}",
             bounded_process_reason(&output)
-        )));
-    }
-    Ok(())
+        ))
+    })
 }
 
 fn extract_imf_descriptor_xml(
