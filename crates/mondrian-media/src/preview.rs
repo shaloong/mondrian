@@ -46,6 +46,7 @@ pub(crate) use frame_materialization::resize_float_rgba;
 mod hardware_decode;
 mod native_frame;
 mod playback_ring;
+mod scaler;
 mod seek_index;
 #[cfg(target_os = "macos")]
 mod videotoolbox;

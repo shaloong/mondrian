@@ -1008,7 +1008,7 @@ struct PreviewDecodeSession {
     /// Session-owned progressive/pass-through or BWDIF field processor.
     field_processor: super::field_processing::PreviewFieldProcessingSession,
     decoder: PreviewCodec,
-    scaler: Option<ffmpeg::software::scaling::Context>,
+    scaler: Option<super::scaler::PreviewScaler>,
     scaler_format_contract: Option<(
         ffmpeg::util::format::pixel::Pixel,
         ffmpeg::util::format::pixel::Pixel,
@@ -1664,8 +1664,8 @@ pub(super) fn preview_create_rgba_scaler(
     target_width: u32,
     target_height: u32,
     path: &Path,
-) -> Result<ffmpeg::software::scaling::Context> {
-    ffmpeg::software::scaling::Context::get(
+) -> Result<super::scaler::PreviewScaler> {
+    super::scaler::PreviewScaler::get(
         source_format,
         source_width,
         source_height,
@@ -2944,7 +2944,7 @@ impl PreviewDecodeSession {
         let representation = self.representation;
 
         let choose_and_convert = |hardware_decode_plan: &mut PreviewHardwareDecodePlan,
-                                  scaler: &mut Option<ffmpeg::software::scaling::Context>,
+                                  scaler: &mut Option<super::scaler::PreviewScaler>,
                                   scaler_format_contract: &mut Option<(
             ffmpeg::util::format::pixel::Pixel,
             ffmpeg::util::format::pixel::Pixel,

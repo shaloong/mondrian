@@ -204,7 +204,7 @@ fn convert_decoded_to_compact_yuv(
 #[allow(clippy::too_many_arguments)]
 fn materialize_decoded_to_compact_yuv(
     decoded: &ffmpeg::util::frame::video::Video,
-    scaler: &mut Option<ffmpeg::software::scaling::Context>,
+    scaler: &mut Option<super::scaler::PreviewScaler>,
     scaler_format_contract: &mut Option<(
         ffmpeg::util::format::pixel::Pixel,
         ffmpeg::util::format::pixel::Pixel,
@@ -257,7 +257,7 @@ fn materialize_decoded_to_compact_yuv(
 #[allow(clippy::too_many_arguments)]
 fn materialize_yuva12_to_encoded_float(
     decoded: &ffmpeg::util::frame::video::Video,
-    scaler: &mut Option<ffmpeg::software::scaling::Context>,
+    scaler: &mut Option<super::scaler::PreviewScaler>,
     scaler_format_contract: &mut Option<(
         ffmpeg::util::format::pixel::Pixel,
         ffmpeg::util::format::pixel::Pixel,
@@ -340,7 +340,7 @@ fn materialize_yuva12_to_encoded_float(
 
 pub(super) fn convert_decoded_to_rgba(
     decoded: &ffmpeg::util::frame::video::Video,
-    scaler: &mut ffmpeg::software::scaling::Context,
+    scaler: &mut super::scaler::PreviewScaler,
     path: &Path,
     source_color: PreviewSourceColorContract,
     scaler_color_contract: &mut Option<DecodedRgbaFrameContract>,
@@ -348,6 +348,12 @@ pub(super) fn convert_decoded_to_rgba(
     let decoded_surface_format = decoded_surface_format_from_pixel(decoded.format());
     let decoded_video_sampling = decoded_video_sampling_from_frame(decoded);
     let color_contract = resolve_cpu_rgba_contract(decoded, source_color, path)?;
+    if scaler.prepare(decoded).map_err(|error| MondrianError::DecodeFailed {
+        asset_id: path.display().to_string(),
+        reason: error.to_string(),
+    })? {
+        *scaler_color_contract = None;
+    }
     if *scaler_color_contract != Some(color_contract) {
         configure_preview_rgba_scaler(scaler, color_contract, path)?;
         *scaler_color_contract = Some(color_contract);
@@ -399,7 +405,7 @@ pub(super) fn convert_decoded_to_rgba(
 
 fn convert_decoded_to_encoded_unorm16_rgba(
     decoded: &ffmpeg::util::frame::video::Video,
-    scaler: &mut ffmpeg::software::scaling::Context,
+    scaler: &mut super::scaler::PreviewScaler,
     path: &Path,
     source_color: PreviewSourceColorContract,
     scaler_color_contract: &mut Option<DecodedRgbaFrameContract>,
@@ -407,6 +413,12 @@ fn convert_decoded_to_encoded_unorm16_rgba(
     let decoded_surface_format = decoded_surface_format_from_pixel(decoded.format());
     let decoded_video_sampling = decoded_video_sampling_from_frame(decoded);
     let color_contract = resolve_cpu_rgba_contract(decoded, source_color, path)?;
+    if scaler.prepare(decoded).map_err(|error| MondrianError::DecodeFailed {
+        asset_id: path.display().to_string(),
+        reason: error.to_string(),
+    })? {
+        *scaler_color_contract = None;
+    }
     if *scaler_color_contract != Some(color_contract) {
         configure_preview_rgba_scaler(scaler, color_contract, path)?;
         *scaler_color_contract = Some(color_contract);
@@ -711,7 +723,7 @@ pub(super) fn materialize_decoded_frame(
     decoded: &ffmpeg::util::frame::video::Video,
     representation: PreviewDecodeRepresentation,
     hardware_decode_plan: &mut PreviewHardwareDecodePlan,
-    scaler: &mut Option<ffmpeg::software::scaling::Context>,
+    scaler: &mut Option<super::scaler::PreviewScaler>,
     scaler_format_contract: &mut Option<(
         ffmpeg::util::format::pixel::Pixel,
         ffmpeg::util::format::pixel::Pixel,
@@ -742,7 +754,7 @@ pub(super) fn materialize_decoded_frame_with_session_output_lease(
     decoded: &ffmpeg::util::frame::video::Video,
     representation: PreviewDecodeRepresentation,
     hardware_decode_plan: &mut PreviewHardwareDecodePlan,
-    scaler: &mut Option<ffmpeg::software::scaling::Context>,
+    scaler: &mut Option<super::scaler::PreviewScaler>,
     scaler_format_contract: &mut Option<(
         ffmpeg::util::format::pixel::Pixel,
         ffmpeg::util::format::pixel::Pixel,
@@ -774,7 +786,7 @@ fn materialize_decoded_frame_inner(
     decoded: &ffmpeg::util::frame::video::Video,
     representation: PreviewDecodeRepresentation,
     hardware_decode_plan: &mut PreviewHardwareDecodePlan,
-    scaler: &mut Option<ffmpeg::software::scaling::Context>,
+    scaler: &mut Option<super::scaler::PreviewScaler>,
     scaler_format_contract: &mut Option<(
         ffmpeg::util::format::pixel::Pixel,
         ffmpeg::util::format::pixel::Pixel,
@@ -1063,7 +1075,7 @@ fn materialize_decoded_to_cpu(
     decoded: &ffmpeg::util::frame::video::Video,
     representation: PreviewDecodeRepresentation,
     hardware_decode_plan: &mut PreviewHardwareDecodePlan,
-    scaler: &mut Option<ffmpeg::software::scaling::Context>,
+    scaler: &mut Option<super::scaler::PreviewScaler>,
     scaler_format_contract: &mut Option<(
         ffmpeg::util::format::pixel::Pixel,
         ffmpeg::util::format::pixel::Pixel,
@@ -1305,7 +1317,7 @@ fn cpu_preview_destination_format(
 }
 
 fn ensure_preview_scaler<'a>(
-    scaler: &'a mut Option<ffmpeg::software::scaling::Context>,
+    scaler: &'a mut Option<super::scaler::PreviewScaler>,
     scaler_format_contract: &mut Option<(
         ffmpeg::util::format::pixel::Pixel,
         ffmpeg::util::format::pixel::Pixel,
@@ -1317,7 +1329,7 @@ fn ensure_preview_scaler<'a>(
     target_width: u32,
     target_height: u32,
     path: &Path,
-) -> Result<&'a mut ffmpeg::software::scaling::Context> {
+) -> Result<&'a mut super::scaler::PreviewScaler> {
     let requested_contract = (source_format, destination_format);
     if scaler.is_none() || *scaler_format_contract != Some(requested_contract) {
         *scaler = Some(preview_create_rgba_scaler(
@@ -1405,6 +1417,74 @@ mod rgba64_direct_scale_tests {
     use super::*;
     use crate::decoder::DecodedVideoRange;
     use mondrian_core::ColorSpace;
+
+    #[test]
+    fn rgba64_cpu_scale_honors_left_chroma_siting_at_color_edges() {
+        use ffmpeg::util::format::pixel::Pixel;
+
+        let mut decoded = ffmpeg::util::frame::video::Video::new(Pixel::YUV420P10LE, 16, 4);
+        decoded.set_color_space(ffmpeg::util::color::Space::BT2020NCL);
+        decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+        for (plane, (width, height)) in [(16, 4), (8, 2), (8, 2)].into_iter().enumerate() {
+            let stride = decoded.stride(plane);
+            for row in decoded.data_mut(plane).chunks_exact_mut(stride).take(height) {
+                for (x, sample) in row.chunks_exact_mut(2).take(width).enumerate() {
+                    let left = [365_u16, 395, 778];
+                    let right = [579_u16, 279, 274];
+                    let value = if x < width / 2 {
+                        left[plane]
+                    } else {
+                        right[plane]
+                    };
+                    sample.copy_from_slice(&value.to_le_bytes());
+                }
+            }
+        }
+        let path = Path::new("left-chroma-edge.mov");
+        let mut scaler =
+            preview_create_rgba_scaler(Pixel::YUV420P10LE, Pixel::RGBA64LE, 16, 4, 16, 4, path)
+                .expect("production scaler");
+        let mut color_contract = None;
+        for (location, cb_code, cr_code) in [
+            (ffmpeg::util::chroma::Location::Left, 279.0_f32, 274.0_f32),
+            (ffmpeg::util::chroma::Location::Center, 308.0, 400.0),
+            (ffmpeg::util::chroma::Location::Left, 279.0, 274.0),
+        ] {
+            // SAFETY: the test exclusively owns the same frame across layout changes.
+            unsafe { (*decoded.as_mut_ptr()).chroma_location = location.into() };
+            let output = convert_decoded_to_encoded_unorm16_rgba(
+                &decoded,
+                &mut scaler,
+                path,
+                PreviewSourceColorContract::automatic(
+                    ColorSpace::Rec2100Hlg,
+                    DecodedVideoRange::Limited,
+                ),
+                &mut color_contract,
+            )
+            .expect("typed RGBA64 output");
+            // At x=8 Left samples the green chroma exactly; Center interpolates
+            // one quarter of the red chroma. This oracle uses BT.2020 NCL math.
+            let y = (579.0 - 64.0) / 876.0;
+            let cb = (cb_code - 512.0) / 896.0;
+            let cr = (cr_code - 512.0) / 896.0;
+            let expected = [
+                y + 2.0 * (1.0 - 0.2627) * cr,
+                y - 2.0 * 0.0593 * (1.0 - 0.0593) / 0.6780 * cb
+                    - 2.0 * 0.2627 * (1.0 - 0.2627) / 0.6780 * cr,
+                y + 2.0 * (1.0 - 0.0593) * cb,
+            ];
+            let pixel = &output.rgba()[(2 * 16 + 8) * 4..(2 * 16 + 9) * 4];
+            for (channel, expected) in expected.into_iter().enumerate() {
+                let expected = (expected * 65535.0).round() as u16;
+                assert!(
+                    pixel[channel].abs_diff(expected) <= 512,
+                    "{location:?}: {pixel:?}"
+                );
+            }
+            assert_eq!(pixel[3], u16::MAX);
+        }
+    }
 
     #[test]
     fn full_chroma_rgba64_preserves_negative_bt2020_chroma() {

@@ -206,7 +206,7 @@ pub(super) fn resolve_cpu_rgba_contract_from_metadata(
 }
 
 pub(super) fn configure_preview_rgba_scaler(
-    scaler: &mut ffmpeg::software::scaling::Context,
+    scaler: &mut super::scaler::PreviewScaler,
     contract: DecodedRgbaFrameContract,
     path: &Path,
 ) -> Result<()> {
