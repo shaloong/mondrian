@@ -7722,17 +7722,26 @@ fn run_headless_cross_region_seeks(
         // PointerDrag latency and exact Settled latency. Each request must reach
         // a presentable result so both latency distributions are independently
         // auditable before the separate latest-wins supersession burst below.
-        state.seek_with_source(
-            target as i64,
-            cross_region_seek_probe_source(index, seek_count),
-        )?;
-        wait_for_headless_gpu_ready(
-            preview_service,
-            state,
-            gpu_adapter,
-            gpu_summary,
-            timeout_per_seek,
-        )?;
+        let source = cross_region_seek_probe_source(index, seek_count);
+        state.seek_with_source(target as i64, source)?;
+        if source == TimelineSeekSource::PointerDrag {
+            wait_for_headless_scrub_then_settle(
+                target as i64,
+                preview_service,
+                state,
+                gpu_adapter,
+                gpu_summary,
+                timeout_per_seek,
+            )?;
+        } else {
+            wait_for_headless_gpu_ready(
+                preview_service,
+                state,
+                gpu_adapter,
+                gpu_summary,
+                timeout_per_seek,
+            )?;
+        }
     }
 
     // Scale the latest-wins gesture burst with the declared gate. A
