@@ -573,8 +573,9 @@ fn real_as11_x9_file_passes_bmx_structural_and_metadata_reimport() {
         std::env::var_os("MONDRIAN_BMX_TOOL_DIR")
             .expect("explicit official BMX 1.7 tool directory"),
     );
-    let raw2bmx = tool_root.join("raw2bmx.exe");
-    let mxf2raw = tool_root.join("mxf2raw.exe");
+    let suffix = std::env::consts::EXE_SUFFIX;
+    let raw2bmx = tool_root.join(format!("raw2bmx{suffix}"));
+    let mxf2raw = tool_root.join(format!("mxf2raw{suffix}"));
     assert!(
         raw2bmx.is_file(),
         "missing official raw2bmx: {}",
