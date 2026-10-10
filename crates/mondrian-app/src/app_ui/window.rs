@@ -8,9 +8,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-#[cfg(feature = "validation")]
-use std::sync::Mutex;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 #[cfg(feature = "validation")]
 use std::{cell::RefCell, rc::Rc};
@@ -895,6 +893,8 @@ struct AppUiViewerGpuOutputDiagnostics {
     compositor_creative_luts: Option<mondrian_renderer::GpuCreativeLutCacheDiagnostics>,
     runtime_report: RenderGpuOutputRuntimeDiagnosticsReport,
     health: AppUiViewerGpuOutputHealthSummary,
+    /// Actual Viewer preparation outcomes; redraw snapshots do not advance them.
+    #[serde(rename = "outcome_counts")]
     health_counts: AppUiViewerGpuOutputHealthCounts,
     last_frame_context: Option<AppUiViewerGpuOutputFrameContext>,
     last_preview_candidate_id: Option<u64>,
@@ -6419,11 +6419,42 @@ fn trace_viewer_gpu_output_telemetry(
     write_viewer_gpu_output_diagnostics_if_needed(&diagnostics);
 }
 
+/// One process-owned diagnostic stream, independent of Window/Device generations.
+/// Counts describe published health observations, not unique frames or GPU work.
+struct ViewerGpuOutputDiagnosticStream {
+    path: PathBuf,
+    counts: AppUiViewerGpuOutputHealthCounts,
+}
+
+impl ViewerGpuOutputDiagnosticStream {
+    fn write(&mut self, diagnostics: &AppUiViewerGpuOutputDiagnostics) -> anyhow::Result<()> {
+        // Advance before I/O: a lost observation remains detectable by replay.
+        self.counts.record(diagnostics.health.status);
+        write_viewer_gpu_output_diagnostics_to_path(&self.path, diagnostics, self.counts)
+    }
+}
+
 fn write_viewer_gpu_output_diagnostics_if_needed(diagnostics: &AppUiViewerGpuOutputDiagnostics) {
     let Some(path) = viewer_gpu_output_diagnostics_output_path() else {
         return;
     };
-    let result = write_viewer_gpu_output_diagnostics_to_path(&path, diagnostics);
+    static STREAM: OnceLock<Mutex<ViewerGpuOutputDiagnosticStream>> = OnceLock::new();
+    let stream = STREAM.get_or_init(|| {
+        Mutex::new(ViewerGpuOutputDiagnosticStream {
+            path: path.clone(),
+            counts: AppUiViewerGpuOutputHealthCounts::default(),
+        })
+    });
+    let result = (|| {
+        let mut stream = stream
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Viewer diagnostic stream poisoned"))?;
+        anyhow::ensure!(
+            stream.path == path,
+            "Viewer diagnostic destination changed within a process"
+        );
+        stream.write(diagnostics)
+    })();
     if let Err(err) = result {
         tracing::warn!(
             output_path = %path.display(),
@@ -6435,11 +6466,18 @@ fn write_viewer_gpu_output_diagnostics_if_needed(diagnostics: &AppUiViewerGpuOut
 fn write_viewer_gpu_output_diagnostics_to_path(
     path: &Path,
     diagnostics: &AppUiViewerGpuOutputDiagnostics,
+    health_counts: AppUiViewerGpuOutputHealthCounts,
 ) -> anyhow::Result<()> {
+    #[derive(serde::Serialize)]
+    struct Record<'a> {
+        #[serde(flatten)]
+        snapshot: &'a AppUiViewerGpuOutputDiagnostics,
+        health_counts: AppUiViewerGpuOutputHealthCounts,
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let report_json = serde_json::to_string(diagnostics)?;
+    let report_json = serde_json::to_string(&Record { snapshot: diagnostics, health_counts })?;
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     writeln!(file, "{report_json}")?;
     Ok(())
@@ -12335,6 +12373,69 @@ mod tests {
     }
 
     #[test]
+    fn viewer_health_stream_replays_redraws_and_retains_failed_observations() {
+        use crate::app::viewer_gpu_output_health::{evaluate_jsonl, ViewerGpuOutputBudget};
+        let root = tempfile::tempdir().expect("stream directory");
+        let mut stream = ViewerGpuOutputDiagnosticStream {
+            path: root.path().join("health.jsonl"),
+            counts: AppUiViewerGpuOutputHealthCounts::default(),
+        };
+        for status in [
+            AppUiViewerGpuOutputHealthStatus::NoInvocation,
+            AppUiViewerGpuOutputHealthStatus::Waiting,
+            AppUiViewerGpuOutputHealthStatus::Blocked,
+            AppUiViewerGpuOutputHealthStatus::Failed,
+            AppUiViewerGpuOutputHealthStatus::Ready,
+            AppUiViewerGpuOutputHealthStatus::Ready,
+        ] {
+            let diagnostics = AppUiViewerGpuOutputDiagnostics {
+                health: AppUiViewerGpuOutputHealthSummary { status, ..Default::default() },
+                health_counts: AppUiViewerGpuOutputHealthCounts { ready: 1, ..Default::default() },
+                ..Default::default()
+            };
+            stream.write(&diagnostics).expect("publish observation");
+        }
+        let contents = std::fs::read_to_string(&stream.path).expect("stream");
+        let summary = evaluate_jsonl(&contents, &ViewerGpuOutputBudget::default()).expect("replay");
+        assert!(summary.reported_counts_match_replay);
+        assert_eq!(summary.counts, stream.counts);
+        assert_eq!(summary.counts.ready, 2);
+        assert_eq!(summary.counts.blocked, 1);
+        assert_eq!(summary.counts.failed, 1);
+        assert!(!summary.passed);
+        let records = contents
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("record"));
+        for record in records {
+            assert_eq!(record["outcome_counts"]["ready"], 1);
+        }
+    }
+
+    #[test]
+    fn viewer_health_stream_lost_write_remains_a_replay_failure() {
+        use crate::app::viewer_gpu_output_health::{evaluate_jsonl, ViewerGpuOutputBudget};
+        let root = tempfile::tempdir().expect("stream directory");
+        let parent = root.path().join("blocked-parent");
+        std::fs::write(&parent, b"not a directory").expect("block writer");
+        let mut stream = ViewerGpuOutputDiagnosticStream {
+            path: parent.join("health.jsonl"),
+            counts: AppUiViewerGpuOutputHealthCounts::default(),
+        };
+        let diagnostics = AppUiViewerGpuOutputDiagnostics::default();
+        assert!(stream.write(&diagnostics).is_err());
+        std::fs::remove_file(&parent).expect("release test-owned blocker");
+        stream.write(&diagnostics).expect("publish later observation");
+        let contents = std::fs::read_to_string(&stream.path).expect("stream");
+        let summary = evaluate_jsonl(&contents, &ViewerGpuOutputBudget::default()).expect("replay");
+        assert!(!summary.reported_counts_match_replay);
+        assert_eq!(summary.count_mismatches.len(), 1);
+        assert!(summary
+            .failures
+            .iter()
+            .any(|failure| failure.metric == "health_counts_match_replay"));
+    }
+
+    #[test]
     fn viewer_gpu_output_diagnostics_jsonl_includes_health_summary() {
         let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
         let previous_contract = test_display_output_contract();
@@ -12475,8 +12576,11 @@ mod tests {
                 .as_nanos()
         ));
 
-        write_viewer_gpu_output_diagnostics_to_path(&output_path, &diagnostics)
-            .expect("write viewer GPU output JSONL");
+        let mut stream = ViewerGpuOutputDiagnosticStream {
+            path: output_path.clone(),
+            counts: AppUiViewerGpuOutputHealthCounts::default(),
+        };
+        stream.write(&diagnostics).expect("write viewer GPU output JSONL");
         let contents = std::fs::read_to_string(&output_path).expect("read viewer GPU output JSONL");
         let _ = std::fs::remove_file(&output_path);
         let json: serde_json::Value =

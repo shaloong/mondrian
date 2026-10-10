@@ -658,7 +658,13 @@ $env:MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT='target/perf/viewer-gpu-output.jsonl'; ca
 The budget command prints a versioned health report and exits non-zero when the
 health stream violates the thresholds or when reported cumulative
 `health_counts` do not match the statuses replayed from the JSONL records.
-Empty JSONL streams fail with a `records` budget failure. The report's embedded
+Empty JSONL streams fail with a `records` budget failure.
+`health_counts` counts health observations submitted to the process diagnostic stream,
+including redraws of the same candidate and Window/Device reopen. The original
+preparation outcome counters are retained as `outcome_counts`; they do not count
+redraw observations or unique media frames. The process binds one diagnostic
+destination and advances observation counts before I/O so a lost write remains
+a replay mismatch. Neither counter establishes new rendered-frame throughput. The report's embedded
 summary now fails closed on missing renderer-owned stage/runtime evidence and on
 preview-candidate discontinuity unless explicitly tolerated:
 `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_MISSING_RUNTIME_REPORTS`,
