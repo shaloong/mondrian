@@ -30,7 +30,9 @@ printf '%s  %s\n' "$archive_sha256" "$archive" | shasum -a 256 --check
 source_dir=$(mktemp -d "$work_dir/ffmpeg-source.XXXXXX")
 tar -xf "$archive" -C "$source_dir" --strip-components=1
 patch_file="$script_dir/ffmpeg/$version-prores12.patch"
+rgba_patch_file="$script_dir/ffmpeg/$version-rgba64-signed-chroma.patch"
 patch --directory="$source_dir" --strip=1 --fuzz=0 < "$patch_file"
+patch --directory="$source_dir" --strip=1 --fuzz=0 < "$rgba_patch_file"
 cd "$source_dir"
 ./configure \
   --prefix="$prefix" --extra-version=mondrian-prores12 \
@@ -49,10 +51,10 @@ make install
 # Keep the exact source, modifications and configuration with the runtime.
 source_package="$prefix/share/mondrian-ffmpeg-source"
 mkdir -p "$source_package"
-cp "$archive" "$patch_file" "$script_dir/build-macos-ffmpeg.sh" ffbuild/config.log "$source_package/"
+cp "$archive" "$patch_file" "$rgba_patch_file" "$script_dir/build-macos-ffmpeg.sh" ffbuild/config.log "$source_package/"
 cp LICENSE.md COPYING.GPLv3 "$source_package/"
 (cd "$source_package" && shasum -a 256 \
-  "ffmpeg-$version.tar.xz" "$version-prores12.patch" build-macos-ffmpeg.sh \
+  "ffmpeg-$version.tar.xz" "$version-prores12.patch" "$version-rgba64-signed-chroma.patch" build-macos-ffmpeg.sh \
   config.log LICENSE.md COPYING.GPLv3 > SHA256SUMS)
 cd "$work_dir"
 rm -rf "$source_dir"

@@ -1407,6 +1407,56 @@ mod rgba64_direct_scale_tests {
     use mondrian_core::ColorSpace;
 
     #[test]
+    fn full_chroma_rgba64_preserves_negative_bt2020_chroma() {
+        use ffmpeg::util::format::pixel::Pixel;
+
+        // Independent BT.2020 NCL limited-range 10-bit color patches. Negative
+        // centered Cb/Cr must stay signed through vertical interpolation.
+        for format in [Pixel::YUV420P10LE, Pixel::YUV422P10LE, Pixel::YUV444P10LE] {
+            for (yuv, expected) in [
+                ([119_u16, 512, 512], [64_u16, 64, 64]),
+                ([365, 395, 778], [800, 200, 100]),
+                ([579, 279, 274], [200, 800, 100]),
+                ([243, 787, 447], [100, 200, 800]),
+            ] {
+                let mut decoded = ffmpeg::util::frame::video::Video::new(format, 16, 4);
+                decoded.set_color_space(ffmpeg::util::color::Space::BT2020NCL);
+                decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+                for (plane, value) in yuv.into_iter().enumerate() {
+                    for sample in decoded.data_mut(plane).chunks_exact_mut(2) {
+                        sample.copy_from_slice(&value.to_le_bytes());
+                    }
+                }
+                let path = Path::new("bt2020-negative-chroma.mov");
+                let mut scaler =
+                    preview_create_rgba_scaler(format, Pixel::RGBA64LE, 16, 4, 16, 4, path)
+                        .expect("full-chroma production scaler");
+                let output = convert_decoded_to_encoded_unorm16_rgba(
+                    &decoded,
+                    &mut scaler,
+                    path,
+                    PreviewSourceColorContract::automatic(
+                        ColorSpace::Rec2100Hlg,
+                        DecodedVideoRange::Limited,
+                    ),
+                    &mut None,
+                )
+                .expect("typed RGBA64 output");
+                for pixel in output.rgba().chunks_exact(4) {
+                    for channel in 0..3 {
+                        let expected = ((u32::from(expected[channel]) * 65535 + 511) / 1023) as u16;
+                        assert!(
+                            pixel[channel].abs_diff(expected) <= 512,
+                            "{format:?} {yuv:?}: actual={pixel:?}, channel={channel}, expected={expected}"
+                        );
+                    }
+                    assert_eq!(pixel[3], u16::MAX);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn direct_rgba64_matches_ffmpeg_frame_for_odd_rows_and_straight_alpha() {
         use ffmpeg::util::format::pixel::Pixel;
 

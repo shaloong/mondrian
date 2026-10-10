@@ -1,0 +1,10 @@
+--- a/libswscale/output.c
++++ b/libswscale/output.c
+@@ -1541,5 +1541,5 @@
+         for (i = 0; i < dstW; i++) {
+             SUINT Y  = (buf0[i]    ) >> 2;
+-            SUINT U = (ubuf0[i] * uvalpha1 + ubuf1[i] * uvalpha - (128 << 23)) >> 14;
+-            SUINT V = (vbuf0[i] * uvalpha1 + vbuf1[i] * uvalpha - (128 << 23)) >> 14;
++            SUINT U = (int)((SUINT)ubuf0[i] * uvalpha1 + (SUINT)ubuf1[i] * uvalpha - (128 << 23)) >> 14;
++            SUINT V = (int)((SUINT)vbuf0[i] * uvalpha1 + (SUINT)vbuf1[i] * uvalpha - (128 << 23)) >> 14;
+             int R, G, B;
