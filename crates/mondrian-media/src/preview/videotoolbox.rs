@@ -48,6 +48,19 @@ pub(super) struct VideoToolboxContract {
     pub hevc_bit_depth: u32,
 }
 
+/// Format-description capability of the direct adapter, not color interpretation.
+pub(super) fn supports_source_color_contract(
+    primaries: i32,
+    transfer: i32,
+    matrix: i32,
+    range: DecodedVideoRange,
+) -> bool {
+    matches!(primaries, 1 | 9)
+        && matches!(transfer, 1 | 16 | 18)
+        && matches!(matrix, 1 | 9)
+        && range == DecodedVideoRange::Limited
+}
+
 /// Native stage and OSStatus are retained for structured rejection diagnostics.
 #[derive(Debug, Clone, Copy, Default, thiserror::Error)]
 #[error("VideoToolbox stage {stage} failed with status {status}")]

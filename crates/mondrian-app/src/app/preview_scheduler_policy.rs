@@ -510,7 +510,25 @@ mod tests {
             color_range: mondrian_media::DecodedVideoRange::Limited,
             color_interpretation: mondrian_media::DetectedColorInterpretation::decoder_unavailable(
             ),
-            color_metadata: None,
+            color_metadata: (color_space == mondrian_core::ColorSpace::Rec2100Pq).then(|| {
+                mondrian_core::VideoColorMetadata {
+                    primaries: mondrian_core::VideoColorTag {
+                        code: 9,
+                        name: Some("bt2020".to_owned()),
+                        specified: true,
+                    },
+                    transfer: mondrian_core::VideoColorTag {
+                        code: 16,
+                        name: Some("smpte2084".to_owned()),
+                        specified: true,
+                    },
+                    matrix: mondrian_core::VideoColorTag {
+                        code: 9,
+                        name: Some("bt2020nc".to_owned()),
+                        specified: true,
+                    },
+                }
+            }),
             color_metadata_hints: Vec::new(),
             hdr_metadata: Vec::new(),
             camera_raw: None,

@@ -1109,6 +1109,25 @@ fn native_surface_hint_from_stream(
     pixel_format: PixelFormat,
 ) -> Option<PreviewNativeSurfaceHint> {
     let surface = native_surface_hint_from_pixel_format(pixel_format)?;
+    // The direct macOS adapter needs an encoded color contract it can
+    // represent. Missing source tags remain valid for shared CPU sampling and
+    // App-owned interpretation; they cannot authorize a strict native request.
+    #[cfg(target_os = "macos")]
+    if matches!(stream.codec, VideoCodec::ProRes(_) | VideoCodec::H265)
+        && !stream.color_metadata.as_ref().is_some_and(|metadata| {
+            metadata.primaries.specified
+                && metadata.transfer.specified
+                && metadata.matrix.specified
+                && super::videotoolbox::supports_source_color_contract(
+                    metadata.primaries.code,
+                    metadata.transfer.code,
+                    metadata.matrix.code,
+                    stream.color_range,
+                )
+        })
+    {
+        return None;
+    }
     match surface {
         PreviewNativeSurfaceHint::Yuva444p12 => matches!(
             stream.codec,
@@ -1238,7 +1257,23 @@ mod tests {
             pixel_format_proven,
             color_range: DecodedVideoRange::Limited,
             color_interpretation: DetectedColorInterpretation::decoder_unavailable(),
-            color_metadata: None,
+            color_metadata: Some(mondrian_core::VideoColorMetadata {
+                primaries: mondrian_core::VideoColorTag {
+                    code: 1,
+                    name: Some("bt709".to_owned()),
+                    specified: true,
+                },
+                transfer: mondrian_core::VideoColorTag {
+                    code: 1,
+                    name: Some("bt709".to_owned()),
+                    specified: true,
+                },
+                matrix: mondrian_core::VideoColorTag {
+                    code: 1,
+                    name: Some("bt709".to_owned()),
+                    specified: true,
+                },
+            }),
             color_metadata_hints: Vec::new(),
             hdr_metadata: Vec::new(),
             camera_raw: None,
@@ -1400,6 +1435,45 @@ mod tests {
             )
             .unwrap();
             assert_eq!(source.permits_native_output(), expected);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn direct_native_hint_requires_representable_source_color_contract() {
+        for (codec, pixel_format) in [
+            (
+                VideoCodec::ProRes(mondrian_core::ProResVariant::R4444),
+                PixelFormat::Yuva444p12le,
+            ),
+            (VideoCodec::H265, PixelFormat::Yuv444p10le),
+        ] {
+            let mut stream = video_stream(0, pixel_format, true);
+            stream.codec = codec;
+            stream.codec_profile = VideoCodecProfile::Unknown;
+            let source_for = |stream: &VideoStreamInfo| {
+                PreviewDecodeSource::from_probed_stream(
+                    absolute_test_path("media/native-color.mov"),
+                    exact_fingerprint(17),
+                    stream,
+                )
+                .expect("source sampling stays valid")
+            };
+            assert!(source_for(&stream).native_surface_hint().is_some());
+            let tagged = stream.clone();
+            stream.color_metadata = None;
+            let source = source_for(&stream);
+            assert_eq!(source.native_surface_hint(), None);
+            assert_eq!(
+                source.compact_cpu_yuv_hint(),
+                PreviewCompactCpuYuvHint::from_pixel_format(pixel_format)
+            );
+            stream = tagged.clone();
+            stream.color_metadata.as_mut().unwrap().transfer.code = 2;
+            assert_eq!(source_for(&stream).native_surface_hint(), None);
+            stream = tagged;
+            stream.color_range = DecodedVideoRange::Full;
+            assert_eq!(source_for(&stream).native_surface_hint(), None);
         }
     }
 
