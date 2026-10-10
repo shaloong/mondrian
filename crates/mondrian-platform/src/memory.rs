@@ -184,7 +184,12 @@ mod platform {
     use super::*;
 
     unsafe extern "C" {
+        static mach_task_self_: libc::mach_port_t;
         fn mach_host_self() -> libc::mach_port_t;
+        fn mach_port_deallocate(
+            task: libc::mach_port_t,
+            name: libc::mach_port_t,
+        ) -> libc::kern_return_t;
     }
 
     pub(super) fn physical_memory_capacity() -> PhysicalMemoryCapacityProbeResult {
@@ -217,17 +222,27 @@ mod platform {
         let mut statistics = MaybeUninit::<libc::vm_statistics64>::zeroed();
         let mut count = libc::HOST_VM_INFO64_COUNT;
         // SAFETY: `statistics` is a correctly sized writable vm_statistics64
-        // buffer and Mach retains no pointer after returning.
-        let result = unsafe {
-            libc::host_statistics64(
-                mach_host_self(),
+        // buffer and Mach retains no pointer after returning. host_self returns
+        // an owned send right; task_self is borrowed. Retire the host right
+        // immediately after the call, including when statistics collection fails.
+        let (result, retirement) = unsafe {
+            let host = mach_host_self();
+            let result = libc::host_statistics64(
+                host,
                 libc::HOST_VM_INFO64,
                 statistics.as_mut_ptr().cast(),
                 &mut count,
-            )
+            );
+            let retirement = mach_port_deallocate(mach_task_self_, host);
+            (result, retirement)
         };
         if result != libc::KERN_SUCCESS {
             return Err(format!("host_statistics64 failed with Mach code {result}"));
+        }
+        if retirement != libc::KERN_SUCCESS {
+            return Err(format!(
+                "host send-right retirement failed with Mach code {retirement}"
+            ));
         }
         if count < libc::HOST_VM_INFO64_COUNT {
             return Err(format!(
@@ -291,6 +306,45 @@ mod platform {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        #[ignore = "requires isolated native Mach send-right ownership observation"]
+        fn memory_sampling_releases_host_send_right() {
+            unsafe extern "C" {
+                fn mach_port_get_refs(
+                    task: libc::mach_port_t,
+                    name: libc::mach_port_t,
+                    right: u32,
+                    refs: *mut u32,
+                ) -> libc::kern_return_t;
+            }
+
+            // SAFETY: The host send right is owned by this test; task_self is
+            // borrowed. Mach writes only to the valid counter pointers.
+            let (before, after) = unsafe {
+                let task = mach_task_self_;
+                let host = mach_host_self();
+                let mut before = 0;
+                assert_eq!(
+                    mach_port_get_refs(task, host, 0, &mut before),
+                    libc::KERN_SUCCESS
+                );
+                for _ in 0..8 {
+                    mach_memory().expect("native memory sample");
+                }
+                let mut after = 0;
+                assert_eq!(
+                    mach_port_get_refs(task, host, 0, &mut after),
+                    libc::KERN_SUCCESS
+                );
+                assert_eq!(mach_port_deallocate(task, host), libc::KERN_SUCCESS);
+                (before, after)
+            };
+            assert_eq!(
+                after, before,
+                "each memory sample must retire its host send right"
+            );
+        }
 
         #[test]
         fn speculative_pages_are_not_counted_twice() {
