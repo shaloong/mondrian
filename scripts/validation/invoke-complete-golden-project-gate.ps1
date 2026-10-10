@@ -186,10 +186,13 @@ $gateWorkRoot = Join-Path $runDirectory "work"
 $assetReportPath = Join-Path $runDirectory "reference-assets.json"
 $buildLogPath = Join-Path $runDirectory "build.log"
 $aggregateReportPath = Join-Path $runDirectory "complete-golden-consecutive-report.json"
-$productExecutable = Join-Path $repositoryRoot "target/debug/mondrian.exe"
-$goldenExecutable = Join-Path $repositoryRoot "target/debug/mondrian-golden.exe"
+$targetDirectory = Resolve-CargoTargetDirectory $repositoryRoot
+$executableSuffix = if ($IsWindows) { ".exe" } else { "" }
+$productExecutable = Join-Path $targetDirectory "debug/mondrian$executableSuffix"
+$goldenExecutable = Join-Path $targetDirectory "debug/mondrian-golden$executableSuffix"
 $buildArguments = @(
     "build",
+    "--locked",
     "-p", "mondrian-app",
     "--features", "validation",
     "--bin", "mondrian",
