@@ -8388,6 +8388,118 @@ fn preview_decode_performance_report_classifies_codec_bound_slow_frame() {
 }
 
 #[test]
+fn preview_decode_report_budget_causes_match_authoritative_work_class_checks() {
+    for (max_duration_us, slow_frames, expected_max_failure, expected_p95_failure) in [
+        (42_242_u64, 1_u64, false, false),
+        (200_001, 1, true, false),
+        (50_000, 20, false, true),
+    ] {
+        let fast_frames = 101 - slow_frames;
+        let total_duration_us = fast_frames * 1_000 + slow_frames * max_duration_us;
+        let work_buckets = PreviewDecodeWorkLatencyBuckets {
+            le_10ms: fast_frames,
+            le_50ms: if max_duration_us <= 50_000 {
+                slow_frames
+            } else {
+                0
+            },
+            le_250ms: if max_duration_us > 50_000 {
+                slow_frames
+            } else {
+                0
+            },
+            ..PreviewDecodeWorkLatencyBuckets::default()
+        };
+        let profile = test_complete_successful_decode_evidence(PreviewDecodeAccessModeProfile {
+            frames: 101,
+            total_duration_us,
+            max_duration_us,
+            latency_buckets: PreviewDecodeLatencyBuckets {
+                le_10ms: fast_frames,
+                le_60ms: if max_duration_us <= 60_000 {
+                    slow_frames
+                } else {
+                    0
+                },
+                gt_80ms: if max_duration_us > 80_000 {
+                    slow_frames
+                } else {
+                    0
+                },
+                ..PreviewDecodeLatencyBuckets::default()
+            },
+            session_reused_frames: 101,
+            work_classes: PreviewDecodeWorkClassProfiles {
+                forward_steady: PreviewDecodeWorkLatencyProfile {
+                    frames: 101,
+                    total_duration_us,
+                    max_duration_us,
+                    latency_buckets: work_buckets,
+                },
+                ..PreviewDecodeWorkClassProfiles::default()
+            },
+            max_frame_stage_durations: PreviewDecodeStageDurations {
+                packet_decode_us: max_duration_us,
+                ..PreviewDecodeStageDurations::default()
+            },
+            ..PreviewDecodeAccessModeProfile::default()
+        });
+        let diagnostics = PreviewDiagnostics {
+            decode_successes: 101,
+            decode_total_duration_us: total_duration_us,
+            decode_max_duration_us: max_duration_us,
+            decode_last_duration_us: max_duration_us,
+            decode_max_frame_stage_durations: profile.max_frame_stage_durations,
+            decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+                playback_cursor: profile,
+                ..PreviewDecodeAccessModeProfiles::default()
+            },
+            ..PreviewDiagnostics::default()
+        };
+        let report = build_preview_decode_performance_report_with_required_access_modes(
+            diagnostics.decode_performance_summary(40_000),
+            "playback-budget-cause-consistency",
+            40_000,
+            &[PreviewDecodeAccessMode::PlaybackCursor],
+        );
+        for (code, limit, expected_failure) in [
+            (
+                "preview_decode_playback_cursor_forward_steady_max_worker_execution_us",
+                200_000,
+                expected_max_failure,
+            ),
+            (
+                "preview_decode_playback_cursor_forward_steady_p95_worker_execution_us",
+                40_000,
+                expected_p95_failure,
+            ),
+        ] {
+            let check = report.checks.iter().find(|check| check.code == code).unwrap();
+            assert_eq!(check.limit, Some(limit));
+            assert_eq!(
+                check.severity == PreviewDecodePerformanceSeverity::Fail,
+                expected_failure,
+                "{code}: {report:?}"
+            );
+        }
+        let failure_causes: Vec<_> = report
+            .root_causes
+            .iter()
+            .filter(|root| root.severity == PreviewDecodePerformanceSeverity::Fail)
+            .collect();
+        assert_eq!(
+            failure_causes.len(),
+            usize::from(expected_max_failure || expected_p95_failure),
+            "budget root causes disagree with the actual policy checks: {report:?}"
+        );
+        if let Some(root) = failure_causes.first() {
+            assert_eq!(root.code, "preview_decode_work_class_over_budget");
+            assert!(root.evidence.contains("work_class=ForwardSteady"));
+        }
+    }
+}
+
+#[test]
 fn preview_decode_report_separates_cold_session_readiness_from_steady_cadence() {
     let profile = test_complete_successful_decode_evidence(PreviewDecodeAccessModeProfile {
         frames: 2,

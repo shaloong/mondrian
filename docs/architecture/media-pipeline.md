@@ -2388,6 +2388,11 @@ equals the Playback Engine's still-pending demand. `CacheOnly`, `Stale`, and
 broker-current cleanup for a replaced/completed demand may be cached or
 discarded according to their completion contract, but cannot refresh visible
 state, create playback pressure, or publish another terminal delivery.
+Budget root causes use the same access-mode/work-class policy as the structured
+checks. A bounded rare Playback lookahead spike that satisfies both the hard
+maximum and p95 obligations cannot become a second aggregate-budget failure;
+actual hard-maximum and p95 violations remain failures. Raw timing and delivery
+quality evidence is retained independently.
 The versioned report must emit access-mode-specific latency checks and root
 causes, so perf tooling can fail on `PlaybackCursor`, `ScrubCursor`, or
 `RandomAccessStillFrame` regressions without reverse-engineering raw counters.
