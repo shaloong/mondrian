@@ -37,6 +37,11 @@ clipping and alpha unpacking remain unchanged. The native adapter independently
 validates the actual sixteen-bit CVPixelBuffer surface and observed hardware
 decode; the probe's software reconstruction format does not define that surface.
 
+The shared runtime includes `libopenjpeg` for the SMPTE DCP picture encoder.
+That production recipe requires XYZ twelve-bit JPEG 2000 with `cinema2k` and
+`2k_24`; FFmpeg’s built-in JPEG 2000 encoder is not a substitute. Supply the
+OpenJPEG development package alongside the codec dependencies listed in CI.
+
 Provide development dependencies through `PKG_CONFIG_PATH`, `CFLAGS` and
 `LDFLAGS`. The builder installs no packages and requires a macOS host, absolute
 work/install paths, and one or two build workers. For example, after installing

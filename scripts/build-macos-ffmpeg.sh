@@ -42,7 +42,7 @@ cd "$source_dir"
   --extra-ldflags="${LDFLAGS:-} -Wl,-headerpad_max_install_names" \
   --enable-gpl --enable-version3 --enable-shared --disable-static --enable-pic \
   --disable-doc --disable-ffplay \
-  --enable-libx264 --enable-libx265 --enable-libaom --enable-libdav1d \
+  --enable-libx264 --enable-libx265 --enable-libaom --enable-libdav1d --enable-libopenjpeg \
   --enable-libfreetype --enable-libharfbuzz --enable-libfontconfig --enable-libass \
   --enable-openssl --enable-zlib --enable-videotoolbox --enable-audiotoolbox
 make -j "$jobs"

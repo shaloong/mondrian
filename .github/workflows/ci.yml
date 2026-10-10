@@ -181,7 +181,7 @@ jobs:
       - name: 安装 FFmpeg (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install pkg-config x264 x265 aom dav1d freetype harfbuzz fontconfig libass openssl@3 zlib
+          brew install pkg-config x264 x265 aom dav1d openjpeg freetype harfbuzz fontconfig libass openssl@3 zlib
           brew_prefix="$(brew --prefix)"
           openssl_prefix="$(brew --prefix openssl@3)"
           zlib_prefix="$(brew --prefix zlib)"
