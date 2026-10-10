@@ -5147,6 +5147,9 @@ fn execute_resident_video_export(
         // FFmpeg scopes options to the next input/output file. Finish both
         // input groups before adding output mapping or the copy encoder.
         command.arg("-map").arg("0:v:0").arg("-c:v").arg("copy");
+        // Resident admission requires progressive pictures. Preserve that
+        // contract in the container even when HEVC omits picture-timing SEI.
+        command.arg("-field_order").arg("progressive");
         match audio_input {
             TimelineAudioInput::PcmFile { .. } | TimelineAudioInput::Silent { .. } => {
                 command.arg("-map").arg("1:a:0").arg("-shortest");
@@ -5157,7 +5160,7 @@ fn execute_resident_video_export(
             }
         }
         // The resident encoder already wrote pixel format, range, CICP, cadence,
-        // field order, and sample aspect ratio into the coded stream. Adding the
+        // and sample aspect ratio into the coded stream. Adding the
         // generic pre-encode `scale`, `setsar`, or `pix_fmt` arguments here would
         // require a decode/filter/re-encode and is invalid with `-c:v copy`.
         apply_external_codec_thread_args(&mut command, resource_policy);
@@ -13488,6 +13491,10 @@ mod tests {
         }
         let video = probe.primary_video().expect("one output video stream");
         assert_eq!(
+            video.picture.field_order,
+            Some(mondrian_core::timeline_data::FieldOrder::Progressive)
+        );
+        assert_eq!(
             (video.width, video.height),
             (resolution.width, resolution.height)
         );
@@ -13539,7 +13546,7 @@ mod tests {
                 "v:0",
                 "-count_frames",
                 "-show_entries",
-                "stream=chroma_location,nb_read_frames:frame=key_frame,pict_type",
+                "stream=chroma_location,nb_read_frames:frame=key_frame,pict_type,interlaced_frame",
                 "-of",
                 "json",
             ])
@@ -13556,6 +13563,10 @@ mod tests {
         let frames = inventory["frames"].as_array().expect("independently decoded frames");
         assert_eq!(frames.len(), frame_count as usize);
         for (index, frame) in frames.iter().enumerate() {
+            assert_eq!(
+                frame["interlaced_frame"], 0,
+                "coded picture must be progressive"
+            );
             assert_eq!(frame["key_frame"], u64::from(index % 30 == 0));
             assert_ne!(
                 frame["pict_type"], "B",
