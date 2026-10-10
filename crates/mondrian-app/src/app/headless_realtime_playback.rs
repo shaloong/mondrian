@@ -388,12 +388,25 @@ pub(crate) fn configure_headless_gpu_decode_admission(
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
+struct HeadlessStageCpuSample {
+    wall_us: u64,
+    /// Includes the native query overhead bracketing this wall-clock sample.
+    thread_cpu_us: u64,
+    probe_setup_us: u64,
+    probe_finish_us: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
 pub(crate) struct HeadlessRealtimeStageTiming {
     observations: u64,
     max_us: u64,
     above_5ms: u64,
     above_20ms: u64,
     above_frame_interval: u64,
+    cpu_probe_observations: u64,
+    cpu_probe_errors: u64,
+    /// CPU and wall time from the same invocation, never independent maxima.
+    slowest_cpu_sample: Option<HeadlessStageCpuSample>,
 }
 
 impl HeadlessRealtimeStageTiming {
@@ -415,7 +428,43 @@ impl HeadlessRealtimeStageTiming {
         self.above_20ms = self.above_20ms.saturating_add(interval.above_20ms);
         self.above_frame_interval =
             self.above_frame_interval.saturating_add(interval.above_frame_interval);
+        self.cpu_probe_observations =
+            self.cpu_probe_observations.saturating_add(interval.cpu_probe_observations);
+        self.cpu_probe_errors = self.cpu_probe_errors.saturating_add(interval.cpu_probe_errors);
+        if let Some(sample) = interval.slowest_cpu_sample {
+            self.retain_cpu_sample(sample);
+        }
     }
+
+    fn retain_cpu_sample(&mut self, sample: HeadlessStageCpuSample) {
+        if self.slowest_cpu_sample.is_none_or(|previous| sample.wall_us > previous.wall_us) {
+            self.slowest_cpu_sample = Some(sample);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn headless_playback_cpu_diagnostics_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("MONDRIAN_PLAYBACK_CPU_DIAGNOSTICS").is_ok_and(|value| value == "1")
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn headless_playback_cpu_observation() -> (
+    Result<
+        mondrian_platform::MacPlaybackThreadObservation,
+        mondrian_platform::PlaybackThreadSchedulingError,
+    >,
+    u64,
+) {
+    let started = Instant::now();
+    let observation = mondrian_platform::observe_macos_playback_thread();
+    (
+        observation,
+        started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+    )
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -2693,13 +2742,49 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
         } else {
             false
         };
+        #[cfg(target_os = "macos")]
+        let cpu_before =
+            headless_playback_cpu_diagnostics_enabled().then(headless_playback_cpu_observation);
         let preview_pump_started = Instant::now();
         let (pump_outcome, accepted_terminal) =
             pump_headless_boundary_preview(state, preview_service);
-        interval_timing.preview_pump.observe(
-            preview_pump_started.elapsed(),
-            interval_timing.frame_period_ns,
-        );
+        let preview_pump_elapsed = preview_pump_started.elapsed();
+        interval_timing
+            .preview_pump
+            .observe(preview_pump_elapsed, interval_timing.frame_period_ns);
+        #[cfg(target_os = "macos")]
+        if let Some((before, probe_setup_us)) = cpu_before {
+            let (after, probe_finish_us) = headless_playback_cpu_observation();
+            let cpu_ns = before.as_ref().ok().zip(after.as_ref().ok()).and_then(|(b, a)| {
+                (b.thread_id == a.thread_id)
+                    .then(|| a.cpu_time_ns.checked_sub(b.cpu_time_ns))
+                    .flatten()
+            });
+            if let Some(cpu_ns) = cpu_ns {
+                let timing = &mut interval_timing.preview_pump;
+                timing.cpu_probe_observations = timing.cpu_probe_observations.saturating_add(1);
+                timing.retain_cpu_sample(HeadlessStageCpuSample {
+                    wall_us: preview_pump_elapsed.as_micros().min(u128::from(u64::MAX)) as u64,
+                    thread_cpu_us: cpu_ns / 1_000,
+                    probe_setup_us,
+                    probe_finish_us,
+                });
+            } else {
+                interval_timing.preview_pump.cpu_probe_errors =
+                    interval_timing.preview_pump.cpu_probe_errors.saturating_add(1);
+            }
+            if preview_pump_elapsed > Duration::from_millis(5) {
+                tracing::warn!(
+                    wall_us = preview_pump_elapsed.as_micros(),
+                    thread_cpu_us = cpu_ns.map(|ns| ns / 1_000),
+                    probe_setup_us,
+                    probe_finish_us,
+                    ?before,
+                    ?after,
+                    "slow Preview pump CPU/wall diagnostic"
+                );
+            }
+        }
         if coordinate_changed {
             let sample = completed_headless_interval_sample(
                 presented_sample,
@@ -4493,6 +4578,34 @@ mod tests {
             assert_eq!(interval.total.observations, 3);
             assert_eq!(interval.total.above_frame_interval, 1);
             assert_eq!(interval.frame_period_ns, Some(period.as_nanos()));
+        }
+    }
+
+    #[test]
+    fn stage_cpu_timing_preserves_the_slow_invocations_cpu_pair_when_merging() {
+        let mut busy =
+            HeadlessRealtimeStageTiming { cpu_probe_observations: 4, ..Default::default() };
+        busy.retain_cpu_sample(HeadlessStageCpuSample {
+            wall_us: 8_000,
+            thread_cpu_us: 7_000,
+            ..Default::default()
+        });
+        let mut delayed = HeadlessRealtimeStageTiming {
+            cpu_probe_observations: 2,
+            cpu_probe_errors: 1,
+            ..Default::default()
+        };
+        delayed.retain_cpu_sample(HeadlessStageCpuSample {
+            wall_us: 28_000,
+            thread_cpu_us: 1_000,
+            ..Default::default()
+        });
+        for (mut aggregate, interval) in [(busy, delayed), (delayed, busy)] {
+            aggregate.merge(interval);
+            let sample = aggregate.slowest_cpu_sample.expect("paired observation");
+            assert_eq!((sample.wall_us, sample.thread_cpu_us), (28_000, 1_000));
+            assert_eq!(aggregate.cpu_probe_observations, 6);
+            assert_eq!(aggregate.cpu_probe_errors, 1);
         }
     }
 
