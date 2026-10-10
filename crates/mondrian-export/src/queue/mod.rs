@@ -5105,11 +5105,7 @@ fn execute_resident_video_export(
             .arg("-f")
             .arg("mpegts")
             .arg("-i")
-            .arg(&resident_video_path)
-            .arg("-map")
-            .arg("0:v:0")
-            .arg("-c:v")
-            .arg("copy");
+            .arg(&resident_video_path);
         match audio_input {
             TimelineAudioInput::PcmFile { path, sample_rate, channel_layout, .. } => {
                 let Some(layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
@@ -5128,11 +5124,7 @@ fn execute_resident_video_export(
                     .arg("-ac")
                     .arg(channel_layout.channel_count().to_string())
                     .arg("-i")
-                    .arg(path)
-                    .arg("-map")
-                    .arg("1:a:0")
-                    .arg("-shortest");
-                apply_audio_codec_args(&mut command, audio);
+                    .arg(path);
             }
             TimelineAudioInput::Silent { sample_rate, channel_layout, analysis } => {
                 let Some(layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
@@ -5148,10 +5140,16 @@ fn execute_resident_video_export(
                 .arg(format!(
                     "anullsrc=channel_layout={layout}:sample_rate={sample_rate},atrim=end_sample={}",
                     analysis.sample_frames
-                ))
-                .arg("-map")
-                .arg("1:a:0")
-                .arg("-shortest");
+                ));
+            }
+            TimelineAudioInput::Disabled => {}
+        }
+        // FFmpeg scopes options to the next input/output file. Finish both
+        // input groups before adding output mapping or the copy encoder.
+        command.arg("-map").arg("0:v:0").arg("-c:v").arg("copy");
+        match audio_input {
+            TimelineAudioInput::PcmFile { .. } | TimelineAudioInput::Silent { .. } => {
+                command.arg("-map").arg("1:a:0").arg("-shortest");
                 apply_audio_codec_args(&mut command, audio);
             }
             TimelineAudioInput::Disabled => {
@@ -12989,20 +12987,32 @@ mod tests {
     #[test]
     #[ignore = "physical macOS qualification; requires unified Metal and observed VideoToolbox hardware encode"]
     fn production_export_queue_runs_same_device_metal_resident_hevc() {
-        run_production_export_queue_resident_video_qualification(
-            ResidentEncodeCodec::Hevc,
+        for mode in [
             ResidentExportQualification::Complete,
-        );
+            ResidentExportQualification::CompleteSilentAudio,
+            ResidentExportQualification::CompletePcmAudio,
+        ] {
+            run_production_export_queue_resident_video_qualification(
+                ResidentEncodeCodec::Hevc,
+                mode,
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "physical macOS H.264 qualification; requires unified Metal and observed VideoToolbox encode"]
     fn production_export_queue_runs_same_device_metal_resident_h264() {
-        run_production_export_queue_resident_video_qualification(
-            ResidentEncodeCodec::H264High,
+        for mode in [
             ResidentExportQualification::Complete,
-        );
+            ResidentExportQualification::CompleteSilentAudio,
+            ResidentExportQualification::CompletePcmAudio,
+        ] {
+            run_production_export_queue_resident_video_qualification(
+                ResidentEncodeCodec::H264High,
+                mode,
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -13069,6 +13079,8 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ResidentExportQualification {
         Complete,
+        CompleteSilentAudio,
+        CompletePcmAudio,
         CancelRetry,
         RejectFirstFrame,
         RejectActiveGrant,
@@ -13182,6 +13194,11 @@ mod tests {
             range: TimelineExportRange::SequenceInOut,
         };
         let mut visual_session = captured_visual_session_for_test(&mut timeline);
+        let audio_enabled = matches!(
+            mode,
+            ResidentExportQualification::CompleteSilentAudio
+                | ResidentExportQualification::CompletePcmAudio
+        );
         let mut delivery = test_delivery_contract(
             bit_depth,
             video_range,
@@ -13210,7 +13227,11 @@ mod tests {
                     rate_control: VideoRateControl::constant_quality(quantizer),
                 }
             },
-            audio: AudioCodecConfig::Disabled,
+            audio: if audio_enabled {
+                AudioCodecConfig::Aac { bitrate_kbps: 192 }
+            } else {
+                AudioCodecConfig::Disabled
+            },
         };
         delivery.resolution =
             crate::preset::Resolution { width: resolution.width, height: resolution.height };
@@ -13234,6 +13255,43 @@ mod tests {
             .expect("bounded render range");
         assert_eq!(range.total_frames, frame_count);
         let directory = tempfile::tempdir().expect("temporary Export directory");
+        let audio_input = if audio_enabled {
+            let sample_rate = 48_000;
+            let channel_layout = AudioChannelLayout::Stereo;
+            let (_, sample_frames) =
+                timeline_audio_sample_range(range, sample_rate).expect("exact audio sample extent");
+            if mode == ResidentExportQualification::CompleteSilentAudio {
+                TimelineAudioInput::Silent {
+                    sample_rate,
+                    channel_layout,
+                    analysis: AudioLoudnessReport::digital_silence(sample_frames as u64),
+                }
+            } else {
+                let path = directory.path().join("program-audio.f32le");
+                let pcm: Vec<f32> = (0..sample_frames)
+                    .flat_map(|index| {
+                        let sample = (index as f32 * std::f32::consts::TAU * 1_000.0
+                            / sample_rate as f32)
+                            .sin()
+                            * 0.25;
+                        [sample, -sample]
+                    })
+                    .collect();
+                let bytes: Vec<u8> = pcm.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+                std::fs::write(&path, bytes).expect("write actual interleaved PCM");
+                let mut loudness =
+                    AudioLoudnessAnalyzer::new(sample_rate, channel_layout).expect("PCM analyzer");
+                loudness.observe_interleaved(&pcm).expect("observe actual PCM");
+                TimelineAudioInput::PcmFile {
+                    path,
+                    sample_rate,
+                    channel_layout,
+                    analysis: loudness.finish().expect("actual PCM loudness receipt"),
+                }
+            }
+        } else {
+            TimelineAudioInput::Disabled
+        };
         let output = directory.path().join(if container == Container::Mp4 {
             "resident-queue.mp4"
         } else {
@@ -13355,7 +13413,7 @@ mod tests {
             &timeline,
             &delivery,
             range,
-            &TimelineAudioInput::Disabled,
+            &audio_input,
             &output,
             &cancellation,
             &open_execution_gate(),
@@ -13402,6 +13460,32 @@ mod tests {
         assert_eq!(latest.visual.resident_encode_video_stream_copy_muxes, 1);
         let probe = mondrian_media::probe_media_info(&output).expect("final queue artifact probe");
         assert!(probe.has_video);
+        assert_eq!(probe.has_audio, audio_enabled);
+        if audio_enabled {
+            let audio = probe.primary_audio().expect("muxed AAC stream");
+            assert_eq!(audio.sample_rate, 48_000);
+            assert_eq!(audio.channels, 2);
+            let mut decode_audio = mondrian_media::ffmpeg_command().expect("qualified FFmpeg");
+            let decoded_audio = decode_audio
+                .args(["-nostdin", "-v", "error", "-xerror", "-i"])
+                .arg(&output)
+                .args(["-map", "0:a:0", "-c:a", "pcm_f32le", "-f", "f32le", "-"])
+                .output()
+                .expect("independent full audio decode");
+            assert!(decoded_audio.status.success());
+            assert!(!decoded_audio.stdout.is_empty());
+            assert_eq!(decoded_audio.stdout.len() % 8, 0);
+            let peak = decoded_audio
+                .stdout
+                .chunks_exact(4)
+                .map(|sample| f32::from_le_bytes(sample.try_into().unwrap()).abs())
+                .fold(0.0_f32, f32::max);
+            if mode == ResidentExportQualification::CompleteSilentAudio {
+                assert_eq!(peak, 0.0, "silent Program must remain silent after mux");
+            } else {
+                assert!(peak > 0.1, "PCM Program signal was lost during mux: {peak}");
+            }
+        }
         let video = probe.primary_video().expect("one output video stream");
         assert_eq!(
             (video.width, video.height),
@@ -13492,9 +13576,9 @@ mod tests {
         );
         let mut decode = mondrian_media::ffmpeg_command().expect("qualified FFmpeg");
         let decoded = decode
-            .args(["-hide_banner", "-v", "error", "-nostdin", "-i"])
+            .args(["-hide_banner", "-v", "error", "-xerror", "-nostdin", "-i"])
             .arg(&output)
-            .args(["-map", "0:v:0", "-f", "null", "-"])
+            .args(["-map", "0", "-f", "null", "-"])
             .output()
             .expect("independent full artifact decode");
         assert!(
