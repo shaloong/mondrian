@@ -3,13 +3,16 @@ use anyhow::{ensure, Context};
 use std::path::PathBuf;
 fn main() -> anyhow::Result<()> {
     mondrian_platform::prepare_graphics_process()?;
+    let (diagnostics_writer, _diagnostics_guard) =
+        mondrian_app::diagnostic_logging::buffered_stderr();
+    let diagnostics_errors = diagnostics_writer.error_counter();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .with_ansi(false)
-        .with_writer(std::io::stderr)
+        .with_writer(diagnostics_writer)
         .try_init()
         .map_err(|error| anyhow::anyhow!("initialize local smoke diagnostics: {error}"))?;
     let mut args = std::env::args_os().skip(1);
@@ -71,6 +74,10 @@ fn main() -> anyhow::Result<()> {
             program_color_space,
         },
     )?;
+    ensure!(
+        diagnostics_errors.dropped_lines() == 0,
+        "local smoke diagnostic log queue lost evidence"
+    );
     println!("MONDRIAN_LOCAL_MEDIA_SMOKE={}", report.display());
     Ok(())
 }
