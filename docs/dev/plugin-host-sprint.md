@@ -56,6 +56,8 @@ Current round evidence:
 | External OpenFX CPU Filter | Verified within source31 BitCrush finite Windows cases | Two actual rounds, each one passed/zero failed; 18 bit-exact Float32 rasters across direct and existing graph execution, parameter changes and instance retirement; GPU/temporal/full OFX remain unqualified |
 | CLAP input-note metadata / discovery staging | Verified within source32 owned metadata and ownership controls | Audio345/0, original11 plus3 new owner controls and two metadata rounds; strict workspace Clippy; no note dispatch/instrument/RT qualification |
 | Source32 shared audio and real CLAP regression | PASS within existing finite workflows | Two rounds of five CLAP/VST3 sidechain/PCM/time/object cases and two real Ring Out metadata/default-load rounds; current host, separately retained historical fixture binaries |
+| CLAP factory slot admission | Verified within source36 Windows controls | Cached count capped before List/Probe/Note traversal; two actual RED controls, six GREEN ABI-counter controls, ordinary351/0 and current native regressions;4096 is host policy, not a CLAP limit |
+| Source36 audio regression | PASS within existing finite workflows | Ordinary351/0; owner14 and metadata2; original CLAP/VST3 cases10; real Ring Out metadata/default-load2; strict workspace Clippy. No new Note DSP, GUI, RT or performance qualification |
 | New performance/platform qualification | Not run | Historical results below do not transfer to new changes |
 
 Clack's RED reproduced in both source and destination. The GUI wrapper differed
@@ -1511,20 +1513,100 @@ SHA256 is `C7A8791BD395015939C85DB11109F2F1CA847621D29D38543A3EEC013B95104C`.
 Fresh Audio18 rebuild passed; ordinary345/0 passed with the restored419/74/345
 inventories, receipt SHA256
 `6F87E7C5C1B47AD47122B5C4A8836C81A975546962A8DDDBEAF83F65A1EDA973`.
-Audio18 now occupies the parent executable path. Audio17 was held against writes
+At this restoration checkpoint, Audio18 occupied the parent executable path. Audio17 was held against writes
 through the diagnostic runs and their postchecks, but no separate executable
 archive was retained before rebuilding; historical producer/image hashes and
 the sealed diagnostic source packet remain. Reproduction requires rebuilding
 that packet rather than treating the current executable as Audio17.
 
-Next independent slice: cached factory-slot count admission before descriptor
+At that checkpoint, the next independent slice was cached factory-slot count admission before descriptor
 iteration in existing List, Probe and Note queries. The same existing4096 host
 capacity applies; it is not a CLAP standard limit. The scratch candidate has6
 prospective ABI-counter controls and a three-guard RED variant; independent
 static review SHA256 is
 `8650225C02E327C1C020631D8C2A471CA53E1C932DC537E50B7053AE33D4D542`.
-It has not yet been integrated, compiled or runtime-qualified. Successful-kill
+It had not yet been integrated, compiled or runtime-qualified. Successful-kill
 kernel wait and permanently unconfirmed child retirement remain disclosed
 ownership limitations. Shared Note/instrument contracts remain separate;
 their scratch proposals do not add executable notes, GUI, realtime safety,
 performance, other-platform or complete-standard qualification.
+
+## Source36 — bounded CLAP factory traversal (2026-10-12)
+
+The existing emitted-descriptor cap did not bound factory slots: Clack's iterator
+skips null descriptors, and filter/take(2) bounds matching results rather than
+native descriptor requests. List, Probe and the additive input-note metadata
+query now check the iterator's cached initial count before traversal, using the
+existing4096 host capacity. This reads no additional native count/get callback.
+Normal admitted factories retain ordering, duplicate/missing-ID behavior and
+the existing error/lifecycle/state channels. No audio/render graph, author model,
+worker protocol or vendor-specific compatibility branch changed.
+
+Two owned source files changed: `processor_isolation/clap_discovery.rs` and
+`processor_isolation/clap_note_input_metadata.rs` in mondrian-audio. Six ABI-counter
+controls cover oversize4097/u32::MAX refusal before any get, exact4096 capacity,
+empty/null slots, duplicate/missing IDs, original request order and no unintended
+plugin creation. Owned immutable fixture lifetimes and callback safety invariants
+are documented next to the test ABI. Source35 RED removed only the three new
+guards; its two exact negative controls really failed the unchanged positive
+test oracle (runner1/native101), not a deadline or cleanup gate. Source36 GREEN
+minus those guards reproduces the formatted RED bytes exactly. All old and new
+test assertions remain intact. The Audio19 RED PE and historical Product15 helper
+were copied with exact-byte verification before the new builds.
+
+Source36 freezes1796 inputs, SHA256
+`F13673499C5255F0D95C571666235401E92CA80ABCDED2744AF0DACAC1E840DC`.
+Fresh Audio20 and normal Product17 were produced from that closure; Product17
+was built last with the original command/profile. Actual all/ignored/exact-skip
+Lists425/74/351 and their settled Job receipts determine424 filtered tests for
+each selected native case. The fixture binaries retain their historical producer
+identity; their actual independent compiled/support subsets match current bytes.
+An old full host freeze is not imposed on changed source36 or relabelled fresh.
+
+| Actual source36 gate | Result | Execution receipt under sprint scratch |
+| --- | --- | --- |
+| Audio ordinary, including six new controls |351 passed/0 failed/74 filtered,26.71s | `audio-ordinary-source36-r1/execution-receipt.json`,8D6B8F07... |
+| Process ownership14 + CLAP input-note metadata2 |16 selected cases passed; original60s/180s budgets | `clap-noteport-source36-native-execution-r1/execution-receipt.json`,87B13F3F... |
+| Original CLAP/VST3 PCM/bus/state/time/object cases |10 passed in two rounds, original oracles/budgets | `audio-legacy-source36-execution-r1/execution-receipt.json`,CCAA4AD2... |
+| Real Ring Out read-only metadata/default opaque load |2 passed;11 descriptors/9 editable/RO IDs9,10/184B state | `clap-readonly-source36-native-execution-r1/execution-receipt.json`,8EB59A7E... |
+| Strict workspace Clippy | `--locked --workspace --all-targets --all-features -- -D warnings` passed | `workspace-clippy-r20-source-receipt.json`,8F831CC0... |
+
+All selected native Job owners exit0, report no deadline/reaping errors and
+confirmed descendant settlement. Root tool terminal exits0 separately confirm
+the wrappers returned after cleanup. Each wrapper holds source/image/input read
+leases and performs postchecks. Ordinary and preflight inherited receipt-before-
+cleanup boundaries remain limited by these separate terminal observations.
+The owner/metadata dedicated wrapper normalizes inherited PATH but does not
+claim caller restoration or a last-round in-process environment observation.
+Identical raw List content originally made the new Ring plan's hash-only input
+lookup ambiguous: unexecuted r1 was refused by review; sealed r2 deduplicates
+consistent canonical paths, rejects conflicting hash/length, and binds all four
+files to the actual all-stdout directory. Original native oracles are unchanged.
+
+Product16 was a real failed build: Cargo101/linker1318, PDB LIMIT(12), with an
+invalid442585088B partial PDB. It remains archived and hash-verified on E; only
+that generated workspace PDB was removed after copying. Five completed App rlibs
+retained their raw hashes; compressing the new453393402B rlib stored78897152B.
+Product17 then passed the same command/configuration in19.55s. This recovery
+does not establish the underlying linker cause or a processing performance gain.
+Product16 is never admitted as the helper. Original failures and earlier evidence
+remain retained, not overwritten.
+
+This slice qualifies finite Windows factory admission and the listed regressions.
+A native count/get callback can still hang or violate pointer contracts; the
+slot cap is not complete native-call safety. Existing successful-kill kernel-wait
+and permanently unconfirmed child-retirement limitations remain. Real Ring Out
+reports no native version string; it does not qualify PCM, nondefault state,
+GUI, full-project reload or Preview/Export. Other platforms, GPU interop,
+allocation/deadline performance and full-standard compatibility remain unverified.
+
+Next: generic parameter-refusal detail in the existing CLAP error channel, using
+the same rejected descriptor's direct numeric bits and first unchanged predicate;
+no extra native query, normalization, sidecar or Stage B instrumentation is
+approved. Separately, proposed Note author M1 needs an archive boundary decision:
+old nested AudioProgram readers ignore new fields, so document31 must not carry
+note_lanes. Using the existing version gate to reject32 in old readers plus an
+explicit strict31-to32 note-free migration is the proposed minimum; container1/library6 need
+not change. No Note author/model/schema migration has been implemented or
+approved here, and ordinary transactions/Undo cannot recover data discarded
+during old deserialization.

@@ -41,7 +41,7 @@ const DISCOVERY_DEADLINE: Duration = Duration::from_secs(5);
 const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 512 * 1024;
 const MAX_CAPTURED_STATE_BYTES: usize = 64 * 1024;
-const MAX_DESCRIPTORS: usize = 4096;
+pub(super) const MAX_DESCRIPTORS: usize = 4096;
 pub(super) const MAX_PARAMETERS: u32 = 1024;
 const MAX_INPUT_PORTS: u32 = 32;
 const MAX_CLAP_BINARY_BYTES: u64 = 512 * 1024 * 1024;
@@ -568,8 +568,12 @@ fn list_loaded(entry: &PluginEntry) -> Result<Vec<ClapPluginDescriptor>, AudioPr
     let factory = entry
         .get_plugin_factory()
         .ok_or_else(|| unavailable("CLAP library has no plugin factory"))?;
+    let factory_descriptors = factory.plugin_descriptors();
+    if factory_descriptors.len() > MAX_DESCRIPTORS {
+        return Err(invalid("CLAP library exceeds descriptor capacity"));
+    }
     let mut descriptors = Vec::new();
-    for descriptor in factory.plugin_descriptors() {
+    for descriptor in factory_descriptors {
         if descriptors.len() == MAX_DESCRIPTORS {
             return Err(invalid("CLAP library exceeds descriptor capacity"));
         }
@@ -611,8 +615,11 @@ pub(super) fn probe_loaded(
     let factory = entry
         .get_plugin_factory()
         .ok_or_else(|| unavailable("CLAP library has no plugin factory"))?;
-    if factory
-        .plugin_descriptors()
+    let descriptors = factory.plugin_descriptors();
+    if descriptors.len() > MAX_DESCRIPTORS {
+        return Err(invalid("CLAP library exceeds descriptor capacity"));
+    }
+    if descriptors
         .filter(|descriptor| descriptor.id() == Some(plugin_c_id.as_c_str()))
         .take(2)
         .count()
@@ -965,6 +972,234 @@ mod tests {
         DefaultPluginFactory, HostMainThreadHandle, HostSharedHandle, Plugin, PluginDescriptor,
         PluginError, SinglePluginEntry,
     };
+
+    #[derive(Clone, Copy)]
+    enum CountingFactoryMode {
+        Null,
+        Duplicate,
+        LastOnly,
+        Unique,
+    }
+
+    #[derive(Default)]
+    struct FactoryObservations {
+        counts: std::sync::atomic::AtomicUsize,
+        gets: std::sync::atomic::AtomicUsize,
+        creates: std::sync::atomic::AtomicUsize,
+        wrong_order: std::sync::atomic::AtomicBool,
+    }
+
+    struct CountingFactory {
+        advertised: u32,
+        mode: CountingFactoryMode,
+        descriptors: Vec<PluginDescriptor>,
+        observations: std::sync::Arc<FactoryObservations>,
+    }
+
+    impl clack_plugin::factory::plugin::PluginFactoryImpl for CountingFactory {
+        fn plugin_count(&self) -> u32 {
+            self.observations.counts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.advertised
+        }
+
+        fn plugin_descriptor(&self, index: u32) -> Option<&PluginDescriptor> {
+            use std::sync::atomic::Ordering::Relaxed;
+            let previous = self.observations.gets.fetch_add(1, Relaxed);
+            if previous != index as usize || self.observations.counts.load(Relaxed) != 1 {
+                self.observations.wrong_order.store(true, Relaxed);
+            }
+            match self.mode {
+                CountingFactoryMode::Null => None,
+                CountingFactoryMode::Duplicate => self.descriptors.first(),
+                CountingFactoryMode::LastOnly => {
+                    if index.checked_add(1) == Some(self.advertised) {
+                        self.descriptors.first()
+                    } else {
+                        None
+                    }
+                }
+                CountingFactoryMode::Unique => self.descriptors.get(index as usize),
+            }
+        }
+
+        fn create_plugin<'a>(
+            &'a self,
+            _host: clack_plugin::host::HostInfo<'a>,
+            _id: &std::ffi::CStr,
+        ) -> Option<clack_plugin::plugin::PluginInstance<'a>> {
+            self.observations.creates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Instance creation is deliberately refused: this fixture qualifies
+            // descriptor admission and order, never audio or note processing.
+            None
+        }
+    }
+
+    // Entry::new has only a path argument. Hand off this test's owned factory
+    // once, on its test thread; callbacks retain owned atomic state and never
+    // borrow this setup slot. No global native pointers or production registry.
+    thread_local! {
+        static NEXT_COUNTING_FACTORY: std::cell::RefCell<Option<CountingFactory>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    struct CountingEntry(clack_plugin::factory::plugin::PluginFactoryWrapper<CountingFactory>);
+
+    impl clack_plugin::entry::Entry for CountingEntry {
+        fn new(
+            _path: Option<&std::ffi::CStr>,
+        ) -> Result<Self, clack_plugin::entry::EntryLoadError> {
+            let factory = NEXT_COUNTING_FACTORY
+                .with(|slot| slot.borrow_mut().take())
+                .ok_or(clack_plugin::entry::EntryLoadError)?;
+            Ok(Self(
+                clack_plugin::factory::plugin::PluginFactoryWrapper::new(factory),
+            ))
+        }
+
+        fn declare_factories<'a>(&'a self, builder: &mut clack_plugin::entry::EntryFactories<'a>) {
+            builder.register_factory(&self.0);
+        }
+    }
+
+    fn counting_entry(
+        advertised: u32,
+        mode: CountingFactoryMode,
+    ) -> (PluginEntry, std::sync::Arc<FactoryObservations>) {
+        let observations = std::sync::Arc::new(FactoryObservations::default());
+        let descriptors = if matches!(mode, CountingFactoryMode::Unique) {
+            assert!(
+                advertised <= 4096,
+                "owned fixture allocation must remain bounded"
+            );
+            (0..advertised)
+                .map(|index| PluginDescriptor::new(&format!("fixture.{index}"), "Fixture"))
+                .collect()
+        } else {
+            vec![PluginDescriptor::new("fixture", "Fixture")]
+        };
+        NEXT_COUNTING_FACTORY.with(|slot| {
+            assert!(slot.borrow().is_none(), "previous setup was not consumed");
+            *slot.borrow_mut() = Some(CountingFactory {
+                advertised,
+                mode,
+                descriptors,
+                observations: observations.clone(),
+            });
+        });
+        // Existing safe Clack entry bridge supplies the real CLAP ABI callbacks.
+        // Entry initialization consumes the setup before any descriptor query.
+        let loaded = PluginEntry::load_from_clack::<CountingEntry>(c"/test/counting-factory");
+        assert!(NEXT_COUNTING_FACTORY.with(|slot| slot.borrow().is_none()));
+        (loaded.expect("owned counting entry"), observations)
+    }
+
+    fn assert_factory_observations(
+        observations: &FactoryObservations,
+        gets: usize,
+        creates: usize,
+    ) {
+        use std::sync::atomic::Ordering::Relaxed;
+        assert_eq!(observations.counts.load(Relaxed), 1);
+        assert_eq!(observations.gets.load(Relaxed), gets);
+        assert_eq!(observations.creates.load(Relaxed), creates);
+        assert!(!observations.wrong_order.load(Relaxed));
+    }
+
+    fn count_probe(entry: &PluginEntry, note: bool) -> Result<(), AudioProcessorHostError> {
+        if note {
+            super::super::clap_note_input_metadata::inspect_loaded(entry, "fixture", [7; 32], None)
+                .map(|_| ())
+        } else {
+            probe_loaded(
+                entry,
+                "fixture",
+                AudioRenderContract {
+                    sample_rate: 48_000,
+                    channel_layout: AudioChannelLayout::Stereo,
+                    max_block_frames: 512,
+                    processing_mode: AudioProcessingMode::Offline,
+                    processor_session_scratch_budget_bytes: usize::MAX,
+                    public_output_lookahead_budget_frames: usize::MAX,
+                    compensation_delay_scratch_budget_bytes: usize::MAX,
+                },
+                None,
+                false,
+            )
+            .map(|_| ())
+        }
+    }
+
+    #[test]
+    fn clap_factory_count_admission_rejects_oversize_before_get_in_all_queries() {
+        assert_eq!(MAX_DESCRIPTORS, 4096);
+        for advertised in [4097, u32::MAX] {
+            for query in 0..3 {
+                // Matches immediately repeat: historical uncapped selectors
+                // stop after2 and List after4097, never hang this regression.
+                let (entry, observations) =
+                    counting_entry(advertised, CountingFactoryMode::Duplicate);
+                let result = if query == 0 {
+                    list_loaded(&entry).map(|_| ())
+                } else {
+                    count_probe(&entry, query == 2)
+                };
+                assert!(matches!(
+                    result,
+                    Err(AudioProcessorHostError::InvalidContract(_))
+                ));
+                assert_factory_observations(&observations, 0, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn clap_factory_list_admitted_boundary_empty_null_and_duplicate_preserve_semantics() {
+        let (entry, observations) = counting_entry(4096, CountingFactoryMode::Unique);
+        let descriptors = list_loaded(&entry).expect("exact admitted descriptor capacity");
+        assert_eq!(descriptors.len(), 4096);
+        for (index, descriptor) in descriptors.iter().enumerate() {
+            assert_eq!(descriptor.plugin_id, format!("fixture.{index}"));
+            assert_eq!(descriptor.name, "Fixture");
+            assert_eq!(descriptor.vendor, None);
+            assert_eq!(descriptor.version, None);
+        }
+        assert_factory_observations(&observations, 4096, 0);
+        for advertised in [0, 4096] {
+            let (entry, observations) = counting_entry(advertised, CountingFactoryMode::Null);
+            assert!(list_loaded(&entry).unwrap().is_empty());
+            assert_factory_observations(&observations, advertised as usize, 0);
+        }
+        let (entry, observations) = counting_entry(16, CountingFactoryMode::Duplicate);
+        assert!(matches!(
+            list_loaded(&entry),
+            Err(AudioProcessorHostError::InvalidContract(_))
+        ));
+        assert_factory_observations(&observations, 16, 0);
+    }
+
+    #[test]
+    fn clap_factory_probe_and_note_boundary_missing_and_duplicate_preserve_selection() {
+        for note in [false, true] {
+            let (entry, observations) = counting_entry(4096, CountingFactoryMode::LastOnly);
+            assert!(
+                matches!(count_probe(&entry, note), Err(AudioProcessorHostError::Unavailable(message)) if message.contains("instance failed"))
+            );
+            // Selection must reach create once after the sole match at4095;
+            // deliberate factory creation refusal supplies the final error.
+            assert_factory_observations(&observations, 4096, 1);
+            for (advertised, mode, expected_gets) in [
+                (0, CountingFactoryMode::Null, 0),
+                (4096, CountingFactoryMode::Null, 4096),
+                (16, CountingFactoryMode::Duplicate, 2),
+            ] {
+                let (entry, observations) = counting_entry(advertised, mode);
+                assert!(
+                    matches!(count_probe(&entry, note), Err(AudioProcessorHostError::Unavailable(message)) if message.contains("missing or duplicated"))
+                );
+                assert_factory_observations(&observations, expected_gets, 0);
+            }
+        }
+    }
 
     struct DiscoveryFixture;
 

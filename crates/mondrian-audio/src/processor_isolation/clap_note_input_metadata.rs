@@ -215,6 +215,30 @@ fn inspect_inputs(
     Ok((true, inputs))
 }
 
+fn validate_factory_plugin_id(
+    factory: &clack_host::factory::plugin::PluginFactory<'_>,
+    plugin_id: &std::ffi::CStr,
+) -> Result<(), AudioProcessorHostError> {
+    // Clack caches the factory's single count callback in this iterator.
+    // len() reads that original slot extent without another native call; it
+    // must be checked before next(), which can skip many null descriptors.
+    let descriptors = factory.plugin_descriptors();
+    if descriptors.len() > super::clap_discovery::MAX_DESCRIPTORS {
+        return Err(invalid("CLAP library exceeds descriptor capacity"));
+    }
+    if descriptors
+        .filter(|descriptor| descriptor.id() == Some(plugin_id))
+        .take(2)
+        .count()
+        != 1
+    {
+        return Err(unavailable(
+            "CLAP note metadata plugin ID is missing or duplicated",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn inspect_loaded(
     entry: &PluginEntry,
     plugin_id: &str,
@@ -227,17 +251,7 @@ pub(super) fn inspect_loaded(
     let factory = entry
         .get_plugin_factory()
         .ok_or_else(|| unavailable("CLAP library has no plugin factory"))?;
-    if factory
-        .plugin_descriptors()
-        .filter(|descriptor| descriptor.id() == Some(plugin_c_id.as_c_str()))
-        .take(2)
-        .count()
-        != 1
-    {
-        return Err(unavailable(
-            "CLAP note metadata plugin ID is missing or duplicated",
-        ));
-    }
+    validate_factory_plugin_id(&factory, plugin_c_id.as_c_str())?;
     let info = HostInfo::new(
         "Mondrian",
         "Mondrian",
@@ -309,6 +323,131 @@ pub(super) fn inspect_loaded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Original in-process ABI fixture; no dynamic library or plugin instance.
+    // Only count/get are consumed. Owned descriptors and factory outlive every
+    // borrowed handle; immutable descriptors and atomic counters stay valid.
+    #[repr(C)]
+    struct FactoryFixture {
+        raw: clap_sys::factory::plugin_factory::clap_plugin_factory,
+        advertised: u32,
+        count_calls: std::sync::atomic::AtomicUsize,
+        get_calls: std::sync::atomic::AtomicUsize,
+        matching_indices: Option<(u32, u32)>,
+        descriptor: clack_host::plugin::PluginDescriptor,
+    }
+
+    impl FactoryFixture {
+        fn new(advertised: u32, matching_indices: Option<(u32, u32)>) -> Self {
+            Self {
+                raw: clap_sys::factory::plugin_factory::clap_plugin_factory {
+                    get_plugin_count: Some(Self::count),
+                    get_plugin_descriptor: Some(Self::get),
+                    create_plugin: None,
+                },
+                advertised,
+                count_calls: std::sync::atomic::AtomicUsize::new(0),
+                get_calls: std::sync::atomic::AtomicUsize::new(0),
+                matching_indices,
+                descriptor: clack_host::plugin::PluginDescriptor::new("fixture", "Fixture"),
+            }
+        }
+
+        unsafe extern "C" fn count(
+            raw: *const clap_sys::factory::plugin_factory::clap_plugin_factory,
+        ) -> u32 {
+            // SAFETY: repr(C)'s first field is raw; from_raw below borrows self
+            // for the handle's full lifetime. No callback mutates the raw ABI.
+            let fixture = unsafe { &*raw.cast::<Self>() };
+            fixture.count_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            fixture.advertised
+        }
+
+        unsafe extern "C" fn get(
+            raw: *const clap_sys::factory::plugin_factory::clap_plugin_factory,
+            index: u32,
+        ) -> *const clap_sys::plugin::clap_plugin_descriptor {
+            // SAFETY: same owned, single-threaded lifetime as count().
+            let fixture = unsafe { &*raw.cast::<Self>() };
+            fixture.get_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if fixture
+                .matching_indices
+                .is_none_or(|(first, second)| index == first || index == second)
+            {
+                fixture.descriptor.as_raw()
+            } else {
+                std::ptr::null()
+            }
+        }
+
+        fn check(&self, id: &std::ffi::CStr) -> Result<(), AudioProcessorHostError> {
+            use clack_host::factory::{plugin::PluginFactory, Factory, RawFactoryPointer};
+            // SAFETY: immutable owned ABI callbacks/descriptor stay valid for
+            // this borrowed factory. We never call its absent create_plugin.
+            let factory = unsafe { PluginFactory::from_raw(RawFactoryPointer::new(&self.raw)) };
+            validate_factory_plugin_id(&factory, id)
+        }
+    }
+
+    #[test]
+    fn note_metadata_factory_oversize_count_is_rejected_before_any_descriptor_get() {
+        assert_eq!(super::super::clap_discovery::MAX_DESCRIPTORS, 4096);
+        for advertised in [4097, u32::MAX] {
+            // Returning matches at every index makes the historical uncapped
+            // code fail quickly, rather than hang this regression for 2^32 slots.
+            let fixture = FactoryFixture::new(advertised, None);
+            assert!(matches!(
+                fixture.check(c"fixture"),
+                Err(AudioProcessorHostError::InvalidContract(_))
+            ));
+            assert_eq!(
+                fixture.count_calls.load(std::sync::atomic::Ordering::Relaxed),
+                1
+            );
+            assert_eq!(
+                fixture.get_calls.load(std::sync::atomic::Ordering::Relaxed),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn note_metadata_factory_exact_capacity_scans_cached_count_and_null_slots() {
+        let fixture = FactoryFixture::new(4096, Some((4095, u32::MAX)));
+        assert!(fixture.check(c"fixture").is_ok());
+        assert_eq!(
+            fixture.count_calls.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            fixture.get_calls.load(std::sync::atomic::Ordering::Relaxed),
+            4096
+        );
+    }
+
+    #[test]
+    fn note_metadata_factory_empty_missing_and_duplicate_id_remain_refused() {
+        for (advertised, matches, id, expected_gets) in [
+            (0, None, c"fixture", 0),
+            (16, Some((u32::MAX, u32::MAX)), c"fixture", 16),
+            (16, Some((15, u32::MAX)), c"other", 16),
+            (4096, Some((0, 1)), c"fixture", 2),
+        ] {
+            let fixture = FactoryFixture::new(advertised, matches);
+            assert!(matches!(
+                fixture.check(id),
+                Err(AudioProcessorHostError::Unavailable(_))
+            ));
+            assert_eq!(
+                fixture.count_calls.load(std::sync::atomic::Ordering::Relaxed),
+                1
+            );
+            assert_eq!(
+                fixture.get_calls.load(std::sync::atomic::Ordering::Relaxed),
+                expected_gets
+            );
+        }
+    }
 
     fn result(present: bool, ids: &[u32]) -> ClapNoteInputMetadata {
         ClapNoteInputMetadata {
