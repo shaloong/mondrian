@@ -14,6 +14,27 @@ use clack_plugin::stream::{InputStream, OutputStream};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
+/// CLAP's audio role may coincide with main or run on another physical thread.
+#[derive(Clone, Copy, Debug)]
+enum RoleRequirement {
+    Main,
+    Audio,
+    MainOrAudio,
+}
+
+impl RoleRequirement {
+    fn accepts(self, main: Option<bool>, audio: Option<bool>, on_initial_main: bool) -> bool {
+        // Verify the host's main identity independently of its symbolic audio
+        // role; a host must not label every audio callback as main.
+        if main != Some(on_initial_main) { return false; }
+        match self {
+            Self::Main => on_initial_main,
+            Self::Audio => audio == Some(true),
+            Self::MainOrAudio => on_initial_main || audio == Some(true),
+        }
+    }
+}
+
 /// Independent native sidechain signal oracle.
 pub struct SidechainFixture;
 
@@ -40,6 +61,7 @@ impl DefaultPluginFactory for SidechainFixture {
     fn new_shared(host: HostSharedHandle<'_>) -> Result<Shared<'_>, PluginError> {
         let shared = Shared {
             host,
+            initial_main_thread: std::thread::current().id(),
             role_valid: AtomicBool::new(true),
             render_mode: AtomicU8::new(0),
             active: AtomicBool::new(false),
@@ -48,7 +70,7 @@ impl DefaultPluginFactory for SidechainFixture {
             mode: AtomicU8::new(0),
             gain: AtomicU32::new(1.0_f32.to_bits()),
         };
-        shared.check_role(false)?;
+        shared.check_role(RoleRequirement::Main)?;
         if let Some(check) = host.get_extension::<HostThreadCheck>() {
             let background_ok = std::thread::scope(|scope| {
                 scope.spawn(move || check.is_main_thread(&host) == Some(false)
@@ -72,6 +94,7 @@ impl DefaultPluginFactory for SidechainFixture {
 /// State restored before native port inspection and activation.
 pub struct Shared<'a> {
     host: HostSharedHandle<'a>,
+    initial_main_thread: std::thread::ThreadId,
     role_valid: AtomicBool,
     render_mode: AtomicU8,
     active: AtomicBool,
@@ -83,10 +106,13 @@ pub struct Shared<'a> {
 impl<'a> PluginShared<'a> for Shared<'a> {}
 
 impl Shared<'_> {
-    fn check_role(&self, audio: bool) -> Result<(), PluginError> {
+    fn check_role(&self, requirement: RoleRequirement) -> Result<(), PluginError> {
         let valid = self.host.get_extension::<HostThreadCheck>().is_some_and(|check| {
-            check.is_main_thread(&self.host) == Some(true)
-                && check.is_audio_thread(&self.host) == Some(audio)
+            requirement.accepts(
+                check.is_main_thread(&self.host),
+                check.is_audio_thread(&self.host),
+                std::thread::current().id() == self.initial_main_thread,
+            )
         });
         if !valid { self.role_valid.store(false, Ordering::Relaxed); }
         if self.role_valid.load(Ordering::Relaxed) { Ok(()) }
@@ -117,18 +143,18 @@ impl Shared<'_> {
 }
 
 impl Drop for Shared<'_> {
-    fn drop(&mut self) { let _ = self.check_role(false); }
+    fn drop(&mut self) { let _ = self.check_role(RoleRequirement::Main); }
 }
 
 /// Main-thread port metadata and state adapter.
 pub struct Main<'a>(&'a Shared<'a>);
 impl<'a> PluginMainThread<'a, Shared<'a>> for Main<'a> {
-    fn on_main_thread(&self) { let _ = self.0.check_role(false); }
+    fn on_main_thread(&self) { let _ = self.0.check_role(RoleRequirement::Main); }
 }
 
 impl PluginStateImpl for Main<'_> {
     fn save(&self, output: &mut OutputStream) -> Result<(), PluginError> {
-        self.0.check_role(false)?;
+        self.0.check_role(RoleRequirement::Main)?;
         output.write_all(&[self.0.mode.load(Ordering::Relaxed)])?;
         output.write_all(&self.0.gain.load(Ordering::Relaxed).to_le_bytes())?;
         if (7..=9).contains(&self.0.mode.load(Ordering::Relaxed)) {
@@ -149,7 +175,7 @@ impl PluginStateImpl for Main<'_> {
     }
 
     fn load(&self, input: &mut InputStream) -> Result<(), PluginError> {
-        self.0.check_role(false)?;
+        self.0.check_role(RoleRequirement::Main)?;
         let mut bytes = [0; 5];
         input.read_exact(&mut bytes)?;
         let gain = f32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
@@ -171,12 +197,12 @@ impl PluginStateImpl for Main<'_> {
 
 impl PluginRenderImpl for Main<'_> {
     fn has_hard_realtime_requirement(&self) -> bool {
-        let _ = self.0.check_role(false);
+        let _ = self.0.check_role(RoleRequirement::Main);
         self.0.mode.load(Ordering::Relaxed) == 4
     }
 
     fn set(&self, mode: RenderMode) -> Result<(), PluginError> {
-        self.0.check_role(false)?;
+        self.0.check_role(RoleRequirement::Main)?;
         if self.0.mode.load(Ordering::Relaxed) == 5 && mode == RenderMode::Offline {
             return Err(PluginError::Message("fixture declined offline render"));
         }
@@ -187,7 +213,7 @@ impl PluginRenderImpl for Main<'_> {
 
 impl PluginLatencyImpl for Main<'_> {
     fn get(&self) -> u32 {
-        if self.0.check_role(false).is_ok() && self.0.active.load(Ordering::Relaxed) {
+        if self.0.check_role(RoleRequirement::Main).is_ok() && self.0.active.load(Ordering::Relaxed) {
             self.0.delay_frames() as u32
         } else {
             u32::MAX
@@ -197,7 +223,7 @@ impl PluginLatencyImpl for Main<'_> {
 
 impl PluginAudioPortsImpl for Main<'_> {
     fn count(&self, is_input: bool) -> u32 {
-        let _ = self.0.check_role(false);
+        let _ = self.0.check_role(RoleRequirement::Main);
         if is_input {
             if self.0.mode.load(Ordering::Relaxed) == 2 {
                 2
@@ -254,7 +280,7 @@ pub struct Processor<'a> {
 
 impl PluginTailImpl for Processor<'_> {
     fn get(&self) -> TailLength {
-        if self.shared.check_role(true).is_ok() { TailLength::Finite(self.delay.len() as u32) }
+        if self.shared.check_role(RoleRequirement::MainOrAudio).is_ok() { TailLength::Finite(self.delay.len() as u32) }
         else { TailLength::Infinite }
     }
 }
@@ -266,7 +292,7 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
         shared: &'a Shared<'a>,
         config: PluginAudioConfiguration,
     ) -> Result<Self, PluginError> {
-        shared.check_role(false)?;
+        shared.check_role(RoleRequirement::Main)?;
         if config.max_frames_count == 0 || config.max_frames_count > 65_536 {
             return Err(PluginError::Message("fixture block extent"));
         }
@@ -274,8 +300,14 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
             shared.emit_logs(c"log:activate")?;
             // Legal arbitrary-thread callbacks, joined before activation ends.
             // No process callback creates, joins or waits for this thread.
-            std::thread::scope(|scope| scope.spawn(|| shared.emit_logs(c"log:background"))
-                .join().map_err(|_|PluginError::Message("background logger panicked")))??;
+            std::thread::scope(|scope| {
+                // PluginError may contain a non-Send erased error. Carry only
+                // its owned message across the thread, then restore the error
+                // on the activation thread without discarding the failure.
+                scope.spawn(|| shared.emit_logs(c"log:background").map_err(|error| error.to_string()))
+                    .join().map_err(|_|PluginError::Message("background logger panicked"))?
+                    .map_err(|message|PluginError::Error(Box::new(std::io::Error::other(message))))
+            })?;
         }
         shared.configured_latency.store(shared.next_activation_delay_frames(), Ordering::Relaxed);
         shared.active.store(true, Ordering::Relaxed);
@@ -292,22 +324,22 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
     }
 
     fn deactivate(self, _main: &Main<'a>) {
-        let _ = self.shared.check_role(false);
+        let _ = self.shared.check_role(RoleRequirement::Main);
         self.shared.active.store(false, Ordering::Relaxed);
     }
 
     fn reset(&mut self) {
-        let _ = self.shared.check_role(true);
+        let _ = self.shared.check_role(RoleRequirement::Audio);
         self.delay.fill([0.0; 2]);
         self.cursor = 0;
     }
 
     fn start_processing(&mut self) -> Result<(), PluginError> {
-        self.shared.check_role(true)
+        self.shared.check_role(RoleRequirement::Audio)
     }
 
     fn stop_processing(&mut self) {
-        let _ = self.shared.check_role(true);
+        let _ = self.shared.check_role(RoleRequirement::Audio);
     }
 
     fn process(
@@ -316,7 +348,7 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
         mut audio: Audio,
         _events: Events,
     ) -> Result<ProcessStatus, PluginError> {
-        self.shared.check_role(true)?;
+        self.shared.check_role(RoleRequirement::Audio)?;
         if self.mode==10 { self.shared.emit_logs(c"log:process")?; }
         self.shared.host.request_callback();
         let frames = audio.frames_count() as usize;
@@ -395,3 +427,41 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
 }
 
 clack_export_entry!(SinglePluginEntry<SidechainFixture>);
+
+#[cfg(test)]
+mod role_contract_tests {
+    use super::RoleRequirement;
+
+    #[test]
+    fn role_requirements_verify_physical_main_and_symbolic_audio() {
+        // Columns are Main, Audio, MainOrAudio. Both audio identities are
+        // legal, but a mismatching main claim and neither role are rejected.
+        let cases = [
+            (false, Some(false), Some(false), [false, false, false]),
+            (false, Some(false), Some(true),  [false, true, true]),
+            (false, Some(false), None,        [false, false, false]),
+            (false, Some(true),  Some(false), [false, false, false]),
+            (false, Some(true),  Some(true),  [false, false, false]),
+            (false, Some(true),  None,        [false, false, false]),
+            (false, None,        Some(false), [false, false, false]),
+            (false, None,        Some(true),  [false, false, false]),
+            (false, None,        None,        [false, false, false]),
+            (true,  Some(false), Some(false), [false, false, false]),
+            (true,  Some(false), Some(true),  [false, false, false]),
+            (true,  Some(false), None,        [false, false, false]),
+            (true,  Some(true),  Some(false), [true, false, true]),
+            (true,  Some(true),  Some(true),  [true, true, true]),
+            (true,  Some(true),  None,        [true, false, true]),
+            (true,  None,        Some(false), [false, false, false]),
+            (true,  None,        Some(true),  [false, false, false]),
+            (true,  None,        None,        [false, false, false]),
+        ];
+        let requirements = [RoleRequirement::Main, RoleRequirement::Audio, RoleRequirement::MainOrAudio];
+        for (on_initial_main, main, audio, expected) in cases {
+            for (requirement, expected) in requirements.into_iter().zip(expected) {
+                assert_eq!(requirement.accepts(main, audio, on_initial_main), expected,
+                    "{requirement:?}: main={main:?}, audio={audio:?}, actual_initial_main={on_initial_main}");
+            }
+        }
+    }
+}
