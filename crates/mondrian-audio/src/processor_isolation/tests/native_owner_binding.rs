@@ -62,7 +62,28 @@ fn installed_vst3_native_object_binding_changes_on_real_enter_and_retains_refuse
     };
     assert_eq!(initial_receipt.binding(), initial.binding);
     assert_eq!(initial_receipt.object(), before);
-    processor.enter_state(-4).expect("real stop/destroy/reload/enter in same child");
+    processor.enter_state(-4).expect("first Enter anchors initialized native object");
+    let anchored = processor
+        .native_audio_object_observation()
+        .expect("actual anchored object")
+        .expect("current VST3 object after first Enter");
+    assert_eq!(
+        anchored, before,
+        "first Enter preserves initialized native object and child"
+    );
+    let anchored_binding = NativeAudioObjectBindRequest {
+        binding: mondrian_core::AudioProcessorBindingId::new(),
+        expected_object: anchored,
+    };
+    let NativeAudioObjectBindOutcome::Bound(anchored_receipt) = processor
+        .bind_native_audio_object(anchored_binding)
+        .expect("correlated rebind after first Enter")
+    else {
+        panic!("anchored current object must bind");
+    };
+    assert_eq!(anchored_receipt.binding(), anchored_binding.binding);
+    assert_eq!(anchored_receipt.object(), anchored);
+    processor.enter_state(9).expect("second Enter stops/destroys/reloads in same child");
     let after = processor
         .native_audio_object_observation()
         .expect("actual reloaded object")

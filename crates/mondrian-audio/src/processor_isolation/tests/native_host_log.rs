@@ -86,18 +86,21 @@ fn installed_clap_host_log_delivers_main_background_audio_records_on_one_authent
     for mode in [AudioProcessingMode::Realtime, AudioProcessingMode::Offline] {
         let (spec, render) = log_fixture_native_spec(mode);
         let factory = IsolatedAudioProcessorFactory::prepare(spec).expect("native log factory");
+        assert_eq!(factory.execution_contract().algorithmic_latency_frames(), 3);
         let mut processor = factory.create().expect("same exclusive child");
-        assert_eq!(
-            processor
-                .native_audio_object_observation()
-                .expect("CLAP capability does not consume logs"),
-            None
-        );
+        let object = processor
+            .native_audio_object_observation()
+            .expect("CLAP capability does not consume logs")
+            .expect("current CLAP adapter exposes its actual retained native object");
+        assert_ne!(object.process_id().get(), std::process::id());
+        assert_eq!(object.object_serial().get(), 1, "one initial load in this fresh exclusive child");
         let activation = processor
             .poll_native_observations(crate::NativeAudioObservationConsumption::Drain)
             .expect("same canonical Poll9 reply");
         let pid = activation.owner_process_id().expect("actual child producer PID");
         assert_ne!(pid.get(), std::process::id());
+        assert_eq!(pid, object.process_id(), "native load and logs belong to the authenticated child");
+        assert_eq!(activation.object, Some(object));
         assert_eq!(activation.logs.records().len(), 14);
         assert!(!activation.logs.incomplete());
         for (index, record) in activation.logs.records().iter().enumerate() {
@@ -118,11 +121,13 @@ fn installed_clap_host_log_delivers_main_background_audio_records_on_one_authent
                 .poll_native_observations(crate::NativeAudioObservationConsumption::Preserve)
                 .expect("nonconsuming capability facts");
             assert_eq!(preserved.owner_process_id(), Some(pid));
+            assert_eq!(preserved.object, Some(object), "same native load after CLAP reset/seek");
             assert!(preserved.logs.records().is_empty());
             let audio = processor
                 .poll_native_observations(crate::NativeAudioObservationConsumption::Drain)
                 .expect("same child bounded records");
             assert_eq!(audio.owner_process_id(), Some(pid));
+            assert_eq!(audio.object, Some(object));
             assert_eq!(audio.logs.records().len(), 7);
             assert!(!audio.logs.incomplete());
             for (severity, record) in audio.logs.records().iter().enumerate() {
@@ -131,12 +136,12 @@ fn installed_clap_host_log_delivers_main_background_audio_records_on_one_authent
                 assert_eq!(record.text(), Ok("log:process"));
                 assert!(!record.truncated() && !record.invalid_utf8());
             }
-            assert!(processor
+            let drained = processor
                 .poll_native_observations(crate::NativeAudioObservationConsumption::Drain)
-                .expect("same connection after drain")
-                .logs
-                .records()
-                .is_empty());
+                .expect("same connection after drain");
+            assert_eq!(drained.owner_process_id(), Some(pid));
+            assert_eq!(drained.object, Some(object));
+            assert!(drained.logs.records().is_empty());
         }
     }
 }
