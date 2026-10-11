@@ -307,6 +307,15 @@ jobs:
           pkg-config --modversion libswscale
           pkg-config --modversion libswresample
 
+      - name: Install supported DX12 shader compiler (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $runtime = ./scripts/install-windows-dxc.ps1 -DestinationPath (Join-Path $env:RUNNER_TEMP 'mondrian-dxc')
+          "MONDRIAN_DXC_ROOT=$($runtime.RootDirectory)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "MONDRIAN_DXC_RELEASE=$($runtime.Release)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "MONDRIAN_DXC_ARCHIVE_SHA256=$($runtime.ArchiveSha256)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: 计算包名与路径
         id: artifact_meta
         shell: pwsh
@@ -361,6 +370,8 @@ jobs:
             native_dependency_registry = [ordered]@{
               vcpkg_ref = '${{ env.VCPKG_REF }}'
               overlay_sha256 = '${{ hashFiles('vcpkg-overlay/**') }}'
+              windows_dxc_release = $env:MONDRIAN_DXC_RELEASE
+              windows_dxc_archive_sha256 = $env:MONDRIAN_DXC_ARCHIVE_SHA256
             }
           }
           $provenance | ConvertTo-Json -Depth 8 |
@@ -411,6 +422,16 @@ jobs:
           }
           Copy-Item -LiteralPath 'LICENSE' -Destination $stageDir -Force
           Copy-Item -LiteralPath 'LICENSES' -Destination $stageDir -Recurse -Force
+          # Auto selects app-local DXC before considering legacy system FXC.
+          # Ship the same compiler/validator pair verified by hosted DX12 CI.
+          foreach ($name in @('dxcompiler.dll', 'dxil.dll')) {
+            Copy-Item -LiteralPath (Join-Path $env:MONDRIAN_DXC_ROOT "bin/x64/$name") -Destination $stageDir -ErrorAction Stop
+          }
+          $dxcLicenses = Join-Path $stageDir 'LICENSES/dxc'
+          New-Item -ItemType Directory -Path $dxcLicenses -Force | Out-Null
+          foreach ($name in @('LICENSE-LLVM.txt', 'LICENSE-MIT.txt', 'LICENSE-MS.txt')) {
+            Copy-Item -LiteralPath (Join-Path $env:MONDRIAN_DXC_ROOT $name) -Destination $dxcLicenses -ErrorAction Stop
+          }
           Copy-Item -LiteralPath 'RELEASE_PROVENANCE.json' -Destination $stageDir -Force
           & (Join-Path $stageDir 'ffmpeg.exe') -hide_banner -version |
             Out-File -FilePath (Join-Path $stageDir 'MEDIA_RUNTIME_BUILD.txt') -Encoding utf8

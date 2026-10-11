@@ -334,25 +334,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $archive = Join-Path $env:RUNNER_TEMP 'dxc_2025_07_14.zip'
-          $root = Join-Path $env:RUNNER_TEMP 'mondrian-dxc'
-          Invoke-WebRequest -Uri 'https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.8.2505.1/dxc_2025_07_14.zip' -OutFile $archive
-          $expected = '9ad895a6b039e3a8f8c22a1009f866800b840a74b50db9218d13319e215ea8a4'
-          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
-            throw 'Microsoft DXC release archive SHA-256 mismatch'
-          }
-          Expand-Archive -Path $archive -DestinationPath $root
-          $bin = Join-Path $root 'bin/x64'
-          foreach ($name in @('dxcompiler.dll', 'dxil.dll', 'dxc.exe')) {
-            $file = Join-Path $bin $name
-            if (-not (Test-Path $file -PathType Leaf)) { throw "Missing DXC runtime file: $name" }
-            Get-FileHash $file -Algorithm SHA256
-            (Get-Item $file).VersionInfo | Format-List FileVersion, ProductVersion
-          }
-          & (Join-Path $bin 'dxc.exe') --version
-          if ($LASTEXITCODE -ne 0) { throw 'DXC version probe failed' }
-          $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $runtime = ./scripts/install-windows-dxc.ps1 -DestinationPath (Join-Path $env:RUNNER_TEMP 'mondrian-dxc')
+          $runtime.BinDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           'WGPU_DX12_COMPILER=dxc' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          'WGPU_BACKEND=dx12' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       # Keep strict GPU failures visible even if a later native driver fault
       # terminates libtest before its captured panic output can be printed.
