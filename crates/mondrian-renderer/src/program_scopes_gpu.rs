@@ -1005,8 +1005,8 @@ struct Uniforms {
 @group(0) @binding(2) var<uniform> uniforms: Uniforms;
 
 
-// Match the shared CPU colorimetry's explicit accumulation order. Implicit
-// multiply/add contraction can move a signal across a discrete scope bin.
+// Keep the shared CPU colorimetry's accumulation order. WGSL fma need not be
+// fused; backend rounding can still select either bin at a float boundary.
 fn signal_luma(rgb: vec3<f32>) -> f32 {
     let kg = 1.0 - uniforms.kr - uniforms.kb;
     return fma(uniforms.kb, rgb.b, fma(kg, rgb.g, uniforms.kr * rgb.r));
@@ -2001,6 +2001,30 @@ mod tests {
             )
             .expect("CPU high-entropy scopes reference");
 
+            // Integer aggregation must be exact, but UNORM conversion and WGSL
+            // fma are not required to round identically to Rust division and
+            // mul_add. Independently classify every pixel on this backend,
+            // verify each classification against a double-precision color
+            // oracle, then sum the integer keys on the CPU. This retains all
+            // boundary pixels and permits no lost, duplicated, or wrong-column
+            // counts in the grouped atomic/reduction paths.
+            let keys = scalar_scope_keys(&context, &input, &record, &pixels, signal_color_space);
+            let mut expected_luma = vec![0_u32; 256];
+            let channels = request.waveform_channels() as usize;
+            let mut expected_waveform = vec![0_u32; waveform_width as usize * 256 * channels];
+            let mut expected_vectorscope = vec![0_u32; 64 * 64];
+            for (pixel_index, [rgb_luma, uv]) in keys.iter().enumerate() {
+                expected_luma[rgb_luma[3] as usize] += 1;
+                let x = pixel_index % WIDTH as usize;
+                let column = x * waveform_width as usize / WIDTH as usize;
+                for channel in 0..channels {
+                    let bin = rgb_luma[if channels == 1 { 3 } else { channel }] as usize;
+                    expected_waveform[(channel * waveform_width as usize + column) * 256 + bin] +=
+                        1;
+                }
+                expected_vectorscope[(uv[1] * 64 + uv[0]) as usize] += 1;
+            }
+
             assert_eq!(&actual[..8], &[0; 8]);
             let histogram = record.buffer_layout.histogram_offset as usize;
             assert_eq!(&actual[histogram..histogram + 256], cpu.histogram.red);
@@ -2014,32 +2038,12 @@ mod tests {
             );
             assert_eq!(
                 &actual[histogram + 768..histogram + 1024],
-                cpu.histogram.luma
+                expected_luma,
+                "{signal_color_space:?} {mode:?} width={waveform_width}"
             );
             let waveform = record.buffer_layout.waveform_offset as usize;
             let vectorscope = record.buffer_layout.vectorscope_offset as usize;
-            // The CPU oracle measures every source column independently.
-            // Fold those exact integer bins into the requested display density;
-            // this does not repeat the GPU's column dispatch or tail geometry.
-            let channels = request.waveform_channels() as usize;
-            let mut expected_waveform = vec![0_u32; waveform_width as usize * 256 * channels];
-            for channel in 0..channels {
-                for x in 0..WIDTH as usize {
-                    let column = x * waveform_width as usize / WIDTH as usize;
-                    for bin in 0..256 {
-                        expected_waveform
-                            [(channel * waveform_width as usize + column) * 256 + bin] +=
-                            cpu.waveform.values[(channel * WIDTH as usize + x) * 256 + bin];
-                    }
-                }
-            }
             assert_eq!(&actual[waveform..vectorscope], expected_waveform);
-            let mut expected_vectorscope = vec![0_u32; 64 * 64];
-            for sample in cpu.vectorscope {
-                let x = ((sample.u + 0.5) * 64.0).floor().clamp(0.0, 63.0) as usize;
-                let y = ((sample.v + 0.5) * 64.0).floor().clamp(0.0, 63.0) as usize;
-                expected_vectorscope[y * 64 + x] = sample.weight;
-            }
             assert_eq!(
                 &actual[vectorscope..record.buffer_layout.invalid_pixel_count_offset as usize],
                 expected_vectorscope,
@@ -2048,6 +2052,118 @@ mod tests {
         }
         assert_eq!(runtime.diagnostics().pipeline_creations, 1);
         assert_eq!(runtime.diagnostics().frames_recorded, 24);
+    }
+
+    fn scalar_scope_keys(
+        context: &GpuContext,
+        input: &wgpu::Texture,
+        record: &GpuProgramScopesRecord,
+        pixels: &[u8],
+        space: ColorSpace,
+    ) -> Vec<[[u32; 4]; 2]> {
+        // Reuse production color functions, with a separate one-pixel dispatch
+        // and disjoint writes: no atomics, column folding, subgroups or reduction.
+        let color_functions = AGGREGATE_SHADER.split("const INVALID_KEY").next().unwrap();
+        let source = color_functions.replace(
+            "var<storage, read_write> counts: array<atomic<u32>>;",
+            "var<storage, read_write> keys: array<vec4<u32>>;",
+        ) + r#"
+@compute @workgroup_size(1)
+fn reference(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let rgb = textureLoad(source, vec2<i32>(gid.xy), 0).rgb;
+    let y = signal_luma(rgb);
+    let i = (gid.y * uniforms.input_width + gid.x) * 2u;
+    keys[i] = vec4<u32>(signal_bin(rgb.r), signal_bin(rgb.g), signal_bin(rgb.b), signal_bin(y));
+    let u = (rgb.b - clamp(y, 0.0, 1.0)) / (2.0 * (1.0 - uniforms.kb));
+    let v = (rgb.r - clamp(y, 0.0, 1.0)) / (2.0 * (1.0 - uniforms.kr));
+    keys[i + 1u] = vec4<u32>(u32(clamp(u + 0.5, 0.0, 0.999) * 64.0), u32(clamp(v + 0.5, 0.0, 0.999) * 64.0), 0u, 0u);
+}
+"#;
+        let device = &context.device;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scope-scalar-classification-oracle"),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("scope-scalar-classification-oracle"),
+            layout: None,
+            module: &module,
+            entry_point: Some("reference"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let byte_size = (pixels.len() / 4 * 32) as u64;
+        let output = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scope-scalar-keys"),
+            size: byte_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scope-scalar-keys-readback"),
+            size: byte_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let view = input.create_view(&Default::default());
+        let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scope-scalar-oracle-bindings"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry { binding: 1, resource: output.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: record._resources.uniforms.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bindings, &[]);
+            pass.dispatch_workgroups(input.width(), input.height(), 1);
+        }
+        encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, byte_size);
+        context.queue.submit([encoder.finish()]);
+        let bytes = map_test_readback(device, &readback);
+        let keys: Vec<[[u32; 4]; 2]> = bytemuck::cast_slice(&bytes).to_vec();
+        let colorimetry = ProgramSignalColorimetry::for_color_space(space).unwrap();
+        let kr = f64::from(colorimetry.kr());
+        let kb = f64::from(colorimetry.kb());
+        // Conservative accumulated f32 error, including UNORM normalization,
+        // the two coefficient subtractions, three products and two additions.
+        // This is a signal-value error bound, never a histogram-count tolerance.
+        let error = 8.0 * f64::from(f32::EPSILON);
+        for (index, (pixel, [rgba, uv])) in pixels.chunks_exact(4).zip(&keys).enumerate() {
+            let r = f64::from(pixel[0]) / 255.0;
+            let g = f64::from(pixel[1]) / 255.0;
+            let b = f64::from(pixel[2]) / 255.0;
+            let y = kr * r + (1.0 - kr - kb) * g + kb * b;
+            let u = (b - y) / (2.0 * (1.0 - kb));
+            let v = (r - y) / (2.0 * (1.0 - kr));
+            for (key, value) in rgba.iter().zip([r, g, b, y]) {
+                let lower = ((value - error).clamp(0.0, 1.0) * 255.0 + 0.5).floor() as u32;
+                let upper = ((value + error).clamp(0.0, 1.0) * 255.0 + 0.5).floor() as u32;
+                assert!(
+                    (lower..=upper).contains(key),
+                    "{space:?} pixel={index} signal={value} key={key} bounds={lower}..={upper}"
+                );
+            }
+            for (key, value) in uv[..2].iter().zip([u, v]) {
+                let lower = ((value + 0.5 - error * 2.0).clamp(0.0, 0.999) * 64.0).floor() as u32;
+                let upper = ((value + 0.5 + error * 2.0).clamp(0.0, 0.999) * 64.0).floor() as u32;
+                assert!(
+                    (lower..=upper).contains(key),
+                    "{space:?} pixel={index} chroma={value} key={key} bounds={lower}..={upper}"
+                );
+            }
+        }
+        keys
     }
     #[tokio::test]
     async fn grouped_gpu_counts_preserve_float_excursions_vectors_and_tail_pixels() {

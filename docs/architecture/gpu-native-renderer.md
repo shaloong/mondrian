@@ -1722,6 +1722,18 @@ integer histogram counters before visualization; luma mode applies the inverse
 choice and derives its luma histogram from its waveform. CPU-reference readback
 tests cover both modes, high-entropy bins, excursions, vectors, and tail pixels.
 
+Exact counts refer to integer aggregation after signal classification. UNORM
+texture conversion and [WGSL floating-point evaluation](https://www.w3.org/TR/WGSL/#floating-point-evaluation)
+can round differently from CPU division and fused multiply-add, especially at
+a histogram or vectorscope boundary. The high-entropy regression retains every
+input pixel and checks its backend classification against a double-precision
+color oracle with an accumulated f32 signal error bound. A separate scalar GPU
+dispatch shares the production color functions but performs no aggregation;
+CPU summation of its per-pixel keys must then match every production histogram,
+waveform column and vectorscope counter exactly. This introduces neither a
+count tolerance nor a production readback path. Software Vulkan CI exercises
+this correctness contract and does not qualify physical GPU performance.
+
 When the adapter advertises wgpu subgroup operations, device creation requests
 that optional feature and the aggregation shader uses a one-dimensional
 256-invocation workgroup. For each four-pixel key vector it elects one active

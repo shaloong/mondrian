@@ -832,7 +832,8 @@ impl ProgramSignalColorimetry {
 
     fn luma(self, r: f32, g: f32, b: f32) -> f32 {
         let kg = 1.0 - self.kr - self.kb;
-        // Match the GPU scope shader's explicit accumulation order for binning.
+        // Keep the GPU scope shader's accumulation order. WGSL permits an
+        // unfused fma, so this does not promise bit-identical boundary rounding.
         self.kb.mul_add(b, kg.mul_add(g, self.kr * r))
     }
 
