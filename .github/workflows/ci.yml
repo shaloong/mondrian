@@ -365,7 +365,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { $failed = $true }
           cargo test --locked -p mondrian-renderer --lib program_scopes_gpu::tests -- --nocapture
           if ($LASTEXITCODE -ne 0) { $failed = $true }
-          if ($failed) { exit 1 }
+          if ($failed) {
+            # Diagnostic replay only: the original failure still fails this job.
+            # Distinguish default OCIO CPU approximations from texture conversion.
+            $env:OCIO_OPTIMIZATION_FLAGS = '0'
+            cargo test --locked -p mondrian-renderer --lib encoded_unorm16_input_matches_cpu_color_on_real_gpu -- --nocapture
+            exit 1
+          }
 
       - name: 编译
         run: cargo build --workspace --exclude mondrian-app

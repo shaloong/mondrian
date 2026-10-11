@@ -6581,77 +6581,104 @@ mod tests {
                 .expect("CPU reference")
                 .result
                 .frame;
-            let mut runtime =
-                RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_310).expect("GPU runtime");
-            let mut encoder =
-                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("mondrian-test-rgba16-input-parity"),
-                });
-            let record = runtime
-                .record_wgpu_input_stage_owned_backend(
-                    &transform,
-                    &source,
-                    RenderColorTransformGpuOptions::default(),
-                    RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
-                        device: &context.device,
-                        queue: &context.queue,
-                        encoder: &mut encoder,
-                        load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                    },
-                )
-                .expect("RGBA16 source records through production OCIO input stage");
-            assert_eq!(
-                record.materialized.input.texture_format(),
-                GpuColorFrameTextureFormat::Rgba16Unorm
-            );
-            assert_eq!(record.stage_diagnostics.upload_stages, 1);
-            assert_eq!(record.stage_diagnostics.readback_stages, 0);
+            // The float control uses the exact CPU normalization of the same
+            // sixteen-bit fixture, isolating texture conversion from OCIO math.
+            let float_control =
+                CpuSourceColorFrame::from(crate::CpuEncodedFloatColorFrame::source_flat_rgba_f32(
+                    4,
+                    4,
+                    color_space,
+                    samples.iter().map(|sample| f32::from(*sample) / f32::from(u16::MAX)).collect(),
+                ));
+            let mut violations = Vec::new();
+            for (source, input_format) in [
+                (&float_control, GpuColorFrameTextureFormat::Rgba32Float),
+                (&source, GpuColorFrameTextureFormat::Rgba16Unorm),
+            ] {
+                let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_310)
+                    .expect("GPU runtime");
+                let mut encoder =
+                    context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("mondrian-test-rgba16-input-parity"),
+                    });
+                let record = runtime
+                    .record_wgpu_input_stage_owned_backend(
+                        &transform,
+                        source,
+                        RenderColorTransformGpuOptions::default(),
+                        RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                            device: &context.device,
+                            queue: &context.queue,
+                            encoder: &mut encoder,
+                            load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        },
+                    )
+                    .expect("RGBA16 source records through production OCIO input stage");
+                assert_eq!(record.materialized.input.texture_format(), input_format);
+                assert_eq!(record.stage_diagnostics.upload_stages, 1);
+                assert_eq!(record.stage_diagnostics.readback_stages, 0);
 
-            let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("mondrian-test-rgba16-working-readback"),
-                size: 256 * 4,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
-            let output = runtime
-                .frame_table()
-                .get(&record.materialized.output)
-                .expect("working output exists");
-            encoder.copy_texture_to_buffer(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &output.resource().texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &readback,
-                    layout: wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(256),
-                        rows_per_image: Some(4),
+                let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("mondrian-test-rgba16-working-readback"),
+                    size: 256 * 4,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                let output = runtime
+                    .frame_table()
+                    .get(&record.materialized.output)
+                    .expect("working output exists");
+                encoder.copy_texture_to_buffer(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &output.resource().texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
                     },
-                },
-                wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
-            );
-            context.queue.submit(std::iter::once(encoder.finish()));
-            let mapped = map_readback_buffer(&context.device, &readback);
-            let actual = mapped
-                .chunks_exact(256)
-                .take(4)
-                .flat_map(|row| bytemuck::cast_slice::<u8, f32>(&row[..64]).iter().copied())
-                .collect::<Vec<_>>();
-            readback.unmap();
-            let expected = expected.rgba_f32().data.as_flattened();
-            let max_delta = actual
-                .iter()
-                .zip(expected)
-                .map(|(actual, expected)| (actual - expected).abs())
-                .fold(0.0_f32, f32::max);
-            assert_eq!(actual.len(), expected.len());
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &readback,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(256),
+                            rows_per_image: Some(4),
+                        },
+                    },
+                    wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+                );
+                context.queue.submit(std::iter::once(encoder.finish()));
+                let mapped = map_readback_buffer(&context.device, &readback);
+                let actual = mapped
+                    .chunks_exact(256)
+                    .take(4)
+                    .flat_map(|row| bytemuck::cast_slice::<u8, f32>(&row[..64]).iter().copied())
+                    .collect::<Vec<_>>();
+                readback.unmap();
+                let expected = expected.rgba_f32().data.as_flattened();
+                let max_delta = actual
+                    .iter()
+                    .zip(expected)
+                    .map(|(actual, expected)| (actual - expected).abs())
+                    .fold(0.0_f32, f32::max);
+                assert_eq!(actual.len(), expected.len());
+                assert!(
+                    actual.iter().all(|sample| sample.is_finite()),
+                    "{input_format:?} {color_space:?} produced nonfinite working samples"
+                );
+                let mut differences = actual.iter().zip(expected).enumerate().collect::<Vec<_>>();
+                differences.sort_by(|(_, (actual_a, expected_a)), (_, (actual_b, expected_b))| {
+                    (*actual_b - *expected_b).abs().total_cmp(&(*actual_a - *expected_a).abs())
+                });
+                eprintln!(
+                    "{input_format:?} {color_space:?} max delta {max_delta}; worst samples {:?}",
+                    &differences[..3]
+                );
+                if max_delta > 1.0e-3 {
+                    violations.push((input_format, max_delta));
+                }
+            }
             assert!(
-                max_delta <= 1.0e-3,
-                "RGBA16 {color_space:?} GPU/CPU working max delta {max_delta}"
+                violations.is_empty(),
+                "{color_space:?} GPU/CPU working parity failures: {violations:?}"
             );
         }
     }
