@@ -673,7 +673,18 @@ impl OpenFxFilterSession {
             })
         })();
         probe.finish(OpenFxRenderPhase::InputAdmission, phase);
-        admission?;
+        if let Err(error) = admission {
+            // An observed owner stop retires this invocation's instance even
+            // before submission. Invalid authored inputs remain recoverable;
+            // they have not changed the native session or its request serial.
+            if matches!(
+                error,
+                OpenFxHostError::Canceled | OpenFxHostError::DeadlineExceeded
+            ) {
+                self.process.terminate()?;
+            }
+            return Err(error);
+        }
         let phase = probe.start();
         let allocation = {
             let mut checkpoint = || self.process.check(&mut owner_checkpoint, deadline);

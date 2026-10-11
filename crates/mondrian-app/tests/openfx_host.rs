@@ -991,10 +991,11 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
         ),
         Err(OpenFxHostError::Canceled)
     ));
-    assert!(matches!(
-        preview.render(&timing, &BTreeMap::new(), &input, &mut || Ok(())),
-        Err(OpenFxHostError::Unavailable(_))
-    ));
+    let after_cancellation = preview.render(&timing, &BTreeMap::new(), &input, &mut || Ok(()));
+    assert!(
+        matches!(after_cancellation, Err(OpenFxHostError::Unavailable(_))),
+        "{after_cancellation:?}"
+    );
     // Retiring one consumer never releases the other consumer's worker/mapping.
     let live = mondrian_core::ExecutionCancellationToken::new();
     assert_eq!(
@@ -1002,6 +1003,17 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
             .render(&timing, &BTreeMap::new(), &input, &mut checkpoint(&live))
             .expect("surviving export"),
         input
+    );
+    assert!(matches!(
+        export.render(&timing, &BTreeMap::new(), &input, &mut || {
+            Err(OpenFxHostError::DeadlineExceeded)
+        }),
+        Err(OpenFxHostError::DeadlineExceeded)
+    ));
+    let after_deadline = export.render(&timing, &BTreeMap::new(), &input, &mut || Ok(()));
+    assert!(
+        matches!(after_deadline, Err(OpenFxHostError::Unavailable(_))),
+        "{after_deadline:?}"
     );
     export.shutdown().expect("native destruction and child reap");
     export.shutdown().expect("idempotent shutdown");
