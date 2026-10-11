@@ -853,9 +853,9 @@ pub fn process_authority() -> Option<&'static PreparedAuthority> {
     PROCESS_AUTHORITY.get()
 }
 
-struct Job(File);
+pub(super) struct Job(File);
 impl Job {
-    fn new() -> Result<Self, LaunchError> {
+    pub(super) fn new() -> Result<Self, LaunchError> {
         use windows_sys::Win32::System::JobObjects::*;
         let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if handle.is_null() {
@@ -877,7 +877,7 @@ impl Job {
         }
         Ok(job)
     }
-    fn assign_and_resume(&self, child: &std::process::Child) -> Result<(), LaunchError> {
+    pub(super) fn assign_and_resume(&self, child: &std::process::Child) -> Result<(), LaunchError> {
         use windows_sys::Win32::System::Diagnostics::ToolHelp::*;
         use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
         use windows_sys::Win32::System::Threading::{
@@ -917,7 +917,7 @@ impl Job {
         }
         Ok(())
     }
-    fn active(&self) -> Result<u32, LaunchError> {
+    pub(super) fn active(&self) -> Result<u32, LaunchError> {
         use windows_sys::Win32::System::JobObjects::*;
         let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
         if unsafe {
@@ -934,7 +934,7 @@ impl Job {
         }
         Ok(accounting.ActiveProcesses)
     }
-    fn terminate(&self) -> Result<(), LaunchError> {
+    pub(super) fn terminate(&self) -> Result<(), LaunchError> {
         if unsafe {
             windows_sys::Win32::System::JobObjects::TerminateJobObject(
                 self.0.as_raw_handle(),
