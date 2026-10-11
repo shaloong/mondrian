@@ -192,6 +192,18 @@ jobs:
             libavdevice-dev libswscale-dev libswresample-dev \
             libasound2-dev libdbus-1-dev libxcb1-dev pkg-config
 
+      # Hosted Linux runners use Mesa software Vulkan for shader correctness.
+      # This provider is not evidence of physical GPU or playback qualification.
+      - name: Install and verify headless Vulkan test provider (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools
+          install -d -m 700 "$RUNNER_TEMP/mondrian-xdg-runtime"
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/mondrian-xdg-runtime"
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          echo "WGPU_BACKEND=vulkan" >> "$GITHUB_ENV"
+          vulkaninfo --summary
+
       # ── macOS ─────────────────────────────────────────────────────────────
       - name: 安装 FFmpeg (macOS)
         if: runner.os == 'macOS'
@@ -360,6 +372,17 @@ jobs:
             libavdevice-dev libswscale-dev libswresample-dev \
             libasound2-dev libdbus-1-dev libxcb1-dev pkg-config
 
+      # Exercise the same shader and compositor contracts on software Vulkan.
+      # Physical Metal qualification remains a separate real-machine test.
+      - name: Install and verify headless Vulkan test provider
+        run: |
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools
+          install -d -m 700 "$RUNNER_TEMP/mondrian-xdg-runtime"
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/mondrian-xdg-runtime"
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          echo "WGPU_BACKEND=vulkan" >> "$GITHUB_ENV"
+          vulkaninfo --summary
+
       # Distribution package retains Noto's OFL-1.1 notices; no font is vendored.
       - name: Install and verify Linux title font
         run: |
@@ -370,7 +393,7 @@ jobs:
         run: cargo test -p mondrian-app --all-targets
 
       - name: 运行 app UI primitive/draw-command renderer 测试
-        run: cargo test -p mondrian-ui-renderer
+        run: cargo test -p mondrian-ui-renderer -- --nocapture
 
       - name: 运行 app UI widget 极端场景测试
         run: cargo test -p mondrian-ui-widgets component_extreme_tests
