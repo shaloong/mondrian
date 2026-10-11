@@ -26,10 +26,10 @@ use mondrian_effects::{
     TrackingRegion, TrackingTransform,
 };
 use mondrian_media::{
-    DecodedVideoMatrix, DecodedVideoRangeContract, PreviewDecodeAccessMode, PreviewDecodeOutcome,
-    PreviewDecodeRequest, PreviewDecodeSessionContext, PreviewSourceColorContract,
+    DecodedVideoRangeContract, PreviewDecodeAccessMode, PreviewDecodeOutcome, PreviewDecodeRequest,
+    PreviewDecodeSessionContext, PreviewSourceColorContract,
 };
-use mondrian_timeline::sequence::{InputColorResolutionSource, ResolvedInputColor};
+use mondrian_timeline::sequence::ResolvedInputColor;
 use sha2::{Digest, Sha256};
 
 use super::endurance_shutdown::{join_workers_until, EnduranceWorkerShutdownEvidence};
@@ -855,16 +855,13 @@ impl AppState {
                 ));
             }
         };
-        let mut source_color = PreviewSourceColorContract::new(
+        let source_color = mondrian_renderer::color::SourceColorModule::decode_contract(
             color_space,
-            DecodedVideoRangeContract::from_interpretation(
-                asset.interpretation.range,
-                video.color_range,
-            ),
-        );
-        if decision.source == InputColorResolutionSource::MissingPolicyAssumeRec709 {
-            source_color = source_color.with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709);
-        }
+            DecodedVideoRangeContract::from_video_stream(asset.interpretation.range, video),
+            decision.source,
+        )
+        .with_video_stream_sampling(video)
+        .with_matrix_interpretation(asset.interpretation.matrix);
         let current_sequence_time = anchor_sequence_time.unwrap_or(clip.position);
         let (frames, anchor_index) =
             tracking_frame_requests(&clip, frame_rate, current_sequence_time, direction)?;
@@ -873,6 +870,7 @@ impl AppState {
             asset_id,
             source_fingerprint,
             video.index,
+            source_color,
             &frames,
             anchor_index,
             &initial_shape,
@@ -1218,6 +1216,7 @@ fn tracking_cache_key(
     asset_id: AssetId,
     fingerprint: MediaFileFingerprint,
     video_stream_index: u32,
+    source_color: PreviewSourceColorContract,
     frames: &[TrackingFrameRequest],
     anchor_index: usize,
     shape: &MaskShape,
@@ -1226,13 +1225,17 @@ fn tracking_cache_key(
     settings: MaskTrackingSettings,
 ) -> Result<[u8; 32], VisualTrackingRequestError> {
     let mut hasher = Sha256::new();
-    hasher.update(b"mondrian.visual-tracking.v1\0");
+    hasher.update(b"mondrian.visual-tracking.v2\0");
     hasher.update(asset_id.to_string().as_bytes());
     hasher.update(
         serde_json::to_vec(&fingerprint)
             .map_err(|error| VisualTrackingRequestError::InvalidRange(error.to_string()))?,
     );
     hasher.update(video_stream_index.to_le_bytes());
+    hasher.update(
+        serde_json::to_vec(&source_color)
+            .map_err(|error| VisualTrackingRequestError::InvalidRange(error.to_string()))?,
+    );
     hasher.update(anchor_index.to_le_bytes());
     for frame in frames {
         hasher.update(

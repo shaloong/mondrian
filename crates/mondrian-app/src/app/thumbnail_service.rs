@@ -129,6 +129,17 @@ pub enum ThumbnailRasterColorSpace {
 
 /// Validated UI-independent thumbnail raster.
 #[derive(Debug, Clone)]
+pub struct ThumbnailSampleFallback {
+    /// Representative target whose decoded interval could not be proved.
+    pub requested: mondrian_core::SourceSampleTarget,
+    /// Alternate deterministic target actually decoded.
+    pub selected: mondrian_core::SourceSampleTarget,
+    /// Original failure, retained without claiming the requested frame succeeded.
+    pub failure: ThumbnailFailure,
+}
+
+/// Validated UI-independent thumbnail raster.
+#[derive(Debug, Clone)]
 pub struct ThumbnailRasterFrame {
     /// Stable renderer-resource identity.
     pub resource_key: String,
@@ -140,6 +151,8 @@ pub struct ThumbnailRasterFrame {
     pub color_space: ThumbnailRasterColorSpace,
     /// Row-major RGBA8 payload.
     pub rgba: Arc<[u8]>,
+    /// Visible alternate-sample evidence; None means the representative target succeeded.
+    pub sample_fallback: Option<ThumbnailSampleFallback>,
 }
 
 impl ThumbnailRasterFrame {
@@ -158,6 +171,7 @@ impl ThumbnailRasterFrame {
             height,
             color_space,
             rgba,
+            sample_fallback: None,
         })
     }
 

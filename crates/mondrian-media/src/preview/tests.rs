@@ -522,8 +522,99 @@ fn covering_decode_request<'a>(
     )
 }
 
+#[test]
+#[ignore = "requires an external source and explicit valid 30 fps sample coordinates; temporal diagnosis only"]
+fn external_source_covering_samples_preserve_temporal_evidence() {
+    let path =
+        PathBuf::from(std::env::var_os("MONDRIAN_PREVIEW_EXTERNAL_MEDIA_PATH").expect("source"));
+    let frames = std::env::var("MONDRIAN_PREVIEW_COMPATIBILITY_FRAMES").expect("samples");
+    let (bootstrap, observer) = match std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH") {
+        Some(worker) => {
+            PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker.into())
+        }
+        None => PreviewDecodeSessionContext::observed_bootstrap(),
+    };
+    let mut context = bootstrap.build();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for coordinate in frames.split(',') {
+            let coordinate: i64 = coordinate.parse().expect("30 fps coordinate");
+            let request = covering_decode_request(
+                &path,
+                TimelineTime::new(coordinate, 30).expect("time"),
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+                // This diagnostic supplies an explicit sampling policy; it
+                // does not qualify the source's unknown RGB color identity.
+                test_source_color().with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709),
+            );
+            let outcome = context
+                .decode_cancellable(request, || false)
+                .unwrap_or_else(|error| panic!("coordinate {coordinate}: {error:?}"));
+            let diagnostics = match &outcome {
+                PreviewDecodeOutcome::Frame(frame) => &frame.diagnostics,
+                PreviewDecodeOutcome::FloatFrame(frame) => &frame.diagnostics,
+                PreviewDecodeOutcome::Unorm16Frame(frame) => &frame.diagnostics,
+                PreviewDecodeOutcome::CpuYuvFrame(frame) => &frame.diagnostics,
+                other => panic!("unexpected outcome: {other:?}"),
+            };
+            eprintln!("SOURCE_TEMPORAL_SAMPLE={coordinate} {diagnostics:?}");
+            let extent = diagnostics.temporal_selection().expect("selection proof");
+            let requested = diagnostics.requested_pts.expect("requested PTS");
+            assert!(extent.selected_pts <= requested);
+            assert!(requested < extent.selected_pts + extent.selected_duration_pts);
+        }
+    }));
+    context.clear();
+    drop(context);
+    let closure = observer.snapshot();
+    eprintln!("SOURCE_TEMPORAL_CLOSURE={closure:?}");
+    assert_eq!(closure.isolated_demux.active_sessions, 0);
+    assert_eq!(
+        closure.isolated_demux.reaped_sessions(),
+        closure.isolated_demux.session_launches
+    );
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 fn test_linear_source_color() -> PreviewSourceColorContract {
     PreviewSourceColorContract::automatic(ColorSpace::Aces2065_1, DecodedVideoRange::Full)
+}
+
+#[test]
+fn authored_yuv_coefficients_are_independent_of_rgb_color_range_and_data() {
+    use mondrian_core::timeline_data::{MediaMatrixInterpretation, MediaYuvMatrix};
+    let override_matrix = MediaMatrixInterpretation::Override { matrix: MediaYuvMatrix::Smpte170M };
+    let source =
+        PreviewSourceColorContract::automatic(ColorSpace::Rec2100Pq, DecodedVideoRange::Limited);
+    let authored = source.with_matrix_interpretation(override_matrix);
+    assert_ne!(
+        source, authored,
+        "decode/cache identity includes the authored coefficient authority"
+    );
+    assert_eq!(authored.color_space(), Some(ColorSpace::Rec2100Pq));
+    assert_eq!(authored.range, source.range);
+    for raw in [
+        DecodedVideoMatrix::Unknown,
+        DecodedVideoMatrix::Bt709,
+        DecodedVideoMatrix::Unsupported,
+    ] {
+        assert_eq!(
+            authored.resolve_yuv_matrix(raw),
+            DecodedVideoMatrix::Smpte170M
+        );
+    }
+    assert_eq!(
+        authored.with_matrix_interpretation(MediaMatrixInterpretation::Auto),
+        source
+    );
+    let data = PreviewSourceColorContract::data_texture(DecodedVideoRangeContract::OverrideFull);
+    assert_eq!(data.with_matrix_interpretation(override_matrix), data);
+    let serialized = serde_json::to_string(&authored).expect("contract encoding");
+    assert_eq!(
+        serde_json::from_str::<PreviewSourceColorContract>(&serialized).expect("contract decoding"),
+        authored
+    );
 }
 
 #[test]
@@ -2716,8 +2807,16 @@ fn high_bit_depth_cpu_materialization_preserves_encoded_float_precision() {
     std::fs::write(&path, [1, 2, 3, 4]).expect("source revision bytes");
     let source = PreviewDecodeSource::capture_probed_stream(&path, &stream)
         .expect("proven high-depth source");
+    assert!(
+        source.cpu_rgba_retained_bytes_per_pixel(test_source_color()) * 2
+            >= std::mem::size_of_val(frame.rgba()),
+        "automatic per-picture range reserves enough space for either packed or float RGB"
+    );
     assert_eq!(
-        source.cpu_rgba_retained_bytes_per_pixel(test_source_color()) * 2,
+        source.cpu_rgba_retained_bytes_per_pixel(PreviewSourceColorContract::new(
+            ColorSpace::Rec709,
+            DecodedVideoRangeContract::OverrideFull,
+        )) * 2,
         std::mem::size_of_val(frame.rgba()),
         "source metadata reserves the materializer's actual RGBA16 payload"
     );
@@ -2872,13 +2971,13 @@ fn proven_cpu_sampling_reservation_matches_actual_eight_and_ten_bit_payloads() {
             ffmpeg::util::format::pixel::Pixel::YUV420P,
             crate::info::PixelFormat::Yuv420p,
             8,
-            4,
+            16,
         ),
         (
             ffmpeg::util::format::pixel::Pixel::YUV420P10LE,
             crate::info::PixelFormat::Yuv420p10le,
             10,
-            8,
+            16,
         ),
     ] {
         let mut decoded = ffmpeg::util::frame::video::Video::new(format, 4, 2);
@@ -2930,6 +3029,78 @@ fn proven_cpu_sampling_reservation_matches_actual_eight_and_ten_bit_payloads() {
         assert_eq!(
             source.cpu_rgba_retained_bytes_per_pixel(test_source_color()) * 8,
             retained
+        );
+    }
+}
+
+#[test]
+fn integer_yuv_cpu_materialization_preserves_subblack_and_superwhite() {
+    use ffmpeg::util::format::pixel::Pixel;
+    for (format, depth) in [
+        (Pixel::YUV411P, 8),
+        (Pixel::YUV420P, 8),
+        (Pixel::YUV444P10LE, 10),
+        (Pixel::YUV444P12LE, 12),
+        (Pixel::YUV444P16LE, 16),
+    ] {
+        let scale = 1_u16 << (depth - 8);
+        let bytes = if depth == 8 { 1 } else { 2 };
+        let mut decoded = ffmpeg::util::frame::video::Video::new(format, 8, 2);
+        decoded.set_color_space(ffmpeg::util::color::Space::SMPTE170M);
+        decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+        for plane in 0..decoded.planes() {
+            let stride = decoded.stride(plane);
+            for data in decoded.data_mut(plane).chunks_mut(stride) {
+                for (x, code) in data.chunks_exact_mut(bytes).enumerate() {
+                    let value = if plane == 0 {
+                        [0, 16, 235, 254][x % 4]
+                    } else {
+                        128
+                    } * scale;
+                    if bytes == 1 {
+                        code[0] = value as u8;
+                    } else {
+                        code.copy_from_slice(&value.to_le_bytes());
+                    }
+                }
+            }
+        }
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::DVVIDEO,
+            None,
+        );
+        let payload = materialize_decoded_frame(
+            &decoded,
+            PreviewDecodeRepresentation::NativeCpu,
+            &mut plan,
+            &mut None,
+            &mut None,
+            &mut None,
+            8,
+            2,
+            Path::new("yuv-headroom"),
+            test_source_color(),
+        )
+        .expect("unclamped YCbCr conversion");
+        let PreviewDecodedFramePayload::CpuFloat(frame) = payload else {
+            panic!("YCbCr CPU output must preserve encoded Float32 headroom");
+        };
+        for (index, pixel) in frame.rgba().chunks_exact(4).enumerate() {
+            let expected = (f32::from([0_u8, 16, 235, 254][index % 4]) - 16.0) / 219.0;
+            for component in &pixel[..3] {
+                assert!(
+                    (component - expected).abs() < 0.0001,
+                    "{format:?}: {pixel:?}, expected {expected}"
+                );
+            }
+            assert_eq!(pixel[3], 1.0);
+        }
+        assert_eq!(
+            frame.color_contract.applied_matrix,
+            DecodedVideoMatrix::Smpte170M
         );
     }
 }
@@ -3831,7 +4002,7 @@ fn playback_session_drains_reordered_frames_between_sequential_requests() {
         .with_max_size(Some(64), Some(64));
         let outcome = decode_preview_frame_cancellable(request, || false)
             .expect("sequential B-frame playback request must decode");
-        let PreviewDecodeOutcome::Frame(frame) = outcome else {
+        let PreviewDecodeOutcome::FloatFrame(frame) = outcome else {
             panic!("CPU playback fixture must return an RGBA frame");
         };
         if index > 5 {
@@ -3876,7 +4047,7 @@ fn playback_sessions_preserve_source_locality_across_composited_sources() {
         let outcome = context
             .decode_cancellable(request, || false)
             .unwrap_or_else(|error| panic!("source-local playback frame must decode: {error}"));
-        let PreviewDecodeOutcome::Frame(frame) = outcome else {
+        let PreviewDecodeOutcome::FloatFrame(frame) = outcome else {
             panic!("software playback fixture must return an RGBA frame");
         };
         let expected = if index < 2 {
@@ -4020,7 +4191,7 @@ fn playback_session_reuses_decoder_across_adaptive_output_geometry() {
         let outcome = context
             .decode_cancellable(request, || false)
             .unwrap_or_else(|error| panic!("adaptive frame {frame_index} must decode: {error}"));
-        let PreviewDecodeOutcome::Frame(frame) = outcome else {
+        let PreviewDecodeOutcome::FloatFrame(frame) = outcome else {
             panic!("software playback fixture must return an RGBA frame");
         };
         assert_eq!((frame.width, frame.height), (extent, extent));
@@ -4061,7 +4232,7 @@ fn reverse_playback_replays_the_bounded_decoded_gop_tail_without_reseeking() {
         let outcome = context
             .decode_cancellable(request, || false)
             .unwrap_or_else(|error| panic!("reverse frame {frame_index} must decode: {error}"));
-        let PreviewDecodeOutcome::Frame(frame) = outcome else {
+        let PreviewDecodeOutcome::FloatFrame(frame) = outcome else {
             panic!("software reverse fixture must return an RGBA frame");
         };
         assert_eq!(frame.diagnostics.requested_pts, Some(frame_index * 1_024));
@@ -4102,7 +4273,7 @@ fn exact_random_access_decodes_stream_start_with_negative_dts_preroll() {
         let outcome = context
             .decode_cancellable(request, || false)
             .unwrap_or_else(|error| panic!("exact frame {frame_index} must decode: {error}"));
-        let PreviewDecodeOutcome::Frame(frame) = outcome else {
+        let PreviewDecodeOutcome::FloatFrame(frame) = outcome else {
             panic!("CPU exact fixture must return an RGBA frame");
         };
         assert_eq!(frame.diagnostics.requested_pts, Some(frame_index * 1_024));
@@ -4141,7 +4312,7 @@ fn isolated_demux_worker_reuses_each_access_mode_session_across_requests() {
     .with_max_size(Some(64), Some(64));
 
     let outcome = context.decode_cancellable(request, || false).expect("isolated exact decode");
-    let PreviewDecodeOutcome::Frame(frame) = outcome else {
+    let PreviewDecodeOutcome::FloatFrame(frame) = outcome else {
         panic!("software exact decode must return an RGBA frame");
     };
     assert_eq!((frame.width, frame.height), (64, 64));
@@ -4157,7 +4328,7 @@ fn isolated_demux_worker_reuses_each_access_mode_session_across_requests() {
     let second_outcome = context
         .decode_cancellable(second_request, || false)
         .expect("second isolated exact decode");
-    let PreviewDecodeOutcome::Frame(second_frame) = second_outcome else {
+    let PreviewDecodeOutcome::FloatFrame(second_frame) = second_outcome else {
         panic!("second software exact decode must return an RGBA frame");
     };
     assert_eq!((second_frame.width, second_frame.height), (64, 64));
@@ -4182,7 +4353,7 @@ fn isolated_demux_worker_reuses_each_access_mode_session_across_requests() {
             let outcome = context
                 .decode_cancellable(request, || false)
                 .expect("isolated access-mode decode");
-            let PreviewDecodeOutcome::Frame(frame) = outcome else {
+            let PreviewDecodeOutcome::FloatFrame(frame) = outcome else {
                 panic!("software access-mode decode must return an RGBA frame");
             };
             if request_index == 1 {
@@ -4976,45 +5147,49 @@ fn preview_decode_fixture_perf_smoke() {
         test_source_color(),
     )
     .with_max_size(max_width, max_height);
-    let frame = match decode_preview_frame_cancellable(request, || false)
-        .expect("decode preview fixture")
-    {
-        PreviewDecodeOutcome::Frame(frame) => frame,
-        PreviewDecodeOutcome::Canceled(_) => {
-            panic!("still-frame perf decode canceled")
-        }
-        PreviewDecodeOutcome::NativeGpuFrame(_) => {
-            panic!("still-frame perf decode requires CPU RGBA output")
-        }
-        PreviewDecodeOutcome::FloatFrame(_) => {
-            panic!("Rec.709 still-frame perf fixture unexpectedly decoded as float")
-        }
-        PreviewDecodeOutcome::Unorm16Frame(_) => {
-            panic!("Rec.709 still-frame perf fixture unexpectedly decoded as RGBA16")
-        }
-        PreviewDecodeOutcome::CpuYuvFrame(_) => {
-            panic!("still-frame perf decode requires CPU RGBA output")
-        }
-    };
+    let (decoded_width, decoded_height, rgba_bytes, diagnostics) =
+        match decode_preview_frame_cancellable(request, || false).expect("decode preview fixture") {
+            PreviewDecodeOutcome::Frame(frame) => (
+                frame.width,
+                frame.height,
+                frame.data.len(),
+                frame.diagnostics,
+            ),
+            PreviewDecodeOutcome::FloatFrame(frame) => (
+                frame.width,
+                frame.height,
+                std::mem::size_of_val(frame.rgba()),
+                frame.diagnostics,
+            ),
+            PreviewDecodeOutcome::Unorm16Frame(frame) => (
+                frame.width,
+                frame.height,
+                std::mem::size_of_val(frame.rgba()),
+                frame.diagnostics,
+            ),
+            other => {
+                panic!("still-frame diagnostic requires an owning CPU RGBA payload: {other:?}")
+            }
+        };
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let report = PreviewDecodePerfReport {
         path: path.display().to_string(),
         timestamp_secs,
         max_width,
         max_height,
-        decoded_width: frame.width,
-        decoded_height: frame.height,
-        rgba_bytes: frame.data.len(),
+        decoded_width,
+        decoded_height,
+        rgba_bytes,
         elapsed_ms,
-        diagnostics_elapsed_us: frame.diagnostics.elapsed_us,
-        path_kind: frame.diagnostics.path.as_str(),
-        cache_hit: frame.diagnostics.cache_hit,
-        cpu_resident: frame.diagnostics.cpu_resident,
-        seek_performed: frame.diagnostics.seek_performed,
-        decoded_frame_count: frame.diagnostics.decoded_frame_count,
-        threading_kind: frame.diagnostics.threading_kind.as_str(),
-        threading_count: frame.diagnostics.threading_count,
-        stage_durations: frame.diagnostics.stage_durations,
+        diagnostics_elapsed_us: diagnostics.elapsed_us,
+        path_kind: diagnostics.path.as_str(),
+        cache_hit: diagnostics.cache_hit,
+        cpu_resident: diagnostics.cpu_resident,
+        seek_performed: diagnostics.seek_performed,
+        decoded_frame_count: diagnostics.decoded_frame_count,
+        threading_kind: diagnostics.threading_kind.as_str(),
+        threading_count: diagnostics.threading_count,
+        stage_durations: diagnostics.stage_durations,
     };
     let json = serde_json::to_string(&report).expect("serialize decode perf report");
     eprintln!("MONDRIAN_PREVIEW_DECODE_PERF_JSON={json}");
@@ -5041,8 +5216,8 @@ fn native_reordered_gop_seeks_preserve_exact_covering_intervals() {
         );
         let outcome = decode_preview_frame_cancellable(request, || false)
             .unwrap_or_else(|error| panic!("program frame {frame_index}: {error}"));
-        let PreviewDecodeOutcome::Unorm16Frame(frame) = outcome else {
-            panic!("Main10 software decode must retain source-encoded UNORM16 precision");
+        let PreviewDecodeOutcome::FloatFrame(frame) = outcome else {
+            panic!("Main10 software decode must retain unclamped source-encoded Float32 precision");
         };
         assert_eq!(frame.diagnostics.decoded_video_sampling.bit_depth, 10);
         assert_eq!(
@@ -5567,7 +5742,7 @@ fn reduced_representation_materializes_the_reduced_raster_not_the_source_raster(
     );
     let outcome =
         decode_preview_frame_cancellable(request, || false).expect("reduced decode must succeed");
-    let PreviewDecodeOutcome::Frame(frame) = outcome else {
+    let PreviewDecodeOutcome::FloatFrame(frame) = outcome else {
         panic!("reduced decode must return an RGBA frame");
     };
     assert_eq!(
@@ -5639,7 +5814,7 @@ fn full_and_reduced_representations_decode_independently_from_the_same_source() 
         let outcome = context
             .decode_cancellable(request, || false)
             .unwrap_or_else(|error| panic!("representation {index} must decode: {error}"));
-        let PreviewDecodeOutcome::Frame(frame) = outcome else {
+        let PreviewDecodeOutcome::FloatFrame(frame) = outcome else {
             panic!("representation {index} must return an RGBA frame");
         };
         assert_eq!(

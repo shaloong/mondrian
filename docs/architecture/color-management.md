@@ -840,6 +840,41 @@ authority and baseline range, so changing a range override cannot reuse pixels
 created under the old sampling contract. Proxy generation retains its own
 versioned source-range contract and fingerprint.
 
+Codec conventions are typed sampling evidence, never RGB colorimetry evidence.
+A validated SD DV DIF profile supplies BT.601 coefficients and video levels.
+Its missing-matrix fallback stays independent of an authored range override.
+VC-3/DNx uses each decoded picture's CLV-derived matrix: in-band BT.709/BT.2020
+color volumes imply nominal video levels, including RGB coding. Out-of-band
+CLV requires an authored range interpretation; the unqualified FFmpeg range
+field does not prove the external digital representation. A conflicting
+full-range tag fails closed. A first-packet header
+cannot declare the range of every subsequent picture. Untagged 8-bit SDR
+MPEG-4/MSMPEG4/FLV1/Theora may use the explicit legacy video-level assumption;
+the raw probe range stays Unknown, the assumption is displayed, and an authored
+override remains authoritative. HDR, high-bit and unrelated codecs cannot
+inherit that assumption. These rules enter Preview, thumbnails and Export
+through `DecodedVideoRangeContract::from_video_stream`.
+
+Asset RGB color identity, YCbCr coefficient interpretation and quantization
+range are independent persistent intents. Interpret Footage can override the
+matrix explicitly when metadata is missing or incorrect; selecting RGB
+primaries/transfer alone never invents YCbCr coefficients. The same immutable
+decode contract binds these intents for Preview, thumbnails, Proxy, Export and
+picture tracking, including their cache identities. RGB/data payloads do not
+apply a YCbCr correction. Smart Render cannot bypass an authored sample
+correction or reuse encoded pixels under different matrix tags.
+
+CPU YCbCr and limited integer RGB preserve negative and extended encoded RGB
+in Float32 before the shared OCIO input boundary. Ordinary float RGB and data
+remain unchanged. Proxy color identity includes the actual sampling matrix
+independently of RGB primaries/transfer: scaling preserves that matrix and its
+range, and output tags describe the resulting samples. The same contract binds
+the original absolute picture-stream index; FFmpeg maps that stream rather than
+assuming the first video stream, which may be an attached cover or another angle.
+Unsupported matrices,
+unresolved whole-source range, and limited RGB requiring explicit materialization
+are rejected before proxy execution rather than retagged as BT.709/full RGB.
+
 Alpha is coverage, not color, and never passes through an OCIO RGB processor.
 Decoded source frames are normalized to the renderer's straight-alpha working
 contract before the source-to-working transform: straight input is shared

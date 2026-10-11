@@ -2,7 +2,8 @@
 
 use mondrian_core::display_labels::color_space_label;
 use mondrian_core::timeline_data::{
-    AssetMediaInterpretation, MediaColorInterpretation, MediaRangeInterpretation, MediaSignalRange,
+    AssetMediaInterpretation, MediaColorInterpretation, MediaMatrixInterpretation,
+    MediaRangeInterpretation, MediaSignalRange, MediaYuvMatrix,
 };
 use mondrian_core::types::{AssetId, ColorSpace, OcioColorSpaceIdentity};
 use mondrian_core::{CameraRawDebayerQuality, CameraRawWhiteBalance};
@@ -26,10 +27,10 @@ use crate::app_ui::localization::{AppUiLocale, Localizer};
 
 const CARD_MIN_WIDTH: f32 = 500.0;
 const CARD_WIDTH: f32 = 620.0;
-const CARD_MIN_HEIGHT: f32 = 500.0;
-const CARD_HEIGHT: f32 = 580.0;
-const RAW_CARD_MIN_HEIGHT: f32 = 650.0;
-const RAW_CARD_HEIGHT: f32 = 720.0;
+const CARD_MIN_HEIGHT: f32 = 548.0;
+const CARD_HEIGHT: f32 = 628.0;
+const RAW_CARD_MIN_HEIGHT: f32 = 698.0;
+const RAW_CARD_HEIGHT: f32 = 768.0;
 const CONTENT_PADDING: f32 = 24.0;
 const TITLE_FONT_SIZE: f32 = 18.0;
 const BODY_FONT_SIZE: f32 = 13.0;
@@ -119,6 +120,8 @@ pub struct InterpretAssetDialog {
     color_space_dropdown: Dropdown,
     range_label: Label,
     range_dropdown: Dropdown,
+    matrix_label: Label,
+    matrix_dropdown: Dropdown,
     raw_exposure_label: Label,
     raw_exposure_dropdown: Dropdown,
     raw_white_balance_label: Label,
@@ -188,9 +191,16 @@ impl InterpretAssetDialog {
             range_dropdown: range_dropdown_for(
                 AssetMediaInterpretation::default(),
                 None,
+                None,
                 &localizer,
             ),
             raw_exposure_label: row_label(localizer.text("interpret-raw-exposure")),
+            matrix_label: row_label(localizer.text("interpret-yuv-matrix")),
+            matrix_dropdown: matrix_dropdown_for(
+                AssetMediaInterpretation::default(),
+                None,
+                &localizer,
+            ),
             raw_exposure_dropdown: raw_exposure_dropdown_for(
                 AssetMediaInterpretation::default(),
                 raw_active,
@@ -250,11 +260,26 @@ impl InterpretAssetDialog {
         self.range_dropdown = range_dropdown_for(
             self.draft.interpretation,
             self.draft.video_signal.as_ref(),
+            self.draft.auto_interpretation.as_ref(),
             &self.localizer,
         )
         .enabled(!raw_active);
         self.raw_exposure_dropdown =
             raw_exposure_dropdown_for(self.draft.interpretation, raw_controls_enabled);
+        self.matrix_dropdown = matrix_dropdown_for(
+            self.draft.interpretation,
+            self.draft.video_signal.as_ref(),
+            &self.localizer,
+        )
+        .enabled(
+            !raw_active
+                && !self
+                    .draft
+                    .video_signal
+                    .as_ref()
+                    .and_then(|signal| signal.sampling)
+                    .is_some_and(|sampling| sampling.pixel_format.is_rgb()),
+        );
         self.raw_white_balance_dropdown = raw_white_balance_dropdown_for(
             self.draft.interpretation,
             raw_controls_enabled,
@@ -351,9 +376,10 @@ fn draft_update_action(
 fn range_dropdown_for(
     interpretation: AssetMediaInterpretation,
     signal: Option<&AppShellVideoSignalDiagnostics>,
+    auto_interpretation: Option<&DetectedColorInterpretation>,
     localizer: &Localizer,
 ) -> Dropdown {
-    let auto_label = range_auto_option_label(signal, localizer);
+    let auto_label = range_auto_option_label(signal, auto_interpretation, localizer);
     let items = vec![
         MenuItem::new(
             auto_label.clone(),
@@ -405,6 +431,52 @@ fn range_draft_update_action(
     app_shell_interpret_asset_draft_changed_action(InterpretAssetDraftUpdatePayload {
         interpretation: AssetMediaInterpretation { range, ..interpretation },
     })
+}
+
+fn matrix_draft_update_action(
+    interpretation: AssetMediaInterpretation,
+    matrix: MediaMatrixInterpretation,
+) -> mondrian_editor_state::Action {
+    app_shell_interpret_asset_draft_changed_action(InterpretAssetDraftUpdatePayload {
+        interpretation: AssetMediaInterpretation { matrix, ..interpretation },
+    })
+}
+
+fn matrix_dropdown_for(
+    interpretation: AssetMediaInterpretation,
+    signal: Option<&AppShellVideoSignalDiagnostics>,
+    localizer: &Localizer,
+) -> Dropdown {
+    let detected = signal
+        .and_then(|signal| signal.color_metadata.as_ref())
+        .map(|metadata| video_color_tag_summary(&metadata.matrix))
+        .unwrap_or_else(|| localizer.text("interpret-matrix-unknown"));
+    let auto = localizer.format_text("interpret-matrix-auto", "detected", &detected);
+    let choices = [
+        (MediaYuvMatrix::Bt709, "BT.709"),
+        (MediaYuvMatrix::Bt2020NonConstant, "BT.2020 NCL"),
+        (MediaYuvMatrix::Bt470Bg, "BT.601 / BT.470BG"),
+        (MediaYuvMatrix::Smpte170M, "BT.601 / SMPTE 170M"),
+        (MediaYuvMatrix::Smpte240M, "SMPTE 240M"),
+        (MediaYuvMatrix::Fcc, "FCC"),
+    ];
+    let mut items = vec![MenuItem::new(
+        auto.clone(),
+        matrix_draft_update_action(interpretation, MediaMatrixInterpretation::Auto),
+    )
+    .checked(interpretation.matrix == MediaMatrixInterpretation::Auto)];
+    let mut label = auto;
+    for (matrix, name) in choices {
+        let mode = MediaMatrixInterpretation::Override { matrix };
+        let selected = interpretation.matrix == mode;
+        if selected {
+            label = name.to_owned();
+        }
+        items.push(
+            MenuItem::new(name, matrix_draft_update_action(interpretation, mode)).checked(selected),
+        );
+    }
+    Dropdown::new(label, items)
 }
 
 fn raw_exposure_dropdown_for(interpretation: AssetMediaInterpretation, enabled: bool) -> Dropdown {
@@ -509,8 +581,27 @@ fn raw_draft_update_action(
 
 fn range_auto_option_label(
     signal: Option<&AppShellVideoSignalDiagnostics>,
+    interpretation: Option<&DetectedColorInterpretation>,
     localizer: &Localizer,
 ) -> String {
+    if signal.is_some_and(|signal| signal.range == DecodedVideoRange::Unknown)
+        && let Some(convention) = interpretation.and_then(|value| {
+            value.evidence.iter().find_map(|entry| match entry {
+                VideoColorInterpretationEvidence::SamplingConvention { convention, .. } => {
+                    Some(convention)
+                }
+                _ => None,
+            })
+        })
+    {
+        return localizer.text(match convention {
+            mondrian_core::VideoSamplingConvention::SdDv => "interpret-range-auto-dv",
+            mondrian_core::VideoSamplingConvention::DnxColorVolume => "interpret-range-auto-dnx",
+            mondrian_core::VideoSamplingConvention::LegacyVideoLevels => {
+                "interpret-range-auto-assumed"
+            }
+        });
+    }
     let detected = signal.map(|signal| range_label_text(signal.range)).unwrap_or("Unknown");
     localizer.format_text("interpret-range-auto", "range", detected)
 }
@@ -806,6 +897,27 @@ fn video_color_tag_summary(tag: &VideoColorTag) -> String {
 
 fn evidence_summary(evidence: &VideoColorInterpretationEvidence, localizer: &Localizer) -> String {
     match evidence {
+        VideoColorInterpretationEvidence::SamplingConvention { codec, convention } => {
+            format_values(
+                localizer,
+                "interpret-evidence-range-convention",
+                [
+                    ("codec", format!("{codec:?}")),
+                    (
+                        "rule",
+                        localizer.text(match convention {
+                            mondrian_core::VideoSamplingConvention::SdDv => "interpret-range-sd-dv",
+                            mondrian_core::VideoSamplingConvention::DnxColorVolume => {
+                                "interpret-range-dnx-clv"
+                            }
+                            mondrian_core::VideoSamplingConvention::LegacyVideoLevels => {
+                                "interpret-range-legacy-assumption"
+                            }
+                        }),
+                    ),
+                ],
+            )
+        }
         VideoColorInterpretationEvidence::CodecDefinedRange { codec, range } => format_values(
             localizer,
             "interpret-evidence-codec-range",
@@ -1034,6 +1146,16 @@ impl Widget for InterpretAssetDialog {
             ROW_HEIGHT,
         ));
 
+        row_y += ROW_HEIGHT + ROW_GAP;
+        self.matrix_label
+            .layout(Rect::new(content.x, row_y, LABEL_COLUMN_WIDTH, ROW_HEIGHT));
+        self.matrix_dropdown.layout(Rect::new(
+            control_x,
+            row_y,
+            control_width.min(360.0),
+            ROW_HEIGHT,
+        ));
+
         if self.raw_active() {
             row_y += ROW_HEIGHT + ROW_GAP;
             self.raw_exposure_label.layout(Rect::new(
@@ -1116,6 +1238,9 @@ impl Widget for InterpretAssetDialog {
                 if self.range_dropdown.event(event, ctx) == EventResult::Handled {
                     return EventResult::Handled;
                 }
+                if self.matrix_dropdown.event(event, ctx) == EventResult::Handled {
+                    return EventResult::Handled;
+                }
                 if self.raw_active() {
                     for dropdown in [
                         &mut self.raw_exposure_dropdown,
@@ -1145,11 +1270,13 @@ impl Widget for InterpretAssetDialog {
         self.status_value_label.paint(ctx);
         self.color_space_label.paint(ctx);
         self.range_label.paint(ctx);
+        self.matrix_label.paint(ctx);
         self.diagnostics_label.paint(ctx);
         self.apply_button.paint(ctx);
         self.cancel_button.paint(ctx);
         self.color_space_dropdown.paint(ctx);
         self.range_dropdown.paint(ctx);
+        self.matrix_dropdown.paint(ctx);
         if self.raw_active() {
             self.raw_exposure_label.paint(ctx);
             self.raw_exposure_dropdown.paint(ctx);
@@ -1166,9 +1293,9 @@ impl Widget for InterpretAssetDialog {
 
     fn child_count(&self) -> usize {
         if self.raw_active() {
-            17
+            19
         } else {
-            11
+            13
         }
     }
 
@@ -1183,9 +1310,11 @@ impl Widget for InterpretAssetDialog {
                 5 => Some(&self.color_space_dropdown),
                 6 => Some(&self.range_label),
                 7 => Some(&self.range_dropdown),
-                8 => Some(&self.diagnostics_label),
-                9 => Some(&self.apply_button),
-                10 => Some(&self.cancel_button),
+                8 => Some(&self.matrix_label),
+                9 => Some(&self.matrix_dropdown),
+                10 => Some(&self.diagnostics_label),
+                11 => Some(&self.apply_button),
+                12 => Some(&self.cancel_button),
                 _ => None,
             };
         }
@@ -1198,15 +1327,17 @@ impl Widget for InterpretAssetDialog {
             5 => Some(&self.color_space_dropdown),
             6 => Some(&self.range_label),
             7 => Some(&self.range_dropdown),
-            8 => Some(&self.diagnostics_label),
-            9 => Some(&self.raw_exposure_label),
-            10 => Some(&self.raw_exposure_dropdown),
-            11 => Some(&self.raw_white_balance_label),
-            12 => Some(&self.raw_white_balance_dropdown),
-            13 => Some(&self.raw_quality_label),
-            14 => Some(&self.raw_quality_dropdown),
-            15 => Some(&self.apply_button),
-            16 => Some(&self.cancel_button),
+            8 => Some(&self.matrix_label),
+            9 => Some(&self.matrix_dropdown),
+            10 => Some(&self.diagnostics_label),
+            11 => Some(&self.raw_exposure_label),
+            12 => Some(&self.raw_exposure_dropdown),
+            13 => Some(&self.raw_white_balance_label),
+            14 => Some(&self.raw_white_balance_dropdown),
+            15 => Some(&self.raw_quality_label),
+            16 => Some(&self.raw_quality_dropdown),
+            17 => Some(&self.apply_button),
+            18 => Some(&self.cancel_button),
             _ => None,
         }
     }
@@ -1222,9 +1353,11 @@ impl Widget for InterpretAssetDialog {
                 5 => Some(&mut self.color_space_dropdown),
                 6 => Some(&mut self.range_label),
                 7 => Some(&mut self.range_dropdown),
-                8 => Some(&mut self.diagnostics_label),
-                9 => Some(&mut self.apply_button),
-                10 => Some(&mut self.cancel_button),
+                8 => Some(&mut self.matrix_label),
+                9 => Some(&mut self.matrix_dropdown),
+                10 => Some(&mut self.diagnostics_label),
+                11 => Some(&mut self.apply_button),
+                12 => Some(&mut self.cancel_button),
                 _ => None,
             };
         }
@@ -1237,15 +1370,17 @@ impl Widget for InterpretAssetDialog {
             5 => Some(&mut self.color_space_dropdown),
             6 => Some(&mut self.range_label),
             7 => Some(&mut self.range_dropdown),
-            8 => Some(&mut self.diagnostics_label),
-            9 => Some(&mut self.raw_exposure_label),
-            10 => Some(&mut self.raw_exposure_dropdown),
-            11 => Some(&mut self.raw_white_balance_label),
-            12 => Some(&mut self.raw_white_balance_dropdown),
-            13 => Some(&mut self.raw_quality_label),
-            14 => Some(&mut self.raw_quality_dropdown),
-            15 => Some(&mut self.apply_button),
-            16 => Some(&mut self.cancel_button),
+            8 => Some(&mut self.matrix_label),
+            9 => Some(&mut self.matrix_dropdown),
+            10 => Some(&mut self.diagnostics_label),
+            11 => Some(&mut self.raw_exposure_label),
+            12 => Some(&mut self.raw_exposure_dropdown),
+            13 => Some(&mut self.raw_white_balance_label),
+            14 => Some(&mut self.raw_white_balance_dropdown),
+            15 => Some(&mut self.raw_quality_label),
+            16 => Some(&mut self.raw_quality_dropdown),
+            17 => Some(&mut self.apply_button),
+            18 => Some(&mut self.cancel_button),
             _ => None,
         }
     }
@@ -1439,7 +1574,7 @@ mod tests {
         let dialog = chinese_dialog(draft);
 
         assert!(dialog.raw_active());
-        assert_eq!(dialog.child_count(), 17);
+        assert_eq!(dialog.child_count(), 19);
         assert!(!dialog.color_space_dropdown.is_enabled());
         assert!(!dialog.range_dropdown.is_enabled());
         assert!(dialog.raw_exposure_dropdown.is_enabled());
@@ -1481,9 +1616,9 @@ mod tests {
         ));
 
         assert!(!dialog.raw_active());
-        assert_eq!(dialog.child_count(), 11);
-        assert!(dialog.child(10).is_some());
-        assert!(dialog.child(11).is_none());
+        assert_eq!(dialog.child_count(), 13);
+        assert!(dialog.child(12).is_some());
+        assert!(dialog.child(13).is_none());
     }
 
     #[test]
@@ -1599,6 +1734,40 @@ mod tests {
         assert_eq!(
             payload.interpretation.range.override_range(),
             Some(MediaSignalRange::Full)
+        );
+    }
+
+    #[test]
+    fn matrix_dropdown_changes_only_the_persistent_coefficient_intent() {
+        let interpretation = AssetMediaInterpretation {
+            color: MediaColorInterpretation::Override { color_space: ColorSpace::Rec2100Pq },
+            range: MediaRangeInterpretation::Override { range: MediaSignalRange::Limited },
+            ..Default::default()
+        };
+        let mut dialog = chinese_dialog(AppUiInterpretAssetDraft::new(
+            AssetId::new(),
+            "Unspecified matrix",
+            interpretation,
+            None,
+        ));
+        let mode =
+            MediaMatrixInterpretation::Override { matrix: MediaYuvMatrix::Bt2020NonConstant };
+        let action = matrix_draft_update_action(interpretation, mode);
+        let payload = draft_update_payload_from_action(&action);
+        assert_eq!(payload.interpretation.color, interpretation.color);
+        assert_eq!(payload.interpretation.range, interpretation.range);
+        assert_eq!(payload.interpretation.matrix, mode);
+        dialog.apply_update(payload);
+        assert_eq!(
+            dialog.matrix_dropdown.checked_for_action(&matrix_draft_update_action(
+                dialog.draft.interpretation,
+                mode
+            )),
+            Some(true)
+        );
+        assert_eq!(
+            dialog.draft.clone().into_payload().interpretation.matrix,
+            mode
         );
     }
 

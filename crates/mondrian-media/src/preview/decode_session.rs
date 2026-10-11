@@ -4410,7 +4410,7 @@ mod session_topology_tests {
             )
             .with_max_size(Some(64), Some(64));
             let outcome = context.decode_cancellable(request, || false).expect("decode");
-            let PreviewDecodeOutcome::Frame(frame) = outcome else {
+            let PreviewDecodeOutcome::FloatFrame(frame) = outcome else {
                 panic!("software fixture must produce a frame");
             };
             if index == 2 {
@@ -4512,7 +4512,7 @@ mod session_topology_tests {
                 || false,
             )
             .expect("scrub decode");
-        let PreviewDecodeOutcome::Frame(frame) = scrub else {
+        let PreviewDecodeOutcome::FloatFrame(frame) = scrub else {
             panic!("software fixture must produce a frame");
         };
         assert_eq!(
@@ -4538,7 +4538,7 @@ mod session_topology_tests {
                 || false,
             )
             .expect("second playback decode");
-        let PreviewDecodeOutcome::Frame(frame) = playback_again else {
+        let PreviewDecodeOutcome::FloatFrame(frame) = playback_again else {
             panic!("software fixture must produce a frame");
         };
         assert_eq!(

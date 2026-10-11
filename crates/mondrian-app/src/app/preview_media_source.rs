@@ -206,9 +206,9 @@ pub(crate) fn resolve_preview_media_source(
     let input_video_range = if primary_video.camera_raw.is_some() {
         DecodedVideoRangeContract::Automatic { probed_range: DecodedVideoRange::Full }
     } else {
-        DecodedVideoRangeContract::from_interpretation(
+        DecodedVideoRangeContract::from_video_stream(
             request.asset.interpretation.range,
-            primary_video.color_range,
+            primary_video,
         )
     };
     let (source_color, mut preparation_intent) = match input_color_resolution.resolved {
@@ -217,7 +217,9 @@ pub(crate) fn resolve_preview_media_source(
                 color_space,
                 input_video_range,
                 input_color_resolution.source,
-            ),
+            )
+            .with_video_stream_sampling(primary_video)
+            .with_matrix_interpretation(request.asset.interpretation.matrix),
             SourceFramePreparationIntent::ColorManaged(SourceColorModule::cpu_intent(
                 request.input_color,
             )),
@@ -431,6 +433,7 @@ fn resolve_preview_media_decode_path(
         return source_decode_path(source_path, source_fingerprint, primary_video);
     };
     if Some(proxy_color.source_color_space()) != source_color.color_space()
+        || proxy_color.source_video_stream_index() != primary_video.index
         || proxy_color.source_range() != source_color.range.baseline()
     {
         return source_decode_path_with_resolution(

@@ -79,10 +79,11 @@ Preview decode sources retain an explicit single-image fact only when the Asset'
 
 Preview CPU residency freezes component depth from the admitted stream sampling
 or proxy encoding in `PreviewDecodeSource`. Its source-byte estimate and the
-actual CPU materializer share the same greater-than-eight-bit precision rule:
-proven encoded eight-bit data retains RGBA8, while higher-depth data retains
-RGBA float. Unknown precision, scene-linear data and non-color data reserve
-float capacity. This bound describes retained source storage only; consumers
+actual CPU materializer reserve Float32 RGBA for YCbCr, limited-range integer
+RGB, scene-linear and unproven inputs. Automatic RGB reserves float capacity
+because a picture-local limited declaration may require expansion; explicitly
+full-range integer RGB retains RGBA8/16 according to component depth. This
+bound describes retained source storage only; consumers
 add their working-frame storage and keep compact YUV/native accounting separate.
 
 Approved BMX execution shares the approved provider capsule and native child
@@ -633,6 +634,14 @@ failure cache. A worker decodes through `PreviewDecodeRequest` with
 canonical source-to-working and working-to-sRGB output boundaries, and returns
 only a validated UI-independent `ThumbnailRasterFrame`.
 
+The representative target is not proof that the declared duration is readable.
+Only a typed temporal mismatch at a nonzero target permits one bounded attempt
+at source time zero. The raster retains the original failure, requested target,
+and selected target; both targets participate in raster identity. The Window
+Adapter displays a first-frame badge. Cancellation, color and decoder errors
+cannot authorize this attempt. Still, Playback and Export requests retain their
+exact selection rules and never inherit the thumbnail fallback.
+
 Thumbnail construction first prepares the complete inert owner and both bounded
 transports, then installs the actual native JoinHandle before later Host setup.
 Shutdown revokes shared admission, cancels pending/deferred requests, releases
@@ -866,11 +875,15 @@ matrix, input range, and full-range RGBA output. FFmpeg/swscale defaults are not
 part of Mondrian's color contract.
 
 CPU materialization selects its output precision from the actual decoded-frame
-pixel descriptor, not a short surface-format allow-list. Eight-bit encoded
-sources use RGBA8. Encoded 10/12/16-bit YUV or RGB sources scale to RGBA64LE and
-are normalized into a typed source-encoded f32 payload before OCIO, so software
-fallback cannot silently quantize a high-bit source. Scene-linear planar-f32
-remains a distinct direct float path. `DecodedVideoSampling.bit_depth` is also
+pixel descriptor, not a short surface-format allow-list. Integer YCbCr is
+resampled at its original 8/10/12/16-bit depth without changing its matrix or
+range, then converted using Core's shared `EncodedYuvToRgbParameters` into
+source-encoded Float32 RGBA. RGB UNORM scaling is not a headroom-preserving YUV
+conversion: it clips subblack and superwhite even when its destination is
+subsequently promoted to float. Explicitly limited integer RGB is expanded
+using nominal video black/white while alpha retains its full coverage range.
+Full-range integer RGB retains RGBA8/16, and planar-f32 remains a direct float
+path. `DecodedVideoSampling.bit_depth` is also
 derived from FFmpeg component descriptors; explicit native NV12/P010 surface
 contracts remain the fallback authority for opaque hardware formats.
 

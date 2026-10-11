@@ -9812,6 +9812,13 @@ fn resolve_export_source_preparation(
             ));
         }
     };
+    let source_contract = dependency
+        .source_video_stream
+        .as_ref()
+        .map_or(source_contract, |stream| {
+            source_contract.with_video_stream_sampling(stream)
+        })
+        .with_matrix_interpretation(dependency.interpretation.matrix);
     Ok(ExportSourcePreparation {
         source_contract,
         preparation_intent,
@@ -10490,6 +10497,13 @@ fn resolve_export_input_video_range(
     asset_id: AssetId,
     interpretation: mondrian_core::timeline_data::AssetMediaInterpretation,
 ) -> DecodedVideoRangeContract {
+    if let Some(stream) = media_dependencies
+        .get(&asset_id)
+        .and_then(|dependency| dependency.source_video_stream.as_ref())
+        && stream.camera_raw.is_none()
+    {
+        return DecodedVideoRangeContract::from_video_stream(interpretation.range, stream);
+    }
     if media_dependencies
         .get(&asset_id)
         .and_then(|dependency| dependency.source_video_stream.as_ref())
@@ -12789,6 +12803,56 @@ mod tests {
             frozen_ancillary: None,
             approved_bmx: None,
         });
+        let delivery = crate::delivery::resolve_export_delivery(
+            &job.config.preset,
+            &job.config.timeline.sequence.settings,
+            &job.config.timeline.color_environment,
+        )
+        .expect("delivery");
+        assert!(crate::smart_render::qualify_smart_render(
+            &job.config,
+            &job.config.timeline,
+            &delivery,
+            source_range,
+            25
+        )
+        .is_ok());
+        let mut corrected = job.config.timeline.as_ref().clone();
+        corrected.media.get_mut(&asset_id).expect("source").interpretation.matrix =
+            mondrian_core::timeline_data::MediaMatrixInterpretation::Override {
+                matrix: mondrian_core::timeline_data::MediaYuvMatrix::Bt709,
+            };
+        assert_eq!(
+            crate::smart_render::qualify_smart_render(
+                &job.config,
+                &corrected,
+                &delivery,
+                source_range,
+                25
+            ),
+            Err(crate::smart_render::SmartRenderBlocker::SignalMismatch)
+        );
+        let corrected_source = corrected.media.get_mut(&asset_id).expect("source");
+        corrected_source.interpretation.matrix =
+            mondrian_core::timeline_data::MediaMatrixInterpretation::Auto;
+        corrected_source
+            .source_video_stream
+            .as_mut()
+            .expect("stream")
+            .color_metadata
+            .as_mut()
+            .expect("CICP")
+            .matrix = exact_test_cicp_tag(TestCicpTagKind::Matrix, "smpte170m");
+        assert_eq!(
+            crate::smart_render::qualify_smart_render(
+                &job.config,
+                &corrected,
+                &delivery,
+                source_range,
+                25
+            ),
+            Err(crate::smart_render::SmartRenderBlocker::SignalMismatch)
+        );
         let mut latest_diagnostics = None;
         let result = FfmpegExportExecutor.execute(
             &job,
@@ -14057,6 +14121,44 @@ mod tests {
             .expect_err("RGB override cannot infer matrix")
             .to_string()
             .contains("YUV matrix is unspecified"));
+        dependency.interpretation.matrix =
+            mondrian_core::timeline_data::MediaMatrixInterpretation::Override {
+                matrix: mondrian_core::timeline_data::MediaYuvMatrix::Smpte170M,
+            };
+        let corrected = resolve_export_source_preparation(
+            ExportSourcePreparationRequest {
+                route: ExportDecodedSourceRoute::CpuWorking,
+                asset_id: AssetId::new(),
+                color_space_override: Some(ColorSpace::Rec709),
+                auto_tone_map: false,
+                dependency: &dependency,
+                input_video_range: DecodedVideoRangeContract::OverrideLimited,
+                color_context: &color_context,
+            },
+            None,
+        )
+        .expect("frozen matrix authority");
+        let mut decoder = PreviewDecodeSessionContext::new();
+        let decoded = decoder.decode_cancellable(
+            PreviewDecodeRequest::new(
+                &dependency.path,
+                mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+                PreviewDecodeAccessMode::PlaybackCursor,
+                corrected.source_contract,
+            ),
+            || false,
+        );
+        decoder.clear();
+        drop(decoder);
+        let mondrian_media::PreviewDecodeOutcome::FloatFrame(frame) =
+            decoded.expect("matrix override admits the original source")
+        else {
+            panic!("unclamped Float32 YUV materialization");
+        };
+        assert_eq!(
+            frame.color_contract.applied_matrix,
+            mondrian_media::DecodedVideoMatrix::Smpte170M
+        );
     }
 
     #[test]

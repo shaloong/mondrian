@@ -1894,7 +1894,7 @@ colorspaces:
             || false,
         )
         .expect("decode source video");
-        let PreviewDecodeOutcome::Frame(original) = original else {
+        let PreviewDecodeOutcome::FloatFrame(original) = original else {
             panic!("real video must yield a CPU RGBA preview frame");
         };
         clear_thread_local_preview_decode_session();
@@ -1966,7 +1966,7 @@ colorspaces:
             || false,
         )
         .expect("decode bundled video");
-        let PreviewDecodeOutcome::Frame(decoded) = decoded else {
+        let PreviewDecodeOutcome::FloatFrame(decoded) = decoded else {
             panic!("bundled video must yield a CPU RGBA preview frame");
         };
         assert_eq!(

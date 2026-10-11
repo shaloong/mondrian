@@ -591,7 +591,7 @@ mod tests {
         assert_eq!(reservation.entries, 1);
         assert_eq!(
             reservation.cpu_bytes,
-            3840usize * 2160usize * (4 + 4 * std::mem::size_of::<f32>())
+            3840usize * 2160usize * (16 + 4 * std::mem::size_of::<f32>())
         );
         assert_eq!(reservation.decoder_resource_units, 0);
     }
@@ -621,7 +621,7 @@ mod tests {
                 assert_eq!(
                     media_preview_residency_reservation(&key, PreviewHardwareDecodeRequest::Auto)
                         .cpu_bytes,
-                    3840 * 2160 * (8 + 16)
+                    3840 * 2160 * (16 + 16)
                 );
             }
         }

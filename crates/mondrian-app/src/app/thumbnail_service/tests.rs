@@ -259,6 +259,7 @@ fn color_contract() -> ThumbnailColorContract {
             probed_range: DecodedVideoRange::Limited,
         },
         yuv_matrix_fallback: None,
+        matrix_interpretation: mondrian_core::timeline_data::MediaMatrixInterpretation::Auto,
         camera_raw: None,
         working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
         missing_metadata_policy: MissingColorMetadataPolicy::AssumeRec709,
@@ -519,6 +520,93 @@ fn external_media_thumbnail_uses_production_decode_and_color() {
     assert!(receipt.all_resources_released(), "{receipt:?}");
     drop(library);
     std::fs::remove_dir_all(root).expect("remove external Asset Library");
+    assert!(
+        frame.sample_fallback.is_none(),
+        "requested representative sample did not succeed: {:?}",
+        frame.sample_fallback
+    );
+}
+
+#[test]
+fn alternate_thumbnail_sample_retains_failure_and_does_not_change_still_semantics() {
+    let root = tempfile::tempdir().expect("thumbnail fixture");
+    let path = root.path().join("short-video.mov");
+    let output = mondrian_media::ffmpeg_command()
+        .unwrap()
+        .args([
+            "-v",
+            "error",
+            "-nostdin",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x32:rate=25",
+            "-frames:v",
+            "3",
+            "-c:v",
+            "mpeg4",
+            "-threads",
+            "1",
+            "-f",
+            "mov",
+        ])
+        .arg(&path)
+        .output()
+        .expect("encode short fixture");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let asset = video_asset_with_probe(path, |probe| {
+        probe.video_streams[0].duration = Some(Duration::from_secs(20));
+        probe.video_streams[0].frame_rate = Rational::FPS_25;
+    });
+    let color = ThumbnailColorContract::resolve(&asset, &color_context()).unwrap();
+    let job = ThumbnailJob {
+        key: ThumbnailRequestKey {
+            asset_id: asset.id,
+            path: asset.file_path().unwrap().to_path_buf(),
+            fingerprint: asset.source_fingerprint().unwrap(),
+            color,
+            source_sample: super::analysis::thumbnail_source_sample(&asset),
+        },
+        generation: 1,
+        cancellation: mondrian_core::ExecutionCancellationToken::new(),
+    };
+    let mut decoder = mondrian_media::PreviewDecodeSessionContext::new();
+    let mut color_session = mondrian_renderer::RenderCpuColorExecutionSession::default();
+    let exact = mondrian_media::PreviewDecodeRequest::new(
+        &job.key.path,
+        job.key.source_sample,
+        mondrian_media::PreviewDecodeAccessMode::RandomAccessStillFrame,
+        mondrian_media::PreviewSourceColorContract::new(
+            job.key.color.source_color_space,
+            job.key.color.source_range,
+        ),
+    )
+    .with_fingerprint(job.key.fingerprint);
+    assert!(
+        matches!(
+            decoder.decode_cancellable(exact, || false),
+            Err(mondrian_core::MondrianError::DecodeTemporalMismatch { .. })
+        ),
+        "an unavailable Still/Export sample must remain an error"
+    );
+    let raster = super::analysis::decode_thumbnail(&job, &mut decoder, &mut color_session).unwrap();
+    let fallback = raster.sample_fallback.as_ref().expect("visible fallback receipt");
+    assert_eq!(fallback.requested, job.key.source_sample);
+    assert_eq!(
+        fallback.selected,
+        mondrian_core::SourceSampleTarget::covering(mondrian_core::TimelineTime::ZERO)
+    );
+    assert!(fallback.failure.detail.contains("requested_pts"));
+    assert_ne!(
+        raster.resource_key,
+        thumbnail_key(&job, raster.width, raster.height).unwrap()
+    );
+    decoder.clear();
+    color_session.clear();
 }
 
 fn missing_video_asset_with_probe(configure: impl FnOnce(&mut MediaInfo)) -> AssetRecord {
@@ -775,6 +863,16 @@ fn color_contract_rejections_and_range_authority_remain_distinct() {
     asset.interpretation.range = mondrian_core::timeline_data::MediaRangeInterpretation::Override {
         range: mondrian_core::timeline_data::MediaSignalRange::Full,
     };
+    asset.interpretation.matrix =
+        mondrian_core::timeline_data::MediaMatrixInterpretation::Override {
+            matrix: mondrian_core::timeline_data::MediaYuvMatrix::Smpte170M,
+        };
+    assert_eq!(
+        ThumbnailColorContract::resolve(&asset, &context)
+            .expect("authored coefficients")
+            .matrix_interpretation,
+        asset.interpretation.matrix
+    );
     assert_eq!(
         ThumbnailColorContract::resolve(&asset, &context)
             .expect("authoritative range override")

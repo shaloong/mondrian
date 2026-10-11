@@ -259,10 +259,49 @@ pub(super) fn resolve_cpu_rgba_contract_from_metadata(
     path: &Path,
 ) -> Result<DecodedRgbaFrameContract> {
     if pixel_format_is_rgb(pixel_format) {
+        let matrix = decoded_video_matrix_from_ffmpeg(decoded_color_space)
+            .ok()
+            .flatten()
+            .unwrap_or(DecodedVideoMatrix::Unknown);
+        let range_contract = match source.range {
+            // A YCbCr stream-level range must not expand already materialized
+            // RGB a second time. RGB integer frames own their local declaration;
+            // authored overrides and the VC-3 frame rule remain explicit.
+            crate::DecodedVideoRangeContract::Automatic { .. } => {
+                crate::DecodedVideoRangeContract::Automatic {
+                    probed_range: DecodedVideoRange::Unknown,
+                }
+            }
+            other => other,
+        };
+        let resolved = range_contract
+            .resolve_for_sampling(decoded_video_range_from_ffmpeg(decoded_color_range), matrix);
+        let is_float = pixel_format.descriptor().is_some_and(|descriptor| unsafe {
+            (*descriptor.as_ptr()).flags & ffmpeg::ffi::AV_PIX_FMT_FLAG_FLOAT as u64 != 0
+        });
+        let range = if source.is_data_texture() || is_float {
+            DecodedVideoRange::Full
+        } else if resolved == DecodedVideoRange::Unknown {
+            if matches!(
+                source.range,
+                crate::DecodedVideoRangeContract::AutomaticWithConvention {
+                    convention: mondrian_core::VideoSamplingConvention::DnxColorVolume,
+                    ..
+                }
+            ) {
+                return Err(MondrianError::DecodeFailed {
+                    asset_id: path.display().to_string(),
+                    reason: "VC-3 RGB range is absent or conflicts with its in-band CLV; explicit interpretation required".to_owned(),
+                });
+            }
+            DecodedVideoRange::Full
+        } else {
+            resolved
+        };
         return Ok(DecodedRgbaFrameContract::source_encoded(
             source,
             DecodedVideoMatrix::Rgb,
-            DecodedVideoRange::Full,
+            range,
         ));
     }
     if source.is_data_texture() {
@@ -274,10 +313,13 @@ pub(super) fn resolve_cpu_rgba_contract_from_metadata(
         });
     }
 
-    let decoded_matrix =
-        decoded_video_matrix_from_ffmpeg(decoded_color_space).map_err(|reason| {
-            MondrianError::DecodeFailed { asset_id: path.display().to_string(), reason }
-        })?;
+    let decoded_matrix = match decoded_video_matrix_from_ffmpeg(decoded_color_space) {
+        Err(_) if source.yuv_matrix_override.is_some() => Some(DecodedVideoMatrix::Unsupported),
+        result => result.map_err(|reason| MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason,
+        })?,
+    };
     // CICP RGB colorimetry and YCbCr sampling matrices are independent facts.
     // A missing frame fact can only use a fallback already bound into the
     // immutable source contract by an authored/project policy.
@@ -301,9 +343,10 @@ pub(super) fn resolve_cpu_rgba_contract_from_metadata(
     }
     // Auto accepts a more local frame fact; an authored range override remains
     // authoritative over incorrect source tags.
-    let range = source
-        .range
-        .resolve_for_frame(decoded_video_range_from_ffmpeg(decoded_color_range));
+    let range = source.range.resolve_for_sampling(
+        decoded_video_range_from_ffmpeg(decoded_color_range),
+        decoded_matrix.unwrap_or(DecodedVideoMatrix::Unknown),
+    );
     if range == DecodedVideoRange::Unknown {
         return Err(MondrianError::DecodeFailed {
             asset_id: path.display().to_string(),
@@ -320,6 +363,15 @@ pub(super) fn configure_preview_rgba_scaler(
     scaler: &mut super::scaler::PreviewScaler,
     contract: DecodedRgbaFrameContract,
     path: &Path,
+) -> Result<()> {
+    configure_preview_scaler_range(scaler, contract, path, true)
+}
+
+pub(super) fn configure_preview_scaler_range(
+    scaler: &mut super::scaler::PreviewScaler,
+    contract: DecodedRgbaFrameContract,
+    path: &Path,
+    output_full_range: bool,
 ) -> Result<()> {
     let coefficient_id = match contract.applied_matrix {
         DecodedVideoMatrix::Bt709 => Some(ffmpeg::ffi::SWS_CS_ITU709),
@@ -351,7 +403,7 @@ pub(super) fn configure_preview_rgba_scaler(
             coefficients,
             source_full_range,
             coefficients,
-            1,
+            i32::from(output_full_range),
             0,
             1 << 16,
             1 << 16,

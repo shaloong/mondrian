@@ -30,18 +30,50 @@ fn proxy_config(cache_dir: PathBuf) -> ProxyConfig {
 }
 
 fn proxy_color(bit_depth: u8) -> ProxyColorContract {
-    ProxyColorContract::try_new(ColorSpace::Rec709, bit_depth, DecodedVideoRange::Limited)
-        .expect("valid proxy color contract")
+    proxy_color_for_stream(0, bit_depth)
+}
+
+fn proxy_color_for_stream(stream_index: u32, bit_depth: u8) -> ProxyColorContract {
+    ProxyColorContract::try_new(
+        stream_index,
+        ColorSpace::Rec709,
+        bit_depth,
+        DecodedVideoRange::Limited,
+        mondrian_media::DecodedVideoMatrix::Bt709,
+    )
+    .expect("valid proxy color contract")
 }
 
 fn preview_source_color() -> PreviewSourceColorContract {
     PreviewSourceColorContract::automatic(ColorSpace::Rec709, DecodedVideoRange::Limited)
 }
 
-fn install_proxy_manifest(generator: &ProxyGenerator, source: &Path, proxy: &Path) {
-    let manifest = generator
-        .expected_manifest(source, proxy_color(8))
-        .expect("expected proxy manifest");
+#[test]
+fn proxy_contract_rejects_alpha_before_a_lossy_proxy_can_be_admitted() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("alpha.mov");
+    std::fs::write(&path, b"source").unwrap();
+    let asset = video_asset_with_physical_stream(
+        path,
+        Some(ColorSpace::Rec709),
+        0,
+        PixelFormat::Rgba,
+        true,
+        8,
+        true,
+    );
+    let result =
+        crate::app::proxy_generation::resolve_asset_proxy_color_contract(&asset, &color_context());
+    assert!(result.unwrap_err().contains("cannot preserve source alpha"));
+}
+
+fn install_proxy_manifest(
+    generator: &ProxyGenerator,
+    source: &Path,
+    proxy: &Path,
+    color: ProxyColorContract,
+) {
+    let manifest = generator.expected_manifest(source, color).expect("expected proxy manifest");
     let bytes = serde_json::to_vec_pretty(&manifest).expect("serialize proxy manifest");
     std::fs::write(ProxyGenerator::manifest_path(proxy), bytes).expect("write proxy manifest");
 }
@@ -312,7 +344,7 @@ fn interlaced_source_bypasses_proxy_and_native_surface_routes() {
     let proxy_path = generator.proxy_path(&source, proxy_color(8)).expect("proxy path");
     std::fs::create_dir_all(proxy_path.parent().expect("proxy parent")).expect("proxy root");
     std::fs::write(&proxy_path, b"proxy").expect("proxy");
-    install_proxy_manifest(&generator, &source, &proxy_path);
+    install_proxy_manifest(&generator, &source, &proxy_path, proxy_color(8));
     let context = color_context();
     let PreviewMediaSourceOutcome::Ready(resolved) =
         resolve_preview_media_source(PreviewMediaSourceRequest {
@@ -403,10 +435,16 @@ fn fresh_h264_proxy_owns_stream_zero_and_nv12_while_original_keeps_absolute_stre
         .primary_video()
         .expect("video")
         .clone();
-    let proxy_path = generator.proxy_path(&source, proxy_color(8)).expect("proxy path");
+    let proxy_path =
+        generator.proxy_path(&source, proxy_color_for_stream(7, 8)).expect("proxy path");
     std::fs::create_dir_all(proxy_path.parent().expect("proxy parent")).expect("proxy root");
     std::fs::write(&proxy_path, b"proxy").expect("proxy");
-    install_proxy_manifest(&generator, &source, &proxy_path);
+    install_proxy_manifest(
+        &generator,
+        &source,
+        &proxy_path,
+        proxy_color_for_stream(7, 8),
+    );
 
     let resolved = resolve_preview_media_decode_path(
         true,
@@ -415,7 +453,7 @@ fn fresh_h264_proxy_owns_stream_zero_and_nv12_while_original_keeps_absolute_stre
         &primary_video,
         preview_source_color(),
         &config,
-        Some(proxy_color(8)),
+        Some(proxy_color_for_stream(7, 8)),
     )
     .expect("fresh proxy path");
     assert_eq!(resolved.source.path(), proxy_path);
@@ -434,7 +472,7 @@ fn fresh_h264_proxy_owns_stream_zero_and_nv12_while_original_keeps_absolute_stre
         &primary_video,
         preview_source_color(),
         &config,
-        Some(proxy_color(8)),
+        Some(proxy_color_for_stream(7, 8)),
     )
     .expect("original source path");
     assert_eq!(original.source.path(), source);
@@ -460,7 +498,7 @@ fn fresh_h264_proxy_owns_stream_zero_and_nv12_while_original_keeps_absolute_stre
             prefer_proxy: true,
             request_missing_proxy_generation: false,
             proxy_config: &config,
-            proxy_color: Some(proxy_color(8)),
+            proxy_color: Some(proxy_color_for_stream(7, 8)),
             hardware_admission: gpu_admission(),
             cpu_working_required: false,
             representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
@@ -480,11 +518,11 @@ fn fresh_h264_proxy_owns_stream_zero_and_nv12_while_original_keeps_absolute_stre
     );
     assert_eq!(
         keyed.key.decode.source_color().color_space(),
-        Some(proxy_color(8).source_color_space())
+        Some(proxy_color_for_stream(7, 8).source_color_space())
     );
     assert_eq!(
         keyed.key.decode.source_color().range.baseline(),
-        proxy_color(8).source_range()
+        proxy_color_for_stream(7, 8).source_range()
     );
 
     let PreviewMediaSourceOutcome::Ready(overridden) =
@@ -498,7 +536,7 @@ fn fresh_h264_proxy_owns_stream_zero_and_nv12_while_original_keeps_absolute_stre
             prefer_proxy: true,
             request_missing_proxy_generation: true,
             proxy_config: &config,
-            proxy_color: Some(proxy_color(8)),
+            proxy_color: Some(proxy_color_for_stream(7, 8)),
             hardware_admission: gpu_admission(),
             cpu_working_required: false,
             representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
@@ -679,7 +717,7 @@ fn missing_and_stale_proxy_fall_back_to_fingerprinted_source() {
         &primary_video,
         preview_source_color(),
         &config,
-        Some(proxy_color(8)),
+        Some(proxy_color_for_stream(7, 8)),
     )
     .expect("missing proxy falls back");
     assert_eq!(missing.source.path(), source);
@@ -690,7 +728,7 @@ fn missing_and_stale_proxy_fall_back_to_fingerprinted_source() {
     assert_eq!(missing.source.fingerprint().len, Some(6));
 
     let proxy_path = ProxyGenerator::new(config.clone())
-        .proxy_path(&source, proxy_color(8))
+        .proxy_path(&source, proxy_color_for_stream(7, 8))
         .expect("proxy path");
     std::fs::create_dir_all(proxy_path.parent().expect("proxy parent")).expect("proxy root");
     std::fs::write(&proxy_path, b"proxy").expect("proxy");
@@ -704,7 +742,7 @@ fn missing_and_stale_proxy_fall_back_to_fingerprinted_source() {
         &primary_video,
         preview_source_color(),
         &config,
-        Some(proxy_color(8)),
+        Some(proxy_color_for_stream(7, 8)),
     )
     .expect("stale proxy falls back");
     assert_eq!(stale.source.path(), source);
@@ -746,7 +784,7 @@ fn complete_resolution_emits_one_canonical_key_and_proxy_intent() {
         prefer_proxy: true,
         request_missing_proxy_generation: true,
         proxy_config: &config,
-        proxy_color: Some(proxy_color(10)),
+        proxy_color: Some(proxy_color_for_stream(7, 10)),
         hardware_admission: gpu_admission(),
         cpu_working_required: false,
         representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
@@ -800,7 +838,7 @@ fn complete_resolution_emits_one_canonical_key_and_proxy_intent() {
         prefer_proxy: true,
         request_missing_proxy_generation: false,
         proxy_config: &config,
-        proxy_color: Some(proxy_color(10)),
+        proxy_color: Some(proxy_color_for_stream(7, 10)),
         hardware_admission: gpu_admission(),
         cpu_working_required: true,
         representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
@@ -918,7 +956,7 @@ fn unproven_sampling_blocks_preview_proxy_precision_and_native_surface_admission
     let proxy_path = generator.proxy_path(&source, proxy_color(8)).expect("proxy path");
     std::fs::create_dir_all(proxy_path.parent().expect("proxy parent")).expect("proxy root");
     std::fs::write(&proxy_path, b"proxy").expect("proxy");
-    install_proxy_manifest(&generator, &source, &proxy_path);
+    install_proxy_manifest(&generator, &source, &proxy_path, proxy_color(8));
     let context = color_context();
 
     let outcome = resolve_preview_media_source(PreviewMediaSourceRequest {

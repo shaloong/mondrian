@@ -118,6 +118,38 @@ impl MediaRangeInterpretation {
     }
 }
 
+/// Authored YCbCr coefficients, independent of RGB primaries and transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaYuvMatrix {
+    /// BT.709 nonconstant luminance.
+    Bt709,
+    /// BT.2020 nonconstant luminance.
+    Bt2020NonConstant,
+    /// FCC coefficients.
+    Fcc,
+    /// BT.470BG / BT.601 coefficients.
+    Bt470Bg,
+    /// SMPTE 170M / BT.601 coefficients.
+    Smpte170M,
+    /// SMPTE 240M coefficients.
+    Smpte240M,
+}
+
+/// Persistent correction for missing or incorrect YCbCr coefficient metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum MediaMatrixInterpretation {
+    /// Use decoded facts, codec sampling evidence, then authorized missing policy.
+    #[default]
+    Auto,
+    /// Explicit coefficients; this never changes RGB primaries/transfer or range.
+    Override {
+        /// Selected YCbCr coefficients.
+        matrix: MediaYuvMatrix,
+    },
+}
+
 /// Whether an asset payload represents color-managed picture data.
 ///
 /// This is intentionally separate from `MediaColorInterpretation`: "non-color
@@ -144,7 +176,7 @@ impl AssetColorPayload {
 /// Persistent media interpretation stored on an asset library record.
 ///
 /// This is deliberately separated from probe results. Asset records keep the
-/// user's color and signal-range modes (`Auto` or `Override`) plus payload
+/// user's RGB color, YCbCr matrix and signal-range modes (`Auto` or `Override`) plus payload
 /// kind; resolved diagnostics remain runtime data so detector/config upgrades
 /// can improve Auto behavior without rewriting library state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -155,6 +187,9 @@ pub struct AssetMediaInterpretation {
     /// Encoded video quantization-range intent for the asset.
     #[serde(default)]
     pub range: MediaRangeInterpretation,
+    /// YCbCr coefficient intent; independent of RGB color and sample range.
+    #[serde(default)]
+    pub matrix: MediaMatrixInterpretation,
     /// Payload kind that decides whether color management applies at all.
     #[serde(default)]
     pub payload: AssetColorPayload,

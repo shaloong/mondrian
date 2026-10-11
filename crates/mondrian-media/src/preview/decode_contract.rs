@@ -295,6 +295,7 @@ pub struct PreviewDecodeSource {
     native_surface_hint: Option<PreviewNativeSurfaceHint>,
     compact_cpu_yuv_hint: Option<PreviewCompactCpuYuvHint>,
     cpu_component_bit_depth: Option<u8>,
+    cpu_rgb_sampling: Option<bool>,
     still_image: bool,
     source_extent: Resolution,
 }
@@ -344,6 +345,7 @@ impl PreviewDecodeSource {
             Resolution { width: stream.width, height: stream.height },
         )?;
         source.cpu_component_bit_depth = Some(sampling.bit_depth);
+        source.cpu_rgb_sampling = Some(sampling.pixel_format.is_rgb());
         Ok(source)
     }
 
@@ -400,6 +402,7 @@ impl PreviewDecodeSource {
             ProxyEncodingProfile::H264High8 | ProxyEncodingProfile::DnxHrSq8 => 8,
             ProxyEncodingProfile::H265Main10 | ProxyEncodingProfile::DnxHrHqx10 => 10,
         });
+        source.cpu_rgb_sampling = Some(false);
         Ok(source)
     }
 
@@ -457,6 +460,7 @@ impl PreviewDecodeSource {
             native_surface_hint,
             compact_cpu_yuv_hint,
             cpu_component_bit_depth: None,
+            cpu_rgb_sampling: None,
             still_image: false,
             source_extent,
         })
@@ -511,13 +515,16 @@ impl PreviewDecodeSource {
 
     /// Conservative retained CPU RGBA source bytes per pixel, before working conversion.
     ///
-    /// Proven 9–16-bit encoded sources retain packed RGBA16, except YUVA12
-    /// which retains unclamped encoded Float32 for CPU/Export parity. Scene-linear,
-    /// floating-point, and unproven sources reserve float capacity. Compact
+    /// YCbCr retains unclamped encoded Float32 for CPU/Export parity. Integer
+    /// RGB may also require Float32 when its range is resolved per picture.
+    /// Explicit full-range RGB retains packed RGBA8/16. Unproven sources reserve
+    /// float capacity. Compact
     /// YUV and native surfaces have separate representation-specific accounting.
     pub fn cpu_rgba_retained_bytes_per_pixel(&self, color: PreviewSourceColorContract) -> usize {
         if color.is_scene_linear()
-            || self.compact_cpu_yuv_hint == Some(PreviewCompactCpuYuvHint::Yuva444p12le)
+            || self.cpu_rgb_sampling != Some(true)
+            || (!color.is_data_texture()
+                && !matches!(color.range, crate::DecodedVideoRangeContract::OverrideFull))
         {
             return 4 * std::mem::size_of::<f32>();
         }
@@ -1299,8 +1306,14 @@ mod tests {
                 object_identity: Some(MediaFileObjectIdentity::Unix { device: 4, inode: 5 }),
                 change_stamp: Some(MediaFileChangeStamp::Unix { seconds: 6, nanoseconds: 7 }),
             },
-            color: ProxyColorContract::try_new(ColorSpace::Rec709, 8, DecodedVideoRange::Limited)
-                .expect("valid proxy color"),
+            color: ProxyColorContract::try_new(
+                0,
+                ColorSpace::Rec709,
+                8,
+                DecodedVideoRange::Limited,
+                crate::DecodedVideoMatrix::Bt709,
+            )
+            .expect("valid proxy color"),
             settings: ProxyArtifactSettings { resolution: ProxyResolution::P720, crf: 20 },
             encoding,
         }

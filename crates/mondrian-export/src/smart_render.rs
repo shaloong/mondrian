@@ -173,6 +173,25 @@ fn qualify_full_source_identity(
         return Err(SmartRenderBlocker::PictureGeometryMismatch);
     }
     let sampling = stream.proven_sampling().ok_or(SmartRenderBlocker::SignalMismatch)?;
+    // Packet reuse cannot execute an authored sample correction or change
+    // YCbCr coefficients by merely relabeling unchanged encoded pixels.
+    if dependency.interpretation.range
+        != mondrian_core::timeline_data::MediaRangeInterpretation::Auto
+        || dependency.interpretation.matrix
+            != mondrian_core::timeline_data::MediaMatrixInterpretation::Auto
+    {
+        return Err(SmartRenderBlocker::SignalMismatch);
+    }
+    let expected =
+        crate::queue::expected_export_video_signal(&timeline.sequence.settings, delivery)
+            .map_err(|_| SmartRenderBlocker::SignalMismatch)?;
+    if let Some(matrix) = expected.color_matrix.as_deref()
+        && !stream.color_metadata.as_ref().is_some_and(|metadata| {
+            metadata.matrix.specified && metadata.matrix.name.as_deref() == Some(matrix)
+        })
+    {
+        return Err(SmartRenderBlocker::SignalMismatch);
+    }
     if !sampling_matches_delivery(
         sampling.pixel_format,
         sampling.bit_depth,

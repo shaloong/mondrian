@@ -312,6 +312,11 @@ pub enum AssetThumbnailState {
     Failed(AssetThumbnailFailure),
     /// A render-ready thumbnail is available.
     Ready(RasterImage),
+    /// An alternate representative sample is shown with its original failure.
+    Degraded {
+        image: RasterImage,
+        failure: AssetThumbnailFailure,
+    },
 }
 
 /// Complete set of view models needed by the app UI panel shell.
@@ -4095,6 +4100,12 @@ fn asset_grid_item_from_asset(
             AssetThumbnailState::Loading => item.with_thumbnail_loading(),
             AssetThumbnailState::Failed(_) => item.with_thumbnail_failed(),
             AssetThumbnailState::Ready(thumbnail) => item.with_thumbnail(thumbnail),
+            AssetThumbnailState::Degraded { image, .. } => {
+                item.with_thumbnail(image).with_badge_tone(
+                    asset_text(localizer, "asset-thumbnail-alternate", "首帧预览"),
+                    AssetGridBadgeTone::Warning,
+                )
+            }
         };
     }
     with_asset_icon(item, icon)

@@ -592,6 +592,9 @@ pub struct PreviewSourceColorContract {
     /// omits its matrix coefficient. Stream/frame metadata still wins.
     #[serde(default)]
     pub yuv_matrix_fallback: Option<DecodedVideoMatrix>,
+    /// Authoritative YCbCr correction. Never applies to already decoded RGB.
+    #[serde(default)]
+    pub yuv_matrix_override: Option<DecodedVideoMatrix>,
 }
 
 impl PreviewSourceColorContract {
@@ -601,6 +604,7 @@ impl PreviewSourceColorContract {
             identity: PreviewSourceSampleIdentity::ColorManaged(color_space),
             range,
             yuv_matrix_fallback: None,
+            yuv_matrix_override: None,
         }
     }
 
@@ -610,6 +614,7 @@ impl PreviewSourceColorContract {
             identity: PreviewSourceSampleIdentity::DataTexture,
             range,
             yuv_matrix_fallback: None,
+            yuv_matrix_override: None,
         }
     }
 
@@ -642,9 +647,60 @@ impl PreviewSourceColorContract {
         self
     }
 
-    /// Apply only an already-authorized missing-matrix policy. An explicit or
-    /// unsupported decoded matrix never changes under this contract.
-    const fn resolve_yuv_matrix(self, decoded: DecodedVideoMatrix) -> DecodedVideoMatrix {
+    /// Lower the persistent coefficient intent once at the shared decode boundary.
+    pub const fn with_matrix_interpretation(
+        mut self,
+        intent: mondrian_core::timeline_data::MediaMatrixInterpretation,
+    ) -> Self {
+        use mondrian_core::timeline_data::{MediaMatrixInterpretation, MediaYuvMatrix};
+        if !self.is_data_texture() {
+            self.yuv_matrix_override = match intent {
+                MediaMatrixInterpretation::Auto => None,
+                MediaMatrixInterpretation::Override { matrix } => Some(match matrix {
+                    MediaYuvMatrix::Bt709 => DecodedVideoMatrix::Bt709,
+                    MediaYuvMatrix::Bt2020NonConstant => DecodedVideoMatrix::Bt2020NonConstant,
+                    MediaYuvMatrix::Fcc => DecodedVideoMatrix::Fcc,
+                    MediaYuvMatrix::Bt470Bg => DecodedVideoMatrix::Bt470Bg,
+                    MediaYuvMatrix::Smpte170M => DecodedVideoMatrix::Smpte170M,
+                    MediaYuvMatrix::Smpte240M => DecodedVideoMatrix::Smpte240M,
+                }),
+            };
+        }
+        self
+    }
+
+    /// Bind validated codec sampling facts independently of RGB interpretation
+    /// and authored range. Explicit picture matrix metadata still wins.
+    pub fn with_video_stream_sampling(mut self, stream: &crate::VideoStreamInfo) -> Self {
+        use mondrian_core::{timeline_data::MediaRangeInterpretation, VideoSamplingConvention};
+        if !self.is_data_texture()
+            && matches!(
+                DecodedVideoRangeContract::from_video_stream(
+                    MediaRangeInterpretation::Auto,
+                    stream
+                ),
+                DecodedVideoRangeContract::AutomaticWithConvention {
+                    convention: VideoSamplingConvention::SdDv,
+                    ..
+                }
+            )
+        {
+            self.yuv_matrix_fallback = Some(if stream.height == 576 {
+                DecodedVideoMatrix::Bt470Bg
+            } else {
+                DecodedVideoMatrix::Smpte170M
+            });
+        }
+        self
+    }
+
+    /// Resolve coefficients for a YCbCr payload. An authored correction wins;
+    /// Auto preserves explicit/unsupported facts and only fills missing metadata.
+    /// Already decoded RGB does not enter this YCbCr conversion boundary.
+    pub const fn resolve_yuv_matrix(self, decoded: DecodedVideoMatrix) -> DecodedVideoMatrix {
+        if let Some(matrix) = self.yuv_matrix_override {
+            return matrix;
+        }
         match decoded {
             DecodedVideoMatrix::Unknown => match self.yuv_matrix_fallback {
                 Some(matrix) => matrix,

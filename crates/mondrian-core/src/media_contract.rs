@@ -889,9 +889,30 @@ fn video_color_metadata_scope_priority(scope: VideoColorMetadataHintScope) -> u8
     }
 }
 
+/// Source sampling convention, independent of RGB colorimetry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum VideoSamplingConvention {
+    /// A validated SD DV DIF profile uses BT.601 coefficients and video levels,
+    /// including headroom. It does not prove RGB primaries or transfer.
+    SdDv,
+    /// ST 2019-1 CLV is interpreted on each successfully decoded VC-3 picture.
+    /// In-band BT.709/BT.2020 uses video levels; out-of-band remains unknown.
+    DnxColorVolume,
+    /// Explicit product default for legacy SDR codecs lacking a range declaration.
+    /// This is an assumption, never detected or normative range evidence.
+    LegacyVideoLevels,
+}
+
 /// Evidence contributing to an automatic color interpretation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VideoColorInterpretationEvidence {
+    /// A codec-specific sampling rule; this cannot authorize RGB colorimetry.
+    SamplingConvention {
+        /// Actual codec identity, independent of the file extension.
+        codec: VideoCodec,
+        /// Normative frame rule or explicitly identified product assumption.
+        convention: VideoSamplingConvention,
+    },
     /// Fixed quantization prescribed by the admitted codec standard, without
     /// authorizing primaries, transfer or matrix. Currently H.263 section 4.1.
     CodecDefinedRange {
@@ -1234,6 +1255,7 @@ fn exact_cicp_evidence_matches_raw(
             | VideoColorInterpretationEvidence::DecoderUnavailable
             | VideoColorInterpretationEvidence::IccProfile { .. }
             | VideoColorInterpretationEvidence::CodecDefinedRange { .. }
+            | VideoColorInterpretationEvidence::SamplingConvention { .. }
             | VideoColorInterpretationEvidence::H264SequenceRange { .. } => {}
         }
     }

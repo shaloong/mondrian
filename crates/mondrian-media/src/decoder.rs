@@ -1280,6 +1280,13 @@ pub struct DecodedVideoSurfaceDescriptor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "authority", rename_all = "snake_case")]
 pub enum DecodedVideoRangeContract {
+    /// Follow frame facts and an explicitly retained source convention.
+    AutomaticWithConvention {
+        /// Raw stream range, without replacing Unknown with a policy guess.
+        probed_range: DecodedVideoRange,
+        /// Format rule or identifiable legacy SDR assumption.
+        convention: mondrian_core::VideoSamplingConvention,
+    },
     /// Follow frame metadata, falling back to the latest stream probe.
     Automatic {
         /// Stream-level range reported while probing the asset.
@@ -1292,6 +1299,95 @@ pub enum DecodedVideoRangeContract {
 }
 
 impl DecodedVideoRangeContract {
+    /// Bind the same persisted probe evidence for Preview, thumbnails and Export.
+    pub fn from_video_stream(
+        interpretation: mondrian_core::timeline_data::MediaRangeInterpretation,
+        stream: &mondrian_core::VideoStreamInfo,
+    ) -> Self {
+        let base = Self::from_interpretation(interpretation, stream.color_range);
+        if !matches!(base, Self::Automatic { .. }) || stream.proven_sampling().is_none() {
+            return base;
+        }
+        let mut conventions =
+            stream.color_interpretation.evidence.iter().filter_map(|entry| match entry {
+                mondrian_core::VideoColorInterpretationEvidence::SamplingConvention {
+                    codec,
+                    convention,
+                } if *codec == stream.codec => Some(*convention),
+                _ => None,
+            });
+        let Some(convention) = conventions.next() else {
+            return base;
+        };
+        if conventions.any(|other| other != convention) {
+            return base;
+        }
+        use mondrian_core::{VideoCodec, VideoSamplingConvention};
+        let allowed = match convention {
+            VideoSamplingConvention::DnxColorVolume => {
+                matches!(stream.codec, VideoCodec::DnxHd | VideoCodec::DnxHr)
+            }
+            VideoSamplingConvention::SdDv => {
+                stream.codec == VideoCodec::Other("DVVIDEO".to_owned())
+                    && stream.width == 720
+                    && matches!(stream.height, 480 | 576)
+                    && stream.bit_depth == 8
+                    && !stream.pixel_format.is_rgb()
+                    && !stream.has_alpha
+            }
+            VideoSamplingConvention::LegacyVideoLevels => {
+                matches!(&stream.codec,
+                VideoCodec::Other(name) if matches!(name.as_str(), "MPEG4" | "MSMPEG4V1" | "MSMPEG4V2" | "MSMPEG4V3" | "FLV1" | "THEORA"))
+                    && stream.bit_depth == 8
+                    && !stream.pixel_format.is_rgb()
+                    && stream
+                        .color_metadata
+                        .as_ref()
+                        .is_none_or(|metadata| !matches!(metadata.transfer.code, 16 | 18))
+                    && stream
+                        .hdr_metadata
+                        .iter()
+                        .all(|entry| entry.kind == mondrian_core::VideoHdrSideDataKind::IccProfile)
+            }
+        };
+        if !allowed {
+            return base;
+        }
+        Self::AutomaticWithConvention { probed_range: stream.color_range, convention }
+    }
+
+    /// Resolve a frame's independent matrix/range facts. FFmpeg's VC-3 decoder
+    /// validates each coding unit and publishes CLV as the frame colorspace.
+    /// CLV=11 yields Unknown and cannot inherit an earlier picture's range.
+    pub const fn resolve_for_sampling(
+        self,
+        frame_range: DecodedVideoRange,
+        matrix: DecodedVideoMatrix,
+    ) -> DecodedVideoRange {
+        if let Self::AutomaticWithConvention {
+            probed_range,
+            convention: mondrian_core::VideoSamplingConvention::DnxColorVolume,
+        } = self
+        {
+            let fact = match frame_range {
+                DecodedVideoRange::Unknown => probed_range,
+                explicit => explicit,
+            };
+            return match matrix {
+                DecodedVideoMatrix::Bt709 | DecodedVideoMatrix::Bt2020NonConstant => match fact {
+                    // A contradictory container/frame tag cannot silently
+                    // replace ST 2019-1's in-band digital representation.
+                    DecodedVideoRange::Full => DecodedVideoRange::Unknown,
+                    _ => DecodedVideoRange::Limited,
+                },
+                // Decoder/container range fields lack provenance here. They
+                // cannot prove the external representation required by CLV=11.
+                // An authored range remains available through Override*.
+                _ => DecodedVideoRange::Unknown,
+            };
+        }
+        self.resolve_for_frame(frame_range)
+    }
     /// Build the decode contract from persistent asset interpretation and probe facts.
     pub const fn from_interpretation(
         interpretation: mondrian_core::timeline_data::MediaRangeInterpretation,
@@ -1313,6 +1409,31 @@ impl DecodedVideoRangeContract {
     /// Resolve the range to apply to one decoded frame.
     pub const fn resolve_for_frame(self, frame_range: DecodedVideoRange) -> DecodedVideoRange {
         match self {
+            Self::AutomaticWithConvention {
+                probed_range,
+                convention: mondrian_core::VideoSamplingConvention::SdDv,
+            } => match (frame_range, probed_range) {
+                (DecodedVideoRange::Full, _)
+                | (DecodedVideoRange::Unknown, DecodedVideoRange::Full) => {
+                    DecodedVideoRange::Unknown
+                }
+                _ => DecodedVideoRange::Limited,
+            },
+            Self::AutomaticWithConvention { probed_range, convention } => match frame_range {
+                DecodedVideoRange::Unknown => match probed_range {
+                    DecodedVideoRange::Unknown => match convention {
+                        mondrian_core::VideoSamplingConvention::SdDv
+                        | mondrian_core::VideoSamplingConvention::LegacyVideoLevels => {
+                            DecodedVideoRange::Limited
+                        }
+                        mondrian_core::VideoSamplingConvention::DnxColorVolume => {
+                            DecodedVideoRange::Unknown
+                        }
+                    },
+                    explicit => explicit,
+                },
+                explicit => explicit,
+            },
             Self::Automatic { probed_range } => match frame_range {
                 DecodedVideoRange::Unknown => probed_range,
                 explicit => explicit,
@@ -1417,6 +1538,36 @@ pub enum DecodedVideoMatrix {
     Smpte240M,
     /// Source pixels were already RGB, so no YUV matrix was applied.
     Rgb,
+}
+
+impl DecodedVideoMatrix {
+    /// Lower the numeric sampling fact independently of RGB colorimetry.
+    pub const fn from_cicp_code(code: i32) -> Self {
+        match code {
+            0 => Self::Rgb,
+            1 => Self::Bt709,
+            2 => Self::Unknown,
+            4 => Self::Fcc,
+            5 => Self::Bt470Bg,
+            6 => Self::Smpte170M,
+            7 => Self::Smpte240M,
+            9 => Self::Bt2020NonConstant,
+            _ => Self::Unsupported,
+        }
+    }
+
+    /// FFmpeg coefficient name for an admitted nonconstant YCbCr matrix.
+    pub const fn ffmpeg_yuv_name(self) -> Option<&'static str> {
+        match self {
+            Self::Bt709 => Some("bt709"),
+            Self::Bt2020NonConstant => Some("bt2020nc"),
+            Self::Fcc => Some("fcc"),
+            Self::Bt470Bg => Some("bt470bg"),
+            Self::Smpte170M => Some("smpte170m"),
+            Self::Smpte240M => Some("smpte240m"),
+            _ => None,
+        }
+    }
 }
 
 /// Native hardware-frame handle family produced by a decoder.
@@ -2393,6 +2544,57 @@ fn ffmpeg_hwdevice_type_available(device_type: ffmpeg::ffi::AVHWDeviceType) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_conventions_preserve_frame_authority_and_dnx_out_of_band() {
+        use mondrian_core::VideoSamplingConvention;
+        for convention in [
+            VideoSamplingConvention::SdDv,
+            VideoSamplingConvention::LegacyVideoLevels,
+        ] {
+            let contract = DecodedVideoRangeContract::AutomaticWithConvention {
+                probed_range: DecodedVideoRange::Unknown,
+                convention,
+            };
+            assert_eq!(contract.baseline(), DecodedVideoRange::Limited);
+            assert_eq!(
+                contract.resolve_for_frame(DecodedVideoRange::Full),
+                if convention == VideoSamplingConvention::SdDv {
+                    DecodedVideoRange::Unknown
+                } else {
+                    DecodedVideoRange::Full
+                }
+            );
+        }
+        let dnx = DecodedVideoRangeContract::AutomaticWithConvention {
+            probed_range: DecodedVideoRange::Unknown,
+            convention: VideoSamplingConvention::DnxColorVolume,
+        };
+        for matrix in [
+            DecodedVideoMatrix::Bt709,
+            DecodedVideoMatrix::Bt2020NonConstant,
+        ] {
+            assert_eq!(
+                dnx.resolve_for_sampling(DecodedVideoRange::Unknown, matrix),
+                DecodedVideoRange::Limited
+            );
+            assert_eq!(
+                dnx.resolve_for_sampling(DecodedVideoRange::Full, matrix),
+                DecodedVideoRange::Unknown
+            );
+        }
+        assert_eq!(dnx.baseline(), DecodedVideoRange::Unknown);
+        for range in [DecodedVideoRange::Full, DecodedVideoRange::Limited] {
+            assert_eq!(
+                dnx.resolve_for_sampling(range, DecodedVideoMatrix::Unknown),
+                DecodedVideoRange::Unknown
+            );
+        }
+        assert_eq!(
+            dnx.resolve_for_sampling(DecodedVideoRange::Unknown, DecodedVideoMatrix::Unknown),
+            DecodedVideoRange::Unknown
+        );
+    }
 
     #[test]
     fn decoded_video_range_resolution_keeps_auto_and_honors_override() {

@@ -2674,6 +2674,9 @@ mod tests {
             range: mondrian_core::timeline_data::MediaRangeInterpretation::Override {
                 range: mondrian_core::timeline_data::MediaSignalRange::Full,
             },
+            matrix: mondrian_core::timeline_data::MediaMatrixInterpretation::Override {
+                matrix: mondrian_core::timeline_data::MediaYuvMatrix::Bt2020NonConstant,
+            },
             ..AssetMediaInterpretation::default()
         };
 
