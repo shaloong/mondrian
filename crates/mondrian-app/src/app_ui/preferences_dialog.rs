@@ -332,13 +332,13 @@ impl PreferencesDialogTab {
         Self::Developer,
     ];
 
-    fn label(self) -> &'static str {
+    fn label(self, locale: AppUiLocale) -> String {
         match self {
-            Self::General => "常规",
-            Self::Media => "媒体",
-            Self::Display => "显示",
-            Self::Shortcuts => "快捷键",
-            Self::Developer => "开发者",
+            Self::General => pref_text(locale, "preferences-tab-general"),
+            Self::Media => pref_text(locale, "preferences-tab-media"),
+            Self::Display => pref_text(locale, "preferences-tab-display"),
+            Self::Shortcuts => pref_text(locale, "preferences-tab-shortcuts"),
+            Self::Developer => pref_text(locale, "preferences-tab-developer"),
         }
     }
 
@@ -370,6 +370,7 @@ pub struct PreferencesDialog {
     id: WidgetId,
     active_tab: PreferencesDialogTab,
     model: AppUiPreferencesModel,
+    localizer: Option<Localizer>,
     surface: DialogSurface,
     bounds: Rect,
     card: Rect,
@@ -415,7 +416,7 @@ struct ShortcutLayoutRow {
 enum ShortcutLayoutRowKind {
     Section {
         category: AppUiCommandCategory,
-        title: &'static str,
+        title: String,
         collapsed: bool,
     },
     Command {
@@ -451,10 +452,11 @@ impl PreferencesDialog {
         model: AppUiPreferencesModel,
         active_tab: PreferencesDialogTab,
     ) -> Self {
+        let locale = model.locale;
         let nav_buttons = PreferencesDialogTab::ALL
             .into_iter()
             .map(|tab| {
-                Button::new(tab.label())
+                Button::new(tab.label(locale))
                     .minimal()
                     .text_left()
                     .active(tab == active_tab)
@@ -470,7 +472,7 @@ impl PreferencesDialog {
                 .into_iter()
                 .map(|preference| {
                     SegmentedButtonItem::new(
-                        preference.display_name(),
+                        pref_value(locale, preference.display_name()),
                         app_shell_preferences_theme_changed_action(preference),
                     )
                 })
@@ -485,13 +487,13 @@ impl PreferencesDialog {
         let waveform_group = SegmentedButtonGroup::new(
             vec![
                 SegmentedButtonItem::new(
-                    "整流",
+                    pref_text(locale, "preferences-waveform-rectified"),
                     app_shell_preferences_waveform_display_changed_action(
                         WaveformDisplay::BottomAligned,
                     ),
                 ),
                 SegmentedButtonItem::new(
-                    "完整",
+                    pref_text(locale, "preferences-waveform-full"),
                     app_shell_preferences_waveform_display_changed_action(
                         WaveformDisplay::Centered,
                     ),
@@ -506,13 +508,13 @@ impl PreferencesDialog {
         let viewer_background_group = SegmentedButtonGroup::new(
             vec![
                 SegmentedButtonItem::new(
-                    "棋盘格",
+                    pref_text(locale, "preferences-canvas-checkerboard"),
                     app_shell_preferences_viewer_background_changed_action(
                         ViewerCanvasBackground::Checkerboard,
                     ),
                 ),
                 SegmentedButtonItem::new(
-                    "黑色",
+                    pref_text(locale, "preferences-canvas-black"),
                     app_shell_preferences_viewer_background_changed_action(
                         ViewerCanvasBackground::Black,
                     ),
@@ -528,6 +530,7 @@ impl PreferencesDialog {
         let mut dialog = Self {
             id: WidgetId::new(),
             active_tab,
+            localizer: Localizer::new(locale).ok(),
             model,
             surface: DialogSurface::new(
                 Size::new(CARD_MIN_WIDTH, CARD_MIN_HEIGHT),
@@ -538,7 +541,7 @@ impl PreferencesDialog {
             card: Rect::ZERO,
             shortcut_viewport: Rect::ZERO,
             shortcut_scroll_offset: 0.0,
-            shortcut_search: TextInput::new("搜索命令或快捷键..."),
+            shortcut_search: TextInput::new(""),
             shortcut_search_query: String::new(),
             shortcut_sections: default_shortcut_sections(),
             shortcut_layout_rows: Vec::new(),
@@ -557,10 +560,11 @@ impl PreferencesDialog {
             calibration_dropdown,
             icc_rendering_intent_group,
             hdr_policy_group,
-            select_icc_profile_button: Button::new("选择 ICC…")
+            select_icc_profile_button: Button::new(pref_text(locale, "preferences-select-icc"))
                 .on_click(app_shell_preferences_select_display_icc_profile_action()),
             content_labels: Vec::new(),
-            close_button: Button::new("关闭").on_click(app_shell_close_modal_action()),
+            close_button: Button::new(pref_text(locale, "preferences-close"))
+                .on_click(app_shell_close_modal_action()),
         };
         dialog.rebuild_content();
         dialog
@@ -576,12 +580,25 @@ impl PreferencesDialog {
         &self.model
     }
 
-    /// Update the backing settings/status snapshot without replacing widget ids.
+    /// Update the snapshot while retaining the search editor, dropdown ids and shortcut capture.
     pub fn set_model(&mut self, model: AppUiPreferencesModel) {
         if self.model == model {
             return;
         }
+        let locale_changed = self.model.locale != model.locale;
         self.model = model;
+        if locale_changed {
+            self.localizer = Localizer::new(self.model.locale).ok();
+            let translated = Self::with_model_and_tab(self.model.clone(), self.active_tab);
+            self.nav_buttons = translated.nav_buttons;
+            self.theme_group = translated.theme_group;
+            self.waveform_group = translated.waveform_group;
+            self.viewer_background_group = translated.viewer_background_group;
+            self.icc_rendering_intent_group = translated.icc_rendering_intent_group;
+            self.hdr_policy_group = translated.hdr_policy_group;
+            self.select_icc_profile_button = translated.select_icc_profile_button;
+            self.close_button = translated.close_button;
+        }
         let theme_selected = ThemePreference::ALL
             .iter()
             .position(|preference| *preference == self.model.theme_preference)
@@ -604,7 +621,11 @@ impl PreferencesDialog {
             },
         );
         self.audio_output_device_dropdown.set_model(
-            self.model.audio_output_device_label.clone(),
+            localized_audio_output_device_label(
+                self.model.locale,
+                &self.model.audio_output_device_selection,
+                &self.model.audio_output_device_catalog,
+            ),
             audio_output_device_items(&self.model),
         );
         self.monitor_output_dropdown.set_model(
@@ -612,7 +633,10 @@ impl PreferencesDialog {
             monitor_output_items(&self.model),
         );
         self.calibration_dropdown.set_model(
-            calibration_label(self.model.display_management.calibration()),
+            calibration_label(
+                self.model.locale,
+                self.model.display_management.calibration(),
+            ),
             calibration_items(&self.model),
         );
         self.icc_rendering_intent_group.set_selected_index(icc_rendering_intent_index(
@@ -637,6 +661,12 @@ impl PreferencesDialog {
         self.rebuild_content();
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
             self.layout(self.bounds);
+        }
+        if locale_changed
+            && let Some(id) = self.shortcut_actions_menu.as_ref().map(|state| state.id.clone())
+            && let Some(anchor) = self.action_menu_anchor_for(&id)
+        {
+            self.shortcut_actions_menu = self.shortcut_action_menu_for(&id, anchor);
         }
     }
 
@@ -675,7 +705,6 @@ impl PreferencesDialog {
                         .muted()
                         .with_font_size(BODY_FONT_SIZE)
                         .with_padding(0.0, 0.0)
-                        .wrapped()
                 }
             })
             .collect();
@@ -713,7 +742,11 @@ impl PreferencesDialog {
                 .shortcut_rows
                 .iter()
                 .filter(|row| row.category == section.category)
-                .filter(|row| query.is_empty() || row.search_text.contains(&query))
+                .filter(|row| {
+                    query.is_empty()
+                        || row.search_text.contains(&query)
+                        || shortcut_title(self.model.locale, row).to_lowercase().contains(&query)
+                })
                 .collect();
             if rows.is_empty() {
                 continue;
@@ -722,7 +755,13 @@ impl PreferencesDialog {
             self.shortcut_layout_rows.push(ShortcutLayoutRow {
                 kind: ShortcutLayoutRowKind::Section {
                     category: section.category,
-                    title: shortcut_category_label(section.category),
+                    title: pref_text(
+                        self.model.locale,
+                        &format!(
+                            "preferences-category-{}",
+                            shortcut_category_label(section.category).to_lowercase()
+                        ),
+                    ),
                     collapsed,
                 },
                 rect: Rect::ZERO,
@@ -763,7 +802,15 @@ impl PreferencesDialog {
         let action = self.row_action_rect(rect);
         let right = action.x - SHORTCUT_KEYCAP_ACTION_GAP;
         let min_left = rect.x + 240.0;
-        let width = keycap_group_width(label, disabled).min((right - min_left).max(0.0));
+        let width = if disabled {
+            keycap_part_width(&localized_text(
+                self.localizer.as_ref(),
+                "preferences-unbound",
+            ))
+        } else {
+            keycap_group_width(label, false)
+        }
+        .min((right - min_left).max(0.0));
         Rect::new(
             right - width,
             rect.y + (rect.height - SHORTCUT_KEYCAP_HEIGHT) * 0.5,
@@ -788,9 +835,10 @@ impl PreferencesDialog {
     }
 
     fn shortcut_action_menu_for(&self, id: &str, anchor: Point) -> Option<ShortcutActionMenuState> {
+        let locale = self.model.locale;
         let row = self.find_shortcut_row(id)?;
         let reset = MenuItem::new(
-            "重置",
+            pref_text(locale, "preferences-reset"),
             app_shell_preferences_shortcut_reset_action(row.id.clone()),
         );
         let reset = if row.overridden {
@@ -799,7 +847,7 @@ impl PreferencesDialog {
             reset.disabled()
         };
         let disable = MenuItem::new(
-            "禁用",
+            pref_text(locale, "preferences-disable"),
             app_shell_preferences_shortcut_disabled_action(row.id.clone()),
         );
         let disable = if row.disabled {
@@ -951,29 +999,30 @@ impl Widget for PreferencesDialog {
                 NAV_BUTTON_HEIGHT,
             ));
         }
+        let control_width = (content.x + content.width - content_x - 126.0).max(0.0);
         if self.active_tab == PreferencesDialogTab::General {
             self.theme_group.layout(Rect::new(
                 content_x + 126.0,
                 body_top + ROW_HEIGHT + (ROW_HEIGHT - SEGMENTED_GROUP_HEIGHT) * 0.5,
-                238.0,
+                238.0_f32.min(control_width),
                 SEGMENTED_GROUP_HEIGHT,
             ));
             self.locale_dropdown.layout(Rect::new(
                 content_x + 126.0,
                 body_top + 2.0 * ROW_HEIGHT,
-                238.0,
+                238.0_f32.min(control_width),
                 ROW_HEIGHT,
             ));
             self.waveform_group.layout(Rect::new(
                 content_x + 126.0,
                 body_top + 3.0 * ROW_HEIGHT + (ROW_HEIGHT - SEGMENTED_GROUP_HEIGHT) * 0.5,
-                160.0,
+                160.0_f32.min(control_width),
                 SEGMENTED_GROUP_HEIGHT,
             ));
             self.viewer_background_group.layout(Rect::new(
                 content_x + 126.0,
                 body_top + 4.0 * ROW_HEIGHT + (ROW_HEIGHT - SEGMENTED_GROUP_HEIGHT) * 0.5,
-                160.0,
+                160.0_f32.min(control_width),
                 SEGMENTED_GROUP_HEIGHT,
             ));
             self.audio_output_device_dropdown.layout(Rect::ZERO);
@@ -990,7 +1039,7 @@ impl Widget for PreferencesDialog {
             self.audio_output_device_dropdown.layout(Rect::new(
                 content_x + 126.0,
                 body_top + 3.0 * ROW_HEIGHT + (ROW_HEIGHT - SEGMENTED_GROUP_HEIGHT) * 0.5,
-                320.0,
+                320.0_f32.min(control_width),
                 SEGMENTED_GROUP_HEIGHT,
             ));
             self.monitor_output_dropdown.layout(Rect::ZERO);
@@ -1007,31 +1056,31 @@ impl Widget for PreferencesDialog {
             self.monitor_output_dropdown.layout(Rect::new(
                 content_x + 126.0,
                 body_top + 2.0 * ROW_HEIGHT,
-                390.0,
+                390.0_f32.min(control_width),
                 SEGMENTED_GROUP_HEIGHT,
             ));
             self.hdr_policy_group.layout(Rect::new(
                 content_x + 126.0,
                 body_top + 3.0 * ROW_HEIGHT,
-                330.0,
+                330.0_f32.min(control_width),
                 SEGMENTED_GROUP_HEIGHT,
             ));
             self.calibration_dropdown.layout(Rect::new(
                 content_x + 126.0,
                 body_top + 5.0 * ROW_HEIGHT,
-                270.0,
+                (control_width - 120.0).max(0.0),
                 SEGMENTED_GROUP_HEIGHT,
             ));
             self.select_icc_profile_button.layout(Rect::new(
-                content_x + 408.0,
+                content_x + 126.0 + (control_width - 108.0).max(0.0),
                 body_top + 5.0 * ROW_HEIGHT,
-                108.0,
+                108.0_f32.min(control_width),
                 SEGMENTED_GROUP_HEIGHT,
             ));
             self.icc_rendering_intent_group.layout(Rect::new(
                 content_x + 126.0,
                 body_top + 6.0 * ROW_HEIGHT,
-                390.0,
+                390.0_f32.min(control_width),
                 SEGMENTED_GROUP_HEIGHT,
             ));
         } else {
@@ -1076,7 +1125,22 @@ impl Widget for PreferencesDialog {
         let content_width = content.x + content.width - content_x;
         for (index, label) in self.content_labels.iter_mut().enumerate() {
             let y = body_top + index as f32 * ROW_HEIGHT;
-            label.layout(Rect::new(content_x, y, content_width, ROW_HEIGHT));
+            let beside_control = match self.active_tab {
+                PreferencesDialogTab::General => (1..=4).contains(&index),
+                PreferencesDialogTab::Media => index == 3,
+                PreferencesDialogTab::Display => matches!(index, 2 | 3 | 5 | 6),
+                _ => false,
+            };
+            label.layout(Rect::new(
+                content_x,
+                y,
+                if beside_control {
+                    116.0
+                } else {
+                    content_width.max(0.0)
+                },
+                ROW_HEIGHT,
+            ));
         }
 
         self.close_button.layout(Rect::new(
@@ -1309,7 +1373,22 @@ impl Widget for PreferencesDialog {
             self.select_icc_profile_button.paint(ctx);
         }
         if self.active_tab == PreferencesDialogTab::Shortcuts {
+            let localizer = self.localizer.as_ref();
             self.shortcut_search.paint(ctx);
+            if self.shortcut_search.text().is_empty() && !self.shortcut_search.is_focused() {
+                let mut placeholder =
+                    Label::new(pref_text(self.model.locale, "preferences-search"))
+                        .muted()
+                        .with_font_size(BODY_FONT_SIZE)
+                        .with_padding(0.0, 0.0);
+                placeholder.layout(Rect::new(
+                    self.shortcut_viewport.x + 10.0,
+                    self.shortcut_viewport.y - SHORTCUT_SEARCH_HEIGHT - 7.0,
+                    (self.shortcut_viewport.width - 20.0).max(0.0),
+                    SHORTCUT_SEARCH_HEIGHT - 14.0,
+                ));
+                placeholder.paint(ctx);
+            }
             ctx.push_clip(self.shortcut_viewport);
             for row in &self.shortcut_layout_rows {
                 if row.rect.y + row.rect.height < self.shortcut_viewport.y
@@ -1347,6 +1426,7 @@ impl Widget for PreferencesDialog {
                                 self.row_action_rect(row.rect),
                                 hovered,
                                 capture,
+                                localizer,
                             );
                         }
                     }
@@ -1354,7 +1434,13 @@ impl Widget for PreferencesDialog {
             }
             ctx.pop_clip();
             if let Some(capture) = &self.shortcut_capture {
-                paint_shortcut_capture_prompt(ctx, self.shortcut_viewport, capture, &self.model);
+                paint_shortcut_capture_prompt(
+                    ctx,
+                    self.shortcut_viewport,
+                    capture,
+                    &self.model,
+                    localizer,
+                );
             }
             if let Some(menu_state) = &self.shortcut_actions_menu {
                 menu_state.menu.paint_overlay(ctx);
@@ -1677,6 +1763,7 @@ fn paint_shortcut_command_row(
     action_rect: Rect,
     hovered: bool,
     capture: Option<&ShortcutCaptureState>,
+    localizer: Option<&Localizer>,
 ) {
     let colors = &ctx.theme.colors;
     let radius = ctx.theme.spacing.radius_sm;
@@ -1692,33 +1779,54 @@ fn paint_shortcut_command_row(
     } else {
         colors.foreground
     };
+    let title_right = if row.overridden || row.disabled || row.conflict_owner.is_some() {
+        (rect.x + 198.0).min(keycap_rect.x - 10.0)
+    } else {
+        keycap_rect.x - 10.0
+    };
+    ctx.push_clip(Rect::new(
+        rect.x + 10.0,
+        rect.y,
+        (title_right - rect.x - 10.0).max(0.0),
+        rect.height,
+    ));
     ctx.encoder.draw_text(
-        &row.command_title,
+        &localized_shortcut_title(localizer, row),
         ctx.theme.typography.body.font_size,
         Point::new(rect.x + 10.0, rect.y + 11.0),
         title_color,
     );
+    ctx.pop_clip();
     if row.overridden || row.disabled || row.conflict_owner.is_some() {
         let status = if row.disabled {
-            "Disabled"
+            localized_text(localizer, "preferences-status-disabled")
         } else if row.conflict_owner.is_some() {
-            "Conflict"
+            localized_text(localizer, "preferences-status-conflict")
         } else {
-            "Custom"
+            localized_text(localizer, "preferences-status-custom")
         };
+        ctx.push_clip(Rect::new(
+            rect.x + 208.0,
+            rect.y,
+            (keycap_rect.x - rect.x - 218.0).max(0.0),
+            rect.height,
+        ));
         ctx.encoder.draw_text(
-            status,
+            &status,
             ctx.theme.typography.metadata.font_size,
             Point::new(rect.x + 208.0, rect.y + 12.0),
             colors.text_tertiary,
         );
+        ctx.pop_clip();
     }
 
     let label = capture
         .and_then(|capture| capture.pending.map(AppUiShortcutBinding::label))
         .unwrap_or_else(|| row.binding_label.clone());
     let capturing = capture.is_some();
-    paint_keycap_label(ctx, keycap_rect, &label, row.disabled, capturing);
+    ctx.push_clip(keycap_rect);
+    paint_keycap_label(ctx, keycap_rect, &label, row.disabled, capturing, localizer);
+    ctx.pop_clip();
 
     if hovered || capture.is_some() {
         ctx.encoder.draw_rect(action_rect, with_alpha(colors.foreground, 0.055), radius);
@@ -1737,6 +1845,7 @@ fn paint_keycap_label(
     label: &str,
     disabled: bool,
     capturing: bool,
+    localizer: Option<&Localizer>,
 ) {
     let colors = &ctx.theme.colors;
     let radius = ctx.theme.spacing.radius_sm;
@@ -1748,21 +1857,21 @@ fn paint_keycap_label(
             radius,
         );
         let text = if label.is_empty() {
-            "按下组合"
+            localized_text(localizer, "preferences-capture")
         } else {
-            label
+            label.to_owned()
         };
         ctx.encoder.draw_text(
-            text,
+            &text,
             ctx.theme.typography.metadata.font_size,
             Point::new(rect.x + SHORTCUT_KEYCAP_PADDING_X, keycap_text_y(ctx, rect)),
             colors.foreground,
         );
         return;
     }
-    if disabled || label == "已禁用" {
+    if disabled {
         ctx.encoder.draw_text(
-            "未绑定",
+            &localized_text(localizer, "preferences-unbound"),
             ctx.theme.typography.metadata.font_size,
             Point::new(rect.x + SHORTCUT_KEYCAP_PADDING_X, keycap_text_y(ctx, rect)),
             colors.text_tertiary,
@@ -1829,6 +1938,7 @@ fn paint_shortcut_capture_prompt(
     viewport: Rect,
     capture: &ShortcutCaptureState,
     model: &AppUiPreferencesModel,
+    localizer: Option<&Localizer>,
 ) {
     let Some(pending) = capture.pending else {
         return;
@@ -1849,31 +1959,55 @@ fn paint_shortcut_capture_prompt(
         .conflict_owner
         .as_ref()
         .and_then(|id| model.shortcut_rows.iter().find(|row| row.id == *id))
-        .map(|row| row.command_title.as_str());
+        .map(|row| localized_shortcut_title(localizer, row));
     let message = owner.map_or_else(
-        || format!("确认绑定：{}", pending.label()),
-        |owner| format!("已被占用：{owner}（{}）", pending.label()),
+        || {
+            localized_format(
+                localizer,
+                "preferences-confirm-binding",
+                &[("binding", pending.label())],
+            )
+        },
+        |owner| {
+            localized_format(
+                localizer,
+                "preferences-binding-conflict",
+                &[("owner", owner), ("binding", pending.label())],
+            )
+        },
     );
+    ctx.push_clip(Rect::new(
+        rect.x + 12.0,
+        rect.y,
+        (rect.width - 172.0).max(0.0),
+        rect.height,
+    ));
     ctx.encoder.draw_text(
         &message,
         ctx.theme.typography.body.font_size,
         Point::new(rect.x + 12.0, rect.y + 13.0),
         colors.foreground,
     );
+    ctx.pop_clip();
     let replace = Rect::new(rect.x + rect.width - 148.0, rect.y + 8.0, 66.0, 24.0);
     let cancel = Rect::new(rect.x + rect.width - 74.0, rect.y + 8.0, 58.0, 24.0);
-    for (button, label) in [(replace, "替换"), (cancel, "取消")] {
+    for (button, label) in [
+        (replace, localized_text(localizer, "preferences-replace")),
+        (cancel, localized_text(localizer, "preferences-cancel")),
+    ] {
         ctx.encoder.draw_rect(
             button,
             with_alpha(colors.foreground, 0.07),
             ctx.theme.spacing.radius_sm,
         );
+        ctx.push_clip(button);
         ctx.encoder.draw_text(
-            label,
+            &label,
             ctx.theme.typography.button.font_size,
             Point::new(button.x + 16.0, button.y + 6.0),
             colors.foreground,
         );
+        ctx.pop_clip();
     }
 }
 
@@ -1909,78 +2043,133 @@ fn content_rows_for_tab(
     tab: PreferencesDialogTab,
     model: &AppUiPreferencesModel,
 ) -> Vec<ContentRow> {
+    let locale = model.locale;
     match tab {
         PreferencesDialogTab::General => vec![
-            heading("外观"),
-            detail(format!("主题：{}", model.theme_label)),
+            heading(pref_text(locale, "preferences-appearance")),
+            detail(pref_text(locale, "preferences-theme-label")),
             detail(locale_message(
                 model.locale,
                 "preferences-language",
                 "界面语言",
             )),
-            detail(format!("波形显示：{}", model.waveform_display_label)),
-            detail(format!(
-                "透明画布：{}",
-                model.viewer_canvas_background_label
+            detail(pref_text(locale, "preferences-waveform-label")),
+            detail(pref_text(locale, "preferences-canvas-label")),
+            heading(pref_text(locale, "preferences-workspace")),
+            detail(pref_format(
+                locale,
+                "preferences-current-workspace",
+                &[("value", pref_value(locale, &model.workspace))],
             )),
-            heading("工作区"),
-            detail(format!("当前工作区：{}", model.workspace)),
-            heading("项目"),
-            detail(format!("项目：{}", model.project_status)),
-            detail(format!("序列：{}", model.sequence_summary)),
+            heading(pref_text(locale, "preferences-project")),
+            detail(pref_format(
+                locale,
+                "preferences-current-project",
+                &[("value", pref_value(locale, &model.project_status))],
+            )),
+            detail(pref_format(
+                locale,
+                "preferences-current-sequence",
+                &[("value", pref_value(locale, &model.sequence_summary))],
+            )),
         ],
         PreferencesDialogTab::Media => vec![
-            heading("预览"),
-            detail(format!("自动代理：{}", model.proxy_mode)),
-            heading("音频"),
-            detail("输出设备："),
-            detail(format!("时钟：{}", model.audio_clock)),
-            detail(format!("采样率：{}", model.audio_sample_rate)),
-            heading("导出草稿"),
-            detail(format!("范围：{}", model.export_range)),
-            detail(format!("输出：{}", model.export_output)),
+            heading(pref_text(locale, "preferences-preview")),
+            detail(pref_format(
+                locale,
+                "preferences-auto-proxy",
+                &[("value", pref_value(locale, &model.proxy_mode))],
+            )),
+            heading(pref_text(locale, "preferences-audio")),
+            detail(pref_text(locale, "preferences-device-label")),
+            detail(pref_format(
+                locale,
+                "preferences-clock",
+                &[("value", model.audio_clock.clone())],
+            )),
+            detail(pref_format(
+                locale,
+                "preferences-sample-rate",
+                &[("value", model.audio_sample_rate.clone())],
+            )),
+            heading(pref_text(locale, "preferences-export-draft")),
+            detail(pref_format(
+                locale,
+                "preferences-range",
+                &[("value", pref_value(locale, &model.export_range))],
+            )),
+            detail(pref_format(
+                locale,
+                "preferences-output",
+                &[("value", pref_value(locale, &model.export_output))],
+            )),
         ],
         PreferencesDialogTab::Display => display_content_rows(model),
         PreferencesDialogTab::Shortcuts => Vec::new(),
         PreferencesDialogTab::Developer => vec![
-            heading("诊断"),
-            detail(format!("运行时诊断：{}", model.runtime_diagnostics)),
-            detail(format!("日志过滤：{}", model.log_filter)),
-            heading("运行时"),
-            detail(format!("后台工作线程：{}", model.background_workers)),
+            heading(pref_text(locale, "preferences-diagnostics")),
+            detail(pref_format(
+                locale,
+                "preferences-runtime-diagnostics",
+                &[("value", pref_value(locale, &model.runtime_diagnostics))],
+            )),
+            detail(pref_format(
+                locale,
+                "preferences-log-filter",
+                &[("value", model.log_filter.clone())],
+            )),
+            heading(pref_text(locale, "preferences-runtime")),
+            detail(pref_format(
+                locale,
+                "preferences-workers",
+                &[("value", model.background_workers.clone())],
+            )),
         ],
     }
 }
 
 fn display_content_rows(model: &AppUiPreferencesModel) -> Vec<ContentRow> {
+    let locale = model.locale;
     let mut rows = vec![
-        heading("监看输出"),
-        detail(format!("色彩引擎：{}", model.display_engine_name)),
-        detail("Monitor target："),
-        detail("HDR policy："),
-        heading("ICC device calibration"),
-        detail("配置文件："),
-        detail("Rendering intent："),
-        heading("当前结构化诊断"),
+        heading(pref_text(locale, "preferences-monitor-output")),
+        detail(pref_format(
+            locale,
+            "preferences-engine",
+            &[("value", model.display_engine_name.clone())],
+        )),
+        detail(pref_text(locale, "preferences-monitor-label")),
+        detail(pref_text(locale, "preferences-hdr-label")),
+        heading(pref_text(locale, "preferences-icc-calibration")),
+        detail(pref_text(locale, "preferences-profile-label")),
+        detail(pref_text(locale, "preferences-intent-label")),
+        heading(pref_text(locale, "preferences-structured-diagnostics")),
     ];
     let Some(snapshot) = &model.display_output_snapshot else {
-        rows.push(detail("等待 Window 发布 monitor/surface snapshot"));
+        rows.push(detail(pref_text(locale, "preferences-waiting-display")));
         return rows;
     };
     rows.extend([
-        detail(format!(
-            "状态：{} · 显示器：{:?} · 平台：{:?}",
-            snapshot.validation_status, snapshot.display_id.name, snapshot.platform
+        detail(pref_format(
+            locale,
+            "preferences-display-status",
+            &[
+                ("status", snapshot.validation_status.to_string()),
+                ("display", format!("{:?}", snapshot.display_id.name)),
+                ("platform", format!("{:?}", snapshot.platform)),
+            ],
         )),
         detail(format!(
             "Surface：{} / {} / {}",
             snapshot.surface_format, snapshot.surface_color_space, snapshot.surface_hdr_mode
         )),
-        detail(format!(
-            "输出：{} → {} · Viewer：{}",
-            snapshot.requested_output_color_space,
-            snapshot.resolved_output_color_space,
-            snapshot.requested_viewer_mode
+        detail(pref_format(
+            locale,
+            "preferences-display-output",
+            &[
+                ("requested", snapshot.requested_output_color_space.clone()),
+                ("resolved", snapshot.resolved_output_color_space.clone()),
+                ("viewer", snapshot.requested_viewer_mode.clone()),
+            ],
         )),
         detail(format!(
             "OCIO：{} / {}",
@@ -1990,7 +2179,8 @@ fn display_content_rows(model: &AppUiPreferencesModel) -> Vec<ContentRow> {
         detail(format!("ICC：{}", snapshot.monitor_profile_status)),
         detail(format!("HDR：{}", snapshot.hdr_status)),
         detail(format!(
-            "Warnings：{}",
+            "{}: {}",
+            pref_text(locale, "preferences-warnings"),
             snapshot
                 .warnings
                 .iter()
@@ -1999,7 +2189,8 @@ fn display_content_rows(model: &AppUiPreferencesModel) -> Vec<ContentRow> {
                 .join(", ")
         )),
         detail(format!(
-            "Blockers：{}",
+            "{}: {}",
+            pref_text(locale, "preferences-blockers"),
             snapshot
                 .blockers
                 .iter()
@@ -2015,11 +2206,24 @@ fn audio_output_device_label(
     selection: &RealtimeAudioOutputDeviceSelection,
     catalog: &AudioOutputDeviceCatalogState,
 ) -> String {
-    let suffix = match selection.access_policy() {
-        mondrian_media::RealtimeAudioOutputAccessPolicy::Shared => "共享",
-        mondrian_media::RealtimeAudioOutputAccessPolicy::PreferExclusive => "优先独占，可回退共享",
-        mondrian_media::RealtimeAudioOutputAccessPolicy::RequireExclusive => "强制独占",
-    };
+    localized_audio_output_device_label(AppUiLocale::ZhCn, selection, catalog)
+}
+
+fn localized_audio_output_device_label(
+    locale: AppUiLocale,
+    selection: &RealtimeAudioOutputDeviceSelection,
+    catalog: &AudioOutputDeviceCatalogState,
+) -> String {
+    let suffix = pref_value(
+        locale,
+        match selection.access_policy() {
+            mondrian_media::RealtimeAudioOutputAccessPolicy::Shared => "共享",
+            mondrian_media::RealtimeAudioOutputAccessPolicy::PreferExclusive => {
+                "优先独占，可回退共享"
+            }
+            mondrian_media::RealtimeAudioOutputAccessPolicy::RequireExclusive => "强制独占",
+        },
+    );
     let device_id = match selection {
         RealtimeAudioOutputDeviceSelection::SystemDefault
         | RealtimeAudioOutputDeviceSelection::SystemDefaultExclusive
@@ -2042,8 +2246,14 @@ fn audio_output_device_label(
                 | AudioOutputDeviceCatalogState::Failed(_) => None,
             };
             default_name.map_or_else(
-                || "系统默认".to_owned(),
-                |name| format!("系统默认 — {name}"),
+                || pref_text(locale, "preferences-system-default"),
+                |name| {
+                    pref_format(
+                        locale,
+                        "preferences-system-default-device",
+                        &[("name", name.to_owned())],
+                    )
+                },
             )
         }
         Some(device_id) => match catalog {
@@ -2052,9 +2262,13 @@ fn audio_output_device_label(
                 .iter()
                 .find(|device| device.device_id.as_ref() == Some(device_id))
                 .map(|device| device.display_name.clone())
-                .unwrap_or_else(|| "已选设备当前不可用".to_owned()),
-            AudioOutputDeviceCatalogState::Loading => "正在确认已选设备…".to_owned(),
-            AudioOutputDeviceCatalogState::Failed(_) => "无法确认已选设备".to_owned(),
+                .unwrap_or_else(|| pref_text(locale, "preferences-device-unavailable")),
+            AudioOutputDeviceCatalogState::Loading => {
+                pref_text(locale, "preferences-device-loading")
+            }
+            AudioOutputDeviceCatalogState::Failed(_) => {
+                pref_text(locale, "preferences-device-failed")
+            }
         },
     };
     format!("{base} · {suffix}")
@@ -2083,13 +2297,23 @@ fn monitor_output_label(model: &AppUiPreferencesModel) -> String {
         .monitor_output_choices
         .iter()
         .find(|choice| choice.intent == *model.display_management.monitor_output())
-        .map(|choice| choice.label.clone())
-        .unwrap_or_else(|| match model.display_management.monitor_output() {
-            MonitorOutputIntent::MatchProgramOutput => "跟随 Program Output".to_owned(),
-            MonitorOutputIntent::ColorSpace(color_space) => format!("{color_space:?}"),
-            MonitorOutputIntent::OcioDisplayView { display, view } => {
-                format!("不可用 · {display} / {view}")
+        .map(|choice| {
+            if choice.intent == MonitorOutputIntent::MatchProgramOutput {
+                pref_text(model.locale, "preferences-follow-program")
+            } else {
+                choice.label.clone()
             }
+        })
+        .unwrap_or_else(|| match model.display_management.monitor_output() {
+            MonitorOutputIntent::MatchProgramOutput => {
+                pref_text(model.locale, "preferences-follow-program")
+            }
+            MonitorOutputIntent::ColorSpace(color_space) => format!("{color_space:?}"),
+            MonitorOutputIntent::OcioDisplayView { display, view } => pref_format(
+                model.locale,
+                "preferences-monitor-unavailable",
+                &[("display", display.clone()), ("view", view.clone())],
+            ),
         })
 }
 
@@ -2104,7 +2328,11 @@ fn monitor_output_items(model: &AppUiPreferencesModel) -> Vec<MenuItem> {
                 .ok()
                 .map(|policy| {
                     MenuItem::new(
-                        choice.label.clone(),
+                        if choice.intent == MonitorOutputIntent::MatchProgramOutput {
+                            pref_text(model.locale, "preferences-follow-program")
+                        } else {
+                            choice.label.clone()
+                        },
                         app_shell_preferences_display_management_changed_action(policy),
                     )
                 })
@@ -2117,10 +2345,10 @@ fn monitor_output_dropdown(model: &AppUiPreferencesModel) -> Dropdown {
         .with_max_visible_items(10)
 }
 
-fn calibration_label(calibration: &DisplayCalibrationPolicy) -> String {
+fn calibration_label(locale: AppUiLocale, calibration: &DisplayCalibrationPolicy) -> String {
     match calibration {
-        DisplayCalibrationPolicy::Disabled => "关闭".to_owned(),
-        DisplayCalibrationPolicy::OsDefault => "操作系统默认".to_owned(),
+        DisplayCalibrationPolicy::Disabled => pref_text(locale, "preferences-calibration-disabled"),
+        DisplayCalibrationPolicy::OsDefault => pref_text(locale, "preferences-os-default"),
         DisplayCalibrationPolicy::IccProfilePath(path) => Path::new(path)
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -2130,17 +2358,24 @@ fn calibration_label(calibration: &DisplayCalibrationPolicy) -> String {
 
 fn calibration_items(model: &AppUiPreferencesModel) -> Vec<MenuItem> {
     let mut policies = vec![
-        ("关闭".to_owned(), DisplayCalibrationPolicy::Disabled),
         (
-            "操作系统默认".to_owned(),
+            pref_text(model.locale, "preferences-calibration-disabled"),
+            DisplayCalibrationPolicy::Disabled,
+        ),
+        (
+            pref_text(model.locale, "preferences-os-default"),
             DisplayCalibrationPolicy::OsDefault,
         ),
     ];
     if let DisplayCalibrationPolicy::IccProfilePath(path) = model.display_management.calibration() {
         policies.push((
-            format!(
-                "当前文件 · {}",
-                calibration_label(model.display_management.calibration())
+            pref_format(
+                model.locale,
+                "preferences-current-profile",
+                &[(
+                    "value",
+                    calibration_label(model.locale, model.display_management.calibration()),
+                )],
             ),
             DisplayCalibrationPolicy::IccProfilePath(path.clone()),
         ));
@@ -2160,7 +2395,7 @@ fn calibration_items(model: &AppUiPreferencesModel) -> Vec<MenuItem> {
 
 fn calibration_dropdown(model: &AppUiPreferencesModel) -> Dropdown {
     Dropdown::new(
-        calibration_label(model.display_management.calibration()),
+        calibration_label(model.locale, model.display_management.calibration()),
         calibration_items(model),
     )
 }
@@ -2184,7 +2419,7 @@ fn icc_rendering_intent_group(model: &AppUiPreferencesModel) -> SegmentedButtonG
     .into_iter()
     .map(|(label, intent)| {
         SegmentedButtonItem::new(
-            label,
+            pref_value(model.locale, label),
             app_shell_preferences_display_management_changed_action(
                 model.display_management.with_icc_rendering_intent(intent),
             ),
@@ -2216,7 +2451,7 @@ fn hdr_policy_group(model: &AppUiPreferencesModel) -> SegmentedButtonGroup {
     .into_iter()
     .map(|(label, mode)| {
         SegmentedButtonItem::new(
-            label,
+            pref_value(model.locale, label),
             app_shell_preferences_display_management_changed_action(
                 model.display_management.with_viewer_mode(mode),
             ),
@@ -2231,15 +2466,112 @@ fn hdr_policy_group(model: &AppUiPreferencesModel) -> SegmentedButtonGroup {
 
 fn audio_output_device_dropdown(model: &AppUiPreferencesModel) -> Dropdown {
     Dropdown::new(
-        model.audio_output_device_label.clone(),
+        localized_audio_output_device_label(
+            model.locale,
+            &model.audio_output_device_selection,
+            &model.audio_output_device_catalog,
+        ),
         audio_output_device_items(model),
     )
     .with_max_visible_items(10)
 }
 
+fn localized_text(localizer: Option<&Localizer>, id: &str) -> String {
+    localizer.map(|localizer| localizer.text(id)).unwrap_or_else(|| id.to_owned())
+}
+
+fn localized_format(localizer: Option<&Localizer>, id: &str, values: &[(&str, String)]) -> String {
+    let mut args = fluent_bundle::FluentArgs::new();
+    for (key, value) in values {
+        args.set(*key, value.as_str());
+    }
+    localizer
+        .map(|localizer| localizer.format(id, Some(&args)))
+        .unwrap_or_else(|| id.to_owned())
+}
+
+fn localized_shortcut_title(localizer: Option<&Localizer>, row: &ShortcutPreferenceRow) -> String {
+    let id = format!("command-{}", row.id.replace('.', "-"));
+    let text = localized_text(localizer, &id);
+    if text == id {
+        row.command_title.clone()
+    } else {
+        text
+    }
+}
+
+fn pref_text(locale: AppUiLocale, id: &str) -> String {
+    locale_message(locale, id, id)
+}
+
+fn pref_format(locale: AppUiLocale, id: &str, values: &[(&str, String)]) -> String {
+    localized_format(Localizer::new(locale).ok().as_ref(), id, values)
+}
+
+// Only use for known legacy settings/status labels, never names, paths or device titles.
+fn pref_value(locale: AppUiLocale, value: &str) -> String {
+    let id = match value {
+        "跟随系统" => "preferences-system",
+        "深色" => "preferences-dark",
+        "浅色" => "preferences-light",
+        "已启用" => "preferences-enabled",
+        "已禁用" => "preferences-disabled",
+        "未打开项目" => "preferences-no-project",
+        "没有活动序列" => "preferences-no-sequence",
+        "未选择" => "preferences-not-selected",
+        "跟踪已启用" => "preferences-tracing",
+        "整个序列" => "preferences-range-entire",
+        "序列入点/出点" => "preferences-range-in-out",
+        "工作区域" => "preferences-range-work",
+        "共享" => "preferences-shared",
+        "优先独占，可回退共享" => "preferences-prefer-exclusive",
+        "强制独占" => "preferences-require-exclusive",
+        "系统默认" => "preferences-system-default",
+        "已选设备当前不可用" => "preferences-device-unavailable",
+        "正在确认已选设备…" => "preferences-device-loading",
+        "无法确认已选设备" => "preferences-device-failed",
+        "跟随 Program Output" => "preferences-follow-program",
+        "关闭" => "preferences-calibration-disabled",
+        "操作系统默认" => "preferences-os-default",
+        "感知" => "preferences-perceptual",
+        "相对" => "preferences-relative",
+        "饱和度" => "preferences-saturation",
+        "绝对" => "preferences-absolute",
+        "跟随输出" => "preferences-follow-output",
+        "刷新设备列表" => "preferences-refresh-devices",
+        "正在发现输出设备…" => "preferences-discover-devices",
+        "整流" => "preferences-waveform-rectified",
+        "完整" => "preferences-waveform-full",
+        "棋盘格" => "preferences-canvas-checkerboard",
+        "黑色" => "preferences-canvas-black",
+        "编辑" => "command-workspace-editing",
+        "调色" => "command-workspace-color",
+        "音频" => "command-workspace-audio",
+        "合成" => "command-workspace-compositing",
+        "导出" => "command-workspace-export",
+        _ => return value.to_owned(),
+    };
+    pref_text(locale, id)
+}
+
+fn shortcut_title(locale: AppUiLocale, row: &ShortcutPreferenceRow) -> String {
+    locale_message(
+        locale,
+        &format!("command-{}", row.id.replace('.', "-")),
+        &row.command_title,
+    )
+}
+
 fn locale_message(locale: AppUiLocale, id: &str, fallback: &str) -> String {
     Localizer::new(locale)
-        .map(|localizer| localizer.text(id))
+        .map(|localizer| {
+            let text = localizer.text(id);
+            if text == id {
+                fallback.to_owned()
+            } else {
+                text
+            }
+        })
         .unwrap_or_else(|_| fallback.to_owned())
 }
 
@@ -2300,15 +2632,15 @@ fn locale_dropdown(model: &AppUiPreferencesModel) -> Dropdown {
 fn audio_output_device_items(model: &AppUiPreferencesModel) -> Vec<MenuItem> {
     let default_choices = [
         (
-            "跟随系统默认设备 · 共享",
+            pref_text(model.locale, "preferences-default-shared"),
             RealtimeAudioOutputDeviceSelection::SystemDefault,
         ),
         (
-            "跟随系统默认设备 · 优先独占，可回退共享",
+            pref_text(model.locale, "preferences-default-prefer-exclusive"),
             RealtimeAudioOutputDeviceSelection::SystemDefaultPreferExclusive,
         ),
         (
-            "跟随系统默认设备 · 强制独占",
+            pref_text(model.locale, "preferences-default-require-exclusive"),
             RealtimeAudioOutputDeviceSelection::SystemDefaultExclusive,
         ),
     ];
@@ -2325,13 +2657,21 @@ fn audio_output_device_items(model: &AppUiPreferencesModel) -> Vec<MenuItem> {
         .collect::<Vec<_>>();
     match &model.audio_output_device_catalog {
         AudioOutputDeviceCatalogState::Loading => {
-            items.push(MenuItem::inert("正在发现输出设备…"));
+            items.push(MenuItem::inert(pref_text(
+                model.locale,
+                "preferences-discover-devices",
+            )));
         }
         AudioOutputDeviceCatalogState::Failed(detail) => {
-            items.push(MenuItem::inert(format!("设备发现失败：{detail}")));
+            items.push(MenuItem::inert(pref_format(
+                model.locale,
+                "preferences-device-discovery-failed",
+                &[("detail", detail.clone())],
+            )));
         }
         AudioOutputDeviceCatalogState::Ready(catalog) => {
             items.extend(selectable_audio_output_device_items(
+                model.locale,
                 catalog,
                 &model.audio_output_device_selection,
             ));
@@ -2339,13 +2679,14 @@ fn audio_output_device_items(model: &AppUiPreferencesModel) -> Vec<MenuItem> {
     }
     items.push(MenuItem::separator());
     items.push(MenuItem::new(
-        "刷新设备列表",
+        pref_text(model.locale, "preferences-refresh-devices"),
         app_shell_preferences_refresh_audio_output_devices_action(),
     ));
     items
 }
 
 fn selectable_audio_output_device_items(
+    locale: AppUiLocale,
     catalog: &RealtimeAudioOutputDeviceCatalog,
     selection: &RealtimeAudioOutputDeviceSelection,
 ) -> Vec<MenuItem> {
@@ -2354,24 +2695,37 @@ fn selectable_audio_output_device_items(
         .iter()
         .flat_map(|device| {
             let Some(device_id) = device.device_id.clone() else {
-                return vec![MenuItem::inert(format!(
-                    "{}（身份不可用）",
-                    device.display_name
+                return vec![MenuItem::inert(pref_format(
+                    locale,
+                    "preferences-device-no-identity",
+                    &[("name", device.display_name.clone())],
                 ))];
             };
             let choices = [
                 (
-                    format!("{} · 共享", device.display_name),
+                    format!(
+                        "{} · {}",
+                        device.display_name,
+                        pref_text(locale, "preferences-shared")
+                    ),
                     RealtimeAudioOutputDeviceSelection::Specific { device_id: device_id.clone() },
                 ),
                 (
-                    format!("{} · 优先独占，可回退共享", device.display_name),
+                    format!(
+                        "{} · {}",
+                        device.display_name,
+                        pref_text(locale, "preferences-prefer-exclusive")
+                    ),
                     RealtimeAudioOutputDeviceSelection::SpecificPreferExclusive {
                         device_id: device_id.clone(),
                     },
                 ),
                 (
-                    format!("{} · 强制独占", device.display_name),
+                    format!(
+                        "{} · {}",
+                        device.display_name,
+                        pref_text(locale, "preferences-require-exclusive")
+                    ),
                     RealtimeAudioOutputDeviceSelection::SpecificExclusive { device_id },
                 ),
             ];
@@ -2605,6 +2959,180 @@ mod tests {
         assert!(dialog.child(search_index).is_some());
         assert_eq!(dialog.child(close_index).map(Widget::id), Some(close_id));
         assert!(dialog.child(close_index).expect("close child").can_focus());
+    }
+
+    #[test]
+    fn locale_switch_preserves_search_selection_tab_and_pending_shortcut() {
+        let mut dialog = PreferencesDialog::with_model_and_tab(
+            AppUiPreferencesModel::default(),
+            PreferencesDialogTab::Shortcuts,
+        );
+        dialog.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
+        let actions = RefCell::new(Vec::new());
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let search = Point::new(
+            dialog.shortcut_viewport.x + 20.0,
+            dialog.shortcut_viewport.y - 30.0,
+        );
+        click(&mut dialog, &mut ctx, search);
+        dialog.event(&UiEvent::TextInput("save".into()), &mut ctx);
+        dialog.shortcut_search.select_all();
+        let search_id = dialog.shortcut_search.id();
+        let selection = dialog.shortcut_search.selection_byte_range();
+        let dropdown_id = dialog.locale_dropdown.id();
+        let mut model = dialog.model.clone();
+        model.set_locale_preference(AppUiLocalePreference::EnUs, None);
+        dialog.set_model(model);
+        assert!(dialog.shortcut_search.is_focused());
+        assert_eq!(dialog.shortcut_search.selection_byte_range(), selection);
+        let keycap = shortcut_keycap_center(&dialog, "file.save_project");
+        click(&mut dialog, &mut ctx, keycap);
+        dialog.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::I,
+                modifiers: Modifiers { ctrl: true, alt: true, shift: false, meta: false },
+            },
+            &mut ctx,
+        );
+        let capture = dialog.shortcut_capture.clone().expect("pending capture");
+        assert!(capture.pending.is_some());
+        // Clicking a keycap already clears the input selection; locale changes must preserve
+        // the editor state that exists after that interaction.
+        let selection = dialog.shortcut_search.selection_byte_range();
+        let sections: Vec<_> =
+            dialog.shortcut_sections.iter().map(|s| (s.category, s.collapsed)).collect();
+        for preference in [
+            AppUiLocalePreference::EnUs,
+            AppUiLocalePreference::Pseudo,
+            AppUiLocalePreference::ZhCn,
+        ] {
+            let mut model = dialog.model.clone();
+            model.set_locale_preference(preference, None);
+            dialog.set_model(model);
+            assert_eq!(dialog.active_tab(), PreferencesDialogTab::Shortcuts);
+            assert_eq!(dialog.shortcut_search.id(), search_id);
+            assert_eq!(dialog.locale_dropdown.id(), dropdown_id);
+            assert_eq!(dialog.shortcut_search.text(), "save");
+            assert_eq!(dialog.shortcut_search_query, "save");
+            assert_eq!(dialog.shortcut_search.selection_byte_range(), selection);
+            assert_eq!(dialog.shortcut_capture.as_ref(), Some(&capture));
+            assert_eq!(
+                dialog
+                    .shortcut_sections
+                    .iter()
+                    .map(|s| (s.category, s.collapsed))
+                    .collect::<Vec<_>>(),
+                sections
+            );
+            assert!(dialog.find_shortcut_row("file.save_project").is_some());
+        }
+        dialog.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(actions.borrow().len(), 1);
+        match &actions.borrow()[0] {
+            Action::Custom { name, payload, .. } => {
+                assert_eq!(name, APP_SHELL_PREFERENCES_SHORTCUT_REBOUND);
+                let payload: PreferencesShortcutReboundPayload =
+                    serde_json::from_value(payload.clone()).expect("payload");
+                assert_eq!(payload.id, "file.save_project");
+                assert_eq!(payload.key, "I");
+                assert!(payload.ctrl && payload.alt);
+            }
+            action => panic!("unexpected action: {action:?}"),
+        }
+    }
+
+    #[test]
+    fn translated_preferences_text_is_clipped_within_its_layout_region() {
+        use mondrian_ui_renderer::command::{DrawCommand, DrawEncoder};
+        let theme = ThemePreset::Dark.build();
+        for locale in [AppUiLocale::EnUs, AppUiLocale::Pseudo] {
+            for tab in PreferencesDialogTab::ALL {
+                for width in [CARD_MIN_WIDTH, CARD_WIDTH] {
+                    let model = AppUiPreferencesModel { locale, ..Default::default() };
+                    let mut dialog = PreferencesDialog::with_model_and_tab(model, tab);
+                    dialog.layout(Rect::new(0.0, 0.0, width + 48.0, 700.0));
+                    if tab == PreferencesDialogTab::Shortcuts {
+                        dialog.shortcut_capture = Some(ShortcutCaptureState {
+                            id: "file.save_project".into(),
+                            pending: Some(AppUiShortcutBinding {
+                                key: AppUiShortcutKey::O,
+                                ctrl: true,
+                                alt: false,
+                                shift: false,
+                                meta: false,
+                            }),
+                            conflict_owner: Some("file.open_project".into()),
+                        });
+                    }
+                    let mut encoder = DrawEncoder::new();
+                    dialog.paint(&mut PaintContext {
+                        encoder: &mut encoder,
+                        theme: &theme,
+                        clip_rect: dialog.bounds,
+                    });
+                    let commands = encoder.finish();
+                    let mut clips = Vec::new();
+                    let mut texts = Vec::new();
+                    for command in commands {
+                        match command {
+                            DrawCommand::PushClip { bounds } => clips.push(bounds),
+                            DrawCommand::PopClip => {
+                                clips.pop().expect("balanced clips");
+                            }
+                            DrawCommand::Text { text, .. } => {
+                                let clip = clips.last().expect("every translated text has a clip");
+                                assert!(clip.width >= 0.0 && clip.height >= 0.0);
+                                assert!(
+                                    clip.x >= dialog.card.x
+                                        && clip.x + clip.width
+                                            <= dialog.card.x + dialog.card.width + 1.0,
+                                    "{text}: {clip:?}"
+                                );
+                                assert!(
+                                    clip.y >= dialog.card.y
+                                        && clip.y + clip.height
+                                            <= dialog.card.y + dialog.card.height + 1.0,
+                                    "{text}: {clip:?}"
+                                );
+                                if text.contains("Confirm binding") || text.contains("Used by") {
+                                    assert!(
+                                        clip.x + clip.width
+                                            <= dialog.shortcut_viewport.x
+                                                + dialog.shortcut_viewport.width
+                                                - 160.0
+                                    );
+                                }
+                                texts.push(text);
+                            }
+                            _ => {}
+                        }
+                    }
+                    assert!(clips.is_empty());
+                    if locale == AppUiLocale::EnUs {
+                        assert!(texts.iter().any(|text| text == "Close"));
+                        assert!(!texts.iter().any(|text| text.contains("已禁用")
+                            || text.contains("确认绑定")
+                            || text.contains("重置")));
+                    } else {
+                        assert!(texts.iter().any(|text| text.starts_with('⟦')));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

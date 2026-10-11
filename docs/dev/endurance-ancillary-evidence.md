@@ -62,7 +62,7 @@ pwsh -NoProfile -File scripts/validation/test-endurance-ancillary-evidence.ps1 `
 pwsh -NoProfile -File scripts/validation/test-phase-owner-closure.ps1
 ```
 
-The separate ignored Media integration tests in `tests/approved_bmx.rs` exercise
+The separate ignored Media integration tests in `crates/mondrian-media/tests/approved_bmx.rs` exercise
 actual official tools. Set `MONDRIAN_BMX_TOOL_DIR` to the installed binary
 directory and `MONDRIAN_BMX_NATIVE_EVIDENCE_OUTPUT` to a new JSON file, then run
 the freshly built `approved_bmx` test harness with `--ignored --test-threads=1`.

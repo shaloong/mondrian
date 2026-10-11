@@ -1,10 +1,10 @@
 # Mondrian 产品路线图
 
-> 更新日期：2026-08-11
+> 更新日期：2026-10-03
 >
-> 当前状态：M1 Alpha 收口完成（实现、候选资格与三平台 native CI 均已闭环）
+> 当前状态：M1 Windows Alpha 收口中（核心实现与历史验证已有基线，当前候选资格尚待重跑）
 >
-> 当前主线：冻结 M1，随后只推进 M2 的产品可靠性与交互完整性
+> 当前主线：完成 M1 当前候选资格收口，再推进 M2 的产品可靠性与交互完整性
 
 ROADMAP 只记录产品范围、里程碑状态和退出门槛。实现细节放在
 [`CONTEXT.md`](../CONTEXT.md) 与 [`docs/architecture/`](architecture/)；测试命令、
@@ -67,7 +67,7 @@ M1 的目标是 L1，不要求所有高级组合都可执行。暂未实现的�
 
 M0 已完成以下结果，技术合同以 `CONTEXT.md`、ADR 和架构文档为准：
 
-- current document v25/library v5、封闭 `ClipContent`、强编辑关系和显式 schema 拒绝。
+- current document v27/library v6、封闭 `ClipContent`、强编辑关系和显式 schema 拒绝。
 - 单一事务型 Authoring Session、Project/Sequence Undo/Redo、History 双预算和连续性屏障。
 - crash-consistent `.mdp` 发布、SQLite snapshot、Recovery Authority、Session/generation 隔离。
 - 精确作者时间、显式 Time Domain/Transform、帧/样本 Evaluation Grid 和规范源采样目标。

@@ -26,7 +26,8 @@ mkdir -p crates/mondrian-plugin-hello/src
 [package]
 name = "mondrian-plugin-hello"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 mondrian-core = { path = "../mondrian-core" }
