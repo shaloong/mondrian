@@ -679,11 +679,11 @@ function Assert-MondrianCanonicalAppClosure($Receipt) {
     $app = Read-CanonicalOwnerLeaf $Receipt 'Phase App' 'canonical_json'
     Assert-ExactReceiptFields $app @('schema_version','app_owner_consumed','project','reference_output','export','export_terminal_snapshot','audio','audio_source_cache','workers') 'Canonical App'
     Assert-UnsignedInteger $app.schema_version 'Canonical App schema'
-    if ($app.schema_version -ne 1) { throw 'Unknown canonical App schema' }
+    if ($app.schema_version -ne 2) { throw 'Unknown canonical App schema' }
     Assert-Bool $app.app_owner_consumed $true 'App consumed'
-    Assert-ExactReceiptFields $app.project @('session_was_open','pending_close_was_active','authoring_session_released','pending_close_released','runtime_lease_released','retired_library_generations_remaining','lifecycle_failure') 'Canonical project'
-    foreach ($field in @('session_was_open','pending_close_was_active')) { Assert-BoolType $app.project.$field "App project $field" }
-    foreach ($field in @('authoring_session_released','pending_close_released','runtime_lease_released')) { Assert-Bool $app.project.$field $true "App project $field" }
+    Assert-ExactReceiptFields $app.project @('session_was_open','pending_close_was_active','pending_open_was_active','pending_open_released','authoring_session_released','pending_close_released','runtime_lease_released','retired_library_generations_remaining','lifecycle_failure') 'Canonical project'
+    foreach ($field in @('session_was_open','pending_close_was_active','pending_open_was_active')) { Assert-BoolType $app.project.$field "App project $field" }
+    foreach ($field in @('pending_open_released','authoring_session_released','pending_close_released','runtime_lease_released')) { Assert-Bool $app.project.$field $true "App project $field" }
     Assert-Zero $app.project.retired_library_generations_remaining 'App retired libraries'
     Assert-Null $app.project.lifecycle_failure 'App project close failure'
     $projection = [pscustomobject]@{

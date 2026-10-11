@@ -120,7 +120,7 @@ foreach ($kind in @('continuous_export','playback_reference','concurrent_recover
             Assert-Rejected $raw $kind "verifier $mutation"
         }
     }
-    foreach ($mutation in @('schema','ordinal','phase','run','extra','missing','failed','bool-string','child-string','failures','export','raw-app','app-hash','app-worker','app-extra','app-export-join')) {
+    foreach ($mutation in @('schema','ordinal','phase','run','extra','missing','failed','bool-string','child-string','failures','export','raw-app','app-hash','app-worker','app-extra','app-export-join','app-old-schema','app-pending-open-retained','app-pending-open-type','app-pending-open-missing','app-pending-open-active-type')) {
         $raw = $original | ConvertTo-Json -Depth 80 -Compress | ConvertFrom-Json
         switch ($mutation) {
             'schema' {$raw.schema_version='1'}
@@ -143,6 +143,11 @@ foreach ($kind in @('continuous_export','playback_reference','concurrent_recover
                         'raw-app' {$body.app_owner_consumed=$false}
                         'app-worker' {$body.workers.project_persistence.detached_workers=1}
                         'app-extra' {$body | Add-Member invented_resource_closed $true}
+                        'app-old-schema' {$body.schema_version=1}
+                        'app-pending-open-retained' {$body.project.pending_open_released=$false}
+                        'app-pending-open-type' {$body.project.pending_open_released='true'}
+                        'app-pending-open-missing' {$body.project.PSObject.Properties.Remove('pending_open_released')}
+                        'app-pending-open-active-type' {$body.project.pending_open_was_active='false'}
                         'app-export-join' {
                             $leaf = $body.export.json | ConvertFrom-Json
                             $leaf.worker_terminated=$false

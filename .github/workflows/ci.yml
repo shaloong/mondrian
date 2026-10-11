@@ -36,6 +36,10 @@ jobs:
         shell: pwsh
         run: ./scripts/validation/validate-github-actions-pins.ps1
 
+      - name: 校验 Phase owner receipt 合同
+        shell: pwsh
+        run: ./scripts/validation/test-phase-owner-closure.ps1
+
       - name: 校验 Windows 参考机资格契约
         shell: pwsh
         run: ./scripts/validation/validate-windows-reference.ps1 -MachineReportPath tests/validation/fixtures/windows-machine-qualified-v3.json -RequiredMemoryClass standard-playback -RequireBaselineEligibility -OutputPath target/validation/reference-machine-contract.json
