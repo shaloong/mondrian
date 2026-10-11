@@ -30,6 +30,21 @@ function Confirm-Source {
         if ((Get-FileHash -LiteralPath $path).Hash -ne $source.sha256) { throw "Source mismatch: $($source.path)" }
     }
 }
+function Stop-LabRunner($process, $settlement) {
+    if ($settlement.Attempted -or $settlement.ParentExitObserved) { return }
+    $settlement.Attempted = $true
+    $cleanupTimer = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        # Kill only the runner. Its existing kill-on-close Job owns test children;
+        # this fallback does not infer tree settlement without the native receipt.
+        if (-not $process.HasExited) { $process.Kill() }
+    } catch { $settlement.Errors += $_.Exception.ToString() }
+    try {
+        $remaining = [math]::Max(0, 2000 - $cleanupTimer.ElapsedMilliseconds)
+        $settlement.ParentExitObserved = $process.HasExited -or ($remaining -gt 0 -and $process.WaitForExit([int]$remaining))
+    } catch { $settlement.Errors += $_.Exception.ToString() }
+    $settlement.ElapsedMs = $cleanupTimer.ElapsedMilliseconds
+}
 Confirm-Source
 $leases = [Collections.Generic.List[IDisposable]]::new()
 $artifacts = @{}
@@ -72,13 +87,17 @@ try {
         $process.StartInfo = $start
         $timer = [Diagnostics.Stopwatch]::StartNew()
         $started = $false
+        $settlement = [ordered]@{ Attempted=$false; ParentExitObserved=$false; WaitBudgetMs=2000; ElapsedMs=0; Errors=@(); DescendantSettlement='RequiresNativeOwnerReceipt' }
+        $resultCount = $results.Count
         try {
             if (-not $process.Start()) { throw 'Lab process did not start.' }
             $started = $true
             # Native Job accounting owns the actual test tree. The outer limit
             # allows its separate two-second reap budget and report publication.
             $outerTimedOut = -not $process.WaitForExit([int]($group.timeoutSeconds * 1000 + 10000))
-            if ($outerTimedOut) { $process.Kill($true); $process.WaitForExit() }
+            $settlement.ParentExitObserved = -not $outerTimedOut
+            if ($outerTimedOut) { Stop-LabRunner $process $settlement }
+            $runnerExitCode = if ($process.HasExited) { $process.ExitCode } else { $null }
             $owner = if (Test-Path -LiteralPath $ownerPath) { Get-Content -LiteralPath $ownerPath -Raw | ConvertFrom-Json } else { $null }
             $matches = @()
             if (Test-Path -LiteralPath $stdoutPath) {
@@ -89,11 +108,16 @@ try {
                     if ($summary.Success) { $matches += [int]$summary.Groups[1].Value }
                 }
             }
-            $accepted = -not $outerTimedOut -and $process.ExitCode -eq 0 -and $owner -and $owner.exit_code -eq 0 -and -not $owner.deadline_exceeded -and -not $owner.descendants_outlived_parent -and $owner.descendants_reaped -and $owner.errors.Count -eq 0 -and $matches.Count -eq 1 -and $matches[0] -eq $group.expectedPassed
-            $results.Add([ordered]@{ Id=$group.id; Accepted=[bool]$accepted; RunnerExitCode=$process.ExitCode; OuterTimedOut=$outerTimedOut; NativeOwner=$owner; ElapsedMs=$timer.ElapsedMilliseconds; StdoutSHA256=if(Test-Path -LiteralPath $stdoutPath){(Get-FileHash -LiteralPath $stdoutPath).Hash}else{$null}; StderrSHA256=if(Test-Path -LiteralPath $stderrPath){(Get-FileHash -LiteralPath $stderrPath).Hash}else{$null} })
+            $accepted = -not $outerTimedOut -and $runnerExitCode -eq 0 -and $owner -and $owner.exit_code -eq 0 -and -not $owner.deadline_exceeded -and -not $owner.descendants_outlived_parent -and $owner.descendants_reaped -and $owner.errors.Count -eq 0 -and $settlement.Errors.Count -eq 0 -and $matches.Count -eq 1 -and $matches[0] -eq $group.expectedPassed
+            $results.Add([ordered]@{ Id=$group.id; Accepted=[bool]$accepted; RunnerExitCode=$runnerExitCode; OuterTimedOut=$outerTimedOut; RunnerSettlement=$settlement; NativeOwner=$owner; ElapsedMs=$timer.ElapsedMilliseconds; StdoutSHA256=if(Test-Path -LiteralPath $stdoutPath){(Get-FileHash -LiteralPath $stdoutPath).Hash}else{$null}; StderrSHA256=if(Test-Path -LiteralPath $stderrPath){(Get-FileHash -LiteralPath $stderrPath).Hash}else{$null} })
             if (-not $accepted) { throw "Lab group failed its exact gate: $($group.id)" }
+        } catch {
+            if ($results.Count -eq $resultCount) {
+                $results.Add([ordered]@{ Id=$group.id; Accepted=$false; Failure=$_.Exception.ToString(); RunnerSettlement=$settlement })
+            }
+            throw
         } finally {
-            if ($started -and -not $process.HasExited) { $process.Kill($true); $process.WaitForExit() }
+            if ($started) { Stop-LabRunner $process $settlement }
             $process.Dispose()
         }
     }

@@ -68,6 +68,13 @@ unproved settlement cannot qualify a group. Receipts keep full-standard and
 full-performance qualification false; group elapsed time is not a plugin benchmark.
 See [the sprint record](plugin-host-sprint.md) for actual controls and boundaries.
 
+If the native runner itself hangs, the PowerShell controller preserves the
+original failure and uses one two-second observation budget after requesting
+runner termination. Cleanup is idempotent and has no unconditional exit wait.
+An observed runner exit still requires the native owner's receipt to prove
+descendant settlement; missing settlement evidence always fails. The observation
+budget does not guarantee a hard bound on the operating system's kill call.
+
 ## Reference media and projects
 
 Reference media, Golden/Stress Project contracts, validation tiers, and Windows
