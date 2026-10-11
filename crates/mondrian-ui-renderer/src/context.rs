@@ -376,7 +376,8 @@ impl UiRenderer {
         ))
     }
 
-    fn from_presentation(device: &wgpu::Device, presentation: UiSurfacePresentation) -> Self {
+    /// Create a renderer from a validated color and compositor contract.
+    pub fn from_presentation(device: &wgpu::Device, presentation: UiSurfacePresentation) -> Self {
         let pipeline =
             UiPipeline::new(device, presentation.ui_attachment_format(), UI_SAMPLE_COUNT);
 
@@ -2302,6 +2303,67 @@ mod tests {
             .contains(wgpu::TextureUsages::TRANSIENT_ATTACHMENT));
         assert!(carrier.ensure_target(&harness.device, (17, 16), UI_SAMPLE_COUNT));
         assert!(!carrier.ensure_target(&harness.device, (17, 16), UI_SAMPLE_COUNT));
+    }
+
+    #[test]
+    fn transparent_surface_clips_all_four_corners_and_preserves_compositor_alpha() {
+        use wgpu::CompositeAlphaMode::{PostMultiplied, PreMultiplied};
+        let mut harness = OffscreenHarness::with_surface(
+            32,
+            32,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            wgpu::SurfaceColorSpace::Srgb,
+        )
+        .expect("GPU adapter required for compositor alpha validation");
+        eprintln!(
+            "transparent UI compositor adapter: {:?}",
+            harness.adapter_info
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(harness.adapter_info.backend, wgpu::Backend::Metal);
+        for mode in [PostMultiplied, PreMultiplied] {
+            let presentation = UiSurfacePresentation::for_surface(
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                wgpu::SurfaceColorSpace::Srgb,
+                ColorSpace::Srgb,
+            )
+            .unwrap()
+            .with_transparency(mode, 10)
+            .unwrap();
+            harness.renderer = UiRenderer::from_presentation(&harness.device, presentation);
+            let mut encoder = DrawEncoder::new();
+            // Opaque rectangular content represents the startup cover image;
+            // the window mask must clip it as well as the panel background.
+            encoder.draw_rect(Rect::new(0.0, 0.0, 32.0, 32.0), Color::WHITE, 0.0);
+            let pixels = harness.render(encoder.finish());
+            for (x, y) in [(0, 0), (31, 0), (31, 31), (0, 31)] {
+                assert_eq!(
+                    pixel(&pixels, 32, x, y),
+                    [0; 4],
+                    "{mode:?} corner ({x},{y})"
+                );
+            }
+            assert_eq!(pixel(&pixels, 32, 16, 16), [255; 4]);
+
+            let mut encoder = DrawEncoder::new();
+            encoder.draw_rect(
+                Rect::new(0.0, 0.0, 32.0, 32.0),
+                Color { r: 0.8, g: 0.4, b: 0.2, a: 0.5 },
+                0.0,
+            );
+            let pixels = harness.render(encoder.finish());
+            let center = pixel(&pixels, 32, 16, 16);
+            let factor = if mode == PreMultiplied { 0.5 } else { 1.0 };
+            for (channel, value) in [0.8_f32, 0.4, 0.2].into_iter().enumerate() {
+                assert!(
+                    center[channel].abs_diff((value * factor * 255.0).round() as u8) <= 2,
+                    "{mode:?}: compositor color {center:?}"
+                );
+            }
+            assert!(center[3].abs_diff(128) <= 1);
+            let cleared = harness.render(Vec::new());
+            assert!(cleared.iter().all(|&channel| channel == 0));
+        }
     }
 
     #[test]

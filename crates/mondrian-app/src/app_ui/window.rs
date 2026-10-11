@@ -8956,6 +8956,13 @@ fn refresh_display_output_contract(
         reason,
         DisplayOutputContractRefreshReason::DisplayPolicyChanged
     );
+    let transparency_requires_refresh = window_uses_compositor_alpha(session.role)
+        && matches!(
+            reason,
+            DisplayOutputContractRefreshReason::SurfaceLifecycle(
+                SurfaceLifecycleReason::ScaleFactorChanged
+            )
+        );
     #[cfg(target_os = "macos")]
     let native_observation = matches!(
         reason,
@@ -8963,18 +8970,24 @@ fn refresh_display_output_contract(
     );
     #[cfg(not(target_os = "macos"))]
     let native_observation = false;
-    if !contract_requires_invalidation && !policy_requires_snapshot_refresh && !native_observation {
+    if !contract_requires_invalidation
+        && !policy_requires_snapshot_refresh
+        && !native_observation
+        && !transparency_requires_refresh
+    {
         return;
     }
 
-    let renderer_rebuilt = contract_requires_invalidation
-        && display_output_contract_requires_renderer_rebuild(&previous, &next);
+    let renderer_rebuilt = transparency_requires_refresh
+        || (contract_requires_invalidation
+            && display_output_contract_requires_renderer_rebuild(&previous, &next));
     let replacement_renderer = if renderer_rebuilt {
         match AppUiFrameRenderer::new_for_surface(
             device,
             next.surface_color.format,
             next.surface_color.color_space,
             app_ui_surface_output_color_space(next.surface_color),
+            window_surface_transparency(session.role, &session.window, session.config.alpha_mode),
         ) {
             Ok(renderer) => Some(renderer),
             Err(error) => {
@@ -9152,6 +9165,7 @@ impl AppUiPreparedWindowSession {
         let surface_color_contract = display_output_contract.surface_color;
         config.format = surface_color_contract.format;
         config.color_space = surface_color_contract.color_space;
+        config.alpha_mode = window_surface_alpha_mode(role, &display_output_contract.alpha_modes)?;
         surface.configure(device, &config);
         tracing::info!(
             format = ?surface_color_contract.format,
@@ -9166,6 +9180,7 @@ impl AppUiPreparedWindowSession {
             format_color_spaces = ?display_output_contract.format_color_spaces,
             present_modes = ?display_output_contract.present_modes,
             alpha_modes = ?display_output_contract.alpha_modes,
+            selected_alpha_mode = ?config.alpha_mode,
             "app UI surface color contract"
         );
 
@@ -9197,6 +9212,7 @@ impl AppUiPreparedWindowSession {
             config.format,
             config.color_space,
             app_ui_surface_output_color_space(display_output_contract.surface_color),
+            window_surface_transparency(role, &window, config.alpha_mode),
         )?;
         if let Some(startup) = viewer_gpu_startup {
             let mut viewer_runtime = ViewerGpuExecutionRuntime::new(adapter, device, queue)?;
@@ -9779,6 +9795,42 @@ fn window_chrome_for_role(role: AppUiWindowRole) -> WindowChrome {
 
 fn logical_size(width: f32, height: f32) -> winit::dpi::LogicalSize<f64> {
     winit::dpi::LogicalSize::new(width as f64, height as f64)
+}
+
+fn window_surface_alpha_mode(
+    role: AppUiWindowRole,
+    available: &[wgpu::CompositeAlphaMode],
+) -> Result<wgpu::CompositeAlphaMode, &'static str> {
+    if !window_uses_compositor_alpha(role) {
+        return Ok(wgpu::CompositeAlphaMode::Auto);
+    }
+    [
+        wgpu::CompositeAlphaMode::PostMultiplied,
+        wgpu::CompositeAlphaMode::PreMultiplied,
+    ]
+    .into_iter()
+    .find(|mode| available.contains(mode))
+    .ok_or("startup surface cannot preserve window transparency")
+}
+
+fn window_uses_compositor_alpha(role: AppUiWindowRole) -> bool {
+    // macOS uses CAMetalLayer alpha for the borderless startup window. Windows
+    // HWND swapchains expose only Opaque and retain their native DWM shape.
+    cfg!(target_os = "macos") && window_chrome_for_role(role).transparent
+}
+
+fn window_surface_transparency(
+    role: AppUiWindowRole,
+    window: &winit::window::Window,
+    alpha_mode: wgpu::CompositeAlphaMode,
+) -> Option<(wgpu::CompositeAlphaMode, u32)> {
+    window_uses_compositor_alpha(role).then(|| {
+        let radius = mondrian_ui_theme::current_theme().spacing.radius_lg;
+        (
+            alpha_mode,
+            (f64::from(radius) * window.scale_factor()).round() as u32,
+        )
+    })
 }
 
 fn winit_theme_to_theme_preset(theme: Option<winit::window::Theme>) -> ThemePreset {
@@ -13146,6 +13198,25 @@ mod tests {
         assert_eq!(
             chrome.max_size,
             Some((STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT))
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn startup_surface_requires_explicit_transparency_without_opaque_fallback() {
+        use wgpu::CompositeAlphaMode::{Auto, Opaque, PostMultiplied, PreMultiplied};
+        assert_eq!(
+            window_surface_alpha_mode(AppUiWindowRole::Startup, &[Opaque, PostMultiplied]),
+            Ok(PostMultiplied)
+        );
+        assert_eq!(
+            window_surface_alpha_mode(AppUiWindowRole::Startup, &[Opaque, PreMultiplied]),
+            Ok(PreMultiplied)
+        );
+        assert!(window_surface_alpha_mode(AppUiWindowRole::Startup, &[Auto, Opaque]).is_err());
+        assert_eq!(
+            window_surface_alpha_mode(AppUiWindowRole::Workspace, &[Opaque]),
+            Ok(Auto)
         );
     }
 

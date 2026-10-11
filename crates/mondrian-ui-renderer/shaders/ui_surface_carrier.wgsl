@@ -3,6 +3,9 @@
 
 @group(0) @binding(0) var composition_texture: texture_2d<f32>;
 
+override window_corner_radius: f32 = 0.0;
+override window_premultiplied: bool = false;
+
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
     let x = f32(i32(vertex_index & 1u) * 4 - 1);
@@ -12,6 +15,37 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<
 
 fn composition_sample(position: vec4<f32>) -> vec4<f32> {
     return textureLoad(composition_texture, vec2<i32>(position.xy), 0);
+}
+
+fn srgb_encode(linear: vec3<f32>) -> vec3<f32> {
+    return select(1.055 * pow(max(linear, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055,
+                  12.92 * linear, linear <= vec3<f32>(0.0031308));
+}
+
+fn srgb_decode(encoded: vec3<f32>) -> vec3<f32> {
+    return select(pow(max((encoded + 0.055) / 1.055, vec3<f32>(0.0)), vec3<f32>(2.4)),
+                  encoded / 12.92, encoded <= vec3<f32>(0.04045));
+}
+
+@fragment
+fn fs_transparent_srgb(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let sample = composition_sample(position);
+    let size = vec2<f32>(textureDimensions(composition_texture));
+    let radius = min(window_corner_radius, min(size.x, size.y) * 0.5);
+    let q = abs(position.xy - size * 0.5) - size * 0.5 + radius;
+    let distance = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+    let coverage = clamp(0.5 - distance, 0.0, 1.0);
+    let alpha = sample.a * coverage;
+    if sample.a <= 0.0 || alpha <= 0.0 {
+        return vec4<f32>(0.0);
+    }
+    let straight_linear = sample.rgb / sample.a;
+    if window_premultiplied {
+        // The sRGB attachment encodes after this shader. Associate in the
+        // compositor's encoded space, then undo that OETF for attachment input.
+        return vec4<f32>(srgb_decode(srgb_encode(straight_linear) * alpha), alpha);
+    }
+    return vec4<f32>(straight_linear, alpha);
 }
 
 fn linear_nits_to_pq(linear_100_nits: vec3<f32>) -> vec3<f32> {

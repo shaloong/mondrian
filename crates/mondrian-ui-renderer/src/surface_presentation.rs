@@ -16,6 +16,7 @@ pub struct UiSurfacePresentation {
     surface_format: wgpu::TextureFormat,
     surface_color_space: Option<wgpu::SurfaceColorSpace>,
     path: UiSurfacePresentationPath,
+    transparency: Option<(wgpu::CompositeAlphaMode, u32)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +40,8 @@ enum UiSurfacePresentationPath {
 /// A native surface cannot carry the requested UI/Viewer presentation contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiSurfacePresentationError {
+    /// Transparent windows require an explicit alpha mode and an sRGB carrier.
+    UnsupportedTransparency,
     /// The selected texture format and surface color space are not one of the
     /// qualified carrier pairs.
     UnsupportedSurfaceContract {
@@ -54,6 +57,9 @@ pub enum UiSurfacePresentationError {
 impl std::fmt::Display for UiSurfacePresentationError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::UnsupportedTransparency => formatter.write_str(
+                "transparent UI requires an sRGB surface and explicit pre/post multiplied alpha",
+            ),
             Self::UnsupportedSurfaceContract { surface_format, surface_color_space, output_color_space } => write!(
                 formatter,
                 "UI surface carrier does not support {surface_format:?} / {surface_color_space:?} for {output_color_space:?}"
@@ -114,7 +120,28 @@ impl UiSurfacePresentation {
             surface_format,
             surface_color_space: Some(surface_color_space),
             path,
+            transparency: None,
         })
+    }
+
+    /// Bind native compositor alpha and the physical-pixel outer window radius.
+    /// UI painter composition stays premultiplied in linear light; only the
+    /// final carrier adapts it to the compositor's declared representation.
+    pub fn with_transparency(
+        mut self,
+        alpha_mode: wgpu::CompositeAlphaMode,
+        corner_radius: u32,
+    ) -> Result<Self, UiSurfacePresentationError> {
+        if self.path != UiSurfacePresentationPath::DirectSrgb
+            || !matches!(
+                alpha_mode,
+                wgpu::CompositeAlphaMode::PreMultiplied | wgpu::CompositeAlphaMode::PostMultiplied
+            )
+        {
+            return Err(UiSurfacePresentationError::UnsupportedTransparency);
+        }
+        self.transparency = Some((alpha_mode, corner_radius));
+        Ok(self)
     }
 
     pub(crate) fn legacy_for_attachment(surface_format: wgpu::TextureFormat) -> Self {
@@ -123,12 +150,14 @@ impl UiSurfacePresentation {
                 surface_format,
                 surface_color_space: Some(wgpu::SurfaceColorSpace::Srgb),
                 path: UiSurfacePresentationPath::DirectSrgb,
+                transparency: None,
             }
         } else {
             Self {
                 surface_format,
                 surface_color_space: None,
                 path: UiSurfacePresentationPath::LinearAttachment,
+                transparency: None,
             }
         }
     }
@@ -152,14 +181,15 @@ impl UiSurfacePresentation {
     }
 
     pub(crate) fn requires_carrier(self) -> bool {
-        matches!(
-            self.path,
-            UiSurfacePresentationPath::DisplayP3
-                | UiSurfacePresentationPath::Rec2100Pq
-                | UiSurfacePresentationPath::Rec2100Hlg
-                | UiSurfacePresentationPath::Rec2100PqEdr
-                | UiSurfacePresentationPath::Rec2100HlgEdr
-        )
+        self.transparency.is_some()
+            || matches!(
+                self.path,
+                UiSurfacePresentationPath::DisplayP3
+                    | UiSurfacePresentationPath::Rec2100Pq
+                    | UiSurfacePresentationPath::Rec2100Hlg
+                    | UiSurfacePresentationPath::Rec2100PqEdr
+                    | UiSurfacePresentationPath::Rec2100HlgEdr
+            )
     }
 
     pub(crate) fn supports_surface_code_values(self) -> bool {
@@ -202,6 +232,9 @@ impl UiSurfacePresentation {
     }
 
     fn carrier_fragment_entry(self) -> Option<&'static str> {
+        if self.transparency.is_some() {
+            return Some("fs_transparent_srgb");
+        }
         match self.path {
             UiSurfacePresentationPath::DisplayP3 => Some("fs_linear"),
             UiSurfacePresentationPath::Rec2100Pq => Some("fs_pq"),
@@ -283,7 +316,21 @@ impl UiSurfaceCarrier {
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[
+                        (
+                            "window_corner_radius",
+                            presentation.transparency.map_or(0.0, |(_, radius)| radius as f64),
+                        ),
+                        (
+                            "window_premultiplied",
+                            f64::from(presentation.transparency.is_some_and(|(mode, _)| {
+                                mode == wgpu::CompositeAlphaMode::PreMultiplied
+                            })),
+                        ),
+                    ],
+                    ..Default::default()
+                },
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,

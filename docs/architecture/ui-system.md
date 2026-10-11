@@ -1687,6 +1687,13 @@ use sRGB-encoded surface formats; PQ/HLG require float or 10-bit non-sRGB
 formats so the final color pass, not hardware sRGB conversion, owns the output
 transfer. Camera-log and Rec.2020 working spaces are not presentation contracts
 and must fail closed until mapped through an explicit display/view transform.
+On macOS, the borderless startup window also requires an explicit compositor
+alpha mode; wgpu `Auto` selects an opaque Metal layer and is not transparency
+evidence. The existing UI carrier resolves the complete linear premultiplied
+composition, applies the outer rounded mask once (including the banner), and
+adapts alpha association to the selected native mode. Transparent pixels carry
+zero RGB, and a Retina-scale change rebuilds the physical-pixel mask. Windows
+HWND swapchains retain their existing opaque surface and native DWM shape.
 The viewer GPU output path records presentation readiness for each requested
 display boundary. If the current surface already matches the requested display
 space, recording may proceed. If wgpu reports that a better surface contract

@@ -7,7 +7,7 @@
 use mondrian_core::ColorSpace;
 use mondrian_ui_renderer::{
     DrawCommand, ExternalTextureKey, ExternalTextureRegistrationError, ExternalTextureTransfer,
-    GlyphUpload, UiRenderer, UiSurfacePresentationError,
+    GlyphUpload, UiRenderer, UiSurfacePresentation, UiSurfacePresentationError,
 };
 use mondrian_ui_text::{resolve_text_commands, TextRenderer};
 use std::time::Instant;
@@ -345,14 +345,18 @@ impl AppUiFrameRenderer {
         surface_format: wgpu::TextureFormat,
         surface_color_space: wgpu::SurfaceColorSpace,
         output_color_space: ColorSpace,
+        transparency: Option<(wgpu::CompositeAlphaMode, u32)>,
     ) -> Result<Self, UiSurfacePresentationError> {
+        let mut presentation = UiSurfacePresentation::for_surface(
+            surface_format,
+            surface_color_space,
+            output_color_space,
+        )?;
+        if let Some((alpha_mode, radius)) = transparency {
+            presentation = presentation.with_transparency(alpha_mode, radius)?;
+        }
         Ok(Self {
-            ui_renderer: UiRenderer::new_for_surface(
-                device,
-                surface_format,
-                surface_color_space,
-                output_color_space,
-            )?,
+            ui_renderer: UiRenderer::from_presentation(device, presentation),
             text_renderer: TextRenderer::new(),
         })
     }

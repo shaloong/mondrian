@@ -566,9 +566,15 @@ impl Widget for AppUiStartupScreen {
         let colors = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
         let typography = &ctx.theme.typography;
-        let radius = spacing.radius_lg;
-
-        ctx.encoder.draw_rect(self.panel_rect, colors.popover, radius);
+        // The window carrier clips the complete composition, including the
+        // cover image. Applying the outer radius here would double the edge
+        // coverage on the panel while leaving the cover independently clipped.
+        let outer_radius = if cfg!(target_os = "macos") {
+            0.0
+        } else {
+            spacing.radius_lg
+        };
+        ctx.encoder.draw_rect(self.panel_rect, colors.popover, outer_radius);
         ctx.push_clip(self.panel_rect);
         paint_startup_banner(ctx, self.left_rect);
         ctx.pop_clip();
