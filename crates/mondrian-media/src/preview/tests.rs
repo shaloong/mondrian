@@ -553,61 +553,6 @@ fn covering_decode_request<'a>(
     )
 }
 
-#[test]
-#[ignore = "requires an external source and explicit valid 30 fps sample coordinates; temporal diagnosis only"]
-fn external_source_covering_samples_preserve_temporal_evidence() {
-    let path =
-        PathBuf::from(std::env::var_os("MONDRIAN_PREVIEW_EXTERNAL_MEDIA_PATH").expect("source"));
-    let frames = std::env::var("MONDRIAN_PREVIEW_COMPATIBILITY_FRAMES").expect("samples");
-    let (bootstrap, observer) = match std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH") {
-        Some(worker) => {
-            PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker.into())
-        }
-        None => PreviewDecodeSessionContext::observed_bootstrap(),
-    };
-    let mut context = bootstrap.build();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        for coordinate in frames.split(',') {
-            let coordinate: i64 = coordinate.parse().expect("30 fps coordinate");
-            let request = covering_decode_request(
-                &path,
-                TimelineTime::new(coordinate, 30).expect("time"),
-                PreviewDecodeAccessMode::RandomAccessStillFrame,
-                // This diagnostic supplies an explicit sampling policy; it
-                // does not qualify the source's unknown RGB color identity.
-                test_source_color().with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709),
-            );
-            let outcome = context
-                .decode_cancellable(request, || false)
-                .unwrap_or_else(|error| panic!("coordinate {coordinate}: {error:?}"));
-            let diagnostics = match &outcome {
-                PreviewDecodeOutcome::Frame(frame) => &frame.diagnostics,
-                PreviewDecodeOutcome::FloatFrame(frame) => &frame.diagnostics,
-                PreviewDecodeOutcome::Unorm16Frame(frame) => &frame.diagnostics,
-                PreviewDecodeOutcome::CpuYuvFrame(frame) => &frame.diagnostics,
-                other => panic!("unexpected outcome: {other:?}"),
-            };
-            eprintln!("SOURCE_TEMPORAL_SAMPLE={coordinate} {diagnostics:?}");
-            let extent = diagnostics.temporal_selection().expect("selection proof");
-            let requested = diagnostics.requested_pts.expect("requested PTS");
-            assert!(extent.selected_pts <= requested);
-            assert!(requested < extent.selected_pts + extent.selected_duration_pts);
-        }
-    }));
-    context.clear();
-    drop(context);
-    let closure = observer.snapshot();
-    eprintln!("SOURCE_TEMPORAL_CLOSURE={closure:?}");
-    assert_eq!(closure.isolated_demux.active_sessions, 0);
-    assert_eq!(
-        closure.isolated_demux.reaped_sessions(),
-        closure.isolated_demux.session_launches
-    );
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
-}
-
 fn test_linear_source_color() -> PreviewSourceColorContract {
     PreviewSourceColorContract::automatic(ColorSpace::Aces2065_1, DecodedVideoRange::Full)
 }
