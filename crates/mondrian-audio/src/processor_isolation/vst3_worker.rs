@@ -37,6 +37,23 @@ use vst3_host::Vst3Host;
 pub const VST3_AUDIO_WORKER_ARGUMENT: &str = "--internal-vst3-audio-worker-v1";
 const MAX_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 pub(super) const MAX_STATE_BYTES: usize = 128 * 1024;
+
+/// Actual product consumers, shared by discovery and every processing reload.
+pub(super) fn product_plugin_interfaces() -> vst3_host::PluginInterfaceSupport {
+    use vst3_host::{PluginInterface as Interface, PluginInterfaceSupport};
+    let interfaces = PluginInterfaceSupport::none()
+        .with(Interface::Component)
+        .with(Interface::AudioProcessor)
+        .with(Interface::EditController)
+        .with(Interface::ConnectionPoint)
+        .with(Interface::ProcessContextRequirements);
+    #[cfg(windows)]
+    let interfaces = interfaces
+        .with(Interface::PlugView)
+        .with(Interface::PlugViewContentScaleSupport)
+        .with(Interface::DataExchangeReceiver);
+    interfaces
+}
 const MAX_PARAMETERS: usize = 1024;
 const MAX_EVENTS_PER_BLOCK: usize = 4096;
 
@@ -364,6 +381,7 @@ impl IsolatedAudioProcessorWorkerFactory for Vst3AudioProcessorWorkerFactory {
             })?,
         );
         let mut host = Vst3Host::builder()
+            .plugin_interfaces(product_plugin_interfaces())
             .sample_rate(f64::from(render.sample_rate))
             .block_size(render.max_block_frames)
             .input_channels(channels)

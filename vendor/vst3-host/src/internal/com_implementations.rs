@@ -89,6 +89,7 @@ impl Default for ProgressState {
 }
 
 pub struct HostApplication {
+    interfaces: crate::PluginInterfaceSupport,
     progress: Mutex<ProgressState>,
     data_exchange: Arc<super::data_exchange::DataExchangeState>,
     storage: super::host_storage::RetainedComStorage,
@@ -97,6 +98,7 @@ pub struct HostApplication {
 impl Default for HostApplication {
     fn default() -> Self {
         Self {
+            interfaces: crate::PluginInterfaceSupport::default(),
             progress: Mutex::new(ProgressState::default()),
             data_exchange: super::data_exchange::DataExchangeState::new(),
             storage: super::host_storage::RetainedComStorage::new(),
@@ -219,23 +221,37 @@ impl IPlugInterfaceSupportTrait for HostApplication {
         // those reverses the direction of the contract and makes plug-ins enable features
         // whose corresponding plug-in interface the host may never query.
         let bytes = std::slice::from_raw_parts(iid as *const u8, 16);
-        let supported = [
-            &IConnectionPoint::IID,
-            &IMidiMapping::IID,
-            &IUnitInfo::IID,
-            &IProgramListData::IID,
-            &IUnitData::IID,
-            &IEditControllerHostEditing::IID,
-            &IMidiLearn::IID,
-            &IAutomationState::IID,
-            &INoteExpressionController::IID,
-            &IPlugViewContentScaleSupport::IID,
-            &IProcessContextRequirements::IID,
-            &IPrefetchableSupport::IID,
-            &IRemapParamID::IID,
-            &IDataExchangeReceiver::IID,
+        use crate::PluginInterface::*;
+        let known = [
+            (&IComponent::IID, Component),
+            (&IAudioProcessor::IID, AudioProcessor),
+            (&IEditController::IID, EditController),
+            (&IConnectionPoint::IID, ConnectionPoint),
+            (&IMidiMapping::IID, MidiMapping),
+            (&IUnitInfo::IID, UnitInfo),
+            (&IProgramListData::IID, ProgramListData),
+            (&IUnitData::IID, UnitData),
+            (&IEditControllerHostEditing::IID, EditControllerHostEditing),
+            (&IMidiLearn::IID, MidiLearn),
+            (&IAutomationState::IID, AutomationState),
+            (&INoteExpressionController::IID, NoteExpressionController),
+            (
+                &IPlugViewContentScaleSupport::IID,
+                PlugViewContentScaleSupport,
+            ),
+            (&IPlugView::IID, PlugView),
+            (
+                &IProcessContextRequirements::IID,
+                ProcessContextRequirements,
+            ),
+            (&IPrefetchableSupport::IID, PrefetchableSupport),
+            (&IRemapParamID::IID, RemapParamId),
+            (&IDataExchangeReceiver::IID, DataExchangeReceiver),
         ];
-        if supported.iter().any(|supported| bytes == &supported[..]) {
+        if known
+            .iter()
+            .any(|(iid, interface)| bytes == &iid[..] && self.interfaces.supports(*interface))
+        {
             kResultTrue
         } else {
             kResultFalse
@@ -449,7 +465,17 @@ impl IProgressTrait for HostApplication {
 
 /// Create a host-application context to pass to `IComponent::initialize`.
 pub fn create_host_application() -> ComWrapper<HostApplication> {
-    ComWrapper::new(HostApplication::default())
+    create_host_application_with_interfaces(crate::PluginInterfaceSupport::default())
+}
+
+/// Retain one immutable declaration before native factory/component initialization.
+pub fn create_host_application_with_interfaces(
+    interfaces: crate::PluginInterfaceSupport,
+) -> ComWrapper<HostApplication> {
+    ComWrapper::new(HostApplication {
+        interfaces,
+        ..HostApplication::default()
+    })
 }
 
 /// Log the first off-thread drop, then every `DROP_LOG_INTERVAL`-th one. A plugin that
@@ -3745,6 +3771,143 @@ mod host_application_tests {
         HostNotification, NativeEditorEvent, NativeEditorEventDrain, NativeEditorEventFailure,
         ParameterEdit, ParameterEditKind,
     };
+
+    fn audio_effect_interfaces() -> crate::PluginInterfaceSupport {
+        use crate::{PluginInterface as Interface, PluginInterfaceSupport};
+        let interfaces = PluginInterfaceSupport::none()
+            .with(Interface::Component)
+            .with(Interface::AudioProcessor)
+            .with(Interface::EditController)
+            .with(Interface::ConnectionPoint)
+            .with(Interface::ProcessContextRequirements);
+        #[cfg(windows)]
+        let interfaces = interfaces
+            .with(Interface::PlugView)
+            .with(Interface::PlugViewContentScaleSupport)
+            .with(Interface::DataExchangeReceiver);
+        interfaces
+    }
+
+    #[test]
+    fn interface_support_audio_effect_consumers() {
+        let host = create_host_application_with_interfaces(audio_effect_interfaces())
+            .to_com_ptr::<IPlugInterfaceSupport>()
+            .unwrap();
+        let expectations = [
+            (IComponent::IID, true),
+            (IAudioProcessor::IID, true),
+            (IEditController::IID, true),
+            (IConnectionPoint::IID, true),
+            (IProcessContextRequirements::IID, true),
+            (IPlugViewContentScaleSupport::IID, cfg!(windows)),
+            (IMidiMapping::IID, false),
+            (IUnitInfo::IID, false),
+            (IProgramListData::IID, false),
+            (IUnitData::IID, false),
+            (IEditControllerHostEditing::IID, false),
+            (IMidiLearn::IID, false),
+            (IAutomationState::IID, false),
+            (INoteExpressionController::IID, false),
+            (IPrefetchableSupport::IID, false),
+            (IRemapParamID::IID, false),
+            (IDataExchangeReceiver::IID, cfg!(windows)),
+            (IComponentHandler::IID, false),
+            ([0x5a; 16], false),
+        ];
+        for (index, (iid, supported)) in expectations.iter().enumerate() {
+            let result = unsafe { host.isPlugInterfaceSupported(iid as *const _ as *const TUID) };
+            assert_eq!(
+                result,
+                if *supported {
+                    kResultTrue
+                } else {
+                    kResultFalse
+                },
+                "IID case {index}"
+            );
+        }
+        assert_eq!(
+            unsafe { host.isPlugInterfaceSupported(ptr::null()) },
+            kInvalidArgument
+        );
+        assert_eq!(
+            unsafe { host.isPlugInterfaceSupported(&IPlugView::IID as *const _ as *const TUID) },
+            if cfg!(windows) {
+                kResultTrue
+            } else {
+                kResultFalse
+            },
+        );
+    }
+
+    #[test]
+    fn interface_support_contexts_are_independent_immutable_values() {
+        use crate::{PluginInterface, PluginInterfaceSupport};
+        let original = PluginInterfaceSupport::none().with(PluginInterface::Component);
+        let first = create_host_application_with_interfaces(original)
+            .to_com_ptr::<IPlugInterfaceSupport>()
+            .unwrap();
+        let second = create_host_application_with_interfaces(
+            PluginInterfaceSupport::none().with(PluginInterface::MidiMapping),
+        )
+        .to_com_ptr::<IPlugInterfaceSupport>()
+        .unwrap();
+        // Building a new policy must not mutate either retained host context.
+        let third_policy = original.with(PluginInterface::MidiMapping);
+        assert!(third_policy.supports(PluginInterface::MidiMapping));
+        let component = &IComponent::IID as *const _ as *const TUID;
+        let midi = &IMidiMapping::IID as *const _ as *const TUID;
+        unsafe {
+            assert_eq!(first.isPlugInterfaceSupported(component), kResultTrue);
+            assert_eq!(first.isPlugInterfaceSupported(midi), kResultFalse);
+            assert_eq!(second.isPlugInterfaceSupported(component), kResultFalse);
+            assert_eq!(second.isPlugInterfaceSupported(midi), kResultTrue);
+            assert_eq!(first.isPlugInterfaceSupported(component), kResultTrue);
+        }
+    }
+
+    #[test]
+    fn interface_support_standalone_default_preserves_original_declarations() {
+        let host = create_host_application()
+            .to_com_ptr::<IPlugInterfaceSupport>()
+            .unwrap();
+        let supported = [
+            IConnectionPoint::IID,
+            IMidiMapping::IID,
+            IUnitInfo::IID,
+            IProgramListData::IID,
+            IUnitData::IID,
+            IEditControllerHostEditing::IID,
+            IMidiLearn::IID,
+            IAutomationState::IID,
+            INoteExpressionController::IID,
+            IPlugViewContentScaleSupport::IID,
+            IProcessContextRequirements::IID,
+            IPrefetchableSupport::IID,
+            IRemapParamID::IID,
+            IDataExchangeReceiver::IID,
+        ];
+        for (index, iid) in supported.iter().enumerate() {
+            assert_eq!(
+                unsafe { host.isPlugInterfaceSupported(iid as *const _ as *const TUID) },
+                kResultTrue,
+                "original IID {index}"
+            );
+        }
+        for iid in [
+            IComponent::IID,
+            IAudioProcessor::IID,
+            IEditController::IID,
+            IPlugView::IID,
+            IComponentHandler::IID,
+            [0x5a; 16],
+        ] {
+            assert_eq!(
+                unsafe { host.isPlugInterfaceSupported(&iid as *const _ as *const TUID) },
+                kResultFalse
+            );
+        }
+    }
 
     #[test]
     fn interface_support_reports_plugin_side_interfaces_only() {

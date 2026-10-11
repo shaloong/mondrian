@@ -322,6 +322,7 @@ fn probe_loaded(
         return Err(invalid("VST3 probe state exceeds the limit"));
     }
     let mut host = Vst3Host::builder()
+        .plugin_interfaces(super::vst3_worker::product_plugin_interfaces())
         .sample_rate(f64::from(sample_rate))
         .block_size(max_block_frames)
         .input_channels(channels)

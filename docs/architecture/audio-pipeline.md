@@ -1,5 +1,25 @@
 # Audio pipeline
 
+## VST3 plugin-interface declarations
+
+Native discovery and processing builders select one immutable, instance-local
+`PluginInterfaceSupport` before factory host-context binding and component/
+controller initialization. This declaration describes plugin interfaces the
+product consumes, separately from the host object's `queryInterface` services.
+Core component/processor/controller, connections and process-context requirements
+are consumed. Windows additionally consumes the native view, content scaling and
+main-thread DataExchange receiver; other platforms do not advertise those product
+consumers. Product note/MIDI, unit/program, note-expression, prefetch and remapping
+consumers remain unavailable. Vendor APIs alone do not qualify them.
+
+The standalone vendored host retains its original default declarations. A custom
+policy with its separate isolation helper is explicitly refused because that
+helper's protocol does not carry the policy. Mondrian's own isolated adapter
+constructs the selected policy in each discovery/processing child. This adds no
+authoring, routing, parameter or process state authority. Actual COM declarations
+and instance isolation have dedicated controls; native vendor and platform
+qualification remain separate.
+
 ## CLAP render admission and symbolic thread roles
 
 The CLAP discovery request includes the consumer's explicit realtime/offline

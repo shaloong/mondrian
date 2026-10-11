@@ -26,7 +26,7 @@ use vst3::{ComPtr, ComWrapper, Interface, Steinberg::Vst::*, Steinberg::*};
 use super::com_implementations::RunLoopRegistry;
 use super::{
     com_implementations::{
-        create_event_list, create_host_application, create_host_plug_frame,
+        create_event_list, create_host_application_with_interfaces, create_host_plug_frame,
         create_memory_stream_from_with_metadata, create_memory_stream_with_metadata,
         create_state_restore_stream, ComponentHandler, ConnectionPair, HostApplication,
         HostEventList, HostPlugFrame, ParameterChanges, StreamStateType, MAX_EDITOR_FEEDBACK,
@@ -1238,16 +1238,24 @@ impl PluginImpl {
     }
 
     /// Load a VST3 plugin from the given path
-    pub fn load(path: &std::path::Path) -> Result<Self> {
-        Self::load_with_class(path, None)
+    pub fn load(path: &std::path::Path, interfaces: crate::PluginInterfaceSupport) -> Result<Self> {
+        Self::load_with_class(path, None, interfaces)
     }
 
     /// Load a specific current or moduleinfo-retired audio class from a VST3 bundle.
-    pub fn load_class(path: &std::path::Path, requested_class_id: &str) -> Result<Self> {
-        Self::load_with_class(path, Some(requested_class_id))
+    pub fn load_class(
+        path: &std::path::Path,
+        requested_class_id: &str,
+        interfaces: crate::PluginInterfaceSupport,
+    ) -> Result<Self> {
+        Self::load_with_class(path, Some(requested_class_id), interfaces)
     }
 
-    fn load_with_class(path: &std::path::Path, requested_class_id: Option<&str>) -> Result<Self> {
+    fn load_with_class(
+        path: &std::path::Path,
+        requested_class_id: Option<&str>,
+        interfaces: crate::PluginInterfaceSupport,
+    ) -> Result<Self> {
         let native_editor_owner = crate::plugin::NativeEditorAttachmentOwner::issue()?;
         let requested_class_id = requested_class_id
             .map(|requested| -> Result<String> {
@@ -1293,7 +1301,7 @@ impl PluginImpl {
 
             // Factory3 must receive the host context before any class is instantiated. Keep the
             // same context alive for the complete component/controller lifetime.
-            let host_app = create_host_application();
+            let host_app = create_host_application_with_interfaces(interfaces);
             let host_ctx = host_app.to_com_ptr::<IHostApplication>();
             let context = host_ctx
                 .as_ref()

@@ -1,5 +1,23 @@
 # Vendored VST3 host dependency
 
+## Instance-local plug-in interface declarations
+
+`PluginInterfaceSupport` is a typed immutable inline value, supplied by the
+builder to the native host context before factory/component/controller
+initialization. Embedded applications select only actual consumers; exposing a
+vendor library API alone does not establish product support. The standalone
+library's original declaration set is preserved exactly. A nondefault declaration
+with the library's optional isolation helper is explicitly refused because that
+helper wire carries no policy. Standalone safe discovery/probe APIs keep their
+documented library-default context; Mondrian uses its own supervised discovery
+and processing children with the same selected product policy.
+
+The SDK contract is
+<https://steinbergmedia.github.io/vst3_doc/vstinterfaces/classSteinberg_1_1Vst_1_1IPlugInterfaceSupport.html>.
+No generated SDK ABI, native plug-in interface, license or shared audio domain
+model changes. COM tests cover selected acceptance/refusal, unknown/null IIDs,
+independent simultaneous contexts and the unchanged default declarations.
+
 Source: https://github.com/HelgeSverre/rust-vst3-host
 Revision: 49fc189177c72cf799d5034fcca81d8aacc3d7a6
 Package: vst3-host 0.9.0, original author Helge Sverre, MIT license retained.

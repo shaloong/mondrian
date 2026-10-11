@@ -57,6 +57,7 @@
 pub mod audio;
 pub mod error;
 pub mod host;
+pub mod interface_support;
 pub mod midi;
 pub mod parameters;
 pub mod playback;
@@ -97,6 +98,7 @@ pub use discovery::{
 pub use embed::{EditorRect, EmbeddedEditor};
 pub use error::{Error, Result};
 pub use host::{DiscoveryProgress, ProbeResult, Vst3Host, Vst3HostBuilder};
+pub use interface_support::{PluginInterface, PluginInterfaceSupport};
 pub use midi::{
     cc, MidiChannel, MidiEvent, NoteExpressionInfo, NoteExpressionType, NoteId, OutputEvent,
     PluginEvent, PluginEventData,

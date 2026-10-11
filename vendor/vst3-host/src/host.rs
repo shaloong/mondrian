@@ -4,6 +4,7 @@ use crate::{
     audio::AudioConfig,
     error::{Error, Result},
     plugin::{Plugin, PluginInfo, PluginInternal},
+    PluginInterfaceSupport,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -26,6 +27,8 @@ fn clamp_output_channels(reported: i32) -> usize {
 
 /// VST3 host instance
 pub struct Vst3Host {
+    /// Immutable plug-in interface declarations for loaded native contexts.
+    pub(crate) plugin_interfaces: PluginInterfaceSupport,
     /// Audio configuration
     pub(crate) config: AudioConfig,
     /// Custom plugin scan paths
@@ -287,8 +290,12 @@ impl Vst3Host {
     fn load_plugin_internal(&mut self, path: &Path, class_id: Option<&str>) -> Result<Plugin> {
         // Load the plugin implementation directly - it will handle path resolution
         let mut plugin_impl = match class_id {
-            Some(class_id) => crate::internal::plugin_impl::PluginImpl::load_class(path, class_id)?,
-            None => crate::internal::plugin_impl::PluginImpl::load(path)?,
+            Some(class_id) => crate::internal::plugin_impl::PluginImpl::load_class(
+                path,
+                class_id,
+                self.plugin_interfaces,
+            )?,
+            None => crate::internal::plugin_impl::PluginImpl::load(path, self.plugin_interfaces)?,
         };
 
         // Apply the builder's audio config (sample rate / block size) so the plugin actually
@@ -434,6 +441,7 @@ impl Vst3Host {
 impl Default for Vst3Host {
     fn default() -> Self {
         Self {
+            plugin_interfaces: PluginInterfaceSupport::default(),
             config: AudioConfig::default(),
             custom_paths: Vec::new(),
             use_process_isolation: false,
@@ -453,6 +461,7 @@ impl Default for Vst3Host {
 /// `false`, requiring explicit opt-in (unlike `Vst3Host`, which defaults it to `true`).
 #[derive(Default)]
 pub struct Vst3HostBuilder {
+    plugin_interfaces: PluginInterfaceSupport,
     config: AudioConfig,
     custom_paths: Vec<PathBuf>,
     use_process_isolation: bool,
@@ -465,6 +474,17 @@ pub struct Vst3HostBuilder {
 }
 
 impl Vst3HostBuilder {
+    /// Declare the plug-in interfaces the embedding application consumes.
+    ///
+    /// Applied before factory, component and controller initialization. The
+    /// standalone helper wire currently carries no custom interface policy;
+    /// combining a custom policy with its process isolation is refused by build.
+    /// Safe discovery/probe helpers remain standalone library-default probes.
+    pub fn plugin_interfaces(mut self, interfaces: PluginInterfaceSupport) -> Self {
+        self.plugin_interfaces = interfaces;
+        self
+    }
+
     /// Set the sample rate
     pub fn sample_rate(mut self, rate: f64) -> Self {
         self.config.sample_rate = rate;
@@ -585,6 +605,12 @@ impl Vst3HostBuilder {
     /// `1.0 / sampleRate` generate NaN coefficients, and a `time_signature(4, 3)` built a host
     /// whose transport every runtime setter refuses.
     pub fn build(self) -> Result<Vst3Host> {
+        if self.use_process_isolation && self.plugin_interfaces != PluginInterfaceSupport::default()
+        {
+            return Err(Error::InvalidParameter(
+                "custom plugin interface declarations are unavailable in the standalone isolation helper".to_owned(),
+            ));
+        }
         if !self.config.sample_rate.is_finite() || self.config.sample_rate <= 0.0 {
             return Err(Error::InvalidParameter(format!(
                 "sample rate must be finite and positive, got {}",
@@ -611,6 +637,7 @@ impl Vst3HostBuilder {
             )));
         }
         Ok(Vst3Host {
+            plugin_interfaces: self.plugin_interfaces,
             config: self.config,
             custom_paths: self.custom_paths,
             use_process_isolation: self.use_process_isolation,
@@ -761,6 +788,31 @@ impl Vst3Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interface_support_builder_preserves_policy_and_refuses_unsupported_helper() {
+        let interfaces = PluginInterfaceSupport::none().with(crate::PluginInterface::Component);
+        let host = Vst3HostBuilder::default()
+            .plugin_interfaces(interfaces)
+            .build()
+            .unwrap();
+        assert_eq!(host.plugin_interfaces, interfaces);
+        assert!(matches!(
+            Vst3HostBuilder::default()
+                .plugin_interfaces(interfaces)
+                .with_process_isolation(true)
+                .build(),
+            Err(Error::InvalidParameter(_)),
+        ));
+        assert!(Vst3HostBuilder::default()
+            .with_process_isolation(true)
+            .build()
+            .is_ok());
+        assert_eq!(
+            Vst3Host::default().plugin_interfaces,
+            PluginInterfaceSupport::default()
+        );
+    }
 
     #[test]
     fn transport_defaults_to_120_bpm_4_4() {
