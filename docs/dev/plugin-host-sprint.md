@@ -1,0 +1,791 @@
+# Plugin host engineering sprint
+
+Updated 2026-10-11 (Asia/Shanghai). This is the recoverable coordination record
+for the OpenFX / VST3 / CLAP sprint. Detailed contracts remain in the existing
+[plugin architecture](../architecture/plugin-system.md),
+[audio pipeline](../architecture/audio-pipeline.md),
+[audio standard matrix](native-audio-standard-features.md),
+[OpenFX standard matrix](native-openfx-standard-features.md), and
+[compatibility evidence](native-plugin-compatibility.md). Source capability and
+historical qualification are distinct; stale matrix rows must be checked against
+their actual consumer before changing a support claim.
+
+## Recovered baseline and evidence
+
+The original isolated checkout was clean at `a1925ca`, an ancestor of the prior
+`a808891c8c91d122798c01ec633202c08ca2d9eb` worktree. The coordinator created
+`feature/plugin-host-sprint` at that prior base and restored its retained tracked
+and untracked production sources, rather than reimplementing its native adapters.
+The source worktree at `E:/dev/mondrian/.claude/worktrees/nle-backlog` remained
+read-only. Recovery verified all 2,100 source file hashes; 817 files required
+copying and one obsolete file required removal. The original destination is
+recoverable from `.scratch/plugin-host-sprint/source-recovery/pre-recovery.zip`.
+The manifest and pre/post stability evidence are in that directory's
+`receipt.json`. Recovery checkpoint `13fefdf33747a907a25075d7449c1f473a9264e9`
+records that snapshot separately from this round's changes. An alternate index
+staged only the recovery manifest; the real index was aligned without touching
+working files. A pre-existing empty index lock was removed only after checking
+the exact path, absence of Git processes and unchanged parent index. All 2,100
+original and 1,772 current source hashes remained stable. The checkpoint is not
+a native acceptance claim.
+
+Current round evidence:
+
+| Gate | Result | Scope |
+| --- | --- | --- |
+| Source recovery | PASS | Exact file hashes and stable source tree; no execution claim |
+| Cargo metadata | PASS | Workspace/path package resolution; `.scratch/plugin-host-sprint/cargo-metadata.json` |
+| CLAP source provenance | PASS | Official generated source/package identity; no runtime claim |
+| Clack source provenance | RED then PASS | Audited metadata repair, original checker unchanged, 252 shipped paths |
+| Audio baseline | PASS | 331 passed, zero failed, 50 ignored; `.scratch/plugin-host-sprint/audio-baseline-receipt.json` and log |
+| Audio after VST3 declaration policy | PASS within library scope | 331 passed, zero failed, 50 ignored; `audio-after-vst-policy-r2.log`, native ignored cases remain separate |
+| Shared domain baseline | PASS | Audio scheduling 8, Effects 327, Timeline 247 passed; one scheduling case ignored |
+| VST3 consumer policy | PASS within COM scope | Five actual policy/instance/default/builder controls; native vendor initialization remains separate |
+| Native lab process owner | PASS within Windows scope | 12 library tests passed, four fixture functions ignored; four new controls execute real owned child/grandchild processes |
+| Strict workspace Clippy | PASS | All targets/all features, `-D warnings`, exit zero in 2m06s; 1,772 frozen source hashes stable; `workspace-clippy-r6-receipt.json` |
+| Frozen lab controller | PASS within selected scope | Seven tests in three groups, 1,771 source hashes stable; five negative controls refuse wrong count/hash, duplicate ID, timeout and a live descendant |
+| DXC build environment / renderer check | PASS within build scope | Original immutable API and SHA-256 checks executed; exact cached archive reused; `renderer-build-environment-r6.log`. No GPU output or performance claim |
+| Fresh Basic / SessionProbe binaries | Verified within selected native cases | Fresh build r5 / freeze19: 15 original native groups; no full OFX/GPU qualification |
+| Active native catalog shutdown | Verified within two controlled Windows cases | Actual discovery/describe worker retirement and native HANDLE exit; other GUI lifecycle remains separate |
+| Independent vendor/plugin execution | Verified within List/Probe/capture only | Airwindows CLAP/VST3, eight native runs; PCM/state restoration remains pending |
+| New performance/platform qualification | Not run | Historical results below do not transfer to new changes |
+
+Clack's RED reproduced in both source and destination. The GUI wrapper differed
+from its sealed `clap-gui-refusal-v1` preimage only in three method-chain line
+wraps. The sealed manifest already identifies the current documentation bytes,
+but its local metadata still held an older documentation hash. The note-port
+source matched its declared unsigned-carrier delta while `shipped_files` retained
+an old hash. Only `vendor/clack/PROVENANCE.json` and
+`vendor/clack/LOCAL-FORMAT-CHANGES.json` changed. Runtime, upstream input and checker
+bytes are unchanged. Original RED, metadata preimages, sealed witnesses and GREEN
+are saved in `.scratch/plugin-host-sprint/clack-provenance-repair/`.
+Original LF was restored to avoid a whole-file Windows newline diff; the dependent
+raw receipt hash was updated without another semantic change. The unchanged
+checker again passed 252 paths. Final provenance SHA-256 is
+`e90ace85359e950ed8419cbb9ffdd4228770d4189d4320b24cf8a0bc3c0f53f0`.
+This repairs source attribution; it does not qualify runtime compatibility.
+Commit `c5337e5` contains only the metadata files. Commit `87db4dd` contains the
+separately reviewed VST3 instance policy, and `3572a3c` the Windows lab owner.
+The controller's later outer-wait fix remains a separate acceptance slice.
+
+The prior `handoff-6oqHh9.md` records matching r584 strict checks and default-stack
+workspace tests: 8,440 passed, zero failed, 303 ignored. Native r561 records 36
+owned cases and GPU r562 records 10 portable plus seven actual RTX 3050/DX12
+cases. Those results bind their exact source/artifact/environment hashes. Their
+ignored, unexercised and platform limitations remain. Fresh compilation and
+execution are required for this restored tree and every subsequent patch.
+
+Literal include audit found 118 unique Rust `include_str!`/`include_bytes!`
+inputs, all present and none ignored. No tracked symlink/submodule was found.
+This is a source audit, not an exhaustive proof of dynamic runtime dependencies.
+`.scratch`, `.claude`, `target`, generated DLLs and secrets were excluded from
+production recovery. Historical receipts remain in the original evidence store.
+Native build prerequisites include OCIO, FFmpeg, MSVC/ATL and pinned static DXC;
+the source snapshot does not include their compiled outputs.
+
+## Capability status
+
+`Verified` means the stated boundary has matching executed evidence. `Implemented
+— Not Fully Verified` means source exists without the required vendor/platform/
+performance evidence. `Partially Supported` means an admitted finite subset.
+`Unsupported` means no product execution contract. `Blocked` records a concrete
+missing prerequisite, not merely unfinished engineering. No complete standard
+has current-round `Verified` status.
+
+| Format / capability | Status | Boundary and acceptance still required |
+| --- | --- | --- |
+| VST3 discovery, class/fingerprint, supervised worker | Implemented — Not Fully Verified | Repeated actual load/unload, errors and permitted vendor corpus |
+| VST3 PCM/buses | Partially Supported | Float32 product, mono/stereo main, up to 31 admitted same-layout auxiliary inputs; mixed/surround and multiple outputs absent |
+| VST3 sample-offset parameters | Implemented — Not Fully Verified | Normalized bounded queues; native output, saturation, allocation and full callback deadline gates |
+| VST3 state | Partially Supported | Bounded component/controller envelope; arbitrary DSP checkpoint not implied |
+| VST3 transport | Partially Supported | Exact signed signal sample/rate; unavailable musical facts remain unavailable |
+| VST3 MIDI/notes/instruments | Unsupported | Vendor event APIs exist; product author/event/output routing does not |
+| VST3 GUI | Partially Supported | Windows same-object editor path; later destructive entry, DPI/focus/keyboard and vendor matrix pending |
+| VST3 dynamic reprepare/PDC | Partially Supported | Cohort/hold/seed controls; canonical installation and retained author acceptance pending |
+| VST3 complete vendor/platform certification | Blocked | Matching fresh fixtures/vendor permissions and Linux/macOS execution hosts unavailable in this round |
+| CLAP discovery, descriptor/fingerprint, supervised worker | Implemented — Not Fully Verified | Actual repeated lifecycle and vendor controls required |
+| CLAP audio ports | Partially Supported | Admitted Float32 mono/stereo main and auxiliary topology; notes/instrument/multi-output contracts absent |
+| CLAP parameter events | Implemented — Not Fully Verified | Plain scalar values, ordered bounded carrier; full allocation/deadline and author closure pending |
+| CLAP state | Partially Supported | Bounded state/configuration; state seed is not proven DSP continuity |
+| CLAP transport | Partially Supported | Exact signed seconds; musical time/tempo-map facts unavailable |
+| CLAP note/MIDI/polyphonic modulation | Unsupported | No canonical product event route or note-port execution |
+| CLAP GUI/main services | Partially Supported | Windows same-object roles/timers exist; exact callbacks and native platform loops need separate gates |
+| CLAP sleep/request-process scheduler | Unsupported | Callback presence alone does not schedule sole Audio DAG |
+| CLAP dynamic ports/latency/restart | Partially Supported | Sticky request/control path; actual canonical graph candidate installation unfinished |
+| CLAP complete vendor/platform certification | Blocked | No installed independent CLAP binary found; permitted corpus and other platforms still need provisioning |
+| OpenFX Filter CPU execution | Partially Supported | Current-frame full-frame progressive RGBA Float32 Source/Output, resident instances and explicit alpha contract |
+| OpenFX numeric/text/resource parameters | Partially Supported | Canonical curves/transactions; spatial/hierarchy/custom/dynamic/plugin-origin edits incomplete |
+| OpenFX Generator/Transition/General/Retimer | Unsupported | Do not adapt these silently to a single-input Filter |
+| OpenFX temporal images, ROI/RoD, tiles/multiresolution | Unsupported | Full-frame current-time subset; scheduling/cache dependencies must be added before advertisement |
+| OpenFX components/depth/fields | Partially Supported | Declared CPU Float32/progressive subset; mixed formats/fields/PAR admission remains explicit |
+| OpenFX required/aux/thread suites | Implemented — Not Fully Verified | Native ownership/callback evidence finite; full vendor suite conformance is unqualified |
+| OpenFX overlay/interact | Unsupported | A descriptor/API presence is not a product interactive workflow |
+| OpenFX GPU interoperability | Unsupported | wgpu numeric Mix is not an OpenFX GPU Suite; no native-resource/sync contract |
+| OpenFX discovery shutdown in qualified Windows cases | Verified | Actual blocked discovery/describe Host Drop settles child and thread without publication; OS-wide failure/latency guarantees remain unqualified |
+| OpenFX full vendor/platform certification | Blocked | Official Basic and owned SessionProbe qualify a finite subset; broader vendor corpus and Linux/macOS/native UI/hardware execution remain unavailable |
+
+The `Verified` category applies to source recovery/provenance and the finite
+current Windows COM and process-supervision controls above. It does not upgrade
+whole format capabilities. Historical narrowly verified host cases remain recorded
+with their original receipts in `native-plugin-compatibility.md`; they are not
+upgraded to full third-party compatibility here.
+
+## Shared contracts and ownership
+
+Keep one author Session/transaction/history authority and exact occurrence IDs.
+Plugin output observations are execution feedback until an explicit canonical
+author transaction accepts them. A state seed, local epoch, Bind or GUI view
+does not mint a new installed owner, DSP position or accepted clock anchor.
+
+Audio uses the existing typed Routing DAG, prepared PDC, sample-rate/block/mode
+admission and signed signal time. VST normalized values and CLAP plain values
+remain distinct adapters. Note events require one future canonical time/bus/
+payload contract before either format introduces product event routes. Main/UI
+affinity, symbolic audio role and physical scheduling registration are distinct.
+Realtime/offline requests must reach actual native preparation.
+
+Video uses the compiled Effects graph and existing Renderer/Cache authority for
+both Preview and Export. Render requests carry exact occurrence, time, scale,
+extent, pixel/alpha identity, generation and cancellation. Native image ownership,
+temporal requests, ROI and cache invalidation must extend that authority. Native
+GPU handles require an independently negotiated resource and synchronization
+contract. CPU transfers may be measured; zero-copy must never be inferred.
+
+Parent Session owns resource grants and root checkpoint/deadline. Known native
+buffers/SDK owners are measured under that grant; arbitrary plugin heaps, OS/CRT,
+thread bookkeeping and unmeasured SDK ownership remain explicit frontiers.
+Operation timeouts protect recovery; they do not certify audio deadlines.
+
+| Owner | Exclusive responsibility | Concurrent write exclusions |
+| --- | --- | --- |
+| Coordinator | Git, source recovery, Cargo/native execution, shared contracts, integration | All writes paused during source/artifact qualification leases |
+| Audio slice agent | VST3 instance-local immutable `IPlugInterfaceSupport` policy, loader propagation and independent COM tests | No Audio DAG/Session/protocol/SDK rewrite |
+| OpenFX slice agent | Cancelable discovery/describe, correct packaged helper, catalog worker/child settlement, owner-thread definition registration and controls | No Render Graph/pixel/suite-domain redesign |
+| Independent verification agent | This record; Clack provenance metadata repair; read-only review of final slice patches | No runtime source changes or Cargo execution |
+
+This round uses disjoint module ownership within the already isolated worktree;
+it does not claim per-agent worktrees were created. Contract changes require the
+coordinator to approve scope, dependent consumers, migration and regression gates.
+Expensive builds are serialized by the coordinator.
+
+```mermaid
+flowchart TD
+  A[Recovered source and immutable provenance] --> B[Metadata and baseline tests]
+  B --> C[VST3 advertised-consumer policy]
+  B --> D[OFX discovery lifecycle]
+  C --> E[Independent patch review]
+  D --> E
+  E --> F[Targeted tests and fresh native fixtures]
+  F --> G[Workspace regression and recorded slice commit]
+  G --> H[Shared musical event contract]
+  H --> I[VST3 and CLAP note routing / instruments]
+  G --> J[OFX temporal / ROI / context contract]
+  J --> K[Cache, Preview and Export integration]
+  I --> L[Independent vendor and measured performance lab]
+  K --> L
+```
+
+## Compatibility lab
+
+The initial inventory is `.scratch/plugin-host-sprint/plugin-inventory.json`.
+The installed Coda VST3 shell was found, but version/authorization/class inventory
+and execution remain unverified. Duplicate package copies are one binary/class
+identity, not extra test coverage. Owned fixture DLLs and the SDK Basic OFX sample
+exist under the prior target directory; their historical hashes do not prove
+fresh matching build selection.
+
+The following 24 planned objects prioritize different boundaries. They are a
+candidate queue, not 24 installed or compatible plugins. Owned/SDK objects remain
+separate from independent vendor counts. Each format build and plugin class must
+be inventoried before execution; external candidates are not silently installed.
+
+| Object | Kind | Primary purpose / entry dependency |
+| --- | --- | --- |
+| CLAP sample gain | Owned fixture | Scalar events and range/partition PCM |
+| CLAP sidechain | Owned fixture | Auxiliary mapping, delay, state and partitions |
+| CLAP output probe | Owned fixture | Bounded output parameter/event observations |
+| CLAP process author | Owned fixture | Native-origin author transaction closure |
+| VST3 sidechain | Owned fixture | Bus mapping, state/delay and partition PCM |
+| VST3 editor | Owned fixture | Same-object HWND and first-signal state |
+| Stateful VST3 gain | Owned fixture | Component/controller state round-trip |
+| VST3 Gain bundle | Reference fixture | Bundle resolution and repeated lifecycle |
+| OpenFX SDK Basic | Official sample | Declared Filter processing and image law |
+| OpenFX contract fixtures | Owned fixture family | Error/ownership/callback/teardown boundaries; individual IDs must be recorded |
+| Coda VST3 shell | Installed independent candidate | Shell classes, discovery and permitted state/GUI execution |
+| Surge XT instrument, VST3 | Independent candidate | Requires musical events and instrument output routing first |
+| Surge XT instrument, CLAP | Independent candidate | Note lifecycle and polyphonic modulation after shared contract |
+| Surge XT Effects, VST3 | Independent candidate | Effect chain, parameters/state and GUI |
+| Surge XT Effects, CLAP | Independent candidate | Adapter comparison, parameters/state and GUI |
+| Chow Tape Model | Independent candidate | Nonlinear PCM, state and automation; inspect actual format build |
+| BYOD | Independent candidate | Complex state and processing graph; VST3/CLAP artifact checks |
+| DPF example effect | Independent framework reference | Second implementation stack; choose actual built descriptor |
+| DPF example instrument | Independent framework reference | Zero-input/event admission after shared contract |
+| openfx-misc Blur | Independent candidate | Spatial/ROI/tiles and exact image comparison |
+| openfx-misc ColorCorrect | Independent candidate | Float HDR/negative/alpha and colour contract |
+| openfx-misc TimeBlur | Independent candidate | Temporal image requests and caching |
+| openfx-misc Merge | Independent candidate | Required multi-input General context |
+| openfx-misc Transform | Independent candidate | Bounds/ROI/PAR/multiresolution and interaction |
+
+Primary project sources checked for candidate selection:
+[Surge](https://github.com/surge-synthesizer/surge),
+[Surge CLAP capabilities](https://surge-synthesizer.github.io/clap/),
+[ChowDSP products](https://chowdsp.com/products.html),
+[DPF format build targets](https://github.com/DISTRHO/DPF/blob/main/cmake/DPF-plugin.cmake),
+[openfx-misc](https://github.com/NatronGitHub/openfx-misc).
+These sources establish candidate projects, not local binaries or compatibility.
+Choose immutable release/commit/license inputs when provisioning; no third-party
+core code or license constraint is imported by this candidate list.
+
+Every result records binary/class/version/SDK, source and artifact hashes, license
+and activation, OS/CPU/GPU, input/parameters/rate/block/pixel format, selectors,
+actual output, repetitions, failure/cleanup and performance. Native tests use
+matching fresh helper/fixture artifacts, run serially and explicitly select
+ignored cases. Ordinary unit success does not execute these cases.
+
+## Acceptance gates and priority risks
+
+Each slice needs a reviewable diff, independent semantic oracle, matching build,
+targeted regression and explicit unresolved boundary. Preserve RED failures;
+do not refresh identity metadata until each source delta has independent evidence.
+Before integration, test cross-module lifecycle, state and Preview/Export contracts.
+Run periodic workspace fmt, strict Clippy and all-feature tests; ignored cases
+remain separately reported. Finish a verified slice with an auditable commit.
+
+Highest priority risks are truthful capability advertisement, OFX discovery
+children/dispatch, incomplete native author/reprepare installation, and absent
+musical event routing. Follow with GUI thread/lifetime controls and callback
+allocation/IPC deadline measurements. Existing zero-feedback budget controls do
+not certify the known nonzero-feedback capacity-growth frontier. GPU Mix only
+admits its documented Coverage/Opaque targets; Float alpha refusal remains.
+
+Historical CPU HD/UHD Mix misses frame deadlines. Cold GPU pipeline creation is
+material; 16/64-size eight-sample costs do not qualify full-frame playback/export.
+Audio MMCSS admission is not callback deadline evidence. Measure actual whole-root
+DSP, IPC, preflight, handoff and copies at declared sample rates/blocks with
+p50/p95/p99/max and misses. Compare matched plugin/input/hardware/quality against
+the restored baseline and a permitted mature host; a 10% target is provisional,
+not a universal certification line.
+
+Windows source and owned native evidence do not qualify Linux/macOS. The existing
+environment has FFmpeg 7/libavcodec 61; release guard requires FFmpeg 8/62 and must
+remain enforced. OCIO native prefix and ATL/pinned DXC downloads are build
+prerequisites, not product semantic fallbacks. Physical DAC, full modal/save/reopen
+workflows, whole-App RSS and commercial activation remain separate evidence needs.
+
+## Recoverable 30-day cadence
+
+Day 1–3: recover/audit real sources, reconcile provenance, baseline tests, freeze
+shared contracts and complete independent lifecycle/capability slices. Day 4–12:
+prioritize shared event/transport contract, audio notes/instruments/buses/state and
+native author/reprepare closure. Day 13–21: contexts, temporal images/ROI/tiles and
+Preview/Export/cache integration; independent OFX work may start earlier. Day
+22–26: permitted vendor corpus, repeated lifecycle, platform verification and
+measured bottlenecks. Day 27–30: stop discretionary feature expansion, regressions,
+risks, evidence and final five-state matrix.
+
+These are engineering phases, not a claim of continuous unattended execution.
+Each resumed cycle reads this record, receipts, Git status and the last accepted
+slice before selecting the next dependency-ready task. No recurring automation
+has been created by this document. Coordinator updates evidence/status when a
+gate actually finishes; pending work must never become `Verified` by elapsed time.
+
+## Independent review record
+
+The initial Clack recovery RED is independently explained by sealed source
+preimages, not a new semantic source delta. `clack-provenance-repair/` retains
+source/destination RED, both old metadata files, sealed GUI/document/manifest
+witnesses and a GREEN receipt. GUI preimage SHA-256 is
+`58c4e6de6964c2021a5a464df2577ab992b5026ced04b7e80c9eed4de20935b3`;
+current unchanged runtime SHA-256 is
+`3e240c8241083251efc521bb00f7186b2dbdc650f4dfe716fcb423fbf3652efb`.
+The diff has only three whitespace line-wrap changes. Current document hash
+`bc1801148ce69b8d375fd07c00ded9fa248f242c98499e3b46e41918855e5158`
+matches the sealed package manifest. Note-port hash
+`306ac1f8042b2d42d6a138b9ef3827b8be4cc11def6d530f6a7d03cca613d20f`
+already matched its declared source delta. The immutable input receipt/tree and
+checker hash are recorded unchanged in GREEN. The initial repaired format receipt is
+`00a7eebb54007548132996a6ec7320b31aaac7262bc9e9a26b613086b946cf83`.
+Preserving baseline LF yields final raw receipt hash
+`616b67d39bbd90ef55eacfc6a577a07959e035084e452097cbf1df241ed0ec1f`;
+independent JSON-leaf review confirms the same approved semantic changes.
+
+The first read-only lab-runner review found two pending issues. Its parent
+`WaitForExit` deadline did not bound subsequent asynchronous output drain when
+an already-exited parent leaves inherited pipe handles in a child. Parent exit
+and complete output drain require separate bounded outcomes; killing a live
+parent tree does not prove normal-exit child settlement. Its final manifest hash
+also reread the mutable input file rather than hashing the frozen evidence copy.
+The controller now delegates to the existing validation launcher's native Job
+owner: suspended spawn, assignment before resume, kernel active-process counts,
+termination even after parent exit, and bounded cleanup. Logs are create-only
+files. Frozen manifest bytes define the receipt digest. Independent follow-up
+also found and corrected late-exit acceptance and duplicate group overwrite.
+The matching `lab-frozen-r2/receipt.json` passes three groups/seven tests with
+1,771 source hashes stable. `lab-negative-controls-r2.json` records actual refusal
+of wrong counts/hashes, duplicate IDs, a deadline and a parent that exits with a
+live child. The last two include actual native Job settlement evidence. These
+controls qualify Windows test supervision; they do not establish full native
+plugin compatibility, arbitrary OS failure recovery or real-time performance.
+
+A later audit found two indefinite waits in the PowerShell fallback for a hung
+runner. The follow-up removes them, uses one bounded observation budget, preserves
+errors and requires the native Job receipt for descendant settlement. Killing
+the runner does not prove tree settlement or impose a hard bound on the operating
+system's kill operation. Actual `controller-followup-r3/summary.json` passes
+nine positive controls (four process-owner controls and five COM controls) and
+rejects wrong counts, a live descendant, a deadline and a deliberately hung
+outer runner. The last case failed after 11,088 ms, observed runner exit during
+seven ms of cleanup and retained the missing native-owner receipt as a failure.
+Independent review checked receipt hashes and raw native flags. These results
+qualify this finite Windows supervision behavior, not a hard OS kill deadline.
+
+VST3's five real COM/policy controls passed after the original declaration RED.
+OpenFX's four direct-child controls passed after the original cancellation RED.
+Independent review also found and corrected a missing checkpoint argument in
+the resident preparation caller; the first workspace Clippy run was canceled
+before product checking to preserve a single-source build. This is a canceled
+gate, not a passing check or an executed compiler failure. App/native Basic and
+active catalog shutdown still require the integration gate.
+
+## Current integration and next contract
+
+The second and third strict workspace Clippy attempts stopped in the external
+DXC build script: system curl could not acquire Schannel credentials. They did
+not diagnose product code and are not passing gates. An actual Rust 1.97.1
+resolution probe confirmed that the build executable directory precedes the
+system directory when no child PATH is explicitly supplied. A task-local curl
+launcher forwards literal arguments to installed Git OpenSSL curl. The live
+release API still reports an immutable release. For the one exact archive URL,
+an explicit cache binding copies the actual existing 26,115,841-byte archive;
+the unchanged build script verifies its SHA-256
+`2db15ab14e6eee9b9931d75d1690b4f7d81cad446fecccfe4e36e218dee25cce`
+before extraction/linking. This round did not download a new complete archive.
+The slow renderer attempt was canceled before the cache-backed successful check.
+Registry sources and upstream checks were not patched. Task-local launcher,
+probe, cache preflight and independent review receipts remain in `.scratch`.
+
+The fourth strict Clippy attempt exposed an omitted resident `std::thread`
+import and a test's invalid `PropertyBag::new` call; both were repaired without
+changing their contracts or assertions. The fifth rejected the deliberately
+orphaning negative fixture. A scoped `expect(clippy::zombie_processes)` documents
+that exact control's external Job owner and retains strict enforcement for the
+rest of the code. The sixth workspace attempt passed. The owner suite then
+passed again: 12 tests, zero failures, four explicitly ignored fixture functions.
+Neither compilation nor these supervision controls qualify native plugin output.
+
+The OpenFX fixture now has explicit test-only modes that block inside actual
+`OfxSetHost` or `Describe`, after validating host capabilities and recording a
+native PID. The Windows AppUiHost tests dispatch the real install action, retain
+the native child process and catalog worker thread handles, and invoke the real
+Host destructor once. Both objects must signal exit; registry revision and an
+isolated preferences file must remain unchanged. A five-second Drop gate is
+below the original discovery/describe timeouts and distinguishes cancellation
+from merely waiting for them. It is a broad integration gate, not a real-time UI
+guarantee. Failed tests require the external lab Job owner; cleanup cannot turn
+a failure into a pass. Fresh native controls passed: first-run discovery and
+describe Host Drop took 19 and 22 ms respectively, with actual process/thread
+handles signaled and no registry/preferences publication. Repeated frozen gates
+also passed. These observations do not establish a universal latency bound.
+
+App/native build r2 completed successfully in 13m05s. The first native execution
+passed 12 of 15 selected groups before an inherited NaN test expected the wrong
+error variant. A diagnostic-only rerun retained that failing assertion and
+captured `Frame(InvalidSample { index: 7, alpha: StraightFloat })`. Independent
+review proved the canonical validator and error variant unchanged from recovery.
+The test now checks that exact typed refusal; no production validator changed.
+Native execution r2 passed 13 groups, including that strict NaN control, then
+exposed a real resident lifecycle defect: admission returned `Canceled` without
+retiring the instance, so the following render still succeeded. The original
+retirement assertion remains; the local fix retires on admission cancellation or
+deadline and adds an equivalent deadline regression. Invalid authored frame
+errors, output resource refusal and user-blocked semantics retain their existing
+handling. Native execution r3 passes all 15 groups across eight exact selectors,
+with 1,773 frozen source hashes stable and every Job report proving zero exit,
+no errors or outliving descendants and complete settlement. Independent
+acceptance is `ofx-native-r3-independent-acceptance.json`. Both failed native
+runs remain preserved under `.scratch/plugin-host-sprint`. Strict Clippy must be
+rerun after the new admission change.
+
+The ordinary App library regression first exceeded a 15-minute serial budget.
+The second run completed in 691.70 seconds with 2,836 passing tests, four failures
+and 121 ignored tests. All four failures were the new direct-child supervision
+controls; the Job reported exit 101, no deadline, no errors and complete cleanup.
+The same App executable starts both ignored child fixtures correctly when launched
+directly. A minimal Rust reproduction subsequently proved that the inherited
+Windows environment contains different `PATH` and `Path` values: rebuilding that
+environment for a child folds the keys and loses the prepended FFmpeg DLL path.
+Changing output redirection or process creation flags did not resolve it.
+Normalizing the outer launch environment with `ProcessStartInfo.Environment`
+then passes all four original controls in 0.95 seconds, without changing source,
+assertions or their five-second readiness budget. A frozen lab repeat also passes
+four controls with zero ignored tests. This finite result does not substitute for
+a fresh complete App regression. Raw RED, environment folding and GREEN evidence
+are retained in `app-child-entry-diagnosis-r1` and
+`ofx-child-supervision-frozen-r2`. Separately, 18 ordinary OFX module tests pass;
+their selectors did not include these four new child controls.
+
+Fresh audio fixture compilation exposed a non-Send error returned from a scoped
+CLAP background log thread. The fixture now transports an owned error string and
+converts it back on the caller; SDK and host threading remain unchanged. Both
+native fixture builds and the audio library build completed. The first selected
+CLAP native PCM lifecycle gate nevertheless fails because `start_processing`
+returns false. The original predicate required audio callbacks to also be main
+callbacks. A complete diagnostic record now proves the first failure was
+`start_processing`: main=false, audio=true, prior validity=true and actual DLL
+ThreadId(1) -> ThreadId(3). The initial teardown-only publication produced empty
+files; a later run also failed earlier at bounded validation shutdown. Both
+remain preserved. Temporary fault-path file instrumentation was used only for
+diagnosis and has been completely removed from the current fixture.
+
+The corrected fixture checks main identity against its own initialization
+ThreadId, accepts audio on either physical thread and accepts main or audio for
+Tail. All original PCM/state/bus algorithms and sticky refusal remain. Its one
+table test covers 54 role/identity assertions and passes. Native execution r2
+then passes four groups: CLAP and VST3 PCM lifecycle and signed signal time. The
+fifth VST3 object-binding group fails because it assumes the very first Enter
+reloads the initialized object, whereas the worker explicitly preserves that
+object on first entry. The second round is unexecuted. A separate CLAP native log
+gate fails an assertion that object observation is unavailable, although the
+current adapter returns an actual object. These tests require contract review
+and fresh strict replacements, not removal of their binding/log/PCM assertions.
+The complete audio matrix remains unqualified. Diagnostic builds and these
+functional timing observations are excluded from realtime/performance acceptance.
+
+Independent review also confirmed a separate retained risk:
+`ProcessOwner::terminate` ignores a kill error before waiting unconditionally.
+An OS refusal while the child stays alive can therefore strand a resident
+caller. The external lab Job bounds test recovery, not the product method.
+This requires its own settlement slice and is not qualified by successful
+normal-OS cancellation tests. No full production lifecycle claim is made.
+
+The next audio contract is canonical Note routing, followed by a real input-free
+instrument graph role. A native zero-input admission change alone would still
+inherit the current main-PCM contribution and its latency and cannot qualify an
+instrument. Note author data must remain in the sole Sequence AudioProgram,
+with exact TimelineTime, target instance and definition-owned note-input identity;
+compiled/prepared sample schedules are derived execution state. Event capacity,
+ordering, continuity epoch, seek/preroll and releasing voices need explicit
+admission and independent PCM oracles before adapters are expanded.
+
+CLAP second-based Note routing can be verified as a first finite slice. VST3's
+event PPQ position has no unavailable flag and requires a real musical projection;
+the standalone vendor Timeline or an invented 120 BPM must not become product
+authority. VST3 separate parameter queues and event lists also cannot promise
+CLAP's cross-kind FIFO. The common contract can preserve same-sample application
+and stable order within each stream. No project schema, musical map or shared
+event API change is approved by this investigation alone. The detailed coordinated
+change request is `.scratch/plugin-host-sprint/note-routing-contract-proposal.md`.
+
+## Integration checkpoint: accepted slices and outstanding native shutdown
+
+Accepted commits are `ae00fa2` (exact typed NaN refusal assertion), `04ae31a`
+(catalog cancellation and worker settlement), and `c4debc6` (resident admission
+cancellation/deadline retires the instance). The normalized full App regression
+now passes **2,840 / 0 failed / 121 ignored**, in 726.87 seconds. Its source,
+artifact and normalized Windows environment binding are preserved in
+`.scratch/plugin-host-sprint/app-lib-regression-r3`. The earlier four failures
+and serial timeout remain recorded; environment normalization is part of the
+lab launch, not a product compatibility workaround. Workspace strict Clippy r7
+and audio strict Clippy r8 both pass.
+
+Two stricter audio test corrections are independently reviewed:
+VST3 first Enter retains the initial object and second Enter must replace it;
+CLAP log observations retain the actual initial native object identity. All
+original PCM, stale-binding and complete log assertions remain. Eight earlier
+finite PCM/signal-time groups passed across two rounds. The fresh r3 matrix
+passes seven of ten groups, including the corrected VST3 object test, before
+CLAP factory validation shutdown fails again. The corrected CLAP log gate also
+fails at factory creation. Neither run qualifies the complete matrix. Temporary
+parent-libtest diagnostics preserve the original shutdown budgets and observe
+ACK versus process exit; diagnosis and any lifecycle contract change are pending.
+
+The finite fixture and test-oracle slices are subsequently committed as
+`b882d53` and `70522b3`; temporary supervisor diagnostics are excluded. Eight
+serial diagnostic groups pass, with 56 normal shutdown records and actual exit
+observed in 57.634–79.390 ms. A separate two-stream native stress run completes
+18 groups (17 passing, one failing during factory validation). Three complete
+records show `Completed` ACK in approximately 0.3–0.4 ms followed by the original
+100 ms post-ACK exit deadline and forced cleanup. The failed factory's Job still
+settles its process tree. Passing groups can contain failing Drop shutdowns and
+are not graceful-lifecycle acceptance. The child subphase and natural exit time
+after the original cap are unknown because forced termination interrupts them.
+A second diagnostic-only shadow observation retains the original failure
+verdict, delays cleanup by at most an extra second and records natural exit
+separately; it is not a production budget change or realtime qualification.
+
+Real third-party Airwindows Consolidated **1.2026.285**, publisher commit
+`8a67b80e04230a5cf40e84d6e8b9a2fd70b13a75`, completes two List and two Probe
+runs for each of CLAP and VST3 on Windows x64. All eight native Job reports
+have zero exit, no deadline/errors/outliving descendants and complete settlement.
+Each format reports 14 parameters, latency zero and tail 96,000 samples. Opaque
+default state capture is 314 bytes for CLAP and 373 bytes for VST3. Evidence is
+`.scratch/plugin-host-sprint/airwindows-native-discovery-r1/receipt.json`
+(SHA256 `5C9216E16338D49C14B0A21B4A7E820B51612736F6AF996BF03ACCAF951902E9`).
+Only these finite discovery/initialization/capture cases are verified. PCM,
+state restore, GUI, project integration, realtime safety, comparative performance
+and complete format compatibility remain unverified. The package is a private
+external lab input; its complete binary license composition remains unverified.
+
+The OFX kill-refusal fix is implemented only in an isolated worktree and awaits
+independent review, fresh builds and seven Job-contained native controls. It
+separates Running / Retiring / Settled, retains the Child for cleanup retry, and
+prohibits wait after an unconfirmed kill refusal. No native result is yet claimed.
+
+## Current checkpoint: terminal reader and process retirement
+
+The temporary parent Shutdown diagnostics were removed before freeze19. The
+original 100 ms acknowledgement/exit policy remains. Two diagnostic shadow runs
+observed four children naturally exiting with code zero at approximately
+171–184 ms after the unchanged original failure verdict. These are diagnostic
+observations, not altered production acceptance, realtime or performance results.
+
+An independent actual TCP regression demonstrates a separate terminal-reader
+bug: after acknowledged Shutdown, the original reader attempts another decode
+while the connection remains open. The original behavior fails the new test;
+the corrected reader returns after terminal acknowledgement and all eight reader
+module controls pass. The scoped-thread cleanup guard closes slots and socket
+before join on assertion/unwind paths. It proves loop completion, not an OS
+thread-exit deadline, and does not explain every observed slow teardown.
+Evidence and independent review are in `native-reader-terminal-r1` and
+`native-reader-terminal-independent-review.json` under the sprint scratch store.
+
+The OFX owner slice is now integrated. Its private Running / Retiring / Settled
+state revokes admission before cleanup, never waits after an unconfirmed kill
+refusal, and retains the same Child for retry. Freeze19 fresh App build r5 passes
+15 original native OFX groups and seven new Job-contained retirement controls.
+Independent source/producer/artifact/Job acceptance is recorded in
+`ofx-freeze19-normal-and-retirement-independent-review.json`. The affected
+ordinary OFX modules also pass 18 tests and the child supervision module passes
+four controls. Kill-refusal controls inject errors around actual children; they
+do not prove an actual OS ACL refusal. Successful OS kill/wait latency is not
+universally bounded; permanent refusal can leave a live process after finite
+Drop attempts. GPU interop and complete OFX compatibility remain unqualified.
+
+Freeze19 Audio build r6 passes the full ten selected native audio groups and two
+strict CLAP log groups. These retain PCM, bus/state, signed signal time, actual
+object identity, complete callback logs and the original factory-shutdown gate.
+Independent ten-group receipt is
+`audio-freeze19-ten-gates-independent-review.json`. Passing processing groups
+still cannot prove each ignored Drop shutdown returned true.
+
+The ordinary audio regression on the same build is **RED: 327 passed / five
+failed / zero ignored / 50 explicitly skipped**, in 20.18 seconds. The first
+paused GUI test observes Active=1 and AcceptedEvents=0 instead of three; four
+later tests fail from its poisoned fixture serialization mutex. An isolated
+repeat passes without changes. Read-only review identifies a valid completion
+race in the embedded fixture: the audio callback publishes ACTIVE_FLUSHES before
+sending events, and main inspects the later event counter immediately. This
+embedded path does not use the native reader or external worker. The correction
+publishes that existing SeqCst count after exchange, preserving all event, PCM,
+thread, Process-count and two-second assertions. Original RED and independent
+source-bound review remain in `audio-ordinary-execution-r6` and
+`clap-paused-flush-race-review-r1`. Fresh full regression is pending.
+
+Strict workspace Clippy r9 refuses one nested-if warning in the new OFX fixture;
+a semantically equivalent let-chain resolves it. Fresh freeze21 Clippy r10
+passes all targets/features with `-D warnings` in 1m38s. Historical App full
+2,840-pass regression predates these slices and must not be reported as a fresh
+full regression of the current tree.
+
+The audio process-owner r2 and generic external-vendor PCM/state test slices
+remain isolated, independently reviewable deliveries. Neither has root build
+or native qualification yet. The vendor test uses opaque captured default state,
+canonical author parameters and plugin-owned Bypass for bit-exact PCM, with a
+non-bypass discrimination control; default state alone cannot prove nondefault
+state restoration. Upcoming admission must preserve the existing factory
+shutdown failure rather than bypassing it. Current fresh binary bytes are saved
+in `native-artifact-archive-r6` before further rebuilds.
+
+Freeze21 Audio build r7 subsequently completes the full ordinary regression:
+**332 passed / zero failed / zero ignored / 50 explicitly filtered**, 30.44s.
+The fresh Job exits zero with no deadline/errors/outliving descendants and full
+settlement. `audio-ordinary-execution-r7/receipt.json` binds the exact successful
+summary, 1,773 source hashes and current Cargo-produced audio executable.
+This supersedes the ordinary-test pending status above; the original r6 RED
+remains. It does not execute the 50 native/installed ignored cases or qualify the
+isolated audio owner/vendor additions.
+
+
+The three accepted slices are committed independently as `afa6614` (terminal
+reader), `9cff2bf` (OFX owner) and `586acde` (fixture completion). Subsequent root
+integration changes audio supervisor/Cargo and adds the reviewed external vendor
+test module; an offline metadata resolution adds only the existing workspace
+tracing dependency to mondrian-audio's Cargo.lock entry. Freeze22 explicitly
+includes the new source file (1,774 inputs). Strict build and all new native
+qualification remain pending. Freeze21 gates are historical accepted artifacts,
+not a claim that this newer tree matches their hashes. Exact existing App and
+Audio executables were archived before rebuilding.
+
+## Latest checkpoint: Audio owner and external vendor admission
+
+Freeze23 contains 1,774 selected repository inputs (SHA256
+`97A8F42DD3BA581EDD4291F6BFF8E6139C9026360DAF2079E22DF8DC1492CB69`).
+Fresh default-feature Audio build r8 and App build r6 succeed. Strict workspace
+Clippy r12 passes all targets/features with `-D warnings` in 1m40s. These replace
+the build-pending status above; they do not certify plugin compatibility.
+
+The integrated audio owner has private Running / Retiring / Settled states and
+a startup guard immediately after spawn. It revokes admission before cleanup,
+preserves the primary startup error, retains the same Child after unconfirmed
+kill refusal, and forbids wait on that refusal path. Eleven actual Windows
+Job-contained controls pass and have independent source/artifact/output review:
+`audio-owner-native-eleven-independent-review-r1.json` (SHA256
+`069C3D5CBC2D15721F2D67A7C791D946414ED6678CA21FE9F4BE2D51EFD8A6E3`).
+Those controls inject operation errors around actual children; they do not
+establish actual OS ACL refusal, bounded successful kill/wait, whole-tree product
+containment, real SDK teardown, or realtime safety. Permanent kill refusal may
+leave a live process after finite Drop attempts. The Running shutdown policy
+and existing native factory-shutdown assertion remain unchanged.
+
+Fresh `audio-native-execution-r7/summary.json` records **10/10 original native
+audio groups passing** on this owner, across two rounds of CLAP/VST3 PCM,
+signal/time and actual VST3 object lifecycle controls. Independent review is in
+`audio-freeze23-ten-native-gates-independent-review-r1.json` (SHA256
+`3302EFF8B9A1343B300873D6EF66044E05EA8BD739645B7A8EF858D4BABB7217`).
+Current ordinary Audio subsequently passes **332 / zero failed / zero ignored /
+64 explicitly filtered**, 30.38s, with all actual test names matching the derived
+ordinary set. Independent receipt
+`source23-audio-owner-ordinary-and-inventory-independent-acceptance-r1.json`
+has SHA256 `650174277E49458F3FBEF3259EF16A57AE22A045B2561940219FF1F1BE273C47`.
+The owner slice is committed as `9ebc35c`. The generic external lab tests are
+separately committed as `21f1827`, retaining actual vendor RED results. Full
+current App regression is pending.
+
+The generic external-vendor test uses actual opaque state capture, canonical
+author parameters, native discovery/resolve, plugin Bypass and asymmetric PCM
+with multiple block partitions. Its current four-case plan binds exact Airwindows
+binaries and fresh product helper. Actual first CLAP execution is **RED: zero
+passed / one failed**, before DSP: the resolver reports
+`authored CLAP parameter contract differs from the plugin`. The Job exits 101
+without deadline, owner errors or outliving
+descendants; the failure is preserved under
+`external-vendor-native-frozen-r1/round-1-clap-controller-evidence`.
+
+The independent first VST3 case subsequently reaches factory validation and a
+fresh native instance, but is **RED before PCM** at state entry:
+`ReprepareRequired(Vst3Restart { flags: 4 })`. Current bindings identify this as
+`kParamValuesChanged`. Its native Job also settles with exit 101 and no deadline,
+errors or outliving descendants. Evidence is in the same generation directory's
+`round-1-vst3-controller-evidence`; both second-round cases remain unexecuted.
+The required parameter-authority/reprepare integration is under investigation;
+the flag has not been ignored or reclassified as a successful entry.
+
+The saved initial and bypass author snapshots differ only in Bypass automation
+constant, zero to one; schema and opaque state are identical. Publisher source
+contains an uninitialized default-value array with entries written only for
+active algorithm parameters. This is a candidate explanation for fresh-instance
+schema drift, **not yet confirmed by the actual failing descriptor**. Strict
+schema admission remains intact. No plugin-name exception, default normalization,
+fabricated state or relaxed output assertion has been introduced. Vendor PCM,
+restore, GUI, performance and full compatibility are still unqualified.
+
+Exact current Audio/App/OFX executable bytes are retained in
+`native-artifact-archive-r8/receipt.json` before diagnostic rebuilds. These PE
+archives do not establish the entire runtime DLL dependency closure. Raw logs,
+plans, source hashes and independent reviews remain in the sprint scratch store;
+this document is the Git-persisted coordination index.
+
+Fresh App build r6 also passes all 15 original OFX native groups under the
+unchanged controller (`ofx-native-execution-r7/summary.json`). Each actual exact
+selector produces the required successful test summary and Job settlement.
+No separate fresh selector-list preflight was executed in this run. The retained
+old plan was correctly refused for stale source/marker bindings; a new plan only
+rebinds the current source and fresh catalog marker paths. Independent review of
+this new execution is recorded in
+`ofx-freeze23-fifteen-native-independent-review-r1.json` (SHA256
+`F9276459F19FE55E3E4F50CC0DC7EF9354E879FA66C8DA8271B2EBEBA8BFC4A3`).
+Complete current App regression remains pending.
+
+## Actual vendor diagnosis and next isolated slice
+
+A temporary test-only same-refused-probe diagnostic was independently reviewed
+and compiled as Audio build r9 / freeze24. The existing helper remains App6,
+built from source23; it was not relabeled as a source24 product build. Actual
+diagnostic attempts fail at different native gates: startup metadata admission,
+discovery/restore, and then the existing strict restored-author assertion.
+A third-case preparation error (missing required empty evidence directory) is
+retained separately from its corrected continuation. No attempt passes PCM.
+
+The corrected third continuation provides actual metadata drift: after one
+successful restored author snapshot with default zero, a second fresh restore
+reports parameter `2944917345` with default `4.5906537691281007e-41` instead of
+`0.0`. The schema equality compares allocation contents, so differing diagnostic
+allocation UUIDs do not explain the refusal. The test-only resolver diagnostics
+did not print: this failure occurs earlier in the existing assertion. The value
+is consistent with the publisher's uninitialized inactive default slot; complete
+binary/source cause attribution remains an inference. Keep the strict refusal
+and do not suppress inactive parameters or normalize the default.
+
+Exact diagnostic executable bytes are archived in `native-artifact-archive-r9`.
+Temporary diagnostics were removed and all 1,774 source23 hashes restored.
+Cargo build r10 was **rejected as restoration evidence**: Copy-Item preserved an
+older source timestamp, so Cargo reported fresh=true and reused diagnostic r9
+bytes. Touching only the restored file timestamp forced an actual r11 compile
+(fresh=false), producing SHA256
+`8A7CE34E4E839533177A0A0365E1D7A205BA2765D2617741494F629FF40704AE`.
+Original r10 logs/cache refusal and restoration proofs are retained. No restored
+source claim relies on its stale executable.
+
+Actual default App6 inventory contains 2,778 ordinary and 124 ignored tests;
+historical 2,840/121 used the validation feature. Inventory alone executes no
+tests. Bulk inventory tool r1 failed before child launch on a scalar --list JSON
+argument; r2 corrects array serialization and provides the successful actual
+inventory/Audio run. Tool r3 additionally guarantees cleanup attempts when
+evidence publication fails; its syntax and extracted-finally fault controls pass.
+These scratch tool changes do not alter production budgets or assertions.
+
+VST3 restart flag4 has a documented initial control-consumer gap, distinct from
+latency flag8. The existing latency service cannot consume it before first DSP.
+Its reviewed CCR is in `vst3-param-values-restart-independent-ccr-r1`. A new
+isolated worktree at `.scratch/agent-worktrees/vst3-initial-value-restart`
+(base `9ebc35c`) owns only the VST3 adapter, narrow bounded controller-query
+support and a dedicated SDK fixture. The accepted design supports pure4 only on
+proven initial/fresh-reload control phases, preserves canonical author and
+last-DSP authority, and retires only the exact observed cohort after all reads.
+Runtime/mixed/newer/exhausted requests remain pending. Implementation, native
+controls, independent review and actual vendor retest are still required before
+integration. No shared domain, graph, schema or global time contract is changed.
+
+## Restored executable regression and second corpus checkpoint
+
+The actual source23 Audio r11 executable passes all 332 ordinary tests again,
+with zero failures/ignored and 64 filtered native gates (26.60 seconds). Evidence
+is `audio-ordinary-execution-r9/receipt.json`; actual four-Job inventory r3 is
+`libtest-inventory-execution-r3/inventory-receipt.json` (SHA256
+`1305CC6DD98881EAFC07B48EE9F498D05D5045B6E61953B529F68B5A115ECE6A`).
+This binds the restored r11 producer and executable, rather than the rejected
+fresh=true r10 build. Independent acceptance is pending. The current default
+App6 ordinary regression is running in `app-lib-regression-r4`, against its
+actual inventory of 2,778 ordinary and 124 ignored tests; no result is claimed
+before its final output, source checks and native Job settlement.
+
+The App r4 run subsequently completed successfully: 2,778 passed, zero failed,
+124 ignored, zero filtered, 677.99 seconds. The runner and outer controller
+exit codes are zero, native owner errors are empty, no deadline or outliving
+descendants were reported, and descendants were reaped. All source checks passed
+under 1,853 read leases. `app-lib-regression-r4/receipt.json` binds App6 SHA256
+`68E8CB85254E5791F666247BD542AB45F3809B958C3863BC755E909799562D47` and source23;
+ignored native tests were not executed by this ordinary regression. Independent
+review is pending. Exact restored Audio11 bytes are now preserved separately in
+`native-artifact-archive-r10`; accepted App6/product/OFX bytes remain in archive r8.
+
+The isolated VST3 initial-value service is now frozen for review in
+`vst3-initial-value-service-r1/delivery-receipt.json`. Its relative seed patch
+SHA256 is `66944FF29064F29F0F6C02F0584EF25F3E9A3D1B6E2750B7A90DD45D16C99B6B`.
+There are 15 owned paths, including five ignored actual SDK fixture controls.
+Rustfmt parsing and pinned SDK provenance checks passed; no Cargo/native test
+or root integration has happened for this slice.
+
+The second real CLAP corpus is DuskAudio RingOut v1.0.0. Official ZIP SHA256 is
+`9DEA8EC30F9F69362BF95F7FDD1108870F2982423953C9A46748C7E7DE8AC3E4`;
+the extracted x64 CLAP SHA256 is
+`DF86E10F2B0AADA4A3EB5F4F0BDA315A941960B587B4B9513CD7BA8A9F8BD99B`.
+Static acceptance evidence is `second-clap-corpus-r1/static-candidate-acceptance.json`
+(SHA256 `9041967F04688860B0B5EE62CB303CC7B57AE15894605048E2C91BB9892D7277`).
+Only CLAP and actual license/notices were extracted; no installer or plugin
+execution occurred. GPL-3.0-or-later plus ISC/MIT notices are recorded, while
+complete binary composition remains unverified. Its 11 parameters include two
+read-only meters, bypass smooths over 10 ms, and default processing can be
+identity. These legitimate semantics make the existing first external PCM
+slice ineligible. Preserve that gate and design separate read-only authoring,
+controlled nondefault state and bypass-settling oracles before runtime claims.
