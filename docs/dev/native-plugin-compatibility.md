@@ -263,3 +263,52 @@ failures remain evidence. Current bulk transport and complete-float source need
 fresh unchanged-policy release measurement, then actual cold factory, whole
 compositor/NLE and device acceptance. Correct image pixels and source lint are
 not performance acceptance.
+
+## Independent third-party CPU Filter gate (2026-10-11)
+
+The production adapters are unchanged in this slice. The new generic external
+OFX integration test executes the acquired purzos-ofx **BitCrush**, publisher
+release **v0.2.0**, native identifier `org.purzos.bitCrush`, actual factory/API
+version1.0/1. The Windows AMD64 module SHA256 is
+`AE266A44A17F4140DCB819DF3AE013B97A9F9E0246EEBD29A95DB7183DA2C3C7`.
+Authored-source MIT and packaged OFX Support BSD3 notices were inspected; exact
+publisher SDK build commit/complete binary composition remain unknown.
+No commercial activation or native editor is involved in this gate.
+
+Source31 has1,787 frozen inputs. Actual fresh Test2 and normal Product13 LAST
+pass compilation, and strict Workspace all-target/all-feature Clippy17 passes.
+Their producer/source receipts retain the initial E0599 compiler failure;
+actual test-binary compilation also overwrote the product path, so the final
+helper is bound to Product13 rather than the displaced Product12.
+
+The actual exact ignored List reports one test/zero benchmarks. Two independent
+serial native Jobs each report **one passed/zero failed/zero ignored/zero
+filtered**, with native exit0, no deadline/errors/outliving descendants and
+successful descendant settlement. Each round generates nine actual240-byte
+Float32 RGBA rasters: four direct-resident renders, one fresh-instance render
+before Drop, and four existing hierarchical-graph renders. Both rounds compare
+all raster bytes against the independently frozen asymmetric5x3 endpoint oracle.
+Bits8/mix1, bits4/mix1, mix0 and repeat remain distinct checks; probability0
+and dyadic straight alpha are explicit input conditions. All six typed numeric
+parameter defaults/ranges/animation flags and canonical author IDs are checked,
+and full public Describe remains equal before/after registration.
+
+Actual retained process handles are alive after rendering and signaled after
+explicit shutdown or Drop. Graph retention is one owner after each call and
+zero after retirement. The graph API does not expose a native PID or per-child
+shutdown error; its owner count plus outer Job settlement is separate evidence
+from direct retained-handle observations. The PID-to-handle acquisition race
+remains. The two workflow controller elapsed values are2,151ms and2,091ms;
+these include discovery/process startup and are **not** render-cost benchmarks
+or measured overhead relative to a reference host.
+
+Current execution receipt is
+`.scratch/plugin-host-sprint/ofx-external-source31-native-r2/adapter-receipt.json`,
+SHA256 `1E22C70BD9BE6F949DEC920E4060E8ED66B9E9172A8C797AC3901926E9608B86`.
+Actual raw rasters, description/inspection, parser controls, author requests and
+lifecycle observations are retained under
+`ofx-external-source31-cases-r1/round-{1,2}/native-evidence`.
+Independent raw-output acceptance is recorded in the sprint coordination record.
+This finite CPU Filter gate does not qualify GPU interop, HDR/interior rounding,
+temporal access, tile/multires, animation execution, opaque state, GUI,
+Preview/Export/application UI, realtime, other platforms or full OpenFX coverage.

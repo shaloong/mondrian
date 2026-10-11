@@ -53,6 +53,7 @@ Current round evidence:
 | External native PCM | VST3 limited PASS; CLAP RED | Airwindows VST3 default-state offline bypass partitions1/17/64 and distinct finite non-bypass output; CLAP schema drift remains unresolved |
 | CLAP read-only metadata / default state load | Verified within Ring Out two-round controls | Source29 Audio336/0, exact native2/2 and independent raw state/author/payload checks; existing core behavior, new verification gate only; no PCM/full-project claim |
 | Periodic App ordinary regression | Verified within source29 default libtest scope | 2,778 passed/zero failed; exact ordinary inventory, current producer, 1,786 source hashes and four native Job retirements independently accepted; 124 ignored cases remain separate |
+| External OpenFX CPU Filter | Verified within source31 BitCrush finite Windows cases | Two actual rounds, each one passed/zero failed; 18 bit-exact Float32 rasters across direct and existing graph execution, parameter changes and instance retirement; GPU/temporal/full OFX remain unqualified |
 | New performance/platform qualification | Not run | Historical results below do not transfer to new changes |
 
 Clack's RED reproduced in both source and destination. The GUI wrapper differed
@@ -1221,3 +1222,99 @@ adds exact first-description animation/numeric metadata expectations, precise
 fresh product producer/package/source/terminal validation and local FFI safety
 invariants. Existing bit-exact image and primary-failure checks remain required.
 No OFX candidate compilation or actual BitCrush invocation is claimed yet.
+## External OFX finite test integration (build checkpoint)
+
+Root integrated only the independently accepted generic Windows integration
+file `crates/mondrian-app/tests/openfx_external_vendor.rs`; production adapters,
+core graph and SDK inputs remain unchanged. Root rustfmt is independently
+confirmed equivalent to the sealed r2 formatter output. Source30 Test1 actually
+failed with E0599: the graph execution error implements Debug, not Display.
+That compiler RED and producer remain retained. Source31 changes only the test's
+single error-format expression to Debug; it preserves all numeric/image,
+lifecycle and timing assertions. The independent correction receipt SHA256 is
+`DFA0BD10E6258784EC8F8997ADF6D19EAB48CE739A6D902378552369F3395035`.
+Current freeze31 contains1,787 sources, SHA256
+`B2F12C0FFCA0D7994FD33129E8C437D74F4FA3FA3FC34921446DDF46A8501DB7`;
+all1,786 previous source29 hashes remain unchanged.
+
+Actual Test2 compilation passes in10.90s, fresh=false/default features,
+profile test=true/opt0/debug0; integration PE SHA256
+`65E82A22A9A6DF12206BFF0C7DE60A46E274AA620A328A39F09974D0848FA401`.
+Cargo actually overwrote the main executable while compiling the integration
+target, so root rebuilt Product13 LAST under the same freeze. That actual
+cargo-rustc build passes in18.24s, fresh=false/default features, dev opt1/debug2;
+the redundant explicit debug2 argument is recorded, not described as cargo-build.
+Final helper SHA256 is
+`AB67319ACE58D5704EF711CC68BD4CD1FFE374B645CABFA8DC5B93D630372763`.
+Both builds hold all1,787 sources plus their metadata inputs. Actual strict
+Workspace Clippy17 all-targets/all-features/-D warnings also passes in16.59s,
+holding both selected executable bytes unchanged; its source receipt SHA256 is
+`04C18C806F66C56FBB52E5094DB679A62E22C4D81A469B62A7C369B26F190BC9`.
+These are build/check gates, not native BitCrush compatibility.
+
+Two actual data-only cases were generated under all1,787 source and15 other
+input read leases. Generation receipt SHA256 is
+`74FA416E9DE938A0C971E5526EA7CE6B4920B0557A45C27AD23024D7E2A3BB5F`.
+No actual List, plugin invocation or native test is counted yet. Independent
+review refuses execution-adapter r1 until profile matching, primary-error
+preservation/final cleanup acceptance and unique evidence-directory checks are
+fixed in a new sealed r2. No native deadline or pixel oracle is relaxed.
+
+The CLAP metadata/lifecycle candidate r3 is independently statically accepted:
+15 candidate files,7 root preimages and31 packet artifacts match;14 files are
+identical to sealed-r2, while supervisor only gains two local SAFETY comments.
+It remains outside root production sources until the OFX slice settles.
+Independent r3 review SHA256 is
+`CF3EC241CA4E37A98453C6F7F0C7E4A0C72513A8D57FE2769502724B55E0B7B8`.
+Its9 ordinary/four ignored proposed additions and prior11 owner controls still
+require actual new compilation/execution. A pre-existing provenance metadata
+length debt remains explicit: MONDRIAN.md hash is correct, but recorded3274
+bytes differs from actual4071. This candidate does not silently revise that
+historical length. No Note execution, instrument, realtime or complete CLAP
+qualification is inferred from static acceptance.
+
+## External OFX actual execution and retained failures
+
+The preparation r2 actually refused before native launch because PowerShell
+bound an Object[] to HashSet[string].SetEquals. That data-preparation RED is
+retained in `ofx-external-source31-plan-r1/adapter-receipt.json`; it is not a
+plugin failure. Sealed adapter r3 changes only the explicit string-array argument.
+Its isolated controls actually pass nine/zero and independent static acceptance
+SHA256 is `43E07AAC62BAAE5612A64828FE662E9D5571F24C0A03A04EEE6E8F553DFD3EFA`.
+Root r3 Prepare and Execute both actually exit zero; no pixel assertion, native
+budget, profile, producer or cleanup gate is relaxed.
+
+Actual Execute receipt `ofx-external-source31-native-r2/adapter-receipt.json`
+SHA256 is `1E22C70BD9BE6F949DEC920E4060E8ED66B9E9172A8C797AC3901926E9608B86`.
+It binds all1,787 source hashes and1,866 inputs. The actual exact ignored List
+contains one test/zero benchmarks; both independent native Jobs report exactly
+one passed/zero failed/zero ignored/zero filtered, empty stderr, owner exit0,
+no deadline/error/outliving descendants and successful retirement. The preserved
+source30 compiler RED remains distinct from this source31 native acceptance.
+
+Each round contains nine240-byte rasters: four resident direct calls, one fresh
+instance Drop call and four existing graph calls. All18 files equal the frozen
+neutral/posterized Float32 golden bytes, including alpha. Actual native factory
+ID/version/API and six typed parameter descriptors, canonical identities,
+registered Describe equality and all four graph authoring/timing steps are
+checked. Direct instances are observed alive after rendering and their retained
+native handles signal after shutdown/Drop. The narrow PID-to-OpenProcess race
+remains disclosed; graph owner-count retirement and outer Job settlement are
+separate evidence, not graph PID or per-child shutdown-error observations.
+
+Rounds take2,151ms and2,091ms including worker startup and lab work; these are
+workflow timings, not host overhead benchmarks. This acceptance is Windows CPU
+Filter normalized5x3 endpoint/dyadic-alpha Float32 only. No HDR/interior rounding,
+GPU interoperability, temporal/tile/multiresolution, animated execution, GUI,
+opaque state persistence, realtime, other platform or full Preview/Export UI
+qualification is inferred. Publisher SDK commit remains Unknown; selected
+authored MIT and static SDK BSD notices are recorded without claiming complete
+linked-composition license verification.
+
+Independent final acceptance
+`ofx-external-source31-native-independent-final-acceptance-r1.json` SHA256
+`AD4F93DF594BB51B9FA4FD069792FB1FF0B883920AF5BC17068019D03DD501D1`
+rechecks current source/producer/input lengths and hashes, raw Job outputs,
+all18 rasters and native schema/author/lifecycle evidence. Its verdict permits
+only the generic integration test and two evidence documents; production core
+changes and later source closures require their own gates.
