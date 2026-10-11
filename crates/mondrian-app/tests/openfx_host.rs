@@ -799,7 +799,18 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
         &parameters,
         &invalid,
     );
-    assert!(matches!(rejected, Err(OpenFxHostError::Invalid(_))));
+    assert!(
+        matches!(
+            rejected,
+            Err(OpenFxHostError::Frame(
+                mondrian_effects::EffectFloatFrameError::InvalidSample {
+                    index: 7,
+                    alpha: mondrian_core::ColorFrameAlpha::StraightFloat,
+                }
+            ))
+        ),
+        "{rejected:?}"
+    );
 
     let out_of_range = constant_parameters([
         ("scale".to_owned(), OpenFxParameterValue::Double(-0.5)),
