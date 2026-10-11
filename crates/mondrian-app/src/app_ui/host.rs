@@ -3513,14 +3513,31 @@ mod tests {
         state.active_sequence_mut_uncommitted().expect("Sequence").video_tracks[0].clips[0]
             .is_disabled = false;
         state.seek(4).expect("bind still picture");
-        let host = AppUiHost::new_with_preferences_path(
+        let logical_extent = state.active_sequence().expect("Sequence").settings.resolution;
+        let mut host = AppUiHost::new_with_preferences_path(
             state,
             AppUiPreferences::default(),
             temp_preferences_path("reused-gpu-model-projection"),
         );
+        // Reuse requires the same raster contract. Realtime admission may
+        // change Viewer scale on minimum-memory machines; the real Scopes
+        // consumer retains the canonical full-resolution Program instead.
+        if !host.is_panel_active(PanelKind::Scopes) {
+            host.root
+                .try_handle_shell_action(
+                    Action::TogglePanel(PanelKind::Scopes),
+                    &NoopPlatformService,
+                    None,
+                )
+                .expect("open canonical Program consumer");
+        }
         let PreviewGpuFrameState::Ready(frame) = host.gpu_preview_frame_for_current_state() else {
             panic!("generated solid must have a ready GPU execution plan");
         };
+        assert_eq!(
+            (frame.width, frame.height),
+            (logical_extent.width, logical_extent.height)
+        );
         let presentation = ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
             .expect("valid presentation");
         assert!(matches!(
@@ -3528,6 +3545,9 @@ mod tests {
             FramePresentationDisposition::Presented(_)
         ));
         host.app_state.borrow_mut().play().expect("prime playback of the same solid");
+        host.app_state.borrow().observe_execution_resource_pressure(
+            crate::app::execution_resource_coordination::ExecutionResourcePressure::Critical,
+        );
         let demand = host
             .app_state
             .borrow()
@@ -3583,6 +3603,63 @@ mod tests {
             completed_evidence
         );
         assert!(!host.has_pending_ui_refresh());
+    }
+
+    #[test]
+    fn changed_viewer_quality_cannot_reuse_the_old_gpu_output_or_complete_its_ticket() {
+        let mut state = workspace_app_state_with_timed_solid();
+        state.active_sequence_mut_uncommitted().expect("Sequence").video_tracks[0].clips[0]
+            .is_disabled = false;
+        state.seek(4).expect("bind still picture");
+        let host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("changed-quality-model-projection"),
+        );
+        let PreviewGpuFrameState::Ready(frame) = host.gpu_preview_frame_for_current_state() else {
+            panic!("generated solid must have a ready GPU execution plan");
+        };
+        let presentation = ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
+            .expect("valid presentation");
+        assert!(matches!(
+            host.set_external_viewer_frame(&frame, "previous-quality-output", presentation),
+            FramePresentationDisposition::Presented(_)
+        ));
+        host.app_state.borrow_mut().play().expect("prime playback");
+        host.app_state.borrow().observe_execution_resource_pressure(
+            crate::app::execution_resource_coordination::ExecutionResourcePressure::Critical,
+        );
+        let demand = host
+            .app_state
+            .borrow()
+            .pending_playback_frame_demand_identity()
+            .expect("new playback demand");
+        let projection = {
+            let state = host.app_state.borrow();
+            host.preview_service.presentation(
+                state.preview_frame_execution_request(Instant::now()),
+                PreviewPresentationCarrier::ExternalGpu,
+            )
+        };
+        assert!(matches!(projection, PreviewPresentationState::Stale(_)));
+        host.refresh_window_preview_state();
+        assert_eq!(
+            host.app_state.borrow().pending_playback_frame_demand_identity(),
+            Some(demand)
+        );
+        let PreviewGpuFrameState::Ready(successor) = host.gpu_preview_frame_for_current_state()
+        else {
+            panic!("changed quality requires a new GPU execution plan");
+        };
+        assert_ne!(successor.output_key, frame.output_key);
+        assert_ne!(
+            (successor.width, successor.height),
+            (frame.width, frame.height)
+        );
+        assert_eq!(
+            host.app_state.borrow().pending_playback_frame_demand_identity(),
+            Some(demand)
+        );
     }
 
     #[test]
