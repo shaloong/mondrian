@@ -652,6 +652,24 @@ struct ClapPayload {
     parameter_ids: Vec<u32>,
 }
 
+// Context only: this does not attribute the invalid descriptor to its writer.
+// Successful validation and unrelated/count errors do not allocate here.
+fn parameter_refusal_at_site(
+    error: AudioProcessorHostError,
+    site: &'static str,
+) -> AudioProcessorHostError {
+    match error {
+        AudioProcessorHostError::InvalidContract(mut detail)
+            if detail.starts_with("CLAP parameter metadata is invalid or ambiguous: ") =>
+        {
+            detail.push_str(" validation_site=");
+            detail.push_str(site);
+            AudioProcessorHostError::InvalidContract(detail)
+        }
+        other => other,
+    }
+}
+
 impl IsolatedAudioProcessorWorkerFactory for ClapAudioProcessorWorkerFactory {
     fn native_worker_lane_resources(
         &self,
@@ -674,7 +692,8 @@ impl IsolatedAudioProcessorWorkerFactory for ClapAudioProcessorWorkerFactory {
                 "CLAP library path must be absolute and plugin ID nonempty",
             ));
         }
-        validate_parameters(&payload.parameters)?;
+        validate_parameters(&payload.parameters)
+            .map_err(|error| parameter_refusal_at_site(error, "decoded_payload"))?;
         if payload.parameter_ids.len() != request.parameter_ids().len() {
             return Err(invalid(
                 "CLAP parameter lane count differs from the worker request",
@@ -808,7 +827,8 @@ fn prepare_loaded_on_main(
     .map_err(|error| invalid(format!("invalid CLAP host identity: {error}")))?;
     let shared = ClapHostShared::new();
     let output_events =
-        ClapOutputEvents::new(expected_parameters, Arc::clone(&shared.parameter_source))?;
+        ClapOutputEvents::new(expected_parameters, Arc::clone(&shared.parameter_source))
+            .map_err(|error| parameter_refusal_at_site(error, "expected_output_contract"))?;
     let native_shared = shared.clone().with_native_logs()?;
     let mut instance = PluginInstance::<ClapHost>::new(
         |_| native_shared,
@@ -841,7 +861,11 @@ fn prepare_loaded_on_main(
     shared.service_callbacks(&mut instance)?;
     let channel_count = request.render_contract().channel_count();
     let handle = instance.plugin_handle();
-    if !same_clap_parameter_structure(&list_parameters(&handle)?, expected_parameters) {
+    if !same_clap_parameter_structure(
+        &list_parameters(&handle)
+            .map_err(|error| parameter_refusal_at_site(error, "native_after_state_render_mode"))?,
+        expected_parameters,
+    ) {
         return Err(invalid(
             "CLAP parameter metadata changed since contract probe",
         ));
@@ -2474,6 +2498,166 @@ mod tests {
             catalog.descriptors().expect("unchanged descriptors"),
             before
         );
+    }
+
+    fn parameter_site_descriptor() -> super::super::ClapParameterDescriptor {
+        super::super::ClapParameterDescriptor {
+            id: 1,
+            name: "Gain".to_owned(),
+            min_value: 0.0,
+            max_value: 1.0,
+            default_value: 1.0,
+            current_value: 1.0,
+            automatable: true,
+            stepped: false,
+            enumeration: false,
+            read_only: false,
+            hidden: false,
+        }
+    }
+
+    fn parameter_site_request() -> IsolatedAudioProcessorWorkerPrepareRequest {
+        let mut request = sidechain_request();
+        request.auxiliary_inputs = AudioProcessorAuxiliaryInputContract::default();
+        request.parameter_ids = vec![
+            mondrian_core::ParameterId::new("clap.param.1").expect("owned parameter identity")
+        ];
+        request
+    }
+
+    fn parameter_site_error(
+        result: Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError>,
+    ) -> String {
+        match result {
+            Err(AudioProcessorHostError::InvalidContract(detail)) => detail,
+            Err(other) => panic!("expected InvalidContract, received {other:?}"),
+            Ok(_) => panic!("invalid parameter contract was admitted"),
+        }
+    }
+
+    fn parameter_site_decoded_request(
+        parameters: Vec<super::super::ClapParameterDescriptor>,
+        library_path: PathBuf,
+    ) -> IsolatedAudioProcessorWorkerPrepareRequest {
+        let mut request = parameter_site_request();
+        request.native_lane =
+            clap_native_worker_lane_profile().expect("actual native lane profile");
+        request.payload = serde_json::to_vec(&ClapPayload {
+            library_path,
+            plugin_id: "org.mondrian.test.automated-gain".to_owned(),
+            binary_sha256: [0; 32],
+            state: None,
+            parameters,
+            parameter_ids: vec![1],
+        })
+        .expect("finite owned payload");
+        request
+    }
+
+    #[test]
+    fn parameter_refusal_site_decoded_payload_is_classified_before_library_loading() {
+        let directory = tempfile::tempdir().expect("temporary missing-library parent");
+        let missing_library = directory.path().join("never-created.clap");
+        assert!(!missing_library.exists());
+        let mut descriptor = parameter_site_descriptor();
+        descriptor.default_value = 2.0;
+        let request = parameter_site_decoded_request(vec![descriptor], missing_library);
+        assert_eq!(
+            parameter_site_error(ClapAudioProcessorWorkerFactory.prepare(request)),
+            "CLAP parameter metadata is invalid or ambiguous: index=0 native_id=1 reason=default_out_of_range min_bits=0000000000000000 max_bits=3FF0000000000000 default_bits=4000000000000000 current_bits=3FF0000000000000 validation_site=decoded_payload"
+        );
+    }
+
+    #[test]
+    fn parameter_refusal_site_expected_output_contract_uses_existing_loaded_consumer() {
+        // The public factory already validated this same immutable slice. This
+        // existing test seam checks the real redundant output consumer directly;
+        // it does not imply that a normal factory can legally reach this refusal.
+        let entry = PluginEntry::load_from_clack::<SinglePluginEntry<AutomatedGainPlugin>>(
+            c"/test/parameter-site-output",
+        )
+        .expect("existing owned ABI entry");
+        let mut descriptor = parameter_site_descriptor();
+        descriptor.default_value = 2.0;
+        assert_eq!(parameter_site_error(prepare_loaded(
+            parameter_site_request(), entry, c"org.mondrian.test.automated-gain",
+            None, &[descriptor], &[1],
+        )),
+            "CLAP parameter metadata is invalid or ambiguous: index=0 native_id=1 reason=default_out_of_range min_bits=0000000000000000 max_bits=3FF0000000000000 default_bits=4000000000000000 current_bits=3FF0000000000000 validation_site=expected_output_contract"
+        );
+    }
+
+    #[test]
+    fn parameter_refusal_site_native_after_state_render_mode_uses_owned_state_restore() {
+        let entry = PluginEntry::load_from_clack::<SinglePluginEntry<AutomatedGainPlugin>>(
+            c"/test/parameter-site-native",
+        )
+        .expect("existing owned ABI entry");
+        // Existing fixture state stores these raw f32 bits. Its native get_value
+        // widens them to f64 after load; no diagnostic callback or new query.
+        let restored = f32::from_bits(0x7FC0_0042);
+        let state = restored.to_le_bytes();
+        let error = parameter_site_error(prepare_loaded(
+            parameter_site_request(),
+            entry,
+            c"org.mondrian.test.automated-gain",
+            Some(&state),
+            &[parameter_site_descriptor()],
+            &[1],
+        ));
+        assert_eq!(error, format!(
+            "CLAP parameter metadata is invalid or ambiguous: index=0 native_id=1 reason=current_nonfinite min_bits=0000000000000000 max_bits=3FF0000000000000 default_bits=3FF0000000000000 current_bits={:016X} validation_site=native_after_state_render_mode",
+            (restored as f64).to_bits(),
+        ));
+    }
+
+    #[test]
+    fn parameter_refusal_sites_preserve_count_other_errors_and_valid_state_admission() {
+        let directory = tempfile::tempdir().expect("temporary missing-library parent");
+        let request = parameter_site_decoded_request(
+            vec![parameter_site_descriptor(); 1025],
+            directory.path().join("never-created.clap"),
+        );
+        assert_eq!(
+            parameter_site_error(ClapAudioProcessorWorkerFactory.prepare(request)),
+            "CLAP parameter count exceeds the supported bound"
+        );
+        let mut request = parameter_site_request();
+        request.native_lane =
+            clap_native_worker_lane_profile().expect("actual native lane profile");
+        request.payload = b"{".to_vec();
+        let error = parameter_site_error(ClapAudioProcessorWorkerFactory.prepare(request));
+        assert!(error.starts_with("invalid CLAP worker payload: "));
+        assert!(!error.contains("validation_site="));
+        let entry = PluginEntry::load_from_clack::<SinglePluginEntry<AutomatedGainPlugin>>(
+            c"/test/parameter-site-valid",
+        )
+        .expect("existing owned ABI entry");
+        let state = 0.25_f32.to_le_bytes();
+        let worker = prepare_loaded(
+            parameter_site_request(),
+            entry,
+            c"org.mondrian.test.automated-gain",
+            Some(&state),
+            &[parameter_site_descriptor()],
+            &[1],
+        )
+        .expect("valid native observation retains prior admission");
+        drop(worker);
+        for error in [
+            AudioProcessorHostError::InvalidContract(
+                "CLAP parameter metadata changed since contract probe".to_owned(),
+            ),
+            AudioProcessorHostError::Unavailable(
+                "CLAP parameter metadata is invalid or ambiguous: unavailable".to_owned(),
+            ),
+        ] {
+            let before = format!("{error:?}");
+            assert_eq!(
+                format!("{:?}", parameter_refusal_at_site(error, "decoded_payload")),
+                before
+            );
+        }
     }
 
     #[test]

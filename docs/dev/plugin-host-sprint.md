@@ -59,6 +59,8 @@ Current round evidence:
 | CLAP factory slot admission | Verified within source36 Windows controls | Cached count capped before List/Probe/Note traversal; two actual RED controls, six GREEN ABI-counter controls, ordinary351/0 and current native regressions;4096 is host policy, not a CLAP limit |
 | Source36 audio regression | PASS within existing finite workflows | Ordinary351/0; owner14 and metadata2; original CLAP/VST3 cases10; real Ring Out metadata/default-load2; strict workspace Clippy. No new Note DSP, GUI, RT or performance qualification |
 | CLAP parameter-refusal detail | Verified within source38 finite Windows controls | Original admission preserved; same rejected snapshot's first reason, unsigned ID/index and direct numeric bits; ordinary355/0 and two real failed Airwindows startup observations, without compatibility/root-cause qualification |
+| CLAP startup refusal consumer sites | Implemented — Not Fully Verified | Source40 owned controls exercise three existing consumers; real Airwindows rounds failed without a tagged descriptor refusal, so third-party site capture remains unverified |
+| Source40 audio regression | PASS within existing finite Windows workflows | Ordinary359/0; owner14 and metadata2; original CLAP/VST3 cases10; real Ring Out metadata/default-load2; strict workspace Clippy. Original vendor PCM gate remains failed |
 | New performance/platform qualification | Not run | Historical results below do not transfer to new changes |
 
 Clack's RED reproduced in both source and destination. The GUI wrapper differed
@@ -1704,3 +1706,87 @@ MD5 established the full byte sequence. Original partials and both attempt
 receipts remain. `surge-acquisition-resume-r2/archive-admission.json` records
 acquisition only: no extraction, installation or native/plugin compatibility
 result is established by it. Static package and license inventory follows.
+
+## Source40: CLAP startup refusal consumer position
+
+`mondrian-audio/src/processor_isolation/clap_worker.rs` appends one fixed
+`validation_site` only to the existing detailed parameter-validation refusal:
+`decoded_payload`, `expected_output_contract`, or
+`native_after_state_render_mode`. These identify the host consumer, without
+attributing the descriptor to a writer or a publisher defect. The three existing
+validation calls, native query count, state/render-mode setup and error categories
+remain. Count, payload-decoding, structural-change and unrelated errors retain
+their existing details. Successful validation adds no formatting allocation.
+No parameter authority, payload schema, state source or execution path was added.
+
+Four additive controls exercise the real missing-library factory boundary, the
+existing loaded-output consumer, native metadata after an owned ABI state
+restore, and preservation of valid state/count/other errors. The output consumer
+is redundant behind validation of the same immutable public-factory payload;
+its direct existing loaded seam does not imply that ordinary factory requests
+can reach this refusal. Source39 retains the original three calls with the same
+new tests: three precise missing-suffix controls failed and one preservation
+control passed. Its formatted source and Audio23 executable were retained before
+GREEN. Restoring those three calls in formatted GREEN reproduces the whole RED
+source. Non-Windows `Result<Option<_>>::expect` is statically compatible with
+`Ok(None)`; actual runtime evidence here remains Windows only.
+
+Source40 freezes1796 inputs, SHA256
+`01AE6CD93EDAE390ED500C6C3508C08DD930EE0C9D4A53FCD2EF80BCDB8D3126`.
+Fresh Audio24 and normal Product19 share this closure, with original commands
+and profiles. Normal App library and current metadata capture precede Product19.
+Actual all/ignored/ordinary Lists433/74/359 establish432 filtered tests for each
+sole selected native case. Historical fixtures retain their separate producers;
+current compiled support subsets match their bytes.
+
+| Actual source40 gate | Result | Execution receipt under sprint scratch |
+| --- | --- | --- |
+| Audio ordinary, including four new consumer controls |359 passed/0 failed/74 filtered,26.51s | `audio-ordinary-source40-r1/execution-receipt.json`,13FFB750... |
+| Process ownership14 + CLAP input-note metadata2 |16 selected cases passed | `clap-noteport-source40-native-execution-r1/execution-receipt.json`,E7EAF96F... |
+| Original CLAP/VST3 PCM/bus/state/time/object |10 selected cases passed, two rounds | `audio-legacy-source40-execution-r1/execution-receipt.json`,DD0E82E0... |
+| Real Ring Out metadata/default opaque load |2 selected cases passed, two rounds | `clap-readonly-source40-native-execution-r1/execution-receipt.json`,73FD98FF... |
+| Strict workspace Clippy | All targets/all features, `-D warnings`, jobs1; exit0,3m25s | `workspace-clippy-r23-source-receipt.json`,2BA80569... |
+
+The original two AirwindowsConsolidated CLAP1.2026.285 PCM cases remain FAILED.
+They keep the same314B Galactic state, authored values, inputs, partitions1/17/64,
+positive expectedPassed1 and180s budgets. Round1 completed the4096-frame,
+32768B partition1 output with input/output byte equality and native bypass,
+then failed at partition17 startup with
+`CLAP parameter metadata changed since contract probe`. Round2 failed during
+opaque native state restore with `CLAP discovery worker failed with status exit
+code: 1`, before PCM output. Both native owners exit101/runner1 and settle
+without deadline/reaping errors. Neither contains a detailed descriptor refusal
+or a `validation_site`; descriptor ID/bits and native origin are not inferred
+from Source38 or a separate Probe. ObservationComplete is true,
+DiagnosticCaptureComplete and CompatibilityQualified are false. The raw receipt
+is `clap-parameter-refusal-site-source40-native-execution-r1/execution-receipt.json`,
+SHA25660EB2D176D1EC31ECAD95F493028641A23B3C04C749D2F91338BC91063A784AD.
+Owned ABI consumer behavior is verified within the controls; actual third-party
+site capture remains Implemented — Not Fully Verified.
+
+Engineering resource records retain the normal library build6m06 and Product19
+link46.73s. Lossless compression of the completed453390758B generated RLIB
+preserves SHA256D754FDF1... and stores78893056B. These are build/disk observations;
+processing performance, deadlines, allocations and mature-host overhead remain
+unmeasured. Static review rejected two unexecuted stale-freeze helper scripts and
+a self-referential packet manifest. New immutable revisions correct only those
+preparation defects; original selectors, budgets and native assertions remain.
+
+Surge XT1.3.4 now has four contained local module extractions from the admitted
+archive: instrument/effects CLAP and VST3,61463552B total. Independent CRC, SHA,
+x64 PE and export checks passed. Native discovery, roles, resolved dependencies,
+state, DSP and GUI remain unverified. The two-format Effects List adapter is a
+scratch candidate; independent controls exposed rejection of legal empty Lists
+and inconsistent case-sensitive ID ordering. Its separate correction passed
+finite static and pure-control review; actual generation and execution remain
+pending.
+
+OpenFX current-Source IsIdentity remains a scratch candidate. Independent review
+found that recoverable persistent Error could mask native fatal/error status;
+the revised candidate fixes this precedence and adds conjunction/retirement
+controls, with actual RED/GREEN pending. The existing Render/ROI/EndSequence path
+has a separate statically identified version of this risk and is unchanged.
+It needs its own reproduction and fix before the identity feature is integrated.
+Note DSP/instruments, GUI, Preview/Export equivalence, other platforms, native GPU
+interoperability and full standard compatibility remain outside these verified
+finite gates.
