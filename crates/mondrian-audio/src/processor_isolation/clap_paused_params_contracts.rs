@@ -726,8 +726,10 @@ impl PluginMainThreadParams for PausedParamsMain<'_> {
 impl PluginAudioProcessorParams for PausedParamsProcessor<'_> {
     fn flush(&mut self, _input: &InputEvents, output: &mut OutputEvents) {
         self.0.check(Some(false), true);
-        ACTIVE_FLUSHES.fetch_add(1, AuditOrdering::SeqCst);
         self.0.exchange(output);
+        // The main-thread oracle waits for completed event delivery. Publishing
+        // at entry would let it inspect ACCEPTED_EVENTS before exchange runs.
+        ACTIVE_FLUSHES.fetch_add(1, AuditOrdering::SeqCst);
     }
 }
 impl PluginStateImpl for PausedParamsMain<'_> {
