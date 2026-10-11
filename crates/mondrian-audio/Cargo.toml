@@ -12,6 +12,7 @@ mondrian-audio-scheduling.workspace = true
 mondrian-core.workspace = true
 mondrian-timeline.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 pulp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -35,4 +36,4 @@ clack-host = { workspace = true, features = ["clack-plugin"] }
 clack-extensions = { workspace = true, features = ["clack-plugin", "note-ports", "gui", "log", "timer"] }
 
 [target.'cfg(windows)'.dev-dependencies]
-windows-sys.workspace = true
+windows-sys = { workspace = true, features = ["Win32_System_JobObjects", "Win32_System_Threading"] }

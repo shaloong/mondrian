@@ -16,7 +16,7 @@ use tempfile::NamedTempFile;
 use uuid::Uuid;
 
 pub(super) struct SupervisedAudioWorker {
-    child: Child,
+    process: ProcessOwner,
     control: TcpStream,
     shared: MmapMut,
     _shared_file: NamedTempFile,
@@ -24,7 +24,115 @@ pub(super) struct SupervisedAudioWorker {
     operation_timeout: Duration,
     state_entry_timeout: Duration,
     configured_control_timeout: Option<Duration>,
-    active: bool,
+}
+
+// This is private OS ownership, not a second processor/domain lifecycle.
+// Retiring revokes submissions without claiming that the retained Child exited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessState {
+    Running,
+    Retiring,
+    Settled,
+}
+
+struct ProcessOwner {
+    child: Child,
+    state: ProcessState,
+}
+
+impl ProcessOwner {
+    fn terminate(&mut self) -> Result<(), AudioProcessorHostError> {
+        self.terminate_with(Child::try_wait, Child::kill, Child::wait)
+    }
+
+    fn terminate_with(
+        &mut self,
+        mut observe: impl FnMut(&mut Child) -> io::Result<Option<std::process::ExitStatus>>,
+        mut kill: impl FnMut(&mut Child) -> io::Result<()>,
+        mut wait: impl FnMut(&mut Child) -> io::Result<std::process::ExitStatus>,
+    ) -> Result<(), AudioProcessorHostError> {
+        if self.state == ProcessState::Settled {
+            return Ok(());
+        }
+        self.state = ProcessState::Retiring;
+        let observation_error = match observe(&mut self.child) {
+            Ok(Some(_)) => {
+                self.state = ProcessState::Settled;
+                return Ok(());
+            }
+            Ok(None) => None,
+            Err(error) => Some(format!(
+                "failed (kind={:?}, raw_os={:?}): {error}",
+                error.kind(),
+                error.raw_os_error()
+            )),
+        };
+        if let Err(error) = kill(&mut self.child) {
+            let final_observation = match observe(&mut self.child) {
+                Ok(Some(_)) => {
+                    self.state = ProcessState::Settled;
+                    if let Some(error) = observation_error.as_deref() {
+                        tracing::warn!(
+                            process_id = self.child.id(),
+                            observation_error = error,
+                            "Audio child observation failed before confirmed exit"
+                        );
+                    }
+                    return Ok(());
+                }
+                Ok(None) => "post-kill try_wait: child still running".to_owned(),
+                Err(error) => format!(
+                    "post-kill try_wait failed (kind={:?}, raw_os={:?}): {error}",
+                    error.kind(),
+                    error.raw_os_error()
+                ),
+            };
+            return Err(worker_failed_detail("native child cleanup", &format!(
+                "termination unconfirmed (pid={}): kill failed (kind={:?}, raw_os={:?}): {error}; {final_observation}; initial try_wait={}",
+                self.child.id(), error.kind(), error.raw_os_error(),
+                observation_error.as_deref().unwrap_or("child still running")
+            )));
+        }
+        match wait(&mut self.child) {
+            Ok(_) => {
+                self.state = ProcessState::Settled;
+                if let Some(error) = observation_error.as_deref() {
+                    tracing::warn!(
+                        process_id = self.child.id(),
+                        observation_error = error,
+                        "Audio child observation failed before confirmed reap"
+                    );
+                }
+                Ok(())
+            }
+            Err(error) => {
+                Err(worker_failed_detail(
+                    "native child cleanup",
+                    &format!(
+                "reap failed (pid={}, kind={:?}, raw_os={:?}): {error}; initial try_wait={}",
+                self.child.id(), error.kind(), error.raw_os_error(),
+                observation_error.as_deref().unwrap_or("child still running")
+            ),
+                ))
+            }
+        }
+    }
+
+    // Only rare cleanup/control failure paths report here. The existing logger
+    // may allocate/block; this is not a realtime-safe failure-path guarantee.
+    // Preserve the caller's original typed error rather than replacing it.
+    fn terminate_reported(&mut self, context: &'static str) {
+        if let Err(error) = self.terminate() {
+            tracing::warn!(process_id = self.child.id(), state = ?self.state, context, error = %error,
+                "Audio native child cleanup failed");
+        }
+    }
+}
+
+impl Drop for ProcessOwner {
+    fn drop(&mut self) {
+        self.terminate_reported("audio process Drop");
+    }
 }
 
 impl SupervisedAudioWorker {
@@ -51,8 +159,9 @@ impl SupervisedAudioWorker {
             .map_err(|error| worker_failed("startup", error))?;
         // SAFETY: the retained temporary file has just been sized to the exact
         // immutable layout extent. Both processes validate that extent before
-        // producing typed views, and the parent keeps the file alive until the
-        // Worker has been terminated and reaped.
+        // producing typed views. The parent attempts child settlement before
+        // releasing storage; permanent OS refusal is diagnosed, never claimed
+        // as a successful reap. The child owns its independently validated map.
         let shared =
             unsafe { MmapOptions::new().len(layout.total_bytes).map_mut(shared_file.as_file()) }
                 .map_err(|error| worker_failed("startup", error))?;
@@ -68,20 +177,23 @@ impl SupervisedAudioWorker {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let mut child = command.spawn().map_err(|error| worker_failed("startup", error))?;
+        let mut process = ProcessOwner {
+            child: command.spawn().map_err(|error| worker_failed("startup", error))?,
+            state: ProcessState::Running,
+        };
         let startup_deadline = Instant::now()
             .checked_add(spec.startup_timeout)
             .ok_or_else(|| invalid_contract("Worker startup deadline overflowed"))?;
-        let mut control = match accept_worker(&listener, &mut child, startup_deadline) {
+        let mut control = match accept_worker(&listener, &mut process.child, startup_deadline) {
             Ok(control) => control,
             Err(error) => {
-                terminate_and_reap(&mut child);
+                process.terminate_reported("audio startup failure");
                 return Err(error);
             }
         };
         let remaining = startup_deadline.saturating_duration_since(Instant::now());
         if let Err(error) = set_stream_timeout(&control, remaining.max(Duration::from_millis(1))) {
-            terminate_and_reap(&mut child);
+            process.terminate_reported("audio startup failure");
             return Err(worker_failed("startup", error));
         }
         let prepare = PrepareWire {
@@ -111,12 +223,12 @@ impl SupervisedAudioWorker {
         let ready = match ready {
             Ok(ready) => ready,
             Err(error) => {
-                terminate_and_reap(&mut child);
+                process.terminate_reported("audio startup failure");
                 return Err(classify_io("startup handshake", error));
             }
         };
         if ready.schema_version != PROTOCOL_VERSION {
-            terminate_and_reap(&mut child);
+            process.terminate_reported("audio startup failure");
             return Err(worker_failed_detail(
                 "startup",
                 "Worker replied with another protocol version",
@@ -127,7 +239,7 @@ impl SupervisedAudioWorker {
                 let worker_contract = match execution_contract.realize() {
                     Ok(contract) => contract,
                     Err(error) => {
-                        terminate_and_reap(&mut child);
+                        process.terminate_reported("audio startup failure");
                         return Err(error);
                     }
                 };
@@ -135,7 +247,7 @@ impl SupervisedAudioWorker {
                 if worker_contract != spec.plugin_execution_contract
                     || worker_auxiliary != spec.auxiliary_inputs
                 {
-                    terminate_and_reap(&mut child);
+                    process.terminate_reported("audio startup failure");
                     return Err(worker_failed_detail(
                         "startup",
                         "Worker preparation contract drifted from the admitted parent contract",
@@ -144,23 +256,23 @@ impl SupervisedAudioWorker {
                 if let Err(error) =
                     crate::AudioProcessorInputName::validate_all(&input_names, &worker_auxiliary)
                 {
-                    terminate_and_reap(&mut child);
+                    process.terminate_reported("audio startup failure");
                     return Err(error);
                 }
                 input_names
             }
             ReadyResultWire::Rejected { detail } => {
-                terminate_and_reap(&mut child);
+                process.terminate_reported("audio startup failure");
                 return Err(worker_failed_detail("startup", &detail));
             }
         };
         if let Err(error) = set_stream_timeout(&control, spec.operation_timeout) {
-            terminate_and_reap(&mut child);
+            process.terminate_reported("audio startup failure");
             return Err(worker_failed("startup", error));
         }
         Ok((
             Self {
-                child,
+                process,
                 control,
                 shared,
                 _shared_file: shared_file,
@@ -168,7 +280,6 @@ impl SupervisedAudioWorker {
                 operation_timeout: spec.operation_timeout,
                 state_entry_timeout: spec.state_entry_timeout,
                 configured_control_timeout: Some(spec.operation_timeout),
-                active: true,
             },
             input_names,
         ))
@@ -187,7 +298,7 @@ impl SupervisedAudioWorker {
         operation: &'static str,
         command: WorkerCommand,
     ) -> Result<Option<mondrian_core::NativeAudioReprepareRequest>, AudioProcessorHostError> {
-        if !self.active {
+        if self.process.state != ProcessState::Running {
             return Err(AudioProcessorHostError::PoisonedInstance);
         }
         let timeout = if command.kind == super::protocol::CommandKind::EnterState {
@@ -225,11 +336,11 @@ impl SupervisedAudioWorker {
         &mut self,
         object: crate::NativeAudioObjectObservation,
     ) -> Result<(), AudioProcessorHostError> {
-        if !self.active {
+        if self.process.state != ProcessState::Running {
             return Err(AudioProcessorHostError::PoisonedInstance);
         }
-        match self.child.try_wait() {
-            Ok(None) if self.child.id() == object.process_id().get() => Ok(()),
+        match self.process.child.try_wait() {
+            Ok(None) if self.process.child.id() == object.process_id().get() => Ok(()),
             Ok(_) => {
                 self.terminate();
                 Err(worker_failed_detail(
@@ -274,7 +385,7 @@ impl SupervisedAudioWorker {
         timeout: Duration,
     ) -> Result<crate::NativeAudioObservations, AudioProcessorHostError> {
         let operation = "native observation";
-        if !self.active {
+        if self.process.state != ProcessState::Running {
             return Err(AudioProcessorHostError::PoisonedInstance);
         }
         if let Err(error) = self.configure_control_timeout(timeout) {
@@ -297,14 +408,16 @@ impl SupervisedAudioWorker {
         })();
         match result {
             Ok(observations) => {
-                if observations.owner_process_id().map(|pid| pid.get()) != Some(self.child.id()) {
+                if observations.owner_process_id().map(|pid| pid.get())
+                    != Some(self.process.child.id())
+                {
                     self.terminate();
                     return Err(worker_failed_detail(
                         operation,
                         "observation belongs to a different supervised child",
                     ));
                 }
-                match self.child.try_wait() {
+                match self.process.child.try_wait() {
                     Ok(None) => {}
                     Ok(_) => {
                         self.terminate();
@@ -336,7 +449,7 @@ impl SupervisedAudioWorker {
         request: crate::NativeAudioObjectBindRequest,
     ) -> Result<crate::NativeAudioObjectBindOutcome, AudioProcessorHostError> {
         let operation = "native object binding";
-        if self.child.id() != request.expected_object.process_id().get() {
+        if self.process.child.id() != request.expected_object.process_id().get() {
             // A stale/foreign requested owner is a typed intent refusal, not
             // evidence that the currently retained child/socket is corrupt.
             return Ok(crate::NativeAudioObjectBindOutcome::Refused(
@@ -380,10 +493,13 @@ impl SupervisedAudioWorker {
     ) -> Result<crate::NativeAudioAuthorStateEntryOutcome, AudioProcessorHostError> {
         use crate::NativeAudioAuthorStateEntryOutcome as Outcome;
         let operation = "native author state-entry preparation";
-        if request.binding.expected_object.process_id().get() != self.child.id() {
+        if request.binding.expected_object.process_id().get() != self.process.child.id() {
             return Ok(Outcome::Refused(
                 crate::NativeAudioAuthorStateEntryRefusal::OwnerChanged,
             ));
+        }
+        if self.process.state != ProcessState::Running {
+            return Err(AudioProcessorHostError::PoisonedInstance);
         }
         // A retry intentionally names the OLD object. Only the child's private
         // exact preparation may acknowledge that link; an old object cannot be
@@ -452,10 +568,10 @@ impl SupervisedAudioWorker {
         open: Option<&crate::NativeAudioEditorOpenRequest>,
     ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
         use super::native_audio_editor_wire::{self as wire, EditorReply};
-        if !self.active {
+        if self.process.state != ProcessState::Running {
             return Err(AudioProcessorHostError::PoisonedInstance);
         }
-        if self.child.id() != binding.expected_object.process_id().get() {
+        if self.process.child.id() != binding.expected_object.process_id().get() {
             return Ok(crate::NativeAudioEditorOutcome::Refused(
                 crate::NativeAudioEditorRefusal::OwnerChanged,
             ));
@@ -510,7 +626,7 @@ impl SupervisedAudioWorker {
         &mut self,
     ) -> Result<Option<super::NativeRequestCohort>, AudioProcessorHostError> {
         let operation = "configuration cohort query";
-        if !self.active {
+        if self.process.state != ProcessState::Running {
             return Err(AudioProcessorHostError::PoisonedInstance);
         }
         if let Err(error) = self.configure_control_timeout(self.state_entry_timeout) {
@@ -543,7 +659,7 @@ impl SupervisedAudioWorker {
     ) -> Result<super::NativeConfigurationControlOutcome, AudioProcessorHostError> {
         use super::native_configuration_wire::{self as wire, ControlReply};
         let operation = "configuration control";
-        if !self.active {
+        if self.process.state != ProcessState::Running {
             return Err(AudioProcessorHostError::PoisonedInstance);
         }
         wire::validate_request(&request)
@@ -614,7 +730,7 @@ impl SupervisedAudioWorker {
         stage: Option<&super::NativeConfigurationSeedRequest<'_>>,
     ) -> Result<super::NativeConfigurationSeedOutcome, AudioProcessorHostError> {
         use super::native_configuration_seed_wire::{self as wire, SeedReply};
-        if !self.active {
+        if self.process.state != ProcessState::Running {
             return Err(AudioProcessorHostError::PoisonedInstance);
         }
         if let Err(error) = self.configure_control_timeout(self.state_entry_timeout) {
@@ -646,9 +762,16 @@ impl SupervisedAudioWorker {
     }
 
     pub(super) fn shutdown(&mut self) -> bool {
-        if !self.active {
-            return true;
+        match self.process.state {
+            ProcessState::Settled => return true,
+            ProcessState::Retiring => {
+                self.process.terminate_reported("audio shutdown retry");
+                // Cleanup without a fresh ACK is not graceful validation.
+                return false;
+            }
+            ProcessState::Running => {}
         }
+        self.process.state = ProcessState::Retiring;
         let timeout = self.operation_timeout.min(Duration::from_millis(100));
         if self.configure_control_timeout(timeout.max(Duration::from_millis(1))).is_err() {
             self.terminate();
@@ -663,18 +786,20 @@ impl SupervisedAudioWorker {
         .write_to(&mut self.control)
         .and_then(|_| WorkerResponse::read_from(&mut self.control))
         .is_ok_and(|response| response == WorkerResponse::Completed);
-        self.active = false;
         if completed {
             let deadline = Instant::now() + timeout;
             while Instant::now() < deadline {
-                match self.child.try_wait() {
-                    Ok(Some(status)) => return status.success(),
+                match self.process.child.try_wait() {
+                    Ok(Some(status)) => {
+                        self.process.state = ProcessState::Settled;
+                        return status.success();
+                    }
                     Ok(None) => thread::yield_now(),
                     Err(_) => break,
                 }
             }
         }
-        terminate_and_reap(&mut self.child);
+        self.process.terminate_reported("audio shutdown failure");
         false
     }
 
@@ -688,10 +813,7 @@ impl SupervisedAudioWorker {
     }
 
     fn terminate(&mut self) {
-        if self.active {
-            self.active = false;
-            terminate_and_reap(&mut self.child);
-        }
+        self.process.terminate_reported("audio worker failure");
     }
 
     fn classify_operation_io(
@@ -703,7 +825,7 @@ impl SupervisedAudioWorker {
             error.kind(),
             io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
         ) {
-            match self.child.try_wait() {
+            match self.process.child.try_wait() {
                 Ok(Some(status)) => worker_failed_detail(
                     operation,
                     &format!("Worker exited before replying ({status})"),
@@ -791,11 +913,6 @@ fn classify_io(operation: &'static str, error: io::Error) -> AudioProcessorHostE
     } else {
         worker_failed(operation, error)
     }
-}
-
-fn terminate_and_reap(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 fn invalid_contract(detail: &str) -> AudioProcessorHostError {
@@ -1097,7 +1214,7 @@ mod control_timeout_worker_lifecycle {
             None
         );
         let _completed_gracefully = worker.shutdown();
-        assert!(!worker.active);
+        assert_eq!(worker.process.state, ProcessState::Settled);
         assert_eq!(
             worker.configured_control_timeout,
             Some(Duration::from_millis(100))
@@ -1110,7 +1227,7 @@ mod control_timeout_worker_lifecycle {
             worker.control.write_timeout()?,
             Some(Duration::from_millis(100))
         );
-        assert!(worker.child.try_wait()?.is_some());
+        assert!(worker.process.child.try_wait()?.is_some());
         Ok(())
     }
 
@@ -1134,11 +1251,11 @@ mod control_timeout_worker_lifecycle {
             None
         );
         let _completed_gracefully = worker.shutdown();
-        assert!(!worker.active);
+        assert_eq!(worker.process.state, ProcessState::Settled);
         assert_eq!(worker.configured_control_timeout, Some(budget));
         assert_eq!(worker.control.read_timeout()?, Some(budget));
         assert_eq!(worker.control.write_timeout()?, Some(budget));
-        assert!(worker.child.try_wait()?.is_some());
+        assert!(worker.process.child.try_wait()?.is_some());
         Ok(())
     }
 
@@ -1168,5 +1285,571 @@ mod control_timeout_worker_lifecycle {
             other => panic!("retired worker connection returned {other:?}"),
         }
         Ok(())
+    }
+
+    #[cfg(windows)]
+    mod process_retirement_tests {
+        use super::*;
+        use std::cell::RefCell;
+        use std::io::Write;
+        use std::path::PathBuf;
+        use std::process::{Command, ExitStatus, Stdio};
+
+        const READY_ENV: &str = "MONDRIAN_AUDIO_RETIREMENT_FIXTURE_READY";
+        const EXIT_ENV: &str = "MONDRIAN_AUDIO_RETIREMENT_FIXTURE_EXIT";
+        const FIXTURE: &str =
+        "processor_isolation::supervisor::control_timeout_worker_lifecycle::process_retirement_tests::owned_sleeping_child_fixture";
+
+        fn require_actual_job() {
+            let mut inside = 0;
+            // SAFETY: the current-process pseudo handle is valid; a null job asks
+            // about any Job. `inside` is a live writable BOOL for this query only.
+            // No handles are acquired or closed. The outer runner identifies the
+            // actual owner Job; this local guard proves membership, not its identity.
+            let ok = unsafe {
+                windows_sys::Win32::System::JobObjects::IsProcessInJob(
+                    windows_sys::Win32::System::Threading::GetCurrentProcess(),
+                    std::ptr::null_mut(),
+                    &mut inside,
+                )
+            };
+            assert_ne!(ok, 0, "Job query failed: {}", io::Error::last_os_error());
+            assert_ne!(
+                inside, 0,
+                "requires an actual outer owner Job before spawning"
+            );
+        }
+
+        #[test]
+        #[ignore = "direct child fixture; invoke only through a Job-contained retirement test"]
+        fn owned_sleeping_child_fixture() {
+            require_actual_job();
+            let ready = PathBuf::from(std::env::var_os(READY_ENV).expect("exclusive ready path"));
+            let exit = PathBuf::from(std::env::var_os(EXIT_ENV).expect("exclusive exit path"));
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(ready)
+                .expect("create-only readiness marker");
+            writeln!(file, "{}", std::process::id()).expect("complete readiness marker");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while Instant::now() < deadline {
+                if exit.exists() {
+                    std::process::exit(7);
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            panic!("outer owner failed to settle its sleeping child");
+        }
+
+        fn sleeping_owner() -> (ProcessOwner, tempfile::TempDir) {
+            require_actual_job();
+            let directory = tempfile::tempdir().expect("exclusive child markers");
+            let ready = directory.path().join("ready");
+            let child = Command::new(std::env::current_exe().expect("current libtest executable"))
+                .args([
+                    "--exact",
+                    FIXTURE,
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(READY_ENV, &ready)
+                .env(EXIT_ENV, directory.path().join("exit"))
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn actual inherited-Job child");
+            // Wrap immediately: all later assertion/unwind paths use the same
+            // production cleanup, never ignored kill followed by unconditional wait.
+            let mut owner = ProcessOwner { child, state: ProcessState::Running };
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                assert!(Instant::now() < deadline, "child readiness deadline");
+                assert!(owner.child.try_wait().expect("observe startup").is_none());
+                if let Ok(marker) = std::fs::read_to_string(&ready)
+                    && let Ok(pid) = marker.trim().parse::<u32>()
+                {
+                    assert_eq!(pid, owner.child.id(), "marker belongs to exact retained Child");
+                    break;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            (owner, directory)
+        }
+
+        fn await_exit(child: &mut Child) -> ExitStatus {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                assert!(
+                    Instant::now() < deadline,
+                    "actual exit observation deadline"
+                );
+                if let Some(status) = child.try_wait().expect("nonblocking exit observation") {
+                    return status;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        fn request_natural_exit(directory: &tempfile::TempDir) {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(directory.path().join("exit"))
+                .expect("create-only natural exit request");
+        }
+
+        fn refusal_text(result: Result<(), AudioProcessorHostError>, pid: u32) -> String {
+            let Err(AudioProcessorHostError::WorkerFailed { operation, detail: text }) = result
+            else {
+                panic!("expected exact typed unconfirmed cleanup refusal: {result:?}");
+            };
+            assert_eq!(operation, "native child cleanup");
+            assert!(text.contains(&format!("pid={pid}")), "{text}");
+            text
+        }
+
+        fn assert_settled_idempotent(owner: &mut ProcessOwner) {
+            assert_eq!(owner.state, ProcessState::Settled);
+            owner
+                .terminate_with(
+                    |_| panic!("settled owner must not observe again"),
+                    |_| panic!("settled owner must not kill again"),
+                    |_| panic!("settled owner must not wait again"),
+                )
+                .expect("idempotent settlement");
+            assert!(owner.child.try_wait().expect("actual child exit retained").is_some());
+        }
+
+        #[test]
+        #[ignore = "requires actual outer owner Job; spawns one owned native OS child"]
+        fn audio_process_initial_exit_settles_without_kill_or_wait() {
+            let (mut owner, directory) = sleeping_owner();
+            request_natural_exit(&directory);
+            assert_eq!(await_exit(&mut owner.child).code(), Some(7));
+            let trace = RefCell::new(Vec::new());
+            owner
+                .terminate_with(
+                    |child| {
+                        trace.borrow_mut().push("observe");
+                        child.try_wait()
+                    },
+                    |_| panic!("initial exit must not kill"),
+                    |_| panic!("initial exit must not wait"),
+                )
+                .expect("actual initially exited child");
+            assert_eq!(trace.into_inner(), ["observe"]);
+            assert_settled_idempotent(&mut owner);
+        }
+
+        #[test]
+        #[ignore = "requires actual outer owner Job; refusal injection with actual live retained child"]
+        fn audio_process_refused_live_kill_retains_child_and_retry_settles() {
+            let (mut owner, _directory) = sleeping_owner();
+            let pid = owner.child.id();
+            let trace = RefCell::new(Vec::new());
+            let result = owner.terminate_with(
+                |child| {
+                    trace.borrow_mut().push("observe");
+                    child.try_wait()
+                },
+                |_| {
+                    trace.borrow_mut().push("kill");
+                    Err(io::Error::from_raw_os_error(5))
+                },
+                |_| panic!("unconfirmed failed kill must never wait"),
+            );
+            let text = refusal_text(result, pid);
+            assert!(
+                text.contains("raw_os=Some(5)") && text.contains("child still running"),
+                "{text}"
+            );
+            assert_eq!(trace.into_inner(), ["observe", "kill", "observe"]);
+            assert_eq!(owner.state, ProcessState::Retiring);
+            assert_eq!(owner.child.id(), pid);
+            assert!(owner.child.try_wait().expect("actual refusal retained live child").is_none());
+            assert_ne!(owner.state, ProcessState::Running, "no work admission");
+            assert_eq!(owner.state, ProcessState::Retiring, "no re-admission");
+            owner.terminate().expect("real kill/reap retry");
+            assert_settled_idempotent(&mut owner);
+        }
+
+        #[test]
+        #[ignore = "requires actual outer owner Job; actual natural exit after controlled kill refusal"]
+        fn audio_process_refused_kill_exit_race_observes_settlement_without_wait() {
+            let (mut owner, directory) = sleeping_owner();
+            let trace = RefCell::new(Vec::new());
+            owner
+                .terminate_with(
+                    |child| {
+                        trace.borrow_mut().push("observe");
+                        child.try_wait()
+                    },
+                    |child| {
+                        trace.borrow_mut().push("kill");
+                        request_natural_exit(&directory);
+                        assert_eq!(await_exit(child).code(), Some(7));
+                        Err(io::Error::from_raw_os_error(5))
+                    },
+                    |_| panic!("refused kill with confirmed exit must not wait"),
+                )
+                .expect("same actual child exited naturally before post-kill observation");
+            assert_eq!(trace.into_inner(), ["observe", "kill", "observe"]);
+            assert_settled_idempotent(&mut owner);
+        }
+
+        #[test]
+        #[ignore = "requires actual outer owner Job; observation/kill failure injection"]
+        fn audio_process_observation_and_kill_errors_preserve_stages_and_retirement() {
+            let (mut owner, _directory) = sleeping_owner();
+            let trace = RefCell::new(Vec::new());
+            let mut observations = 0;
+            let result = owner.terminate_with(
+                |_| {
+                    trace.borrow_mut().push("observe");
+                    observations += 1;
+                    Err(io::Error::from_raw_os_error(if observations == 1 {
+                        87
+                    } else {
+                        6
+                    }))
+                },
+                |_| {
+                    trace.borrow_mut().push("kill");
+                    Err(io::Error::from_raw_os_error(5))
+                },
+                |_| panic!("failed observations/refused kill must not wait"),
+            );
+            let text = refusal_text(result, owner.child.id());
+            for evidence in [
+                "initial try_wait=failed",
+                "post-kill try_wait failed",
+                "raw_os=Some(87)",
+                "raw_os=Some(6)",
+                "raw_os=Some(5)",
+            ] {
+                assert!(text.contains(evidence), "missing {evidence}: {text}");
+            }
+            assert_eq!(trace.into_inner(), ["observe", "kill", "observe"]);
+            assert_eq!(owner.state, ProcessState::Retiring);
+            assert!(owner
+                .child
+                .try_wait()
+                .expect("injection retained actual live child")
+                .is_none());
+            assert_ne!(owner.state, ProcessState::Running, "no work admission");
+            owner.terminate().expect("real cleanup after controlled OS errors");
+            assert_settled_idempotent(&mut owner);
+        }
+
+        #[test]
+        #[ignore = "requires actual outer owner Job; real kill with controlled reap failure"]
+        fn audio_process_successful_kill_failed_wait_retains_then_observes_exit() {
+            let (mut owner, _directory) = sleeping_owner();
+            let trace = RefCell::new(Vec::new());
+            let result = owner.terminate_with(
+                |child| {
+                    trace.borrow_mut().push("observe");
+                    child.try_wait()
+                },
+                |child| {
+                    trace.borrow_mut().push("kill");
+                    child.kill()
+                },
+                |_| {
+                    trace.borrow_mut().push("wait");
+                    Err(io::Error::from_raw_os_error(6))
+                },
+            );
+            let text = refusal_text(result, owner.child.id());
+            assert!(
+                text.contains("reap failed") && text.contains("raw_os=Some(6)"),
+                "{text}"
+            );
+            assert_eq!(trace.into_inner(), ["observe", "kill", "wait"]);
+            assert_eq!(owner.state, ProcessState::Retiring);
+            await_exit(&mut owner.child);
+            owner
+                .terminate_with(
+                    Child::try_wait,
+                    |_| panic!("exit retry must not kill"),
+                    |_| panic!("exit retry must not wait"),
+                )
+                .expect("actual exit observation settles failed reap");
+            assert_settled_idempotent(&mut owner);
+        }
+
+        #[test]
+        #[ignore = "requires actual outer owner Job; real kill and real reap"]
+        fn audio_process_successful_kill_and_wait_settles_once() {
+            let (mut owner, _directory) = sleeping_owner();
+            let trace = RefCell::new(Vec::new());
+            owner
+                .terminate_with(
+                    |child| {
+                        trace.borrow_mut().push("observe");
+                        child.try_wait()
+                    },
+                    |child| {
+                        trace.borrow_mut().push("kill");
+                        child.kill()
+                    },
+                    |child| {
+                        trace.borrow_mut().push("wait");
+                        child.wait()
+                    },
+                )
+                .expect("real actual child kill and reap");
+            assert_eq!(trace.into_inner(), ["observe", "kill", "wait"]);
+            assert_settled_idempotent(&mut owner);
+        }
+
+        #[test]
+        #[ignore = "requires actual outer owner Job; observation error followed by real kill/reap"]
+        fn audio_process_initial_observation_error_does_not_skip_real_cleanup() {
+            let (mut owner, _directory) = sleeping_owner();
+            let trace = RefCell::new(Vec::new());
+            owner
+                .terminate_with(
+                    |_| {
+                        trace.borrow_mut().push("observe");
+                        Err(io::Error::from_raw_os_error(6))
+                    },
+                    |child| {
+                        trace.borrow_mut().push("kill");
+                        child.kill()
+                    },
+                    |child| {
+                        trace.borrow_mut().push("wait");
+                        child.wait()
+                    },
+                )
+                .expect("proven reap settles despite earlier observation error");
+            assert_eq!(trace.into_inner(), ["observe", "kill", "wait"]);
+            assert_settled_idempotent(&mut owner);
+        }
+
+        // Retain an independent native process handle BEFORE owner teardown. PID
+        // reuse or releasing the Rust Child handle cannot masquerade as settlement.
+        fn retain_process(child: &Child) -> std::os::windows::io::OwnedHandle {
+            use std::os::windows::io::FromRawHandle;
+            // SAFETY: OpenProcess borrows the known retained Child PID, requests
+            // only synchronization, and returns either null or one caller-owned
+            // handle. Ownership is transferred exactly once to OwnedHandle below.
+            let raw = unsafe {
+                windows_sys::Win32::System::Threading::OpenProcess(
+                    windows_sys::Win32::System::Threading::PROCESS_SYNCHRONIZE,
+                    0,
+                    child.id(),
+                )
+            };
+            assert!(
+                !raw.is_null(),
+                "retain actual process: {}",
+                io::Error::last_os_error()
+            );
+            // SAFETY: raw is a non-null valid process handle uniquely returned by
+            // OpenProcess above. OwnedHandle closes it exactly once on all paths.
+            unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(raw) }
+        }
+
+        fn assert_handle_settled(handle: &std::os::windows::io::OwnedHandle) {
+            use std::os::windows::io::AsRawHandle;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                // SAFETY: OwnedHandle retains the native process handle for this
+                // zero-timeout query. No mutation, transfer or handle close occurs.
+                let observed = unsafe {
+                    windows_sys::Win32::System::Threading::WaitForSingleObject(
+                        handle.as_raw_handle(),
+                        0,
+                    )
+                };
+                match observed {
+                    windows_sys::Win32::Foundation::WAIT_OBJECT_0 => return,
+                    windows_sys::Win32::Foundation::WAIT_TIMEOUT => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "retained actual process did not settle"
+                        );
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    other => panic!(
+                        "retained actual process query failed {other}: {}",
+                        io::Error::last_os_error()
+                    ),
+                }
+            }
+        }
+
+        #[test]
+        #[ignore = "requires actual outer owner Job; startup-style implicit error unwinds real Child owner"]
+        fn audio_process_startup_implicit_error_reaps_before_owner_release() {
+            let (owner, _directory) = sleeping_owner();
+            let observer = retain_process(&owner.child);
+            let result: Result<(), AudioProcessorHostError> = (move || {
+                let _process = owner;
+                // Same fallible deadline expression as production, after ownership
+                // is acquired. It must never release a bare std Child on `?`.
+                Instant::now()
+                    .checked_add(Duration::MAX)
+                    .ok_or_else(|| invalid_contract("Worker startup deadline overflowed"))?;
+                panic!("Duration::MAX unexpectedly fit startup deadline");
+            })();
+            assert_eq!(
+                result,
+                Err(invalid_contract("Worker startup deadline overflowed"))
+            );
+            assert_handle_settled(&observer);
+        }
+
+        #[test]
+        #[ignore = "requires actual outer owner Job; real Child settlement through panic unwind"]
+        fn audio_process_startup_panic_unwind_reaps_retained_actual_child() {
+            let (owner, _directory) = sleeping_owner();
+            let observer = retain_process(&owner.child);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let _process = owner;
+                panic!("controlled startup unwind after actual child readiness");
+            }));
+            assert!(result.is_err(), "panic boundary must remain visible");
+            assert_handle_settled(&observer);
+        }
+
+        #[test]
+        #[ignore = "requires actual outer owner Job; finite repeated refusal controls"]
+        fn audio_process_repeated_refusal_never_waits_or_reopens_admission() {
+            let (mut owner, _directory) = sleeping_owner();
+            let pid = owner.child.id();
+            let trace = RefCell::new(Vec::new());
+            for _ in 0..2 {
+                let result = owner.terminate_with(
+                    |child| {
+                        trace.borrow_mut().push("observe");
+                        child.try_wait()
+                    },
+                    |_| {
+                        trace.borrow_mut().push("kill");
+                        Err(io::Error::from_raw_os_error(5))
+                    },
+                    |_| panic!("refused retry must never wait"),
+                );
+                refusal_text(result, pid);
+                assert_eq!(owner.state, ProcessState::Retiring);
+                assert!(owner.child.try_wait().expect("same child remains live").is_none());
+            }
+            assert_eq!(
+                trace.into_inner(),
+                ["observe", "kill", "observe", "observe", "kill", "observe"]
+            );
+            let observer = retain_process(&owner.child);
+            drop(owner);
+            assert_handle_settled(&observer);
+        }
+
+        #[test]
+        #[ignore = "requires actual outer owner Job; real existing worker and typed no-submission controls"]
+        fn audio_retiring_worker_blocks_author_and_process_then_shutdown_cleans_without_ack() {
+            require_actual_job();
+            let mut worker =
+                launch_existing_test_child(Duration::from_secs(1), Duration::from_secs(30))
+                    .expect("existing authenticated worker fixture");
+            let pid = worker.process.child.id();
+            let observer = retain_process(&worker.process.child);
+            worker.shared.fill(0xa5);
+            let installed_timeout = worker.configured_control_timeout;
+            assert_eq!(installed_timeout, Some(Duration::from_secs(1)));
+            let result = worker.process.terminate_with(
+                Child::try_wait,
+                |_| Err(io::Error::from_raw_os_error(5)),
+                |_| panic!("refused live child must not wait"),
+            );
+            refusal_text(result, pid);
+            assert_eq!(worker.process.state, ProcessState::Retiring);
+            assert!(worker
+                .process
+                .child
+                .try_wait()
+                .expect("actual live worker retained")
+                .is_none());
+            let result = worker.invoke(
+                "retired processing",
+                command(super::super::super::protocol::CommandKind::Process, 0),
+            );
+            assert_eq!(result, Err(AudioProcessorHostError::PoisonedInstance));
+            let binding = mondrian_core::AudioProcessorBindingId::new();
+            let request = |process_id| crate::NativeAudioAuthorStateEntryRequest {
+                binding: crate::NativeAudioObjectBindRequest {
+                    binding,
+                    // Negative intent data, not a claimed native object observation.
+                    expected_object: crate::NativeAudioObjectObservation::new(
+                        std::num::NonZeroU32::new(process_id).expect("known live PID"),
+                        std::num::NonZeroU64::new(1).expect("bounded claimed serial"),
+                    ),
+                },
+                source: crate::NativeAudioAuthorStateEntrySource::CanonicalPeer { revision: 0 },
+                format: super::super::super::NativeConfigurationFormat::ClapState,
+                configuration: &[],
+            };
+            assert_ne!(pid, std::process::id());
+            let foreign = worker
+                .prepare_native_author_state_entry(request(std::process::id()))
+                .expect("foreign PID remains a typed intent refusal");
+            assert!(matches!(
+                foreign,
+                crate::NativeAudioAuthorStateEntryOutcome::Refused(
+                    crate::NativeAudioAuthorStateEntryRefusal::OwnerChanged
+                )
+            ));
+            let same = worker.prepare_native_author_state_entry(request(pid));
+            assert!(
+                matches!(same, Err(AudioProcessorHostError::PoisonedInstance)),
+                "same-owner retired author command cannot submit"
+            );
+            assert_eq!(
+                worker.configured_control_timeout, installed_timeout,
+                "no state-entry socket mutation"
+            );
+            assert!(
+                worker.shared.iter().all(|byte| *byte == 0xa5),
+                "no shared PCM/event mutation"
+            );
+            assert_eq!(worker.process.child.id(), pid);
+            assert!(worker.process.child.try_wait().expect("no native command sent").is_none());
+            let installed_read = worker.control.read_timeout().expect("actual control read budget");
+            let installed_write =
+                worker.control.write_timeout().expect("actual control write budget");
+            assert_eq!(installed_read, Some(Duration::from_secs(1)));
+            assert_eq!(installed_write, Some(Duration::from_secs(1)));
+            // Closing this writer makes attempted writes fail, but false alone
+            // cannot prove no attempt. Distinct unchanged budgets below reject
+            // the existing Running shutdown path's switch to 100ms. The direct
+            // Retiring branch proves zero packet submission by static review.
+            worker
+                .control
+                .shutdown(std::net::Shutdown::Write)
+                .expect("close local control writer");
+            assert!(
+                !worker.shutdown(),
+                "cleanup alone cannot claim fresh graceful ACK"
+            );
+            assert_eq!(worker.configured_control_timeout, installed_timeout);
+            assert_eq!(
+                worker.control.read_timeout().expect("post-cleanup read budget"),
+                installed_read
+            );
+            assert_eq!(
+                worker.control.write_timeout().expect("post-cleanup write budget"),
+                installed_write
+            );
+            assert_settled_idempotent(&mut worker.process);
+            assert_handle_settled(&observer);
+            assert!(
+                worker.shutdown(),
+                "following Settled shutdown is idempotent"
+            );
+        }
     }
 }
