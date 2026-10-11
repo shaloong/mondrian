@@ -48,3 +48,9 @@ observations. It owns no plugin/controller or author/install permission. The
 format adapter must acknowledge its native GUI destruction before explicit
 parent destruction. This lets the CLAP adapter borrow a real Win32 parent
 without manufacturing an `IPlugView` or second window/event interpretation.
+
+## Bounded borrowed controller observations (initial parameter-value restart)
+
+`controller_parameters.rs`, the existing Plugin/PluginInternal consumer, and the native PluginImpl add a caller-owned fixed ParameterInfo/value slot with a bounded borrowed visitor. This control-thread path rejects deferred DSP-to-controller synchronization rather than invoking its setters, checks count before native enumeration and allocation, refuses incomplete native metadata, and rereads actual normalized values. It owns no persistent value map and does not clear callbacks or publish authored parameter changes. The product's initial-only consumer compares admitted descriptor identity and finite values, checks unchanged closed author source and exact callback cohort, then uses the existing exact retirement CAS. Unsupported isolated backends retain a typed unsupported default; no SDK declarations were changed.
+
+The sole new fixed inline query frame is included in Mondrian's existing Windows native-worker main-role layout request. That logical ownership obligation is not a hard compiler stack/OS page claim. Runtime pure4, mixed flags, author obligations and serial exhaustion remain pending. Qualification uses the separately licensed owned MIV1 fixture and actual product-helper external regression; implementation/format checks are not native compatibility evidence.

@@ -1152,6 +1152,22 @@ pub(crate) trait PluginInternal: Send {
     }
     fn get_parameter(&self, id: u32) -> Result<f64>;
     fn get_all_parameters(&self) -> Result<Vec<Parameter>>;
+    /// Visit exact native metadata/current values without setters or feedback drain.
+    /// The supplied frame is reused; count is rejected before enumeration.
+    fn visit_controller_parameters_bounded(
+        &self,
+        _maximum: usize,
+        _frame: &mut crate::controller_parameters::ControllerParameterQueryFrame,
+        _visitor: &mut dyn FnMut(
+            usize,
+            crate::controller_parameters::ControllerParameterRef<'_>,
+        ) -> Result<()>,
+    ) -> Result<usize> {
+        Err(Error::Other(
+            "bounded controller observation is unsupported".to_owned(),
+        ))
+    }
+
     fn format_parameter(&self, id: u32, normalized: f64) -> Result<String>;
     fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()>;
     /// Query the current per-bus channel counts and activation state.
@@ -1816,6 +1832,26 @@ impl Plugin {
             .as_ref()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .get_all_parameters()
+    }
+
+    /// Borrow every current native controller parameter on the control owner.
+    ///
+    /// Rejects negative/oversized counts before any parameter loop. Does not drain
+    /// deferred DSP-to-controller setters or retain a second value map. The visitor
+    /// must validate descriptor identity/current values before exact cohort service.
+    pub fn visit_controller_parameters_bounded(
+        &self,
+        maximum: usize,
+        frame: &mut crate::controller_parameters::ControllerParameterQueryFrame,
+        visitor: &mut dyn FnMut(
+            usize,
+            crate::controller_parameters::ControllerParameterRef<'_>,
+        ) -> Result<()>,
+    ) -> Result<usize> {
+        self.internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_owned()))?
+            .visit_controller_parameters_bounded(maximum, frame, visitor)
     }
 
     /// Set a parameter value by ID

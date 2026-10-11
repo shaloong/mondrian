@@ -2483,6 +2483,57 @@ impl PluginInternal for PluginImpl {
         }
     }
 
+    fn visit_controller_parameters_bounded(
+        &self,
+        maximum: usize,
+        frame: &mut crate::controller_parameters::ControllerParameterQueryFrame,
+        visitor: &mut dyn FnMut(
+            usize,
+            crate::controller_parameters::ControllerParameterRef<'_>,
+        ) -> Result<()>,
+    ) -> Result<usize> {
+        self.ensure_control_thread("bounded controller observation")?;
+        // An observation, never a disguised controller synchronization setter.
+        if !self.deferred_controller_sync.is_empty() {
+            return Err(Error::Other(
+                "deferred controller synchronization is pending".to_owned(),
+            ));
+        }
+        let controller = self
+            .controller
+            .as_ref()
+            .ok_or_else(|| Error::InterfaceError("No controller available".to_owned()))?;
+        // SAFETY: this live COM controller belongs to the verified owner thread.
+        // Each output pointer addresses a valid fixed SDK slot for the call only.
+        unsafe {
+            let raw_count = controller.getParameterCount();
+            let count = usize::try_from(raw_count).map_err(|_| {
+                Error::InvalidParameter("negative native parameter count".to_owned())
+            })?;
+            if count > maximum {
+                return Err(Error::InvalidParameter(
+                    "native parameter count exceeds admitted bound".to_owned(),
+                ));
+            }
+            for index in 0..raw_count {
+                *frame = crate::controller_parameters::ControllerParameterQueryFrame::default();
+                if controller.getParameterInfo(index, &mut frame.info) != kResultOk {
+                    return Err(Error::InvalidParameter(
+                        "native parameter metadata query refused".to_owned(),
+                    ));
+                }
+                frame.value = controller.getParamNormalized(frame.info.id);
+                visitor(index as usize, frame.observation())?;
+            }
+            if !self.deferred_controller_sync.is_empty() {
+                return Err(Error::Other(
+                    "controller synchronization arrived during observation".to_owned(),
+                ));
+            }
+            Ok(count)
+        }
+    }
+
     fn get_all_parameters(&self) -> Result<Vec<Parameter>> {
         self.drain_deferred_controller_sync();
         let mut params = Vec::new();

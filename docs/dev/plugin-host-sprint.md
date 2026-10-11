@@ -789,3 +789,124 @@ read-only meters, bypass smooths over 10 ms, and default processing can be
 identity. These legitimate semantics make the existing first external PCM
 slice ineligible. Preserve that gate and design separate read-only authoring,
 controlled nondefault state and bypass-settling oracles before runtime claims.
+
+## Initial VST3 value consumer candidate: actual first gates
+
+Independent acceptance of the previous source23 ordinary Audio/App runs is now
+recorded in `source23-audio-app-ordinary-independent-acceptance-r2.json` (SHA256
+`ADE048B3048391F79BEF99D794DBAB3FF642C12E73E4A425F9AFE710B69D340E`).
+Its 28 checks include exact executed names versus actual List inventories,
+producer/profile identity and Job settlement. The source23 timestamped hash
+snapshot was retained before later candidate writes.
+
+The initial-value candidate is statically accepted in
+`vst3-initial-value-service-independent-review-r2.json` (SHA256
+`9ED4F81F4F0AD9D28644FCE8D2C96FEA22511A9239F3AF67C78475AB2FE03BFF`).
+Root preserved LF in two existing files; other 13 snapshots remain identical.
+Integration is a candidate, not an accepted feature commit. Freeze25 covers
+1,785 inputs, including every owned fixture/license/provenance path; SHA256
+`A03B96AB419323063AD2E80CD04B15D2CBE1D4D1D55606CCAF3ECD83BC83FAC7`.
+Strict workspace Clippy r13 passed (2m11s), actual new SDK fixture build r1
+passed, and Audio12/App7 builds passed with all 1,785 source read leases held.
+Their `*-source-receipt.json` records producer/source checks. None alone proves
+plugin compatibility.
+
+Actual five fresh exact ignored List Jobs passed in
+`vst3-initial-values-native-preflight-r1.json`. Actual positive SDK control1
+passed: current values observed without setters/synthetic Process, followed by
+expected PCM and sample-offset automation. Control2 is **RED**, preserved in
+`vst3-initial-values-native-execution-r1-2`: Enter correctly returns the exact
+pending restart request, but a subsequent direct Process assertion at line231
+expects ReprepareRequired. The worker still has no accepted continuity anchor;
+the existing signal path checks that anchor first. Independent diagnosis of this
+new test's contract assumption is pending. No production error-order change or
+test weakening has been made. Native owner exit101 is settled with no deadline,
+outliving descendants or owner errors. Remaining controls, second round and the
+external real VST3 retest have not executed; initial-only compatibility remains
+Implemented — Not Fully Verified.
+
+## Initial-value slice: source26 accepted SDK gates and external boundary
+
+The source25 negative control exposed an incorrect direct-worker test assumption,
+not a new production error-order defect. The existing signal contract refuses
+Process without an accepted continuity anchor before inspecting restart flags.
+Independent reports `vst3-initial-values-direct-process-contract-independent-review-r1.json`
+and `vst3-initial-negative-test-source26-independent-review-r1.json` accepted the
+test-only correction. Exact Enter refusal, pending cohort, author source,
+query/setter counts, object identity and untouched PCM assertions remain; direct
+Process now asserts the existing typed continuity refusal and retained state.
+The original RED receipt and Audio12 executable remain preserved.
+
+Freeze26 SHA256 is
+`203C8D3777CB8E64A8919BEC4BCB85D0DD3BE6CB29EBBC487FD6E0C1FD005562`.
+Only the new test changed from freeze25; the other 1,784 inputs are identical.
+Strict workspace Clippy r14 passed. Actual Audio13/App8 builds passed under all
+1,785 source read leases, with completed Cargo JSONL and source receipts.
+App8 also compiled default integration targets; compilation does not qualify
+their runtime, GPU, UI or release behavior.
+
+Five fresh exact SDK List Jobs and all five controls in two rounds passed:
+`vst3-initial-values-native-execution-r2/summary.json` records **10/10**.
+Independent acceptance `vst3-initial-values-ten-native-independent-acceptance-r2.json`
+SHA256 `824C854E3F42440A13D33F6EF9AD83DAF419F02D713FECE6E562C9EBCDCA1B0B`
+checks actual producers, source/artifact bindings, exact selectors and settled
+owners. This verifies the owned DLL's initial/fresh-only pure4 observation and
+negative controls; runtime pure4, wider controllers, UI, real-time guarantees
+and full third-party compatibility remain outside that scope.
+
+Actual fresh inventory r4 contains Audio401 tests /69 ignored /332 ordinary,
+and App2902 /124 ignored /2778 ordinary. Source26 ordinary Audio r10 passed
+**332/0/0**. The original five native controls passed twice in
+`audio-native-execution-r9/summary.json` (**10/10**). Their generator first
+rejected a failed historical CLAP fixture producer before launch; regeneration
+explicitly used the accepted CLAP r3 producer. That refusal is retained.
+The previous full App ordinary run remains source23 evidence, not source26.
+
+The unchanged strict Airwindows VST3 case now reaches actual first Enter and
+DSP, and its native child exits0. It is still **RED**:
+`external-vendor-native-vst3-initial-execution-r2-round1` records eight PCM bit
+differences, all right-channel `-0.0` to `+0.0` in partition1. All nonzero samples
+are bit-identical; partitions17/64, non-bypass discrimination and round2 were
+not reached. Raw output/state/author/owner evidence and the bit analysis
+`external-vst3-first-pcm-eight-differences-r1.json` are retained. The host's
+numeric-zero silence optimization can canonicalize signed zero; pinned SDK
+silence flags are optional and do not promise signed-zero preservation, so this
+is not classified as a demonstrated SDK violation. A generic conservative
+silence-detection fidelity change is under review; no normalization, plugin-name
+special case, deleted assertion or compatibility PASS has been introduced.
+
+Ring Out List/Probe preparation r1 remains unexecuted. Independent review found
+whole-file hashing before response/owner size admission. A separate scratch r2
+will repair that bounded-input guard before actual product discovery; Ring Out
+PCM, state restore, authoring and GUI are still unverified.
+
+Source26 standalone `vst3-host` no-default-feature ordinary regression passed
+**269/0/0**, after actual fresh all/ignored inventories under native Job owners:
+`vst3-vendor-ordinary-execution-r1/ordinary/receipt.json`. Build r2 used the
+actual standalone manifest and all 1,785 source read leases. A preceding script
+derivation accidentally retained the App command and was interrupted/rejected;
+`vst3-vendor-build-r1-rejection.json` records it, and no vendor qualification is
+derived from that output.
+
+Ring Out staged preparation r2 received independent acceptance
+`ring-out-discovery-plan-r2-independent-review-r1.json`, SHA256
+`5CF44529CA7543F5C504CFC431A75288D48E7792FA77D0CC46FB3D1455774B85`.
+Root then executed **two List and two Probe Jobs**, all passing with actual
+App8/source26 and the accepted runner. The actual sole identity is
+`com.duskaudio.ring-out`; discovery version is null and package version remains
+the separately evidenced1.0.0. Probe retains all 11 parameters, including the
+two read-only meters, and captured184 bytes of default opaque state. Round1
+state SHA256 is `1CC8E19194558D2B72358549FDF9516FB41631A58B1D784EB95E70036095B7C1`.
+Raw responses, states and owner receipts are in `ring-out-list-native-r1` and
+`ring-out-probe-native-r1`; independent actual-run review is pending. This is
+Verified only for those discovery/default-capture controls, not state restore,
+PCM, bypass settling, project workflows, GUI, performance or full compatibility.
+
+The finite initial-value slice's integrated gates received independent acceptance
+in `initial-values-integrated-gates-independent-acceptance-r1.json`, SHA256
+`144E44D8AC0ED78ECB8BE8C060A7A31EF43AD774FCAC71527308D78C3B074180`.
+It binds1,913 evidence/source files, the unchanged source26, exact332 ordinary
+Audio names,269 vendor names, both native control groups, and the earlier SDK
+acceptance. The actual Airwindows signed-zero RED is explicitly retained; this
+acceptance permits the limited initial/fresh-object slice commit and does not
+qualify third-party compatibility or source26 full-App runtime regression.

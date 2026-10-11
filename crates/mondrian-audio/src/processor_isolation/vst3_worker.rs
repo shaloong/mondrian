@@ -1,6 +1,9 @@
 //! VST3 audio effects run only inside the supervised native worker.
 
 mod author_state_entry;
+mod initial_parameter_values;
+#[cfg(test)]
+mod initial_parameter_values_tests;
 mod native_author;
 
 use super::{
@@ -332,6 +335,16 @@ impl IsolatedAudioProcessorWorkerFactory for Vst3AudioProcessorWorkerFactory {
         &self,
         request: IsolatedAudioProcessorWorkerPrepareRequest,
     ) -> Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError> {
+        self.prepare_native(request)
+            .map(|worker| Box::new(worker) as Box<dyn IsolatedAudioProcessorWorker>)
+    }
+}
+
+impl Vst3AudioProcessorWorkerFactory {
+    fn prepare_native(
+        &self,
+        request: IsolatedAudioProcessorWorkerPrepareRequest,
+    ) -> Result<Vst3Worker, AudioProcessorHostError> {
         let payload: Vst3Payload = serde_json::from_slice(request.payload())
             .map_err(|error| invalid(format!("invalid VST3 worker payload: {error}")))?;
         let registration = Vst3PluginRegistration {
@@ -416,7 +429,7 @@ impl IsolatedAudioProcessorWorkerFactory for Vst3AudioProcessorWorkerFactory {
         plugin
             .start_processing()
             .map_err(|error| unavailable(format!("VST3 processing start failed: {error}")))?;
-        Ok(Box::new(Vst3Worker {
+        Ok(Vst3Worker {
             native_lane: request.native_worker_lane_resources(),
             last_parameter_values: vec![None; payload.parameter_ids.len()],
             configuration_phase:
@@ -438,7 +451,7 @@ impl IsolatedAudioProcessorWorkerFactory for Vst3AudioProcessorWorkerFactory {
             prepared_author_entry: None,
             #[cfg(target_os = "windows")]
             native_main,
-        }))
+        })
     }
 }
 
@@ -989,6 +1002,7 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         if self.enter_prepared_author_state(start_sample)? {
             return Ok(());
         }
+        self.service_first_parameter_values();
         if let Some(request) = self.pending_reprepare() {
             return Err(AudioProcessorHostError::ReprepareRequired(request));
         }
@@ -1002,6 +1016,9 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         self.close_native_editor_owner()?;
         self.prepared_author_entry = None;
         self.rebuild_native_state()?;
+        if let Some(request) = self.pending_reprepare() {
+            return Err(AudioProcessorHostError::ReprepareRequired(request));
+        }
         self.last_end = Some(start_sample);
         Ok(())
     }
@@ -1734,6 +1751,7 @@ pub(super) fn native_worker_lane_profile(
                 super::worker::WorkerProcessContext<'static>,
                 super::native_worker_processing::NativeDspDispatch<'static>,
                 crate::NativeAudioObservations,
+                vst3_host::controller_parameters::ControllerParameterQueryFrame,
             )>()),
             runtime_main_role: native_layout(std::alloc::Layout::new::<VstMainRole<'static>>()),
             runtime_dsp_role: native_layout(std::alloc::Layout::new::<VstDspRole<'static>>()),
@@ -1771,6 +1789,7 @@ impl Vst3Worker {
         let mut previous = self.plugin.take().ok_or_else(|| {
             AudioProcessorHostError::StateEntry("VST3 processor is closed".to_owned())
         })?;
+        let previous_owner = previous.native_editor_attachment_owner();
         previous.stop_processing().map_err(|error| {
             AudioProcessorHostError::StateEntry(format!("VST3 stop failed: {error}"))
         })?;
@@ -1823,7 +1842,15 @@ impl Vst3Worker {
         fresh.start_processing().map_err(|error| {
             AudioProcessorHostError::StateEntry(format!("VST3 state-entry start failed: {error}"))
         })?;
+        let fresh_owner = fresh.native_editor_attachment_owner();
+        // Install before inspecting callbacks. Refused fresh source/cohorts stay
+        // on this actual object rather than being dropped/reloaded to erase them.
         self.plugin = Some(fresh);
+        if matches!((previous_owner, fresh_owner), (Some(old), Some(new))
+            if new.serial() > old.serial())
+        {
+            self.service_fresh_parameter_values();
+        }
         Ok(())
     }
 }

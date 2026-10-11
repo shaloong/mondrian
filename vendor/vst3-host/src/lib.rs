@@ -68,6 +68,7 @@ pub mod transport;
 pub mod window;
 
 pub mod configuration_capture;
+pub mod controller_parameters;
 pub mod discovery;
 pub mod host_storage;
 
