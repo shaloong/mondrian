@@ -163,9 +163,18 @@ foreach ($kind in @('continuous_export','playback_reference','concurrent_recover
         Assert-Rejected $raw $kind "$kind $mutation"
     }
     if ($kind -cne 'continuous_export') {
-        foreach ($mutation in @('gpu-wake','gpu-join','preview','waveform','snapshot')) {
+        $returned = $original | ConvertTo-Json -Depth 80 -Compress | ConvertFrom-Json
+        $returned.terminal.owners.Realtime.gpu.renderer_retirement.backend_preparation = 'returned'
+        Assert-MondrianPhaseOwnerReceipt (Seal-Report $returned) fixture-run fixture-phase 0 $kind
+        foreach ($mutation in @('gpu-wake','gpu-join','preview','waveform','snapshot',
+            'backend-panic','backend-unknown','backend-type','backend-missing','renderer-extra')) {
             $raw=$original|ConvertTo-Json -Depth 80 -Compress|ConvertFrom-Json
             switch($mutation) {
+                'backend-panic' {$raw.terminal.owners.Realtime.gpu.renderer_retirement.backend_preparation='panicked'}
+                'backend-unknown' {$raw.terminal.owners.Realtime.gpu.renderer_retirement.backend_preparation='assumed_idle'}
+                'backend-type' {$raw.terminal.owners.Realtime.gpu.renderer_retirement.backend_preparation=0}
+                'backend-missing' {$raw.terminal.owners.Realtime.gpu.renderer_retirement.PSObject.Properties.Remove('backend_preparation')}
+                'renderer-extra' {$raw.terminal.owners.Realtime.gpu.renderer_retirement | Add-Member unexpected_owner $false}
                 'gpu-wake' {$raw.terminal.owners.Realtime.gpu.wake_callbacks.registrations_retained=1}
                 'gpu-join' {$raw.terminal.owners.Realtime.gpu.worker_shutdown='timed_out_detached'}
                 'preview' {$raw.terminal.owners.Realtime.preview.workers_terminated=0}
