@@ -18,6 +18,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(test)]
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,7 +26,8 @@ use memmap2::MmapOptions;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::openfx_adapter::{
-    resolve_openfx_binary, sha256_file, OpenFxBinaryInspection, OpenFxDiscoveryError,
+    resolve_openfx_binary, sha256_file, sha256_file_with_checkpoint, OpenFxBinaryInspection,
+    OpenFxDiscoveryError,
 };
 
 /// Hidden product executable mode for selected filter description.
@@ -836,7 +838,23 @@ pub fn describe_openfx_filter(
     inspection: &OpenFxBinaryInspection,
     plugin_identifier: &str,
 ) -> Result<OpenFxFilterDescription, OpenFxHostError> {
-    let bundle = verified_selection(inspection, plugin_identifier)?;
+    describe_openfx_filter_with_checkpoint(
+        helper_executable,
+        inspection,
+        plugin_identifier,
+        &mut || Ok(()),
+    )
+}
+
+/// Describe one Filter while observing the catalog owner, without registration.
+pub fn describe_openfx_filter_with_checkpoint(
+    helper_executable: &Path,
+    inspection: &OpenFxBinaryInspection,
+    plugin_identifier: &str,
+    checkpoint: &mut impl FnMut() -> Result<(), OpenFxHostError>,
+) -> Result<OpenFxFilterDescription, OpenFxHostError> {
+    checkpoint()?;
+    let bundle = verified_selection(inspection, plugin_identifier, checkpoint)?;
     let staging = tempfile::tempdir()
         .map_err(|error| unavailable(format!("description staging failed: {error}")))?;
     let request = DescribeRequest {
@@ -850,13 +868,16 @@ pub fn describe_openfx_filter(
         OPENFX_DESCRIBE_WORKER_ARGUMENT,
         staging.path(),
         &request,
+        checkpoint,
     )?;
-    if sha256_file(&inspection.binary_path)? != inspection.binary_sha256 {
+    if sha256_file_with_checkpoint(&inspection.binary_path, checkpoint)? != inspection.binary_sha256
+    {
         return Err(invalid("OpenFX binary changed during description"));
     }
     match response {
         DescribeResponse::Success { description } => {
             validate_description(&description, plugin_identifier)?;
+            checkpoint()?;
             Ok(description)
         }
         DescribeResponse::Rejected { status, reason } => Err(OpenFxHostError::WorkerFailed(
@@ -897,7 +918,10 @@ fn invoke_worker<T: Serialize, R: DeserializeOwned>(
     argument: &str,
     staging: &Path,
     request: &T,
+    checkpoint: &mut impl FnMut() -> Result<(), OpenFxHostError>,
 ) -> Result<R, OpenFxHostError> {
+    use crate::openfx_adapter::child_supervision::{wait_for_child, ChildWaitError};
+    checkpoint()?;
     if !helper_executable.is_absolute() || !helper_executable.is_file() {
         return Err(invalid("helper must be an absolute regular file"));
     }
@@ -910,6 +934,7 @@ fn invoke_worker<T: Serialize, R: DeserializeOwned>(
     }
     fs::write(&request_path, request_bytes)
         .map_err(|error| unavailable(format!("request staging failed: {error}")))?;
+    checkpoint()?;
     let mut child = Command::new(helper_executable)
         .arg(argument)
         .env(REQUEST_ENV, request_path)
@@ -920,25 +945,21 @@ fn invoke_worker<T: Serialize, R: DeserializeOwned>(
         .spawn()
         .map_err(|error| unavailable(format!("OpenFX worker start failed: {error}")))?;
     let deadline = Instant::now() + DEADLINE;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(Some(status)) => return Err(OpenFxHostError::WorkerFailed(status.to_string())),
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(OpenFxHostError::DeadlineExceeded);
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(unavailable(format!(
-                    "OpenFX worker observation failed: {error}"
-                )));
-            }
+    let status = wait_for_child(&mut child, deadline, checkpoint).map_err(|error| match error {
+        ChildWaitError::Checkpoint(error) => error,
+        ChildWaitError::Deadline => OpenFxHostError::DeadlineExceeded,
+        ChildWaitError::Observation(error) => {
+            unavailable(format!("OpenFX worker observation failed: {error}"))
         }
+        ChildWaitError::Settlement(error) => {
+            tracing::error!(pid = child.id(), %error, "OpenFX description child settlement failed");
+            unavailable(format!("OpenFX worker settlement failed: {error}"))
+        }
+    })?;
+    if !status.success() {
+        return Err(OpenFxHostError::WorkerFailed(status.to_string()));
     }
+    checkpoint()?;
     let mut response_bytes = Vec::new();
     fs::File::open(&response_path)
         .map_err(|error| unavailable(format!("OpenFX worker response is unavailable: {error}")))?
@@ -1360,13 +1381,15 @@ fn validate_parameter_values<'a>(
 fn verified_selection(
     inspection: &OpenFxBinaryInspection,
     plugin_identifier: &str,
+    checkpoint: &mut impl FnMut() -> Result<(), OpenFxHostError>,
 ) -> Result<PathBuf, OpenFxHostError> {
     if !inspection.plugins.iter().any(|plugin| plugin.identifier == plugin_identifier) {
         return Err(invalid("selected plugin is absent from the pinned binary"));
     }
     let bundle = bundle_for_binary(&inspection.binary_path)?;
     if resolve_openfx_binary(&bundle)? != inspection.binary_path
-        || sha256_file(&inspection.binary_path)? != inspection.binary_sha256
+        || sha256_file_with_checkpoint(&inspection.binary_path, checkpoint)?
+            != inspection.binary_sha256
     {
         return Err(invalid("selected OpenFX binary changed since discovery"));
     }

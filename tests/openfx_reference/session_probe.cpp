@@ -1564,6 +1564,16 @@ bool constructorActionReceipt(const char* environment) {
   return process > 0 && file.good();
 }
 
+bool blockCatalogCallback(const OfxHost* host) {
+  if (!honestHostCapabilities(host) ||
+      !constructorActionReceipt("MONDRIAN_OPENFX_CATALOG_NATIVE_STARTED")) {
+    return false;
+  }
+  // The host must terminate this actual callback's isolated native process.
+  // No timer or fabricated output completes the callback automatically.
+  for (;;) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); }
+}
+
 struct GenericGuiReceipt { int begun = 0, ended = 0, rendered = 0; bool open = false; };
 GenericGuiReceipt genericGuiReceipt;
 OfxStatus genericGuiProbe(const std::string& action, const void* handle,
@@ -1615,6 +1625,9 @@ OfxStatus probe(const char* action, const void* handle,
                 OfxPropertySetHandle in, OfxPropertySetHandle out) {
   const std::string operation(action);
   const std::string selected = mode();
+  if (selected == "catalog_describe_block" && operation == kOfxActionDescribe) {
+    return blockCatalogCallback(gHost) ? kOfxStatOK : kOfxStatFailed;
+  }
   if (selected.find("gui_") == 0) {
     const OfxStatus gui = genericGuiProbe(operation, handle, in, selected);
     if (operation == kOfxActionBeginInstanceEdit || operation == kOfxActionEndInstanceEdit || gui != kOfxStatOK) { return gui; }
@@ -2066,6 +2079,9 @@ OfxExport int SessionProbeImageIdentifier(int output, char* buffer, size_t capac
 }
 
 OfxExport OfxStatus OfxSetHost(const OfxHost* host) {
+  if (mode() == "catalog_discovery_block") {
+    return blockCatalogCallback(host) ? kOfxStatOK : kOfxStatFailed;
+  }
   if (mode() == "bootstrap_skip") { return kOfxStatFailed; }
   if (mode() == "bootstrap_error") { return kOfxStatErrMissingHostFeature; }
   if (mode() == "bootstrap_memory" && !bootstrapImageMemory(host)) { return kOfxStatErrMissingHostFeature; }

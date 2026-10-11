@@ -3,6 +3,7 @@ use super::*;
 use std::io::{self, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::Child;
+use std::thread;
 pub(super) mod child_diagnostic;
 mod diagnostic;
 use child_diagnostic::ChildProbe;
@@ -408,7 +409,7 @@ impl OpenFxFilterSession {
             .checked_mul(height as usize)
             .ok_or_else(|| invalid("frame dimensions overflow"))?;
         let frame_bytes = validate_frame(width, height, count)?;
-        let bundle = verified_selection(inspection, identifier)?;
+        let bundle = verified_selection(inspection, identifier, &mut || owner_checkpoint())?;
         let file = tempfile::NamedTempFile::new()
             .map_err(|error| unavailable(format!("shared frame creation failed: {error}")))?;
         file.as_file()

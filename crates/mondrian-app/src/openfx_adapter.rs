@@ -11,8 +11,10 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::thread;
 use std::time::{Duration, Instant};
+
+pub(crate) mod child_supervision;
+use child_supervision::{wait_for_child, ChildWaitError};
 
 use libloading::Library;
 use serde::{Deserialize, Serialize};
@@ -67,6 +69,9 @@ pub enum OpenFxDiscoveryError {
     /// Child exited without a valid response, including native crashes.
     #[error("OpenFX discovery worker failed: {0}")]
     WorkerFailed(String),
+    /// The catalog owner closed before metadata publication.
+    #[error("OpenFX discovery was canceled")]
+    Canceled,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -93,6 +98,16 @@ pub fn inspect_openfx_binary(
     helper_executable: &Path,
     binary_path: &Path,
 ) -> Result<OpenFxBinaryInspection, OpenFxDiscoveryError> {
+    inspect_openfx_binary_with_checkpoint(helper_executable, binary_path, &mut || Ok(()))
+}
+
+/// Inspect a binary while observing its owning catalog's cancellation authority.
+pub fn inspect_openfx_binary_with_checkpoint(
+    helper_executable: &Path,
+    binary_path: &Path,
+    checkpoint: &mut impl FnMut() -> Result<(), OpenFxDiscoveryError>,
+) -> Result<OpenFxBinaryInspection, OpenFxDiscoveryError> {
+    checkpoint()?;
     if !helper_executable.is_absolute() || !helper_executable.is_file() {
         return Err(invalid("OpenFX helper must be an absolute regular file"));
     }
@@ -100,7 +115,7 @@ pub fn inspect_openfx_binary(
         return Err(invalid("OpenFX binary path must be absolute"));
     }
     let binary_path = resolve_openfx_binary(binary_path)?;
-    let before = sha256_file(&binary_path)?;
+    let before = sha256_file_with_checkpoint(&binary_path, checkpoint)?;
     let directory = tempfile::tempdir()
         .map_err(|error| unavailable(format!("discovery staging failed: {error}")))?;
     let request_path = directory.path().join("request.json");
@@ -115,6 +130,7 @@ pub fn inspect_openfx_binary(
     }
     fs::write(&request_path, request)
         .map_err(|error| unavailable(format!("request write failed: {error}")))?;
+    checkpoint()?;
     let mut child = Command::new(helper_executable)
         .arg(OPENFX_DISCOVERY_WORKER_ARGUMENT)
         .env(REQUEST_ENV, &request_path)
@@ -125,27 +141,25 @@ pub fn inspect_openfx_binary(
         .spawn()
         .map_err(|error| unavailable(format!("worker start failed: {error}")))?;
     let deadline = Instant::now() + DEADLINE;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(Some(status)) => return Err(OpenFxDiscoveryError::WorkerFailed(status.to_string())),
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(OpenFxDiscoveryError::DeadlineExceeded);
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(unavailable(format!("worker observation failed: {error}")));
-            }
+    let status = wait_for_child(&mut child, deadline, checkpoint).map_err(|error| match error {
+        ChildWaitError::Checkpoint(error) => error,
+        ChildWaitError::Deadline => OpenFxDiscoveryError::DeadlineExceeded,
+        ChildWaitError::Observation(error) => {
+            unavailable(format!("worker observation failed: {error}"))
         }
+        ChildWaitError::Settlement(error) => {
+            tracing::error!(pid = child.id(), %error, "OpenFX discovery child settlement failed");
+            unavailable(format!("worker settlement failed: {error}"))
+        }
+    })?;
+    if !status.success() {
+        return Err(OpenFxDiscoveryError::WorkerFailed(status.to_string()));
     }
+    checkpoint()?;
     let bytes = read_bounded(&response_path)?;
     let response: DiscoveryResponse = serde_json::from_slice(&bytes)
         .map_err(|error| invalid(format!("worker response is malformed: {error}")))?;
-    if sha256_file(&binary_path)? != before {
+    if sha256_file_with_checkpoint(&binary_path, checkpoint)? != before {
         return Err(unavailable("binary changed during OpenFX discovery"));
     }
     let mut plugins = match response {
@@ -176,6 +190,7 @@ pub fn inspect_openfx_binary(
             .then(left.version_major.cmp(&right.version_major))
             .then(left.version_minor.cmp(&right.version_minor))
     });
+    checkpoint()?;
     Ok(OpenFxBinaryInspection { binary_path, binary_sha256: before, plugins })
 }
 
@@ -451,11 +466,20 @@ fn valid_identifier(identifier: &str) -> bool {
 }
 
 pub(crate) fn sha256_file(path: &Path) -> Result<String, OpenFxDiscoveryError> {
+    sha256_file_with_checkpoint(path, &mut || Ok(()))
+}
+
+pub(crate) fn sha256_file_with_checkpoint<E: From<OpenFxDiscoveryError>>(
+    path: &Path,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<String, E> {
+    checkpoint()?;
     let mut file = File::open(path)
         .map_err(|error| unavailable(format!("OpenFX binary cannot be read: {error}")))?;
     let mut digest = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
+        checkpoint()?;
         let count = file
             .read(&mut buffer)
             .map_err(|error| unavailable(format!("OpenFX binary read failed: {error}")))?;
@@ -494,6 +518,35 @@ fn unavailable(reason: impl Into<String>) -> OpenFxDiscoveryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canceled_discovery_never_resolves_or_spawns_an_invalid_selection() {
+        assert!(matches!(
+            inspect_openfx_binary_with_checkpoint(
+                Path::new("invalid-helper"),
+                Path::new("invalid-plugin"),
+                &mut || Err(OpenFxDiscoveryError::Canceled),
+            ),
+            Err(OpenFxDiscoveryError::Canceled)
+        ));
+    }
+
+    #[test]
+    fn binary_identity_hash_observes_cancellation_between_read_chunks() {
+        let directory = tempfile::tempdir().expect("staging");
+        let path = directory.path().join("binary.ofx");
+        fs::write(&path, vec![0_u8; 128 * 1024]).expect("fixture bytes");
+        let mut checkpoints = 0;
+        let result = sha256_file_with_checkpoint(&path, &mut || {
+            checkpoints += 1;
+            if checkpoints == 3 {
+                Err(OpenFxDiscoveryError::Canceled)
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(result, Err(OpenFxDiscoveryError::Canceled)));
+    }
 
     #[test]
     fn descriptor_contract_rejects_controls_and_duplicates() {

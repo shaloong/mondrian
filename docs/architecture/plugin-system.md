@@ -177,6 +177,13 @@ The `EffectGraphDsl` exposes source/current nodes, unary ops, branches, blends, 
 
 ## Runtime Safety
 
+OpenFX discovery and catalog publication ownership are specified in
+[OpenFX catalog lifecycle](openfx-catalog-lifecycle.md). Catalog workers prepare
+definitions; a live App owner publishes them. Cancellation reaches identity reads
+and both isolated discovery/describe waits, and catalog destruction settles its
+worker. This direct-child contract does not qualify other contexts, temporal
+images, native GPU interoperability or plugin-created descendant processes.
+
 Graph builders and custom processors execute against staged state. Builder
 errors/panics return `EffectGraphBuildError`; processor errors/panics return
 `EffectExecutionError`, and neither commits partial graph or pixel state.

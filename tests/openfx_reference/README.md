@@ -497,3 +497,38 @@ Measure the release resident Basic gate again after this stage, excluding warmup
 and retaining the machine/source/binary receipts. Report suite callback dispatch
 separately from ordinary Basic, which may use its own one-thread shortcut. No
 multi-CPU throughput claim follows from the one-CPU suite tests.
+
+## Windows active catalog shutdown controls
+
+Two test-only modes block inside actual native callbacks after validating the
+real host and flushing the native process PID to
+`MONDRIAN_OPENFX_CATALOG_NATIVE_STARTED`: `catalog_discovery_block` blocks in
+`OfxSetHost`, and `catalog_describe_block` blocks in `kOfxActionDescribe`.
+Neither mode completes automatically. The official Basic target is unchanged.
+
+The two ignored Windows App Host controls select the probe through the existing
+product installation action. They retain the actual child process and catalog
+worker thread handles before dropping the Host, then require both native objects
+have exited. Registry revision and independently persisted preference bytes must
+remain unchanged. Only this actual named execution can qualify the controls;
+compilation or merely having these modes in source does not constitute PASS.
+
+Run each exact control in a fresh isolated libtest process with a matching
+absolute `MONDRIAN_OPENFX_WORKER_PATH`, rebuilt
+`MONDRIAN_OPENFX_SESSION_PROBE_BINARY`, the respective
+`MONDRIAN_OPENFX_SESSION_PROBE_MODE`, and a unique absent absolute
+`MONDRIAN_OPENFX_CATALOG_NATIVE_STARTED` path:
+
+```text
+app_ui::host::openfx_catalog_shutdown_qualification::active_discovery_drop_settles_catalog_without_publication
+app_ui::host::openfx_catalog_shutdown_qualification::active_describe_drop_settles_catalog_without_publication
+```
+
+Use `--ignored --exact --test-threads=1 --nocapture`. The external owning runner
+must impose its own process deadline and preserve/clean identified owned native
+processes on failure. Failure unwinding performs only best-effort process
+termination and native handle closure; it does not wait or invoke a second
+possibly blocked Host destructor. Forced cleanup never converts failure to PASS.
+Successful execution drops the real Host exactly once and observes both retained
+native objects already settled. This does not qualify foreign descendants,
+termination-error recovery, hard UI latency bounds, or another platform.

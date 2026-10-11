@@ -23,9 +23,9 @@ use sha2::{Digest, Sha256};
 
 use crate::openfx_adapter::OpenFxBinaryInspection;
 use crate::openfx_host::{
-    describe_openfx_filter, OpenFxFilterDescription, OpenFxFilterSession, OpenFxHostError,
-    OpenFxParameterBinding, OpenFxParameterValue, OpenFxRenderTiming, OpenFxStringMode,
-    OPENFX_MAX_STRING_BYTES,
+    describe_openfx_filter_with_checkpoint, OpenFxFilterDescription, OpenFxFilterSession,
+    OpenFxHostError, OpenFxParameterBinding, OpenFxParameterValue, OpenFxRenderTiming,
+    OpenFxStringMode, OPENFX_MAX_STRING_BYTES,
 };
 
 /// A selected Filter cannot be represented by the admitted visual effect contract.
@@ -323,11 +323,35 @@ pub fn register_selected_openfx_filter(
     inspection: &OpenFxBinaryInspection,
     plugin_identifier: &str,
 ) -> Result<EffectType, OpenFxEffectRegistrationError> {
-    let description = describe_openfx_filter(helper_executable, inspection, plugin_identifier)?;
+    let definition = prepare_selected_openfx_filter(
+        helper_executable,
+        inspection,
+        plugin_identifier,
+        &mut || Ok(()),
+    )?;
     let effect_type = effect_type_for_filter(inspection, plugin_identifier)?;
-    let definition = build_definition(helper_executable, inspection, description, &effect_type)?;
     register_effect_definition(definition)?;
     Ok(effect_type)
+}
+
+/// Prepare an immutable definition. Only the live catalog owner's poll commits it.
+pub(crate) fn prepare_selected_openfx_filter(
+    helper_executable: &Path,
+    inspection: &OpenFxBinaryInspection,
+    plugin_identifier: &str,
+    checkpoint: &mut impl FnMut() -> Result<(), OpenFxHostError>,
+) -> Result<EffectDefinition, OpenFxEffectRegistrationError> {
+    checkpoint()?;
+    let description = describe_openfx_filter_with_checkpoint(
+        helper_executable,
+        inspection,
+        plugin_identifier,
+        checkpoint,
+    )?;
+    let effect_type = effect_type_for_filter(inspection, plugin_identifier)?;
+    let definition = build_definition(helper_executable, inspection, description, &effect_type)?;
+    checkpoint()?;
+    Ok(definition)
 }
 
 fn build_definition(
@@ -774,6 +798,36 @@ mod tests {
     use mondrian_effects::{
         instantiate_effect_node, EffectFrameContext, LutPreparationCache, PreparedEffectProgram,
     };
+
+    #[test]
+    fn canceled_preparation_never_registers_a_filter_definition() {
+        let identifier = format!("test.openfx.canceled.{}", mondrian_core::ProjectId::new());
+        let inspection = OpenFxBinaryInspection {
+            binary_path: PathBuf::from("unavailable.ofx"),
+            binary_sha256: "a".repeat(64),
+            plugins: vec![OpenFxPluginDescriptor {
+                identifier: identifier.clone(),
+                api_version: 1,
+                version_major: 1,
+                version_minor: 0,
+            }],
+        };
+        let effect_type = effect_type_for_filter(&inspection, &identifier).expect("identity");
+        assert!(mondrian_effects::effect_definition(&effect_type).is_none());
+        let result = prepare_selected_openfx_filter(
+            Path::new("unavailable-helper"),
+            &inspection,
+            &identifier,
+            &mut || Err(OpenFxHostError::Canceled),
+        );
+        assert!(matches!(
+            result,
+            Err(OpenFxEffectRegistrationError::Host(
+                OpenFxHostError::Canceled
+            ))
+        ));
+        assert!(mondrian_effects::effect_definition(&effect_type).is_none());
+    }
 
     #[test]
     fn compound_definition_binds_precise_types_and_complete_component_contracts() {

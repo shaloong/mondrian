@@ -93,6 +93,10 @@ const VALIDATION_UI_SERVICE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[path = "host/startup.rs"]
 mod startup;
+
+#[cfg(all(test, windows))]
+#[path = "host/openfx_catalog_shutdown_qualification.rs"]
+mod openfx_catalog_shutdown_qualification;
 pub use crate::app_ui::audio_device_catalog::{
     AudioDeviceCatalogShutdownEvidence, AudioDeviceCatalogStartupState,
 };
