@@ -817,6 +817,7 @@ pub(super) fn materialize_native_decoded_frame(
     let surface_format = decoded_native_surface_format(decoded)?;
     let mut sampling = decoded_video_sampling_from_frame_and_surface(decoded, surface_format);
     sampling.range = source_color.range.resolve_for_frame(sampling.range);
+    sampling.matrix = source_color.resolve_yuv_matrix(sampling.matrix);
     sampling.chroma_location = resolve_codec_defined_native_chroma_location(
         codec_id,
         surface_format,

@@ -806,6 +806,21 @@ fn video_color_tag_summary(tag: &VideoColorTag) -> String {
 
 fn evidence_summary(evidence: &VideoColorInterpretationEvidence, localizer: &Localizer) -> String {
     match evidence {
+        VideoColorInterpretationEvidence::H264SequenceRange { range, defaulted } => format_values(
+            localizer,
+            "interpret-evidence-h264-range",
+            [
+                ("range", format!("{range:?}")),
+                (
+                    "source",
+                    localizer.text(if *defaulted {
+                        "interpret-range-codec-default"
+                    } else {
+                        "interpret-range-coded"
+                    }),
+                ),
+            ],
+        ),
         VideoColorInterpretationEvidence::MetadataHint {
             scope,
             key,

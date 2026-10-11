@@ -537,3 +537,7 @@ audio-rack-move-down = Down
 audio-rack-move-down-tooltip = Move processor down
 audio-rack-remove = Remove
 audio-rack-remove-tooltip = Remove processor
+
+interpret-evidence-h264-range = H.264 sequence range: { $range } ({ $source })
+interpret-range-codec-default = Annex E default; no color-space inference
+interpret-range-coded = encoded video_full_range_flag

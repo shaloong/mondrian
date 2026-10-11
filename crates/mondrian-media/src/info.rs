@@ -500,6 +500,23 @@ impl VideoColorDiagnosticIssueAggregate {
     }
 }
 
+fn h264_sequence_range(
+    parameters: &ffmpeg::codec::Parameters,
+) -> Option<crate::h264_metadata::SequenceRange> {
+    if parameters.id() != ffmpeg::codec::Id::H264 {
+        return None;
+    }
+    // SAFETY: parameters owns the AVCodecParameters and extradata allocation.
+    // The borrowed slice is bounded and used only during this synchronous probe.
+    let raw = unsafe { &*parameters.as_ptr() };
+    let length = usize::try_from(raw.extradata_size).ok()?;
+    if raw.extradata.is_null() || length == 0 || length > 1024 * 1024 {
+        return None;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(raw.extradata, length) };
+    crate::h264_metadata::sequence_range(bytes)
+}
+
 /// Probe one file into the stable, immutable media contract.
 ///
 /// This synchronous FFmpeg Adapter must run on bounded media execution owned
@@ -535,14 +552,6 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
     let container = input.format().name().to_lowercase();
     let container_color_hints =
         collect_color_metadata_hints(VideoColorMetadataHintScope::Container, &input.metadata());
-    let file_name_color_hint =
-        path.file_name().and_then(|file_name| file_name.to_str()).and_then(|file_name| {
-            parse_video_color_metadata_hint(
-                VideoColorMetadataHintScope::FileName,
-                "filename",
-                file_name,
-            )
-        });
 
     let mut video_streams = Vec::new();
     let mut audio_streams = Vec::new();
@@ -559,7 +568,6 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                     &stream.metadata(),
                 );
                 color_metadata_hints.extend(container_color_hints.clone());
-                color_metadata_hints.extend(file_name_color_hint.clone());
                 color_metadata_hints.sort_by(metadata_hint_diagnostic_order);
                 let hdr_metadata = collect_hdr_metadata_summaries(&stream);
                 let mut width = 0;
@@ -585,7 +593,8 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                         pixel_format = camera_raw_pixel_format(raw);
                         pixel_format_proven = true;
                     }
-                    let color_range = decoded_video_range_from_ffmpeg(decoder.color_range());
+                    let mut color_range = decoded_video_range_from_ffmpeg(decoder.color_range());
+                    let sequence_range = h264_sequence_range(&params);
                     bit_depth = pixel_format.bit_depth();
                     has_alpha = pixel_format.has_alpha();
                     let raw_color_metadata = capture_color_metadata(
@@ -593,7 +602,7 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                         decoder.color_transfer_characteristic(),
                         decoder.color_space(),
                     );
-                    let color_interpretation = detect_color_space_from_metadata(
+                    let mut color_interpretation = detect_color_space_from_metadata(
                         &raw_color_metadata,
                         &color_metadata_hints,
                         icc_color_profile_hint(&hdr_metadata).as_ref(),
@@ -603,6 +612,20 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                             has_alpha,
                         }),
                     );
+                    if let Some(sequence_range) = sequence_range {
+                        color_interpretation.evidence.push(
+                            VideoColorInterpretationEvidence::H264SequenceRange {
+                                range: sequence_range.range,
+                                defaulted: sequence_range.defaulted,
+                            },
+                        );
+                        // An explicit container/decoder declaration keeps precedence.
+                        // Decoded frame evidence and authored overrides still own
+                        // per-frame resolution through DecodedVideoRangeContract.
+                        if color_range == DecodedVideoRange::Unknown && pixel_format_proven {
+                            color_range = sequence_range.range;
+                        }
+                    }
                     let (frame_rate, frame_rate_proven) = map_rational(stream.avg_frame_rate());
                     video_streams.push(VideoStreamInfo {
                         index: stream.index() as u32,
@@ -2072,9 +2095,9 @@ fn map_pixel_format(pixel: ffmpeg::util::format::pixel::Pixel) -> Option<PixelFo
     use ffmpeg::util::format::pixel::Pixel;
 
     match pixel {
-        Pixel::YUV420P => Some(PixelFormat::Yuv420p),
-        Pixel::YUV422P => Some(PixelFormat::Yuv422p),
-        Pixel::YUV444P => Some(PixelFormat::Yuv444p),
+        Pixel::YUV420P | Pixel::YUVJ420P => Some(PixelFormat::Yuv420p),
+        Pixel::YUV422P | Pixel::YUVJ422P => Some(PixelFormat::Yuv422p),
+        Pixel::YUV444P | Pixel::YUVJ444P => Some(PixelFormat::Yuv444p),
         Pixel::YUV420P10LE => Some(PixelFormat::Yuv420p10le),
         Pixel::YUV422P10LE => Some(PixelFormat::Yuv422p10le),
         Pixel::YUV444P10LE => Some(PixelFormat::Yuv444p10le),
@@ -2514,6 +2537,24 @@ mod tests {
     }
 
     #[test]
+    fn full_range_planar_layouts_preserve_sampling_without_changing_range() {
+        use ffmpeg::util::format::pixel::Pixel;
+        for (decoder, canonical) in [
+            (Pixel::YUVJ420P, PixelFormat::Yuv420p),
+            (Pixel::YUVJ422P, PixelFormat::Yuv422p),
+            (Pixel::YUVJ444P, PixelFormat::Yuv444p),
+        ] {
+            assert_eq!(map_pixel_format(decoder), Some(canonical));
+            assert_eq!(canonical.bit_depth(), 8);
+            assert!(!canonical.has_alpha());
+        }
+        assert_eq!(
+            decoded_video_range_from_ffmpeg(ffmpeg::util::color::Range::JPEG),
+            DecodedVideoRange::Full
+        );
+    }
+
+    #[test]
     fn probe_mapping_keeps_unknown_frame_rate_and_pixel_format_unproven() {
         assert_eq!(
             map_rational(ffmpeg::Rational(0, 0)),
@@ -2536,6 +2577,65 @@ mod tests {
             None
         );
         assert_eq!(duration_from_stream_ticks(1, ffmpeg::Rational(0, 1)), None);
+    }
+
+    #[test]
+    fn h264_probe_uses_codec_range_across_containers_without_filename_color_inference() {
+        let root =
+            std::env::temp_dir().join(format!("mondrian-range-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("range fixture directory");
+        for extension in ["mp4", "mkv", "h264"] {
+            let path = root.join(format!("HDR_P3PQ_SLog3-SGamut3-Cine.{extension}"));
+            let output = crate::ffmpeg_command()
+                .expect("admit range fixture command")
+                .args([
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=s=64x32:r=24:d=0.25",
+                    "-c:v",
+                    "libx264",
+                    "-threads",
+                    "2",
+                    "-pix_fmt",
+                    "yuv420p",
+                ])
+                .arg(&path)
+                .output()
+                .expect("create H.264 fixture");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let probe = probe_media_info(&path).expect("probe H.264 fixture");
+            let video = probe.primary_video().expect("primary stream");
+            assert_eq!(video.color_range, DecodedVideoRange::Limited, "{extension}");
+            assert!(video.proven_sampling().is_some());
+            assert_eq!(
+                video.executable_color_space(),
+                None,
+                "range is not a color-space declaration"
+            );
+            assert!(video
+                .color_metadata_hints
+                .iter()
+                .all(|hint| hint.scope != VideoColorMetadataHintScope::FileName));
+            assert!(
+                video.color_interpretation.evidence.iter().any(|evidence| matches!(
+                    evidence,
+                    VideoColorInterpretationEvidence::H264SequenceRange {
+                        range: DecodedVideoRange::Limited,
+                        defaulted: true
+                    }
+                ))
+            );
+        }
+        std::fs::remove_dir_all(root).expect("remove closed range fixtures");
     }
 
     #[test]

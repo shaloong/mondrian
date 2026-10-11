@@ -19,7 +19,7 @@ pub(super) fn compact_yuv_layout(
 )> {
     use ffmpeg::util::format::pixel::Pixel;
     Some(match pixel {
-        Pixel::YUV420P => (
+        Pixel::YUV420P | Pixel::YUVJ420P => (
             CpuYuvChromaSubsampling::Cs420,
             CpuYuvSampleFormat::Unorm8,
             CpuYuvChromaPlaneLayout::Planar,
@@ -130,7 +130,8 @@ pub(super) fn decoded_surface_format_from_pixel(
         ffmpeg::util::format::pixel::Pixel::Y212LE => DecodedVideoSurfaceFormat::Y212,
         ffmpeg::util::format::pixel::Pixel::XV30LE => DecodedVideoSurfaceFormat::Xv30,
         ffmpeg::util::format::pixel::Pixel::XV36LE => DecodedVideoSurfaceFormat::Xv36,
-        ffmpeg::util::format::pixel::Pixel::YUV420P => DecodedVideoSurfaceFormat::Yuv420p,
+        ffmpeg::util::format::pixel::Pixel::YUV420P
+        | ffmpeg::util::format::pixel::Pixel::YUVJ420P => DecodedVideoSurfaceFormat::Yuv420p,
         ffmpeg::util::format::pixel::Pixel::YUV420P10LE => DecodedVideoSurfaceFormat::Yuv420p10le,
         ffmpeg::util::format::pixel::Pixel::YUV420P12LE => DecodedVideoSurfaceFormat::Yuv420p12le,
         ffmpeg::util::format::pixel::Pixel::YUV420P16LE => DecodedVideoSurfaceFormat::Yuv420p16le,
@@ -278,13 +279,16 @@ pub(super) fn resolve_cpu_rgba_contract_from_metadata(
     // CICP RGB colorimetry and YCbCr sampling matrices are independent facts.
     // A missing frame fact can only use a fallback already bound into the
     // immutable source contract by an authored/project policy.
-    let matrix = decoded_matrix.or(source.yuv_matrix_fallback).ok_or_else(|| MondrianError::DecodeFailed {
-        asset_id: path.display().to_string(),
-        reason: format!(
-            "YUV matrix is unspecified for resolved source color space {:?}; refusing implicit swscale defaults",
-            source.color_space()
-        ),
-    })?;
+    let matrix = source.resolve_yuv_matrix(decoded_matrix.unwrap_or(DecodedVideoMatrix::Unknown));
+    if matrix == DecodedVideoMatrix::Unknown {
+        return Err(MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: format!(
+                "YUV matrix is unspecified for resolved source color space {:?}; refusing implicit swscale defaults",
+                source.color_space()
+            ),
+        });
+    }
     if matrix == DecodedVideoMatrix::Rgb {
         return Err(MondrianError::DecodeFailed {
             asset_id: path.display().to_string(),

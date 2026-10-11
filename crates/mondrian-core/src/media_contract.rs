@@ -875,6 +875,14 @@ fn video_color_metadata_scope_priority(scope: VideoColorMetadataHintScope) -> u8
 /// Evidence contributing to an automatic color interpretation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VideoColorInterpretationEvidence {
+    /// Quantization range proved by complete, agreeing H.264 sequence headers.
+    /// This evidence cannot authorize primaries, transfer, or matrix semantics.
+    H264SequenceRange {
+        /// Encoded quantization range.
+        range: DecodedVideoRange,
+        /// Whether Annex E inferred an absent video_full_range_flag as zero.
+        defaulted: bool,
+    },
     /// An acquisition metadata hint identified the input.
     MetadataHint {
         /// Metadata scope.
@@ -1199,7 +1207,8 @@ fn exact_cicp_evidence_matches_raw(
             | VideoColorInterpretationEvidence::UnsupportedCicpTags { .. } => return false,
             VideoColorInterpretationEvidence::MetadataHint { .. }
             | VideoColorInterpretationEvidence::DecoderUnavailable
-            | VideoColorInterpretationEvidence::IccProfile { .. } => {}
+            | VideoColorInterpretationEvidence::IccProfile { .. }
+            | VideoColorInterpretationEvidence::H264SequenceRange { .. } => {}
         }
     }
     exact_evidence_found

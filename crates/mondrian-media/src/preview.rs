@@ -642,6 +642,18 @@ impl PreviewSourceColorContract {
         self
     }
 
+    /// Apply only an already-authorized missing-matrix policy. An explicit or
+    /// unsupported decoded matrix never changes under this contract.
+    const fn resolve_yuv_matrix(self, decoded: DecodedVideoMatrix) -> DecodedVideoMatrix {
+        match decoded {
+            DecodedVideoMatrix::Unknown => match self.yuv_matrix_fallback {
+                Some(matrix) => matrix,
+                None => DecodedVideoMatrix::Unknown,
+            },
+            explicit => explicit,
+        }
+    }
+
     /// Build an automatic contract with a stream-probe fallback.
     pub const fn automatic(color_space: ColorSpace, probed_range: DecodedVideoRange) -> Self {
         Self::new(

@@ -27,6 +27,7 @@ pub mod decoder;
 mod ffmpeg_command;
 mod ffmpeg_runtime;
 mod ffmpeg_tools;
+mod h264_metadata;
 pub mod info;
 mod media_probe_process;
 pub mod multilevel_cache;
