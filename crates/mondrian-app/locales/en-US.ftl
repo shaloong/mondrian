@@ -539,5 +539,6 @@ audio-rack-remove = Remove
 audio-rack-remove-tooltip = Remove processor
 
 interpret-evidence-h264-range = H.264 sequence range: { $range } ({ $source })
+interpret-evidence-codec-range = { $codec } standard sample range: { $range }
 interpret-range-codec-default = Annex E default; no color-space inference
 interpret-range-coded = encoded video_full_range_flag

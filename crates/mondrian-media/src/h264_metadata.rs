@@ -104,6 +104,11 @@ impl Bits {
         {
             return None;
         }
+        // Some container configurations retain NAL trailing zero-byte padding
+        // (also removed by the Annex B splitter). It is outside the SPS RBSP;
+        // the complete syntax and stop/alignment bits must still validate.
+        let end = nal.iter().rposition(|&byte| byte != 0)? + 1;
+        let nal = &nal[..end];
         let mut bytes = Vec::with_capacity(nal.len());
         let mut zeros = 0;
         let data = &nal[1..];
@@ -394,6 +399,31 @@ mod tests {
         assert_eq!(sequence_range(&avcc(&[&invalid])), None);
         assert_eq!(sequence_range(&[0, 0, 1, 0x68, 0x80]), None);
     }
+    #[test]
+    fn camera_hrd_sps_accepts_zero_padding_but_requires_complete_syntax() {
+        // GoPro/Ambarella Main-profile SPS with both NAL and VCL HRD and two
+        // zero padding bytes in avcC. No CICP or filename inference is involved.
+        let camera = [
+            0x27, 0x4d, 0x00, 0x28, 0x9a, 0x62, 0x80, 0xa0, 0x0b, 0x76, 0x02, 0x20, 0x00, 0x00,
+            0x7d, 0x20, 0x00, 0x3a, 0x98, 0x1d, 0x0c, 0x00, 0x2d, 0xc8, 0x00, 0x03, 0x37, 0xff,
+            0x77, 0x97, 0x1a, 0x18, 0x00, 0x5b, 0x90, 0x00, 0x06, 0x6f, 0xfe, 0xef, 0x2e, 0x1f,
+            0x08, 0x84, 0x51, 0xe0, 0x00, 0x00,
+        ];
+        let expected = Some(SequenceRange { range: DecodedVideoRange::Limited, defaulted: true });
+        assert_eq!(sequence_range(&avcc(&[&camera])), expected);
+        assert_eq!(sequence_range(&avcc(&[&camera[..46]])), expected);
+        for end in 0..46 {
+            assert_eq!(
+                sequence_range(&avcc(&[&camera[..end]])),
+                None,
+                "prefix {end}"
+            );
+        }
+        let mut invalid = camera.to_vec();
+        invalid.push(1);
+        assert_eq!(sequence_range(&avcc(&[&invalid])), None);
+    }
+
     #[test]
     fn codec_default_requires_complete_sps_and_agreeing_sets() {
         assert_eq!(

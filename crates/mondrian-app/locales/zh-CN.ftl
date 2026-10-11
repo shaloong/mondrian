@@ -500,5 +500,6 @@ audio-rack-remove = 移除
 audio-rack-remove-tooltip = 移除处理器
 
 interpret-evidence-h264-range = H.264 码流范围：{ $range }（{ $source }）
+interpret-evidence-codec-range = { $codec } 标准定义的采样范围：{ $range }
 interpret-range-codec-default = Annex E 规范缺省值；不推断色彩空间
 interpret-range-coded = 码流 video_full_range_flag

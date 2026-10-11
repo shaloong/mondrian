@@ -1773,26 +1773,6 @@ fn generated_solid_storage_key(asset_id: AssetId) -> String {
     format!("generated:solid-color:{asset_id}")
 }
 
-fn has_meaningful_video_stream(info: &MediaInfo) -> bool {
-    info.video_streams.iter().any(|stream| {
-        let fps = stream.frame_rate.to_f64();
-        let moving_fps = fps >= 1.0;
-        let moving_frames = stream.total_frames.unwrap_or(0) > 1;
-        moving_fps || moving_frames
-    })
-}
-
-fn is_audio_only_extension(path: &Path) -> bool {
-    let Some(ext) = path.extension().and_then(|v| v.to_str()) else {
-        return false;
-    };
-
-    matches!(
-        ext.to_ascii_lowercase().as_str(),
-        "mp3" | "wav" | "flac" | "aac" | "m4a" | "ogg" | "opus" | "wma" | "aiff" | "aif" | "alac"
-    )
-}
-
 fn is_proven_single_picture(info: &MediaInfo) -> bool {
     info.primary_video()
         .and_then(|video| video.total_frames)
@@ -1800,11 +1780,6 @@ fn is_proven_single_picture(info: &MediaInfo) -> bool {
 }
 
 fn detect_asset_kind(info: &MediaInfo, path: &Path) -> Result<AssetKind> {
-    let force_audio =
-        info.has_audio && (is_audio_only_extension(path) || !has_meaningful_video_stream(info));
-    if force_audio {
-        return Ok(AssetKind::Audio);
-    }
     if info.has_video && is_picture_file_extension(path) && is_proven_single_picture(info) {
         return Ok(AssetKind::StillImage);
     }
@@ -2314,6 +2289,27 @@ mod tests {
         assert_eq!(record.kind, AssetKind::StillImage);
         assert!(record.media_probe().expect("file probe").has_video);
         assert!(!record.media_probe().expect("file probe").has_audio);
+    }
+
+    #[test]
+    fn picture_stream_identity_does_not_require_timing_or_a_video_extension() {
+        for name in ["bear.ogv", "renamed-audio.ogg", "renamed-audio.mp3"] {
+            let path = Path::new(name);
+            let mut info = lightweight_video_info(path);
+            info.has_audio = true;
+            info.video_streams[0].frame_rate = mondrian_core::Rational::new(0, 1);
+            info.video_streams[0].frame_rate_proven = false;
+            info.video_streams[0].total_frames = None;
+            assert_eq!(
+                detect_asset_kind(&info, path).expect("classify picture stream"),
+                AssetKind::Video
+            );
+        }
+        let path = Path::new("renamed-video.mp4");
+        assert_eq!(
+            detect_asset_kind(&lightweight_audio_info(path), path).expect("classify audio stream"),
+            AssetKind::Audio
+        );
     }
 
     #[test]

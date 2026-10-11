@@ -1079,6 +1079,7 @@ const fn native_surface_hint_from_pixel_format(
         PixelFormat::Yuv444p16le => Some(PreviewNativeSurfaceHint::Yuv444p16),
         PixelFormat::Yuva444p12le => Some(PreviewNativeSurfaceHint::Yuva444p12),
         PixelFormat::Yuv422p
+        | PixelFormat::Yuv411p
         | PixelFormat::Yuv444p
         | PixelFormat::Gbrp10le
         | PixelFormat::Gbrp12le
@@ -1091,7 +1092,11 @@ const fn native_surface_hint_from_pixel_format(
         | PixelFormat::Gbrapf32le
         | PixelFormat::Gbrapf32be
         | PixelFormat::Rgb24
+        | PixelFormat::Bgr24
         | PixelFormat::Rgba
+        | PixelFormat::Bgra
+        | PixelFormat::Argb
+        | PixelFormat::Abgr
         | PixelFormat::Rgba64le
         | PixelFormat::BayerRggb8
         | PixelFormat::BayerBggr8

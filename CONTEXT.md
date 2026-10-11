@@ -1272,6 +1272,19 @@ immutable source contract's missing-matrix policy; explicit and unsupported
 frame matrices retain precedence. Playback-owned bounded terminal-failure memory
 retains the original decoder explanation for Viewer projection.
 
+Container metadata bytes are validated before Rust text interpretation; invalid
+UTF-8 fields supply no interpretation evidence. Explicit attached-picture
+disposition excludes album artwork from Timeline picture streams. Asset kind
+follows actual picture-stream identity even when timing is unproved or the file
+extension suggests audio. Packed RGB ordering/alpha and full-range planar YUV
+layouts remain explicit sampling facts. H.263's fixed BT.601 quantization is
+retained as codec-defined evidence; other untagged codecs do not inherit it.
+
+Raw DV picture cadence comes from FFmpeg's validated DIF-header profile, not
+the demuxer's timestamp tick rate. The original stream PTS/time base remain
+unchanged. NTSC DV 4:1:1 is an explicit source layout; it uses the existing CPU
+materializer rather than being relabeled as a compact 4:2:0/4:2:2 surface.
+
 Asset thumbnails include their exact representative Source Sample Target in
 request, failure and raster identities. Known videos use ten percent of their
 stream duration capped at thirty seconds; proven stills and unknown durations

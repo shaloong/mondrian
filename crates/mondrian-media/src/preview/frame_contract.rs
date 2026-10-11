@@ -54,12 +54,12 @@ pub(super) fn compact_yuv_layout(
             CpuYuvSampleFormat::Unorm16,
             CpuYuvChromaPlaneLayout::Planar,
         ),
-        Pixel::YUV422P => (
+        Pixel::YUV422P | Pixel::YUVJ422P => (
             CpuYuvChromaSubsampling::Cs422,
             CpuYuvSampleFormat::Unorm8,
             CpuYuvChromaPlaneLayout::Planar,
         ),
-        Pixel::YUV444P => (
+        Pixel::YUV444P | Pixel::YUVJ444P => (
             CpuYuvChromaSubsampling::Cs444,
             CpuYuvSampleFormat::Unorm8,
             CpuYuvChromaPlaneLayout::Planar,
@@ -135,11 +135,13 @@ pub(super) fn decoded_surface_format_from_pixel(
         ffmpeg::util::format::pixel::Pixel::YUV420P10LE => DecodedVideoSurfaceFormat::Yuv420p10le,
         ffmpeg::util::format::pixel::Pixel::YUV420P12LE => DecodedVideoSurfaceFormat::Yuv420p12le,
         ffmpeg::util::format::pixel::Pixel::YUV420P16LE => DecodedVideoSurfaceFormat::Yuv420p16le,
-        ffmpeg::util::format::pixel::Pixel::YUV422P => DecodedVideoSurfaceFormat::Yuv422p,
+        ffmpeg::util::format::pixel::Pixel::YUV422P
+        | ffmpeg::util::format::pixel::Pixel::YUVJ422P => DecodedVideoSurfaceFormat::Yuv422p,
         ffmpeg::util::format::pixel::Pixel::YUV422P10LE => DecodedVideoSurfaceFormat::Yuv422p10le,
         ffmpeg::util::format::pixel::Pixel::YUV422P12LE => DecodedVideoSurfaceFormat::Yuv422p12le,
         ffmpeg::util::format::pixel::Pixel::YUV422P16LE => DecodedVideoSurfaceFormat::Yuv422p16le,
-        ffmpeg::util::format::pixel::Pixel::YUV444P => DecodedVideoSurfaceFormat::Yuv444p,
+        ffmpeg::util::format::pixel::Pixel::YUV444P
+        | ffmpeg::util::format::pixel::Pixel::YUVJ444P => DecodedVideoSurfaceFormat::Yuv444p,
         ffmpeg::util::format::pixel::Pixel::YUV444P10LE => DecodedVideoSurfaceFormat::Yuv444p10le,
         ffmpeg::util::format::pixel::Pixel::YUV444P12LE => DecodedVideoSurfaceFormat::Yuv444p12le,
         ffmpeg::util::format::pixel::Pixel::YUV444P16LE => DecodedVideoSurfaceFormat::Yuv444p16le,

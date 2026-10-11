@@ -2617,6 +2617,51 @@ fn gpu_preferred_software_frame_falls_back_with_structured_reason() {
 }
 
 #[test]
+fn packed_rgb_orders_preserve_straight_color_including_zero_alpha() {
+    use ffmpeg::util::format::pixel::Pixel;
+    for (pixel, order) in [
+        (Pixel::RGBA, [0, 1, 2, 3]),
+        (Pixel::BGRA, [2, 1, 0, 3]),
+        (Pixel::ARGB, [3, 0, 1, 2]),
+        (Pixel::ABGR, [3, 2, 1, 0]),
+    ] {
+        let rgba = [32, 96, 192, 128, 64, 128, 224, 0];
+        let mut decoded = ffmpeg::util::frame::video::Video::new(pixel, 2, 1);
+        for (input, output) in rgba.chunks_exact(4).zip(decoded.data_mut(0).chunks_exact_mut(4)) {
+            for (slot, component) in order.iter().enumerate() {
+                output[slot] = input[*component];
+            }
+        }
+        decoded.set_color_space(ffmpeg::util::color::Space::RGB);
+        decoded.set_color_range(ffmpeg::util::color::Range::JPEG);
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::QTRLE,
+            None,
+        );
+        let payload = materialize_decoded_frame(
+            &decoded,
+            PreviewDecodeRepresentation::NativeCpu,
+            &mut plan,
+            &mut None,
+            &mut None,
+            &mut None,
+            2,
+            1,
+            Path::new("packed-rgb-order"),
+            test_source_color(),
+        )
+        .expect("packed RGB materialization");
+        let PreviewDecodedFramePayload::CpuRgba(frame) = payload else {
+            panic!("8-bit packed RGB must retain encoded RGBA output");
+        };
+        assert_eq!(&frame.data[..8], &rgba, "{pixel:?}");
+    }
+}
+
+#[test]
 fn high_bit_depth_cpu_materialization_preserves_encoded_float_precision() {
     let mut decoded =
         ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::RGBA64LE, 2, 1);
@@ -3012,14 +3057,21 @@ fn compact_cpu_yuv_extended_planar_layouts_retain_original_planes() {
     let mut rejected = Vec::new();
     for (pixel, chroma_width, bytes) in [
         (Pixel::YUV422P, 3, 1),
+        (Pixel::YUVJ422P, 3, 1),
         (Pixel::YUV444P, 5, 1),
+        (Pixel::YUVJ444P, 5, 1),
         (Pixel::YUV444P10LE, 5, 2),
         (Pixel::YUV444P12LE, 5, 2),
         (Pixel::YUV422P12LE, 3, 2),
     ] {
         let mut decoded = ffmpeg::util::frame::video::Video::new(pixel, 5, 3);
         decoded.set_color_space(ffmpeg::util::color::Space::BT709);
-        decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+        let full_range = matches!(pixel, Pixel::YUVJ422P | Pixel::YUVJ444P);
+        decoded.set_color_range(if full_range {
+            ffmpeg::util::color::Range::JPEG
+        } else {
+            ffmpeg::util::color::Range::MPEG
+        });
         for plane in 0..3 {
             for sample in decoded.data_mut(plane).chunks_exact_mut(bytes) {
                 sample.fill(0);
@@ -3053,6 +3105,14 @@ fn compact_cpu_yuv_extended_planar_layouts_retain_original_planes() {
             }
         };
         let physical_format = frame.surface_format();
+        assert_eq!(
+            frame.video_sampling.range,
+            if full_range {
+                DecodedVideoRange::Full
+            } else {
+                DecodedVideoRange::Limited
+            }
+        );
         if matches!(pixel, Pixel::YUV422P12LE | Pixel::YUV444P12LE) {
             assert_eq!(frame.sample_format.bit_depth(), 12);
             assert_eq!(
