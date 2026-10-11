@@ -23,6 +23,9 @@ const CASE_HASH_ENV: &str = "MONDRIAN_EXTERNAL_VENDOR_CASE_SHA256";
 const FRAMES: usize = 4096;
 const MAX_JSON: u64 = 512 * 1024;
 
+// Metadata-only qualification has its own case contract and no PCM oracle.
+mod readonly;
+
 #[test]
 #[ignore = "external hash-bound vendor case, current helper and frozen outer native Job required"]
 fn external_clap_opaque_state_native_bypass_pcm() {

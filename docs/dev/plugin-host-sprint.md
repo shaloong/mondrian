@@ -51,6 +51,7 @@ Current round evidence:
 | Initial VST3 value restart consumer | Verified within owned initial/fresh-object controls | Commit0bd39c4; SDK10/10, prior native10/10, ordinary Audio332 and vendor269, independently accepted source26 |
 | Signed-zero buffer fidelity | Verified within owned buffer controls and limited native VST3 replay | Source27 RED270/1 to source28 GREEN271/0; Audio332/0; Airwindows two rounds pass unchanged strict oracle; no SDK violation/performance claim |
 | External native PCM | VST3 limited PASS; CLAP RED | Airwindows VST3 default-state offline bypass partitions1/17/64 and distinct finite non-bypass output; CLAP schema drift remains unresolved |
+| CLAP read-only metadata / default state load | Verified within Ring Out two-round controls | Source29 Audio336/0, exact native2/2 and independent raw state/author/payload checks; existing core behavior, new verification gate only; no PCM/full-project claim |
 | New performance/platform qualification | Not run | Historical results below do not transfer to new changes |
 
 Clack's RED reproduced in both source and destination. The GUI wrapper differed
@@ -1017,3 +1018,82 @@ extraction, installation or native result exists. Evidence is sealed in
 Acquisition is Blocked by observed transfer reliability. Any retry must use
 fresh finite receipts and complete length/official-MD5/local-SHA validation;
 instrument admission requires musical events, bus and audio-output oracles.
+
+## Next CLAP metadata/default-load slice (candidate)
+
+The signed-zero slice is committed as `cb48b86`. Its comprehensive independent
+acceptance is `signed-zero-source28-integrated-independent-acceptance-r1.json`,
+SHA256 `3B21C997EB421A2A0F3F5B91C89F3A8FA7B9FA60CE8DEF7F3AD357131F5A5DF7`.
+The separate source28 root-terminal observation supplement binds actual
+controller returns without treating them as substitute native-owner proof.
+
+Root then integrated the independent r2 CLAP test-only candidate. The existing
+`external_vendor.rs` changes only by a three-line module declaration, retaining
+all old PCM code. The new `external_vendor/readonly.rs` was formatted with
+Rust2024 rustfmt; its current SHA256 is
+`3F43305CD0CCCDE214322A08A2E6E2C57B910D9C6E5B94C9D9DC9F8660CA27A9`.
+The original isolated r2 remains unchanged. Freeze29 binds1,786 sources, SHA256
+`5431C3AAC636DBBF087C2876F56979A3AE4184D258D8FDCEB365DE967BDC9F0B`.
+At that source29 capture, the four ordinary tests and single native ignored gate
+had not yet executed and central Audio15 compilation was in progress. Its status
+then was Implemented — Not Fully Verified; the accepted gates below supersede
+that candidate state. No production CLAP interface changed.
+
+The actual readonly native case/manifest preparation is assigned to the Audio
+Agent in scratch, with fresh current compiler producers, the admitted original
+Ring Out List/Probe/state and two bounded root-owned execution rounds. A source
+file's mtime was invalidated with identical raw bytes to force an actual new
+product build despite this being a test-only addition; that action is separately
+recorded in `clap-readonly-product-force-rebuild-r1.json`. No old helper is
+relabeled as a fresh current producer and no declared test count is acceptance.
+Source29 centralized gates now pass: Audio15 actual fresh build exit0;
+App10 actual fresh product build exit0 (5m36s), helper SHA256
+`7B8FD326F0EC6E2033666FE1C7DB5F8D4695E21070CAAADEBD0FCAA48B9B5B05`;
+actual all406/ignored70 native Job inventories admit exactly336 ordinary names,
+all passing including the four new negative controls. Workspace strict Clippy16
+passes all targets/all features `-D warnings` with all1,786 source read leases
+held (1m42s). Existing standalone vendor strict RED debt is unchanged, not rerun
+or suppressed by this test-only slice.
+
+Independent format review confirms the r2 child changed only whitespace,
+19 optional trailing commas and three return-false semicolons; the raw captured
+JSON and all other protected tokens are retained. Its receipt SHA256 is
+`232A81B96F5D25D4730232A319E8400C386A1F7450E0FDF618C84B6564E9D224`.
+The data-only preparation packet has independent static acceptance SHA256
+`C2A143C8DBF3225D1E16D468B4C5E9EDA5C56C831B51BB54974839536F1A516C`.
+It generated actual current cases/manifests under `clap-readonly-native-frozen-r1`.
+Its first attempt refused nonexistent historical PATH directories before any
+output creation or native launch; explicit existing runtime directories then
+passed without weakening the admission rule.
+
+The new preflight r1 was never executed. Independent review found missing full
+freeze-path admission and possible original-error masking during receipt write.
+A separate scratch r2 reuses the existing full Lease-Freeze admission and
+retains original errors while always releasing leases. It preserves the existing
+30-second Job/40-second outer wait/two-second cleanup budgets and validates
+bounded held-handle owner/stdout inputs before hashing. Exact r2 SHA256 is
+`6E4010DAFDC5E5E82BFA48172B1A8D70BFB6B81CDE49459B9C555CBC95F9171C`.
+Root executed its actual sole ignored-test List Job successfully; no List output
+was counted as a positive test. The original scripts/old preflight readers were
+not modified.
+
+Root then executed two real Ring Out default-load Jobs, both passing exactly
+one test/zero failed/zero ignored/405 filtered, with native owners exit0,
+no deadline/errors/outliving descendants and descendants reaped. Evidence is
+`clap-readonly-native-frozen-r1/round-{1,2}/controller-evidence` and
+`test-evidence`. Actual default opaque load, serde reopen, nine writable author
+values, full11-descriptor resolver payload and refusal of RO IDs9/10 are checked.
+The184-byte opaque state agrees with the original admitted raw default state.
+The runtime discovery version remains null. This establishes validation of
+existing production CLAP behavior; the code addition itself is only a lab gate.
+Raw test output does not certify its own outer Job. Independent final native
+review accepts the three-file verification slice in
+`clap-readonly-source29-two-rounds-independent-acceptance-r1.json`, SHA256
+`DF9D77C07C3668FF0F49D47C16FA47B166EC88959EE5DC060C9C89E939A2C12E`.
+It checks all1,786 source hashes before/after,1,820 generation bindings and
+3,614 preflight bindings, both actual Jobs, raw state/author/native descriptors
+and resolver payload. No PCM/DSP, nondefault-state discrimination,
+project archive, actual author gestures/Undo, GUI, realtime, performance,
+Preview/Export, instrument/events, other-platform or full-standard acceptance
+is inferred. Root terminal observations are separately sealed in
+`clap-readonly-root-controller-observations-r1.json`.
