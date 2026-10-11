@@ -415,7 +415,14 @@ impl AssetThumbnailService {
                 );
             }
         };
-        let key = ThumbnailRequestKey { asset_id: asset.id, path, fingerprint, color };
+        let source_sample = analysis::thumbnail_source_sample(asset);
+        let key = ThumbnailRequestKey {
+            asset_id: asset.id,
+            path,
+            fingerprint,
+            color,
+            source_sample,
+        };
         {
             let mut state = self.state.lock();
             if let Some(entry) = state.cache.get(&asset.id).cloned()
@@ -430,6 +437,7 @@ impl AssetThumbnailService {
                     path: key.path.clone(),
                     fingerprint: key.fingerprint,
                     color: Some(key.color.clone()),
+                    source_sample: Some(key.source_sample),
                 };
                 if entry.key == failure_key {
                     return ThumbnailLookupState::Failed(entry.failure.clone());
@@ -765,7 +773,13 @@ impl AssetThumbnailService {
         if state.closed {
             return ThumbnailLookupState::Unavailable;
         }
-        let key = ThumbnailFailureKey { asset_id, path, fingerprint, color };
+        let key = ThumbnailFailureKey {
+            asset_id,
+            path,
+            fingerprint,
+            color,
+            source_sample: None,
+        };
         let duplicate = state
             .failures
             .get(&asset_id)

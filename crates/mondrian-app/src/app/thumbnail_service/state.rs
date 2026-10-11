@@ -23,6 +23,7 @@ pub(super) struct ThumbnailRequestKey {
     pub(super) path: PathBuf,
     pub(super) fingerprint: MediaFileFingerprint,
     pub(super) color: ThumbnailColorContract,
+    pub(super) source_sample: mondrian_core::SourceSampleTarget,
 }
 
 #[derive(Debug)]
@@ -89,6 +90,7 @@ pub(super) struct ThumbnailFailureKey {
     pub(super) path: PathBuf,
     pub(super) fingerprint: MediaFileFingerprint,
     pub(super) color: Option<ThumbnailColorContract>,
+    pub(super) source_sample: Option<mondrian_core::SourceSampleTarget>,
 }
 
 #[derive(Default)]
@@ -161,6 +163,7 @@ pub(super) fn retain_failure(
             path: key.path,
             fingerprint: key.fingerprint,
             color: Some(key.color),
+            source_sample: Some(key.source_sample),
         },
         failure,
     );

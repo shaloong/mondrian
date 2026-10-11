@@ -1260,3 +1260,19 @@ _Avoid_: loading external plugin code in the Mondrian process, process-per-block
 
 - “Buffering” previously meant startup priming, per-frame decode waiting, and sustained recovery. These are distinct Transport States or Frame Delivery outcomes.
 - “Audio clock” previously advanced from `Instant` even when it was not proven to represent consumed device samples. Device sample position and synthetic monotonic time are distinct Clock Masters.
+
+## Media probe and Preview source evidence
+
+The physical Media probe does not infer color from file names. Bounded complete
+H.264 SPS records in avcC or Annex B can supply an explicit quantization range,
+or Annex E's inferred limited range when video_full_range_flag is absent.
+The retained evidence names that provenance and cannot authorize primaries,
+transfer or matrix. CPU and native decoded-frame materialization use the same
+immutable source contract's missing-matrix policy; explicit and unsupported
+frame matrices retain precedence. Playback-owned bounded terminal-failure memory
+retains the original decoder explanation for Viewer projection.
+
+Asset thumbnails include their exact representative Source Sample Target in
+request, failure and raster identities. Known videos use ten percent of their
+stream duration capped at thirty seconds; proven stills and unknown durations
+use zero. This temporal selection does not inspect brightness or infer color.

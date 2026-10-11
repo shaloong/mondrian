@@ -632,7 +632,7 @@ deliberately has no ACES-branded variant.
 
 Media probing keeps raw facts, diagnostic candidates, executable identity, and
 user overrides separate. CICP/container tags, camera/log metadata hints,
-complete transfer-and-gamut pairs in file names, HDR side data, and embedded ICC
+HDR side data, and embedded ICC
 profiles are retained with confidence and warnings. `candidate_color_space` is
 never pixel authority. `VideoStreamInfo::executable_color_space()` delegates to
 the only metadata-derived Auto execution seam, which simultaneously consumes
@@ -655,8 +655,8 @@ parser. Stream scope outranks container scope; agreeing declarations at the
 winning scope merge, while different executable identities at the same winning
 scope are ambiguous and fail closed independent of dictionary enumeration
 order. Lower-scope and conflicting records remain diagnostics and warnings, not
-pixel authority. File names and free-form descriptive fields remain suggestions
-regardless of confidence. Partial CICP and the current profile-name-only ICC
+pixel authority. The physical media probe does not parse file names for color information.
+Free-form descriptive fields remain suggestions regardless of confidence. Partial CICP and the current profile-name-only ICC
 mapping likewise remain diagnostic: they may help Interpret Footage, but cannot
 affect pixels without an explicit author override.
 Before selection and persistence, raw hint records are canonicalized by scope,
@@ -2077,3 +2077,29 @@ most-significant alignment; planar ten-bit uses least-significant alignment.
 This avoids CPU RGB expansion without changing the working domain, alpha
 contract, output transform, or CPU-addressable consumer requirements. A compact
 CPU payload still requires upload and is never evidence of GPU-resident decode.
+
+### H.264 sequence quantization range
+
+The physical Media probe reads bounded avcC or Annex B SPS RBSPs when FFmpeg
+leaves range unspecified. Complete, agreeing sequence headers prove an explicit
+`video_full_range_flag`, or its normative zero default under H.264 Annex E.
+`H264SequenceRange` records both range and whether that flag was absent.
+Malformed, truncated, unsupported or conflicting SPS sets authorize no range.
+An explicit container/decoder range retains precedence; decoded-frame evidence
+and author overrides continue through the shared `DecodedVideoRangeContract`.
+The inference supplies no primaries, transfer or matrix. Missing colorimetry
+still reaches the explicit project policy or author interpretation.
+
+Terminal Preview decode failures retain the original explanation in the
+playback-owned bounded failure store. App projects that same evidence to the
+Viewer instead of replacing it with a generic negative-cache message.
+
+Both CPU and resident native materialization apply the immutable source
+contract's missing-matrix policy. Explicit or unsupported decoder matrices are
+never replaced by that policy. Native import therefore consumes the same
+resolved sampling facts as CPU conversion without reading back hardware pixels.
+
+Asset thumbnails select one deterministic covering source sample at ten percent
+of the stream duration, capped at thirty seconds. Proven stills and unknown
+durations use zero. The exact target participates in request, failure and raster
+cache identities; selection does not infer color from pixels or file names.

@@ -291,6 +291,9 @@ fn key(asset_id: AssetId, seed: u64) -> ThumbnailRequestKey {
         path: PathBuf::from(format!("E:/media/thumb-{seed}.mov")),
         fingerprint: fingerprint(seed),
         color: color_contract(),
+        source_sample: mondrian_core::SourceSampleTarget::covering(
+            mondrian_core::TimelineTime::ZERO,
+        ),
     }
 }
 
@@ -429,6 +432,47 @@ fn video_asset_with_probe(path: PathBuf, configure: impl FnOnce(&mut MediaInfo))
 
 fn video_asset(path: PathBuf) -> AssetRecord {
     video_asset_with_probe(path, |_| {})
+}
+
+#[test]
+fn representative_video_sample_is_exact_bounded_and_preserves_stills() {
+    use super::analysis::thumbnail_source_sample;
+    use mondrian_core::{SourceSampleTarget, TimelineTime};
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/small/h264-bframes.mp4");
+    let root = std::env::temp_dir().join(format!("mondrian-thumbnail-sample-{}", AssetId::new()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("fixture.mp4");
+    std::fs::copy(source, &path).unwrap();
+    for (duration, frames, expected) in [
+        (1, Some(24), TimelineTime::new(1, 10).unwrap()),
+        (759, Some(18192), TimelineTime::new(30, 1).unwrap()),
+        (759, Some(1), TimelineTime::ZERO),
+        (0, None, TimelineTime::ZERO),
+    ] {
+        let asset = video_asset_with_probe(path.clone(), |probe| {
+            probe.duration = Duration::from_secs(duration);
+            probe.video_streams[0].duration = Some(probe.duration);
+            probe.video_streams[0].total_frames = frames;
+        });
+        assert_eq!(
+            thumbnail_source_sample(&asset),
+            SourceSampleTarget::covering(expected)
+        );
+    }
+    let mut first = ThumbnailJob {
+        key: key(AssetId::new(), 1),
+        generation: 1,
+        cancellation: ExecutionCancellationToken::new(),
+    };
+    let original = thumbnail_key(&first, 320, 180).unwrap();
+    first.key.source_sample = SourceSampleTarget::covering(TimelineTime::ONE);
+    assert_ne!(
+        original,
+        thumbnail_key(&first, 320, 180).unwrap(),
+        "sample identity belongs in raster cache identity"
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

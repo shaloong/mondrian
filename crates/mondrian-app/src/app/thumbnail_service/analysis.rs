@@ -221,7 +221,7 @@ pub(super) fn decode_thumbnail(
     }
     let mut request = PreviewDecodeRequest::new(
         job.key.path.as_path(),
-        mondrian_core::SourceSampleTarget::covering(mondrian_core::TimelineTime::ZERO),
+        job.key.source_sample,
         PreviewDecodeAccessMode::RandomAccessStillFrame,
         source_color,
     )
@@ -422,6 +422,23 @@ pub(super) fn color_manage_rgba(
     )
 }
 
+/// One deterministic representative position: ten percent of a known video,
+/// capped at thirty seconds. Proven stills and unknown durations stay at zero.
+/// This selects a sample, never judges brightness or changes color semantics.
+pub(super) fn thumbnail_source_sample(asset: &AssetRecord) -> mondrian_core::SourceSampleTarget {
+    use mondrian_core::{SourceSampleTarget, TimelineTime};
+    let nanos = asset
+        .media_probe()
+        .and_then(|probe| probe.primary_video().map(|video| (probe, video)))
+        .filter(|(_, video)| video.total_frames != Some(1))
+        .map(|(probe, video)| video.duration.unwrap_or(probe.duration).as_nanos() / 10)
+        .unwrap_or(0)
+        .min(30_000_000_000);
+    SourceSampleTarget::covering(
+        TimelineTime::new(nanos as i64, 1_000_000_000).expect("bounded thumbnail timestamp"),
+    )
+}
+
 pub(super) fn thumbnail_key(
     job: &ThumbnailJob,
     width: u32,
@@ -433,15 +450,17 @@ pub(super) fn thumbnail_key(
         asset_id: mondrian_core::AssetId,
         source_revision: &'a mondrian_core::MediaFileFingerprint,
         color: &'a ThumbnailColorContract,
+        source_sample: mondrian_core::SourceSampleTarget,
         width: u32,
         height: u32,
     }
 
     let identity = ThumbnailRasterIdentity {
-        schema_version: 1,
+        schema_version: 2,
         asset_id: job.key.asset_id,
         source_revision: &job.key.fingerprint,
         color: &job.key.color,
+        source_sample: job.key.source_sample,
         width,
         height,
     };
