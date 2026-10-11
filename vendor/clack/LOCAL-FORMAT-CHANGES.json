@@ -314,6 +314,15 @@
       "corrections": [],
       "format_config": "vendor/clack/rustfmt.toml",
       "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "extensions/src/gui/host.rs",
+      "preimage_sha256_raw": "58c4e6de6964c2021a5a464df2577ab992b5026ced04b7e80c9eed4de20935b3",
+      "shipped_sha256_raw": "3e240c8241083251efc521bb00f7186b2dbdc650f4dfe716fcb423fbf3652efb",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815",
+      "evidence": "Verified against the immutable local clap-gui-refusal-v1 iteration-1 stage2 preimage and sealed manifest; three whitespace-only method-chain line wraps. Metadata repaired 2026-10-11; formatter execution is not newly claimed."
     }
   ],
   "official_inputs_unchanged": true,

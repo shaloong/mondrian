@@ -136,8 +136,8 @@
     {
       "path": "MONDRIAN.md",
       "upstream_sha256": null,
-      "shipped_sha256": "57bd5fec4efd7a68f2a9af40a62da4398be073695e1d0a600703ca9f4645955f",
-      "reason": "local packaging note + bounded Host Log callback contract/oracle; no upstream byte-identity or unapplied ABI migration claim"
+      "shipped_sha256": "bc1801148ce69b8d375fd07c00ded9fa248f242c98499e3b46e41918855e5158",
+      "reason": "local packaging note + bounded Host Log callback contract/oracle; no upstream byte-identity or unapplied ABI migration claim; thread-safe GUI false-reply documentation matches sealed clap-gui-refusal-v1 iteration-1 manifest; repaired stale metadata only"
     },
     {
       "path": "host/tests/log_observation.rs",
@@ -280,8 +280,8 @@
     {
       "path": "extensions/src/gui/host.rs",
       "upstream_sha256": "da50c57f72458f65631d6794ae984c2a9b18329ea92bad4d2b9cfc04da41725e",
-      "shipped_sha256": "58c4e6de6964c2021a5a464df2577ab992b5026ced04b7e80c9eed4de20935b3",
-      "reason": "thread-safe GUI ordinary false replies avoid host error formatting/allocation"
+      "shipped_sha256": "3e240c8241083251efc521bb00f7186b2dbdc650f4dfe716fcb423fbf3652efb",
+      "reason": "thread-safe GUI ordinary false replies avoid host error formatting/allocation; verified whitespace-only post-packet chain formatting; recorded in LOCAL-FORMAT-CHANGES.json"
     },
     {
       "path": "extensions/src/params/host.rs",
@@ -713,8 +713,8 @@
     },
     {
       "path": "extensions/src/gui/host.rs",
-      "sha256": "58c4e6de6964c2021a5a464df2577ab992b5026ced04b7e80c9eed4de20935b3",
-      "bytes": 13890
+      "sha256": "3e240c8241083251efc521bb00f7186b2dbdc650f4dfe716fcb423fbf3652efb",
+      "bytes": 13971
     },
     {
       "path": "extensions/src/gui/plugin.rs",
@@ -768,8 +768,8 @@
     },
     {
       "path": "extensions/src/note_ports.rs",
-      "sha256": "5fdc7da7e24d1189694b79331f1033e11d660eda4ca3e6e34ea9e54ded25f5e5",
-      "bytes": 6551
+      "sha256": "306ac1f8042b2d42d6a138b9ef3827b8be4cc11def6d530f6a7d03cca613d20f",
+      "bytes": 6622
     },
     {
       "path": "extensions/src/note_ports/host.rs",
@@ -1562,8 +1562,8 @@
   },
   "local_formatting": {
     "receipt": "LOCAL-FORMAT-CHANGES.json",
-    "receipt_sha256_raw": "9bf01b5e653efaee08fe7c52f07dbbe3ceb2c5bb7829601471c11a22414843a4",
-    "file_count": 36,
+    "receipt_sha256_raw": "616b67d39bbd90ef55eacfc6a577a07959e035084e452097cbf1df241ed0ec1f",
+    "file_count": 37,
     "official_input_bytes_unchanged": true,
     "generated_abi_bytes_unchanged": true,
     "runtime_qualification": false
