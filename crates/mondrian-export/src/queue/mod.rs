@@ -5064,6 +5064,7 @@ fn execute_resident_video_export(
                 "resident video encoder finalization failed: {error}"
             ));
         }
+        #[cfg(target_os = "macos")]
         let media_evidence = encoder.diagnostics();
         #[cfg(target_os = "macos")]
         if !media_evidence.hardware_observed || !media_evidence.consuming_shutdown {

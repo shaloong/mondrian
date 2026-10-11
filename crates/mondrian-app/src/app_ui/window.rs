@@ -4,14 +4,15 @@
 //! native event-loop wiring, renderer setup, shell command application, and the
 //! bridge between widget-dispatched actions and `AppState`.
 
+#[cfg(feature = "validation")]
+use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-#[cfg(feature = "validation")]
-use std::{cell::RefCell, rc::Rc};
 
 #[cfg(feature = "validation")]
 use crate::app::endurance_recovery::EnduranceRecoveryOperationReceipt;
