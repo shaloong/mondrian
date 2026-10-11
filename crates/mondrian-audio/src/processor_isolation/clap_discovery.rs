@@ -849,31 +849,82 @@ pub(super) fn validate_parameters(
         return Err(invalid("CLAP parameter count exceeds the supported bound"));
     }
     let mut seen = std::collections::BTreeSet::new();
-    for parameter in parameters {
-        if ClapId::from_raw(parameter.id).is_none()
-            || !seen.insert(parameter.id)
-            || parameter.name.is_empty()
-            || parameter.name.len() > 256
-            || parameter.name.chars().any(char::is_control)
-            || !parameter.min_value.is_finite()
-            || !parameter.max_value.is_finite()
-            || !parameter.default_value.is_finite()
-            || !parameter.current_value.is_finite()
-            || parameter.min_value > parameter.max_value
-            || !(parameter.min_value..=parameter.max_value).contains(&parameter.default_value)
-            || !(parameter.min_value..=parameter.max_value).contains(&parameter.current_value)
-            || (parameter.enumeration && !parameter.stepped)
-            || (parameter.stepped
-                && [
-                    parameter.min_value,
-                    parameter.max_value,
-                    parameter.default_value,
-                    parameter.current_value,
-                ]
-                .into_iter()
-                .any(|value| value.fract() != 0.0 || value.abs() > 9_007_199_254_740_992.0))
-        {
-            return Err(invalid("CLAP parameter metadata is invalid or ambiguous"));
+    for (index, parameter) in parameters.iter().enumerate() {
+        // Keep the original predicate and short-circuit order. Only a refusal
+        // formats diagnostics; the descriptor is the already acquired snapshot.
+        let reason = if ClapId::from_raw(parameter.id).is_none() {
+            Some("reserved_id")
+        } else if !seen.insert(parameter.id) {
+            Some("duplicate_id")
+        } else if parameter.name.is_empty() {
+            Some("empty_name")
+        } else if parameter.name.len() > 256 {
+            Some("name_bytes_exceed_256")
+        } else if parameter.name.chars().any(char::is_control) {
+            Some("name_contains_control")
+        } else if !parameter.min_value.is_finite() {
+            Some("min_nonfinite")
+        } else if !parameter.max_value.is_finite() {
+            Some("max_nonfinite")
+        } else if !parameter.default_value.is_finite() {
+            Some("default_nonfinite")
+        } else if !parameter.current_value.is_finite() {
+            Some("current_nonfinite")
+        } else if parameter.min_value > parameter.max_value {
+            Some("reversed_range")
+        } else if !(parameter.min_value..=parameter.max_value).contains(&parameter.default_value) {
+            Some("default_out_of_range")
+        } else if !(parameter.min_value..=parameter.max_value).contains(&parameter.current_value) {
+            Some("current_out_of_range")
+        } else if parameter.enumeration && !parameter.stepped {
+            Some("enum_not_stepped")
+        } else if parameter.stepped {
+            [
+                parameter.min_value,
+                parameter.max_value,
+                parameter.default_value,
+                parameter.current_value,
+            ]
+            .into_iter()
+            .enumerate()
+            .find_map(|(field, value)| {
+                // Preserve field order and fractional-before-precision checks.
+                if value.fract() != 0.0 {
+                    Some(
+                        [
+                            "stepped_min_fractional",
+                            "stepped_max_fractional",
+                            "stepped_default_fractional",
+                            "stepped_current_fractional",
+                        ][field],
+                    )
+                } else if value.abs() > 9_007_199_254_740_992.0 {
+                    Some(
+                        [
+                            "stepped_min_precision_limit",
+                            "stepped_max_precision_limit",
+                            "stepped_default_precision_limit",
+                            "stepped_current_precision_limit",
+                        ][field],
+                    )
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            // ASCII only: never echo a plugin-provided name, reread a native
+            // field, or normalize float values to construct this error.
+            return Err(invalid(format!(
+                "CLAP parameter metadata is invalid or ambiguous: index={index} native_id={} reason={reason} min_bits={:016X} max_bits={:016X} default_bits={:016X} current_bits={:016X}",
+                parameter.id,
+                parameter.min_value.to_bits(),
+                parameter.max_value.to_bits(),
+                parameter.default_value.to_bits(),
+                parameter.current_value.to_bits(),
+            )));
         }
     }
     Ok(())
@@ -1284,6 +1335,302 @@ mod tests {
             ..descriptor
         }])
         .is_err());
+    }
+
+    fn diagnostic_parameter() -> ClapParameterDescriptor {
+        ClapParameterDescriptor {
+            id: 7,
+            name: "Mix".to_owned(),
+            min_value: 0.0,
+            max_value: 1.0,
+            default_value: 0.5,
+            current_value: 0.5,
+            automatable: true,
+            stepped: false,
+            enumeration: false,
+            read_only: false,
+            hidden: false,
+        }
+    }
+
+    fn diagnostic_detail(parameters: &[ClapParameterDescriptor]) -> String {
+        match validate_parameters(parameters) {
+            Err(AudioProcessorHostError::InvalidContract(detail)) => detail,
+            other => panic!("expected the original typed InvalidContract refusal, got {other:?}"),
+        }
+    }
+
+    fn assert_parameter_diagnostic(
+        parameters: &[ClapParameterDescriptor],
+        index: usize,
+        reason: &str,
+    ) {
+        let parameter = &parameters[index];
+        let detail = diagnostic_detail(parameters);
+        assert_eq!(
+            detail,
+            format!(
+                "CLAP parameter metadata is invalid or ambiguous: index={index} native_id={} reason={reason} min_bits={:016X} max_bits={:016X} default_bits={:016X} current_bits={:016X}",
+                parameter.id,
+                parameter.min_value.to_bits(),
+                parameter.max_value.to_bits(),
+                parameter.default_value.to_bits(),
+                parameter.current_value.to_bits(),
+            ),
+            "first-reason mismatch for {reason}",
+        );
+        assert!(detail.is_ascii());
+        assert!(detail.len() < 512, "diagnostic must remain bounded");
+    }
+
+    #[test]
+    fn parameter_refusal_diagnostic_reports_ordered_reasons() {
+        let parameter = diagnostic_parameter();
+        let mut cases = Vec::new();
+        macro_rules! case {
+            ($reason:literal, $($field:ident: $value:expr),+ $(,)?) => {
+                cases.push(($reason, ClapParameterDescriptor { $($field: $value,)+ ..parameter.clone() }));
+            };
+        }
+        case!("reserved_id", id: u32::MAX);
+        case!("empty_name", name: String::new());
+        case!("name_bytes_exceed_256", name: "é".repeat(129));
+        case!("name_contains_control", name: "plugin\nlabel".to_owned());
+        case!("min_nonfinite", min_value: f64::NEG_INFINITY);
+        case!("max_nonfinite", max_value: f64::INFINITY);
+        case!("default_nonfinite", default_value: f64::NAN);
+        case!("current_nonfinite", current_value: f64::NAN);
+        case!("reversed_range", min_value: 2.0);
+        case!("default_out_of_range", default_value: -0.25);
+        case!("current_out_of_range", current_value: 1.25);
+        case!("enum_not_stepped", enumeration: true);
+        case!("stepped_min_fractional", stepped: true, min_value: 0.25);
+        case!("stepped_max_fractional", stepped: true, max_value: 0.75);
+        case!("stepped_default_fractional", stepped: true);
+        case!("stepped_current_fractional", stepped: true, default_value: 0.0);
+        case!("stepped_min_precision_limit", stepped: true, min_value: -9_007_199_254_740_994.0, default_value: 0.0, current_value: 0.0);
+        case!("stepped_max_precision_limit", stepped: true, max_value: 9_007_199_254_740_994.0, default_value: 0.0, current_value: 0.0);
+        for (reason, rejected) in cases {
+            assert_parameter_diagnostic(&[rejected], 0, reason);
+        }
+        let mut second = parameter.clone();
+        second.current_value = 0.75;
+        assert_parameter_diagnostic(&[parameter, second], 1, "duplicate_id");
+    }
+
+    #[test]
+    fn parameter_refusal_diagnostic_keeps_original_short_circuit_precedence() {
+        let parameter = diagnostic_parameter();
+        let cases = [
+            (
+                "reserved_id",
+                ClapParameterDescriptor {
+                    id: u32::MAX,
+                    name: String::new(),
+                    min_value: f64::NAN,
+                    ..parameter.clone()
+                },
+            ),
+            (
+                "empty_name",
+                ClapParameterDescriptor {
+                    name: String::new(),
+                    min_value: f64::NAN,
+                    ..parameter.clone()
+                },
+            ),
+            (
+                "name_bytes_exceed_256",
+                ClapParameterDescriptor {
+                    name: "\n".repeat(257),
+                    min_value: f64::NAN,
+                    ..parameter.clone()
+                },
+            ),
+            (
+                "min_nonfinite",
+                ClapParameterDescriptor {
+                    min_value: f64::NAN,
+                    max_value: f64::NAN,
+                    default_value: f64::NAN,
+                    current_value: f64::NAN,
+                    ..parameter.clone()
+                },
+            ),
+            (
+                "max_nonfinite",
+                ClapParameterDescriptor {
+                    max_value: f64::NAN,
+                    default_value: f64::NAN,
+                    current_value: f64::NAN,
+                    ..parameter.clone()
+                },
+            ),
+            (
+                "default_nonfinite",
+                ClapParameterDescriptor {
+                    default_value: f64::NAN,
+                    current_value: f64::NAN,
+                    ..parameter.clone()
+                },
+            ),
+            (
+                "reversed_range",
+                ClapParameterDescriptor {
+                    min_value: 2.0,
+                    default_value: -1.0,
+                    current_value: -1.0,
+                    ..parameter.clone()
+                },
+            ),
+            (
+                "default_out_of_range",
+                ClapParameterDescriptor {
+                    default_value: -1.0,
+                    current_value: 2.0,
+                    enumeration: true,
+                    ..parameter.clone()
+                },
+            ),
+            (
+                "current_out_of_range",
+                ClapParameterDescriptor {
+                    current_value: 2.0,
+                    enumeration: true,
+                    ..parameter.clone()
+                },
+            ),
+            (
+                "enum_not_stepped",
+                ClapParameterDescriptor { enumeration: true, ..parameter.clone() },
+            ),
+            (
+                "stepped_min_fractional",
+                ClapParameterDescriptor {
+                    stepped: true,
+                    min_value: 0.25,
+                    max_value: 0.75,
+                    ..parameter.clone()
+                },
+            ),
+            (
+                "stepped_max_fractional",
+                ClapParameterDescriptor {
+                    stepped: true,
+                    max_value: 0.75,
+                    ..parameter.clone()
+                },
+            ),
+            // Default/current precision failures cannot precede their required
+            // containing bounds: the original earlier max predicate wins.
+            (
+                "stepped_max_precision_limit",
+                ClapParameterDescriptor {
+                    stepped: true,
+                    max_value: 9_007_199_254_740_994.0,
+                    default_value: 9_007_199_254_740_994.0,
+                    current_value: 0.0,
+                    ..parameter.clone()
+                },
+            ),
+            (
+                "stepped_max_precision_limit",
+                ClapParameterDescriptor {
+                    stepped: true,
+                    max_value: 9_007_199_254_740_994.0,
+                    default_value: 0.0,
+                    current_value: 9_007_199_254_740_994.0,
+                    ..parameter.clone()
+                },
+            ),
+        ];
+        for (reason, rejected) in cases {
+            assert_parameter_diagnostic(&[rejected], 0, reason);
+        }
+        let second = ClapParameterDescriptor {
+            name: String::new(),
+            current_value: f64::NAN,
+            ..parameter.clone()
+        };
+        assert_parameter_diagnostic(&[parameter.clone(), second], 1, "duplicate_id");
+        let later = ClapParameterDescriptor { id: 8, min_value: f64::NAN, ..parameter.clone() };
+        let first = ClapParameterDescriptor { default_value: 2.0, ..parameter };
+        assert_parameter_diagnostic(&[first, later], 0, "default_out_of_range");
+    }
+
+    #[test]
+    fn parameter_refusal_diagnostic_preserves_admission_and_count_message() {
+        let parameter = diagnostic_parameter();
+        validate_parameters(&[]).expect("empty parameters remain valid");
+        for id in [0, 7, 0x8000_0000, u32::MAX - 1] {
+            validate_parameters(&[ClapParameterDescriptor { id, ..parameter.clone() }])
+                .expect("all non-reserved unsigned IDs remain admitted");
+        }
+        for value in [0.0, 1.0] {
+            validate_parameters(&[ClapParameterDescriptor {
+                default_value: value,
+                current_value: value,
+                ..parameter.clone()
+            }])
+            .expect("inclusive range endpoints remain admitted");
+        }
+        validate_parameters(&[ClapParameterDescriptor {
+            min_value: -0.0,
+            max_value: 0.0,
+            default_value: 0.0,
+            current_value: -0.0,
+            stepped: true,
+            enumeration: true,
+            ..parameter.clone()
+        }])
+        .expect("signed zero and singleton stepped range remain admitted");
+        validate_parameters(&[ClapParameterDescriptor {
+            min_value: -9_007_199_254_740_992.0,
+            max_value: 9_007_199_254_740_992.0,
+            default_value: 0.0,
+            current_value: 9_007_199_254_740_992.0,
+            stepped: true,
+            ..parameter.clone()
+        }])
+        .expect("exact 2^53 stepped boundary remains admitted");
+        let admitted = (0..MAX_PARAMETERS)
+            .map(|id| ClapParameterDescriptor { id, ..parameter.clone() })
+            .collect::<Vec<_>>();
+        validate_parameters(&admitted).expect("the existing capacity is inclusive");
+        let mut last_rejected = admitted;
+        last_rejected[MAX_PARAMETERS as usize - 1].id = u32::MAX;
+        assert_parameter_diagnostic(&last_rejected, MAX_PARAMETERS as usize - 1, "reserved_id");
+        let oversized = vec![parameter; MAX_PARAMETERS as usize + 1];
+        assert_eq!(
+            diagnostic_detail(&oversized),
+            "CLAP parameter count exceeds the supported bound"
+        );
+    }
+
+    #[test]
+    fn parameter_refusal_diagnostic_preserves_nan_payload_signed_zero_and_unsigned_id() {
+        let parameter = diagnostic_parameter();
+        let rejected = ClapParameterDescriptor {
+            id: 0x8000_0000,
+            min_value: -0.0,
+            current_value: f64::from_bits(0x7FF8_0000_0000_0042),
+            ..parameter.clone()
+        };
+        let detail = diagnostic_detail(&[rejected]);
+        assert_eq!(detail, "CLAP parameter metadata is invalid or ambiguous: index=0 native_id=2147483648 reason=current_nonfinite min_bits=8000000000000000 max_bits=3FF0000000000000 default_bits=3FE0000000000000 current_bits=7FF8000000000042");
+        let second = ClapParameterDescriptor {
+            min_value: -0.0,
+            max_value: 0.0,
+            default_value: 0.0,
+            current_value: -0.0,
+            ..parameter.clone()
+        };
+        assert_eq!(diagnostic_detail(&[parameter, second]), "CLAP parameter metadata is invalid or ambiguous: index=1 native_id=7 reason=duplicate_id min_bits=8000000000000000 max_bits=0000000000000000 default_bits=0000000000000000 current_bits=8000000000000000");
+        let signaling_nan = ClapParameterDescriptor {
+            min_value: f64::from_bits(0x7FF0_0000_0000_0042),
+            ..diagnostic_parameter()
+        };
+        assert!(diagnostic_detail(&[signaling_nan]).contains("min_bits=7FF0000000000042"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Plugin host engineering sprint
 
-Updated 2026-10-11 (Asia/Shanghai). This is the recoverable coordination record
+Updated 2026-10-12 (Asia/Shanghai). This is the recoverable coordination record
 for the OpenFX / VST3 / CLAP sprint. Detailed contracts remain in the existing
 [plugin architecture](../architecture/plugin-system.md),
 [audio pipeline](../architecture/audio-pipeline.md),
@@ -58,6 +58,7 @@ Current round evidence:
 | Source32 shared audio and real CLAP regression | PASS within existing finite workflows | Two rounds of five CLAP/VST3 sidechain/PCM/time/object cases and two real Ring Out metadata/default-load rounds; current host, separately retained historical fixture binaries |
 | CLAP factory slot admission | Verified within source36 Windows controls | Cached count capped before List/Probe/Note traversal; two actual RED controls, six GREEN ABI-counter controls, ordinary351/0 and current native regressions;4096 is host policy, not a CLAP limit |
 | Source36 audio regression | PASS within existing finite workflows | Ordinary351/0; owner14 and metadata2; original CLAP/VST3 cases10; real Ring Out metadata/default-load2; strict workspace Clippy. No new Note DSP, GUI, RT or performance qualification |
+| CLAP parameter-refusal detail | Verified within source38 finite Windows controls | Original admission preserved; same rejected snapshot's first reason, unsigned ID/index and direct numeric bits; ordinary355/0 and two real failed Airwindows startup observations, without compatibility/root-cause qualification |
 | New performance/platform qualification | Not run | Historical results below do not transfer to new changes |
 
 Clack's RED reproduced in both source and destination. The GUI wrapper differed
@@ -1600,7 +1601,8 @@ reports no native version string; it does not qualify PCM, nondefault state,
 GUI, full-project reload or Preview/Export. Other platforms, GPU interop,
 allocation/deadline performance and full-standard compatibility remain unverified.
 
-Next: generic parameter-refusal detail in the existing CLAP error channel, using
+At the source36 checkpoint, the next slice was generic parameter-refusal detail
+in the existing CLAP error channel, using
 the same rejected descriptor's direct numeric bits and first unchanged predicate;
 no extra native query, normalization, sidecar or Stage B instrumentation is
 approved. Separately, proposed Note author M1 needs an archive boundary decision:
@@ -1610,3 +1612,95 @@ explicit strict31-to32 note-free migration is the proposed minimum; container1/l
 not change. No Note author/model/schema migration has been implemented or
 approved here, and ordinary transactions/Undo cannot recover data discarded
 during old deserialization.
+
+
+## Source38: CLAP parameter-refusal diagnostics and actual failure evidence
+
+The existing shared parameter validator now appends the rejected slice index,
+unsigned native parameter ID, first failed predicate and direct `f64::to_bits`
+hex values for minimum/maximum/default/current to its original InvalidContract
+prefix. Every original predicate, short-circuit order, `seen.insert` effect,
+inclusive range, stepped-field order and1024 host capacity remains. No plugin
+name, native reread, normalization, new state/protocol or DSP logging was added.
+Formatting occurs only on refusal; this is not a real-time safety certification.
+
+Only `mondrian-audio/src/processor_isolation/clap_discovery.rs` changed in
+production. Four additive controls cover ordered and overlapping refusals,
+unchanged admission/count error, full-width unsigned IDs, signed zero and direct
+NaN payload bits. Source37 used the complete original validator with the same
+new tests. Two actual RED controls failed their original positive oracle,
+runner1/native101, and settled without deadline/reaping errors. Its Audio21 PE
+is retained before replacement. Restoring the original validator in formatted
+GREEN exactly reproduces formatted RED, including every old/new test.
+
+Source38 freezes1796 inputs, SHA256
+`C1C97090D7E490953BCEC1D90E5452E0FB70A90D8FFF80A54F99EAC32B259FE0`.
+Fresh Audio22 and normal Product18 use that closure, original command/profile;
+Product18 is last. Actual all/ignored/ordinary Lists429/74/355 determine428
+filtered tests for the selected native cases. Historical fixture binaries retain
+their producer identity; independent compiled support subsets match current
+bytes. Their old full host freezes are not relabelled current.
+
+| Actual source38 gate | Result | Execution receipt under sprint scratch |
+| --- | --- | --- |
+| Audio ordinary, including four new diagnostic controls |355 passed/0 failed/74 filtered,26.99s | `audio-ordinary-source38-r1/execution-receipt.json`, BFD0D28D... |
+| Process ownership14 + CLAP input-note metadata2 |16 selected cases passed; original oracles/budgets | `clap-noteport-source38-native-execution-r2/execution-receipt.json`, 3206E817... |
+| Original CLAP/VST3 PCM/bus/state/time/object |10 selected cases passed; original oracles/budgets | `audio-legacy-source38-execution-r2/execution-receipt.json`, FB059392... |
+| Real Ring Out metadata/default opaque load |2 selected cases passed; original oracles/budgets | `clap-readonly-source38-native-execution-r2/execution-receipt.json`, ED723E2E... |
+| Strict workspace Clippy | All targets/all features, `-D warnings`, jobs1; exit0 | `workspace-clippy-r22-source-receipt.json`, E548BC0E... |
+
+Two real AirwindowsConsolidated CLAP1.2026.285 rounds retain the original plugin,
+314B Galactic state, input PCM, automation, selector, partitions1/17/64,
+positive `expectedPassed=1` and180s budgets. Both remain FAILED at the first
+partition1 startup validation, before PCM creation. Both reject index8,
+native ID2944917348: round1 `default_out_of_range`, default bits
+`C4DD647200000000`; round2 `default_nonfinite`, bits`FFFFFFFFE0000000`.
+Minimum/current are`0000000000000000`, maximum`3FF0000000000000`.
+The same raw test stderr contains these fields, not a separately captured Probe
+or reconstructed decimal. Each native owner exits101/runner1, with confirmed
+reaping and no deadline/settlement errors. Diagnostic capture is verified;
+compatibility remains RED. Source33's earlier completed PCM is not inherited.
+
+The existing startup rejection channel covers decoded payload validation,
+expected output construction and native metadata after state/render-mode setup.
+No actual child payload snapshot was retained; the message alone does not
+identify its originating call site or prove publisher/native callback fault.
+Pinned publisher source is a hypothesis lead, not shipped-binary proof.
+The two-round receipt is
+`clap-parameter-refusal-source38-native-execution-r1/execution-receipt.json`,
+SHA256257385DD18B3704CA8FCD36F229F2126E9AF866B0F715FB632F49955FB595F42;
+independent runtime acceptance is39690739... under sprint scratch.
+
+Normal App library build completed first; lossless generated-rlib compression
+preserved453387582 raw bytes and hash, then Product18 linked normally in19.81s.
+Audio22/Product18 and615927808B PDB were copied/hash-verified in the existing
+E artifact store; only two exact generated local PDB hard links were released.
+Strict21 genuinely failed with PowerShell OOM and allocation errors; its raw log
+and missing final source receipt remain recorded. Strict22 passed in3m01 with
+the same argv and jobs1. This does not identify the resource root cause or
+establish processing performance. Failed data caller r1 is also retained:
+metadata16 prepared, then an incidental requirement for unselected PDB presence
+stopped Legacy preparation. Sealed generator r2 canonicalizes only filenames
+membership; selected PE existence/hash/profile/producer/oracles stay strict.
+Data caller r2 uses fresh output paths and succeeds; no original native test was
+weakened. Pre-native relative-output refusal and root install hash-format/path
+guard mistakes remain separate observations rather than execution claims.
+
+This slice qualifies bounded diagnostics and the listed existing Windows
+regressions. Full Note DSP/instruments, GUI, Preview/Export equivalence,
+allocation/deadline performance, GPU interoperability, other platforms and
+complete standard compatibility remain unverified. Next is a separately
+reviewed minimal classification of the three existing startup rejection sites;
+it may identify host consumption location, not prove a publisher defect. No
+site classification implementation has been integrated in this checkpoint.
+
+Surge XT1.3.4 corpus acquisition has now completed separately: official Windows
+plugins-only asset185292432,49093875B, publisher MD5
+`d318e95ca79a5ee70ddafec04313a00c` and local SHA256
+`564E162C560AF07AD4ED47FE1BFCD827CF97A575DE30D06C48249AAD2E7C35E6`.
+The first finite tail request timed out after28127602B and remains failed; its
+partial was unverified until a second exact206 remainder and complete-archive
+MD5 established the full byte sequence. Original partials and both attempt
+receipts remain. `surge-acquisition-resume-r2/archive-admission.json` records
+acquisition only: no extraction, installation or native/plugin compatibility
+result is established by it. Static package and license inventory follows.
