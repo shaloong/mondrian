@@ -47,7 +47,10 @@ Current round evidence:
 | DXC build environment / renderer check | PASS within build scope | Original immutable API and SHA-256 checks executed; exact cached archive reused; `renderer-build-environment-r6.log`. No GPU output or performance claim |
 | Fresh Basic / SessionProbe binaries | Verified within selected native cases | Fresh build r5 / freeze19: 15 original native groups; no full OFX/GPU qualification |
 | Active native catalog shutdown | Verified within two controlled Windows cases | Actual discovery/describe worker retirement and native HANDLE exit; other GUI lifecycle remains separate |
-| Independent vendor/plugin execution | Verified within List/Probe/capture only | Airwindows CLAP/VST3, eight native runs; PCM/state restoration remains pending |
+| Independent vendor discovery | Verified within List/Probe/capture only | Airwindows CLAP/VST3 eight runs and Ring Out CLAP four runs; no full compatibility claim |
+| Initial VST3 value restart consumer | Verified within owned initial/fresh-object controls | Commit0bd39c4; SDK10/10, prior native10/10, ordinary Audio332 and vendor269, independently accepted source26 |
+| Signed-zero buffer fidelity | Verified within owned buffer controls and limited native VST3 replay | Source27 RED270/1 to source28 GREEN271/0; Audio332/0; Airwindows two rounds pass unchanged strict oracle; no SDK violation/performance claim |
+| External native PCM | VST3 limited PASS; CLAP RED | Airwindows VST3 default-state offline bypass partitions1/17/64 and distinct finite non-bypass output; CLAP schema drift remains unresolved |
 | New performance/platform qualification | Not run | Historical results below do not transfer to new changes |
 
 Clack's RED reproduced in both source and destination. The GUI wrapper differed
@@ -910,3 +913,107 @@ Audio names,269 vendor names, both native control groups, and the earlier SDK
 acceptance. The actual Airwindows signed-zero RED is explicitly retained; this
 acceptance permits the limited initial/fresh-object slice commit and does not
 qualify third-party compatibility or source26 full-App runtime regression.
+
+Ring Out's four actual discovery/default-capture Jobs subsequently received
+independent limited acceptance in `ring-out-native-independent-final-receipt-r2.json`
+(SHA256 `49B783932E2A1389CDEAA40F2023E3FBB8DF40FC0D58B8798308D94AED2EF3A4`).
+Both raw List responses and both raw Probe responses are identical; both opaque
+states have the same184-byte length/hash. All four native owners exit0, report
+no deadline/errors/outliving descendants and report descendants reaped. The
+review binds the earlier exact source26 timestamped snapshot; subsequent
+source27/28 buffer-test/policy edits are explicitly outside that qualification.
+Root-observed controller exit0 returns are recorded separately from the
+independently rehashed native owner proof. State restore and PCM remain untested.
+
+The signed-zero regression is now experimentally established. Source27 adds
+only two owned buffer tests. `vst3-signed-zero-red-execution-r1` records
+**270 PASS /1 FAIL**, with flags7 versus expected1 on the preceding numeric-zero
+policy; native owner exit101 is fully settled. The RED executable is retained in
+archive r12. Source28 changes the same private scan's predicate to positive-zero
+bits in all four f32/f64 input/output consumers, preserving native-declared
+flags and existing missing/inactive behavior. Both new tests and the original
+269 pass (**271/0/0**) in `vst3-signed-zero-green-execution-r1`. This demonstrates
+the owned buffer fidelity policy, not full third-party or performance acceptance.
+Audio/product rebuilds and unchanged real-vendor PCM regression are pending.
+
+## Source28 signed-zero native acceptance and resource checkpoint
+
+The actual source28 App9 product build completed in22m15s with exit0 and
+all1,785 source read leases held. Its actual compiler-artifact is the Windows
+`mondrian` binary, features[], test=false, fresh=false, SHA256
+`2A60BF23C236F9BC0F9B9520D237057165D153D96F788DEC80066E399A77DB56`.
+`app-native-build-r9-source-receipt.json` binds the actual producer and frozen
+source28. Audio14 ordinary regression passes332/0/0 against fresh actual
+all401/ignored69 Job inventories in `audio-ordinary-execution-r11`.
+Workspace strict Clippy15 passes all targets/all features with `-D warnings`,
+exit0 and all1,785 source read leases; its scope is the workspace check.
+
+Two actual Airwindows VST3 Jobs now pass the unchanged strict oracle:
+`external-vendor-native-signed-zero-execution-r1-round1` and `-round2`.
+Each executes4 actual processing instances. The six bypass outputs for
+partitions1/17/64 are all exactly32,768 input bytes, including8 negative zeros,
+SHA256 `0C54BF849A05BEA1F80494BA50ADDD3828C31736DA3C179A5CC735CB2450BB2`.
+Both non-bypass64 outputs are finite and differ in all8,192 sample bit patterns.
+Actual restored default opaque state, author/native-bypass distinctions,
+instance serials and observed post-Drop child exits are retained. Both outer
+Jobs exit0 without deadlines, errors or outliving descendants; all8 processing
+children have observed normal exit0. Independent limited acceptance is
+`airwindows-vst3-signed-zero-two-rounds-independent-acceptance-r1.json`, SHA256
+`4CE1D486422F6C7C1B19C67487164A51B80AC51307EDF2457C6FE3859AADD587`.
+This verifies only Windows48kHz/stereo/offline/default-state processing under
+these inputs. It does not qualify GUI, realtime safety, project reload,
+nondefault-state discrimination, graceful Shutdown ACK, performance or full
+standard compatibility. Historical RED evidence remains intact.
+
+An extra standalone `vst3-host` lib/tests strict Clippy check fails with78
+reported diagnostics in `vst3-vendor-strict-clippy-r1.log`; its exit101 receipt
+is retained. Workspace Clippy success does not cover this separate check.
+Independent diagnostic-to-baseline review maps all78 diagnostics to unchanged
+source lines at0bd39c4:72 unnecessary casts,3 manual is-multiple-of checks,
+one borrowed box, one missing transmute annotation and one vector initialization.
+None originates in the new predicate or signed-zero tests. Mapping receipt
+`vst3-vendor-strict78-independent-baseline-mapping-r1.json` has SHA256
+`AF48B7807DFDF6296EC231F0912B0B7A537A843019825711C89344B48E55EB3B`.
+This is static baseline attribution, not a claim of an actual baseline Clippy
+execution. No warning suppressions, assertion deletions or broad vendor cleanup
+have been made to force a PASS. The source28 SDK initial-value replay passes
+10/10 and the original CLAP/VST3 native replay passes10/10 in
+`vst3-initial-values-native-execution-r3` and `audio-native-execution-r10`.
+Both use current Audio14/App9 and freeze28. Legacy selector admission verifies
+exact membership in the earlier actual current all401/ignored69 Job inventories;
+SDK admission executes five new exact selector Job Lists. Historical source26
+results remain separately bounded.
+
+The cold product/check builds reduced free disk space to about256MiB. Root
+applied reversible NTFS LZX compression to21 historical executable copies and
+the completed product debug-symbol file (two paths refer to the same stored
+file). Before/after raw SHA256 agrees for every compressed file; no file was
+deleted and no source or active executable was changed. Receipts are
+`native-archive-lossless-compression-r1.json` and
+`product-debug-symbol-lossless-compression-r1.json`; after debug-symbol
+compression the measured free space is1,267,945,472 bytes. This is a storage
+maintenance action, not a processing performance claim.
+
+The isolated CLAP read-only metadata/default-load test slice received static
+acceptance after removing an unused, unavailable Serialize derive; original
+r1 remains rejected and immutable. Delivery r2 SHA256 is
+`DF67F8F4D21EB812118AD31FA1710F6DFF695702BCB886FE335799C9026167A3`;
+independent static review SHA256 is
+`F3AB7A5ADF7B4F846F7BC54D144C3DC14636D1C5CBDA379F09E4DE2FB2109F70`.
+It adds a separate lab gate while preserving the existing strict PCM gate.
+Core CLAP already retains11 metadata descriptors and filters the two read-only
+meters from the9 writable author values. No second parameter model is needed.
+This candidate is not yet integrated, built or natively executed.
+
+Surge XT1.3.4 remains a proposed instrument corpus member, not an acquired or
+compatible plugin. Official checksum asset185292289 was obtained, with MD5
+`d318e95ca79a5ee70ddafec04313a00c` for the49,093,875-byte Windowsx64 plugins-only
+ZIP. Two finite whole-file attempts and two bounded range batches failed under
+actual HTTPS timeout/reset conditions. Only about7.4MB of partial evidence is
+retained; no complete archive, binary hash, package-license inventory, executable
+extraction, installation or native result exists. Evidence is sealed in
+`third-corpus-acquisition-r2` (delivery receipt SHA256
+`F307D063039C89E933178936608E4F83400D657D94E240E513537A52A4EDAE77`).
+Acquisition is Blocked by observed transfer reliability. Any retry must use
+fresh finite receipts and complete length/official-MD5/local-SHA validation;
+instrument admission requires musical events, bus and audio-output oracles.

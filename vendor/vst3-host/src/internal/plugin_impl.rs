@@ -594,10 +594,14 @@ impl HostSampleBuffers {
     ) {
         match self {
             Self::F32(samples) => {
-                update_bus_silence_flags(&samples.inputs, buses, active, frames, false)
+                update_bus_silence_flags(&samples.inputs, buses, active, frames, false, |sample| {
+                    sample.to_bits() == 0
+                })
             }
             Self::F64(samples) => {
-                update_bus_silence_flags(&samples.inputs, buses, active, frames, false)
+                update_bus_silence_flags(&samples.inputs, buses, active, frames, false, |sample| {
+                    sample.to_bits() == 0
+                })
             }
         }
     }
@@ -610,10 +614,14 @@ impl HostSampleBuffers {
     ) {
         match self {
             Self::F32(samples) => {
-                update_bus_silence_flags(&samples.outputs, buses, active, frames, true)
+                update_bus_silence_flags(&samples.outputs, buses, active, frames, true, |sample| {
+                    sample.to_bits() == 0
+                })
             }
             Self::F64(samples) => {
-                update_bus_silence_flags(&samples.outputs, buses, active, frames, true)
+                update_bus_silence_flags(&samples.outputs, buses, active, frames, true, |sample| {
+                    sample.to_bits() == 0
+                })
             }
         }
     }
@@ -783,14 +791,17 @@ fn channel_mask(channel_count: i32) -> u64 {
     }
 }
 
-fn update_bus_silence_flags<T: PartialEq + Default>(
+fn update_bus_silence_flags<T>(
     samples: &[Vec<T>],
     buses: &mut [AudioBusBuffers],
     active: &[bool],
     frames: usize,
     preserve_plugin_flags: bool,
+    is_positive_zero: impl Fn(&T) -> bool,
 ) {
-    let zero = T::default();
+    // Silence hints are optional. Inferring them only from positive-zero bits
+    // preserves signed-zero samples that native or host silence optimizations
+    // would otherwise replace with +0. Plugin-declared flags remain authoritative.
     let mut sample_index = 0usize;
     for (bus_index, bus) in buses.iter_mut().enumerate() {
         let channel_count = bus.numChannels.max(0) as usize;
@@ -804,7 +815,7 @@ fn update_bus_silence_flags<T: PartialEq + Default>(
             if channel < 64
                 && samples
                     .get(sample_index + channel)
-                    .is_none_or(|samples| samples.iter().take(frames).all(|sample| sample == &zero))
+                    .is_none_or(|samples| samples.iter().take(frames).all(&is_positive_zero))
             {
                 computed |= 1u64 << channel;
             }
@@ -4939,6 +4950,106 @@ mod process_buffer_tests {
         prepare_output_silence_flags(&mut output_buses, &[true]);
         storage.update_output_silence_flags(&mut output_buses, &[true], 4);
         assert_eq!(output_buses[0].silenceFlags, 0b01);
+    }
+
+    #[test]
+    fn host_silence_hints_preserve_signed_zero_and_processing_prefix() {
+        let layout = buses(&[5, 1]);
+        let active = [true, false];
+        for use_f64 in [false, true] {
+            let mut storage = if use_f64 {
+                HostSampleBuffers::F64(build_typed_sample_buffers(
+                    3, &layout, &active, &layout, &active,
+                ))
+            } else {
+                HostSampleBuffers::F32(build_typed_sample_buffers(
+                    3, &layout, &active, &layout, &active,
+                ))
+            };
+            let input = [
+                vec![0.0, 0.0, 1.0],
+                vec![-0.0, -0.0, 1.0],
+                vec![0.0, -0.0, 1.0],
+                vec![f32::from_bits(1), 0.0, 0.0],
+                vec![0.25, 0.0, 0.0],
+            ];
+            storage.copy_inputs_from(&input, 0, 3);
+            if let HostSampleBuffers::F64(samples) = &mut storage {
+                samples.inputs[3][0] = f64::from_bits(1);
+            }
+            let mut input_buses = buses(&[5, 1]);
+            storage.update_input_silence_flags(&mut input_buses, &active, 2);
+            assert_eq!(input_buses[0].silenceFlags, 0b00001, "f64={use_f64}");
+            assert_eq!(input_buses[1].silenceFlags, 1);
+
+            match &mut storage {
+                HostSampleBuffers::F32(samples) => {
+                    for (destination, source) in samples.outputs.iter_mut().zip(&input) {
+                        destination.copy_from_slice(source);
+                    }
+                }
+                HostSampleBuffers::F64(samples) => {
+                    for (destination, source) in samples.outputs.iter_mut().zip(&input) {
+                        for (to, from) in destination.iter_mut().zip(source) {
+                            *to = *from as f64;
+                        }
+                    }
+                    samples.outputs[3][0] = f64::from_bits(1);
+                }
+            }
+            let mut output_buses = buses(&[5, 1]);
+            prepare_output_silence_flags(&mut output_buses, &active);
+            storage.update_output_silence_flags(&mut output_buses, &active, 2);
+            assert_eq!(output_buses[0].silenceFlags, 0b00001, "f64={use_f64}");
+            assert_eq!(output_buses[1].silenceFlags, 1);
+
+            let mut flat = vec![vec![9.0; 4]; 5];
+            storage.copy_outputs_to(&mut flat, 1, 2, &output_buses, &active);
+            let mut routed = vec![
+                AudioBusBuffer::new(5, 4, true),
+                AudioBusBuffer::new(1, 4, false),
+            ];
+            for bus in &mut routed {
+                for channel in &mut bus.channels {
+                    channel.fill(9.0);
+                }
+            }
+            storage.copy_outputs_to_buses(&mut routed, 1, 2, &output_buses, &active);
+            for (channel, expected) in input.iter().enumerate().take(3) {
+                for (sample, expected) in expected.iter().take(2).enumerate() {
+                    assert_eq!(flat[channel][sample + 1].to_bits(), expected.to_bits());
+                    assert_eq!(
+                        routed[0].channels[channel][sample + 1].to_bits(),
+                        expected.to_bits()
+                    );
+                }
+                assert_eq!(flat[channel][0], 9.0);
+                assert_eq!(flat[channel][3], 9.0);
+            }
+            assert_eq!(routed[1].channels[0], [9.0, 0.0, 0.0, 9.0]);
+
+            // Native-declared silence remains authoritative, including for -0.
+            output_buses[0].silenceFlags |= 0b00010;
+            storage.update_output_silence_flags(&mut output_buses, &active, 2);
+            storage.copy_outputs_to(&mut flat, 1, 2, &output_buses, &active);
+            assert_eq!(flat[1][1].to_bits(), 0);
+            assert_eq!(flat[1][2].to_bits(), 0);
+        }
+    }
+
+    #[test]
+    fn absent_sample_storage_keeps_silent_channel_hints() {
+        for storage in [
+            HostSampleBuffers::F32(build_typed_sample_buffers(2, &[], &[], &[], &[])),
+            HostSampleBuffers::F64(build_typed_sample_buffers(2, &[], &[], &[], &[])),
+        ] {
+            let mut input = buses(&[1]);
+            storage.update_input_silence_flags(&mut input, &[true], 2);
+            assert_eq!(input[0].silenceFlags, 1);
+            let mut output = buses(&[1]);
+            storage.update_output_silence_flags(&mut output, &[true], 2);
+            assert_eq!(output[0].silenceFlags, 1);
+        }
     }
 
     #[test]
