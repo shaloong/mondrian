@@ -2246,6 +2246,7 @@ fn videotoolbox_cpu_transfer_preserves_unobserved_execution_through_ring_reuse()
         ffmpeg::codec::Id::H264,
         None,
     );
+    plan.probe.candidate_backend = Some(HwAccelBackend::VideoToolbox);
     plan.mark_hardware_cpu_transfer_configured(HwAccelBackend::VideoToolbox);
     plan.mark_hardware_cpu_transfer_observed();
     assert!(plan.probe.native_decoder_active);
