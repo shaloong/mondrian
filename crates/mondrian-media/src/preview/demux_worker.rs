@@ -169,17 +169,10 @@ fn run_worker(
                         flags,
                     )
                 };
-                if result < 0 {
-                    return send_failure(
-                        writer,
-                        command_id,
-                        anyhow::anyhow!(
-                            "Preview demux seek to PTS {target_ts} failed with code {result}: {}",
-                            ffmpeg::Error::from(result)
-                        ),
-                    );
-                }
-                write_seek_complete_message(writer, command_id)?;
+                // A demuxer can reject positioning while sequential packets
+                // remain readable. Return the typed result; the parent must
+                // retire this cursor before reopening from a proven origin.
+                write_seek_complete_message(writer, command_id, result)?;
                 writer.flush()?;
             }
             DemuxWorkerCommand::Read { command_id } => {

@@ -1769,6 +1769,7 @@ fn rgba_frame_diagnostics_record_seek_index_evidence() {
             used_index: true,
             anchor_pts: Some(240),
             probe_work_units: 0,
+            origin_restart_seek_error: None,
         },
     );
 

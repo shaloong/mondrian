@@ -1583,6 +1583,7 @@ use playback_ring::PreviewPlaybackRing;
 fn preview_decode_context_from_parameters(
     parameters: ffmpeg::codec::Parameters,
     threading: ffmpeg::codec::threading::Config,
+    stream_time_base: ffmpeg::Rational,
     path: &Path,
 ) -> Result<ffmpeg::codec::context::Context> {
     let mut context =
@@ -1593,6 +1594,10 @@ fn preview_decode_context_from_parameters(
             }
         })?;
     context.set_threading(threading);
+    // AVCodecParameters does not carry packet time base. FFmpeg needs this
+    // before codec open to preserve packet duration on decoded AVFrames.
+    // SAFETY: context is newly allocated and exclusively owned here.
+    unsafe { (*context.as_mut_ptr()).pkt_timebase = stream_time_base.into() };
     Ok(context)
 }
 
@@ -1846,6 +1851,7 @@ impl PreviewDecodeSession {
             let probe_context = preview_decode_context_from_parameters(
                 parameters.clone(),
                 software_threading,
+                stream_tb,
                 path,
             )?;
             let probe_decoder =
@@ -1951,6 +1957,7 @@ impl PreviewDecodeSession {
                 let mut context = preview_decode_context_from_parameters(
                     parameters.clone(),
                     hardware_threading,
+                    stream_tb,
                     path,
                 )?;
                 interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::HardwareDevice);
@@ -2040,6 +2047,7 @@ impl PreviewDecodeSession {
                         None => preview_decode_context_from_parameters(
                             parameters,
                             software_threading,
+                            stream_tb,
                             path,
                         )?
                         .decoder()
@@ -2585,6 +2593,8 @@ impl PreviewDecodeSession {
                     diagnostics.seek_index_source = seek_index.source;
                     diagnostics.seek_index_used = seek_resolution.used_index;
                     diagnostics.seek_index_anchor_pts = seek_resolution.anchor_pts;
+                    diagnostics.origin_restart_seek_error =
+                        seek_resolution.origin_restart_seek_error;
                     diagnostics.threading_kind = self.threading_kind;
                     diagnostics.threading_count =
                         self.threading_count.min(u32::MAX as usize) as u32;
@@ -2755,8 +2765,22 @@ impl PreviewDecodeSession {
                 }
             }
         }
+        // Decode dependencies include the field processor's temporal window,
+        // not only codec keyframes. Seek from the preceding decode root while
+        // retaining the original exact sample as the selection target. If no
+        // root is known, the pristine origin is the only proven predecessor;
+        // the existing work budget still bounds this decode.
+        let target_pts = if self.field_processor.requires_temporal_preroll() {
+            match self.seek_index.keyframe_at_or_before(target_pts) {
+                Some(anchor) if anchor > self.stream_start_pts => anchor - 1,
+                Some(anchor) => anchor,
+                None => self.stream_start_pts,
+            }
+        } else {
+            target_pts
+        };
         let seek_anchor_pts = self.seek_index.keyframe_at_or_before(target_pts);
-        let (min_ts, seek_target_ts, max_ts, seek_flags, used_anchor_pts) = match policy
+        let (min_ts, seek_target_ts, max_ts, seek_flags, mut used_anchor_pts) = match policy
             .seek_strategy
         {
             PreviewDecodeSeekStrategy::KeyframeBefore => {
@@ -2842,6 +2866,7 @@ impl PreviewDecodeSession {
             &self.path,
             should_cancel,
         )?;
+        let mut origin_restart_seek_error = None;
         match seek {
             PreviewPacketSeek::DirectCanceled => {
                 return Ok(PreviewSeekToTarget::DirectCanceled(
@@ -2854,6 +2879,53 @@ impl PreviewDecodeSession {
                 ));
             }
             PreviewPacketSeek::Complete => {}
+            PreviewPacketSeek::Unavailable(code) => {
+                if !self.fingerprint.authorizes_reuse() {
+                    return Err(MondrianError::DecodeFailed {
+                        asset_id: self.path.display().to_string(),
+                        reason: format!("seek failed with code {code}; source revision does not authorize reopening"),
+                    });
+                }
+                let config = self
+                    .packet_source
+                    .take()
+                    .expect("live packet source")
+                    .retire_for_origin_restart(&self.path)?;
+                let opened = match PreviewPacketSource::open(
+                    &self.path,
+                    self.fingerprint,
+                    Some(self.stream_index as u32),
+                    &PreviewSeekIndexCache::default(),
+                    config.as_ref(),
+                    &self.interrupt_state,
+                    should_cancel,
+                ) {
+                    Ok(opened) => opened,
+                    Err(PreviewPacketSourceOpenError::DirectCanceled) => {
+                        return Ok(PreviewSeekToTarget::DirectCanceled(
+                            PreviewDecodeCancellationCheckpoint::InputOpen,
+                        ))
+                    }
+                    Err(PreviewPacketSourceOpenError::IsolatedCanceled(checkpoint)) => {
+                        return Ok(PreviewSeekToTarget::IsolatedCanceled(checkpoint))
+                    }
+                    Err(PreviewPacketSourceOpenError::Failed(error)) => return Err(error),
+                };
+                if opened.stream_index != self.stream_index
+                    || opened.stream_tb != self.stream_tb
+                    || opened.stream_start_pts != self.stream_start_pts
+                    || opened.parameters.id() != self.codec_id
+                {
+                    return Err(MondrianError::DecodeFailed {
+                        asset_id: self.path.display().to_string(),
+                        reason: "reopened origin contradicts the bound stream contract".to_owned(),
+                    });
+                }
+                self.packet_source = Some(opened.source);
+                self.at_demux_origin = true;
+                used_anchor_pts = None;
+                origin_restart_seek_error = Some(code);
+            }
         }
         self.interrupt_state
             .set_execution_stage(PreviewDecodeExecutionStage::CodecFlush);
@@ -2870,6 +2942,7 @@ impl PreviewDecodeSession {
             used_index: used_anchor_pts.is_some(),
             anchor_pts: used_anchor_pts,
             probe_work_units,
+            origin_restart_seek_error,
         }))
     }
 
@@ -4289,6 +4362,7 @@ mod session_topology_tests {
         let mut decoder = preview_decode_context_from_parameters(
             parameters.clone(),
             ffmpeg::codec::threading::Config { kind: kind.to_ffmpeg(), count: 3 },
+            input.stream(0).expect("video stream").time_base(),
             &path,
         )
         .expect("production context")
@@ -4301,6 +4375,7 @@ mod session_topology_tests {
                 kind: ffmpeg::codec::threading::Type::None,
                 count: 1,
             },
+            input.stream(0).expect("video stream").time_base(),
             &path,
         )
         .expect("reference context")

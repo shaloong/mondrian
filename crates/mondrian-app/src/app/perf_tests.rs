@@ -4427,6 +4427,115 @@ fn preview_media_external_access_mode_smoke() -> anyhow::Result<()> {
 }
 
 #[test]
+#[ignore = "requires a real file and explicit valid Sequence sample coordinates; compatibility, not a performance gate"]
+fn preview_media_external_compatibility_smoke() -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("perf lock poisoned");
+    let path = std::path::PathBuf::from(
+        std::env::var_os("MONDRIAN_PREVIEW_EXTERNAL_MEDIA_PATH")
+            .context("MONDRIAN_PREVIEW_EXTERNAL_MEDIA_PATH is required")?,
+    );
+    let frame_text =
+        std::env::var("MONDRIAN_PREVIEW_COMPATIBILITY_FRAMES").unwrap_or_else(|_| "0".to_owned());
+    let frames = frame_text
+        .split(',')
+        .map(str::parse::<usize>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    anyhow::ensure!(
+        !frames.is_empty() && frames.len() <= 64 && frames.iter().all(|frame| *frame <= 36_000),
+        "compatibility samples must be 1..64 bounded Sequence coordinates"
+    );
+    let grid_text = std::env::var("MONDRIAN_PREVIEW_COMPATIBILITY_SEQUENCE_RATE")
+        .unwrap_or_else(|_| "30/1".to_owned());
+    let (num, den) = grid_text
+        .split_once('/')
+        .context("Sequence grid must be numerator/denominator")?;
+    let grid = Rational::new(num.parse()?, den.parse()?);
+    anyhow::ensure!(
+        Rational::SEQUENCE_FRAME_RATES.contains(&grid),
+        "unsupported Sequence grid: {grid}"
+    );
+    let info = probe_external_preview_media_info(&path)?;
+    let source = info.primary_video().context("source has no picture stream")?;
+    let source_rate = source.frame_rate;
+    let source_duration = source.duration;
+    let diagnostic = VideoColorDiagnostic::from_stream(source);
+    let root = tempfile::tempdir()?;
+    let state = build_preview_media_state_on_grid(
+        root.path(),
+        &path,
+        info,
+        frames.iter().copied().max().context("no samples")? + 1,
+        grid,
+        PreviewMediaAuthoredOutput::SourceFull,
+    )?;
+    let (state, preview) = create_perf_preview(state)?;
+    let (gpu, closure) = run_with_perf_gpu_factory(
+        state,
+        vec![preview],
+        HeadlessViewerGpuAdapter::new,
+        |state, previews, adapter| {
+            let preview = previews.first().context("missing production Preview owner")?;
+            let adapter = adapter.context("missing production GPU owner")?;
+            install_perf_timeline_render_cache(
+                preview,
+                &root.path().join("timeline-render-cache"),
+            )?;
+            configure_headless_gpu_decode_admission(preview, adapter)?;
+            let mut gpu = HeadlessViewerGpuExecutionSummary {
+                adapter: Some(adapter.adapter_info().clone()),
+                ..Default::default()
+            };
+            for frame in &frames {
+                state.seek(*frame as i64)?;
+                wait_for_headless_gpu_ready(
+                    preview,
+                    state,
+                    adapter,
+                    &mut gpu,
+                    Duration::from_secs(30),
+                )?;
+                // A queue-published picture can be ready for presentation
+                // before its submission completes. Compatibility evidence
+                // must observe that completion even for a one-picture file.
+                drain_headless_gpu_submission(
+                    preview,
+                    state,
+                    adapter,
+                    &mut gpu,
+                    Duration::from_secs(30),
+                )?;
+            }
+            anyhow::ensure!(
+                gpu.rendered_frames > 0 && gpu.gpu_completion_observed_frames > 0,
+                "no completed production GPU execution"
+            );
+            anyhow::ensure!(
+                gpu.fallback_count == 0
+                    && gpu.stage_diagnostics.readback_stages == 0
+                    && gpu.stage_diagnostics.gpu_blockers == 0,
+                "GPU fallback/readback/blocker"
+            );
+            Ok(gpu)
+        },
+    )?;
+    closure.validate()?;
+    let report = serde_json::json!({
+        "scenario": "preview_media_external_compatibility",
+        "classification": "DiagnosticOnly",
+        "source_average_frame_rate": source_rate,
+        "source_declared_duration": source_duration,
+        "source_color_diagnostic": diagnostic,
+        "sequence_frame_rate": grid,
+        "sequence_samples": frames,
+        "source_speed": "1/1; exact source PTS intervals",
+        "headless_gpu": gpu,
+        "owner_closure": closure,
+    });
+    eprintln!("MONDRIAN_PERF_JSON={report}");
+    Ok(())
+}
+
+#[test]
 #[ignore = "development preview media continuous playback smoke test; run manually"]
 fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
     let _guard = perf_lock().lock().expect("perf lock poisoned");
@@ -9502,7 +9611,6 @@ fn build_preview_media_perf_state_with_media_info(
     media_info: Option<MediaInfo>,
     frame_count: usize,
 ) -> anyhow::Result<AppState> {
-    let library = AssetLibrary::open(root_dir.join("library"))?;
     let media_info = match media_info {
         Some(media_info) => media_info,
         None => probe_media_info(video_path)
@@ -9515,12 +9623,42 @@ fn build_preview_media_perf_state_with_media_info(
         })
         .map(|video| canonical_preview_probe_sequence_frame_rate(video.frame_rate))
         .transpose()?;
+    build_preview_media_state_on_grid(
+        root_dir,
+        video_path,
+        media_info,
+        frame_count,
+        probed_frame_rate.unwrap_or(Rational::FPS_30),
+        PreviewMediaAuthoredOutput::SequenceDefault,
+    )
+}
+
+// Source average cadence is diagnostic metadata. An explicitly authored
+// Sequence grid never reinterprets source timestamps, duration or playback rate.
+fn build_preview_media_state_on_grid(
+    root_dir: &Path,
+    video_path: &Path,
+    media_info: MediaInfo,
+    frame_count: usize,
+    sequence_frame_rate: Rational,
+    authored_output: PreviewMediaAuthoredOutput,
+) -> anyhow::Result<AppState> {
+    anyhow::ensure!(
+        Rational::SEQUENCE_FRAME_RATES.contains(&sequence_frame_rate),
+        "unsupported authored Sequence grid: {sequence_frame_rate}"
+    );
+    let library = AssetLibrary::open(root_dir.join("library"))?;
+    let resolution = media_info
+        .primary_video()
+        .map(|video| Resolution { width: video.width, height: video.height })
+        .context("Preview source has no picture stream")?;
     let asset_id = commit_perf_media_probe(&library, video_path, media_info)?;
 
     let mut sequence = Sequence::new("Preview media perf");
     let mut settings = sequence.settings.clone();
-    settings.frame_rate = probed_frame_rate.unwrap_or(Rational::FPS_30);
+    settings.frame_rate = sequence_frame_rate;
     sequence.apply_settings(settings)?;
+    configure_preview_media_authored_output(&mut sequence, authored_output, resolution)?;
     let tb = sequence.time_base();
     let duration = tt(frame_count as i64, tb);
     sequence.video_tracks[0]

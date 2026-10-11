@@ -1525,6 +1525,10 @@ pub struct PreviewDecodeDiagnostics {
     /// coordinate (PTS only when DTS is absent), not presentation coverage.
     #[serde(default)]
     pub seek_index_anchor_pts: Option<i64>,
+    /// The demux seek failed with this FFmpeg code. The exact sample was
+    /// decoded from a newly opened, revision-verified origin under its budget.
+    #[serde(default)]
+    pub origin_restart_seek_error: Option<i32>,
     /// Decoded frames consumed by this request before selecting the output frame.
     #[serde(default)]
     pub decoded_frame_count: u32,
@@ -1643,6 +1647,7 @@ impl PreviewDecodeDiagnostics {
             seek_index_source: PreviewSeekIndexSource::None,
             seek_index_used: false,
             seek_index_anchor_pts: None,
+            origin_restart_seek_error: None,
             decoded_frame_count: 0,
             threading_kind: PreviewDecodeThreadingKind::None,
             threading_count: 0,

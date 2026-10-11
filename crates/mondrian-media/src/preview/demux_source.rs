@@ -24,13 +24,17 @@ pub(super) enum PreviewPacketRead {
 
 pub(super) enum PreviewPacketSeek {
     Complete,
+    Unavailable(i32),
     DirectCanceled,
     IsolatedCanceled,
 }
 
 pub(super) enum PreviewPacketSource {
     Direct(ffmpeg::format::context::Input),
-    Isolated(Box<IsolatedDemuxSession>),
+    Isolated {
+        session: Box<IsolatedDemuxSession>,
+        config: PreviewDemuxWorkerConfig,
+    },
 }
 
 pub(super) struct PreviewPacketSourceOpen {
@@ -98,7 +102,10 @@ impl PreviewPacketSource {
                             index
                         });
                     Ok(PreviewPacketSourceOpen {
-                        source: Self::Isolated(Box::new(open.source)),
+                        source: Self::Isolated {
+                            session: Box::new(open.source),
+                            config: config.clone(),
+                        },
                         at_demux_origin: true,
                         parameters: stream.parameters,
                         stream_index: stream.stream_index,
@@ -141,12 +148,28 @@ impl PreviewPacketSource {
     pub(super) fn is_healthy(&self) -> bool {
         match self {
             Self::Direct(_) => true,
-            Self::Isolated(source) => source.is_healthy(),
+            Self::Isolated { session, .. } => session.is_healthy(),
         }
     }
 
     pub(super) fn is_isolated(&self) -> bool {
-        matches!(self, Self::Isolated(_))
+        matches!(self, Self::Isolated { .. })
+    }
+
+    /// Consume the rejected cursor before admitting another packet owner.
+    pub(super) fn retire_for_origin_restart(
+        mut self,
+        path: &Path,
+    ) -> Result<Option<PreviewDemuxWorkerConfig>> {
+        match &mut self {
+            Self::Direct(_) => Ok(None),
+            Self::Isolated { session, config } => {
+                session.close_for_origin_restart().map_err(|reason| {
+                    MondrianError::DecodeFailed { asset_id: path.display().to_string(), reason }
+                })?;
+                Ok(Some(config.clone()))
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -178,13 +201,7 @@ impl PreviewPacketSource {
                     if should_cancel() {
                         return Ok(PreviewPacketSeek::DirectCanceled);
                     }
-                    return Err(MondrianError::DecodeFailed {
-                        asset_id: path.display().to_string(),
-                        reason: format!(
-                            "seek to PTS {target_ts} failed with code {result}: {}",
-                            ffmpeg::Error::from(result)
-                        ),
-                    });
+                    return Ok(PreviewPacketSeek::Unavailable(result));
                 }
                 if should_cancel() {
                     Ok(PreviewPacketSeek::DirectCanceled)
@@ -192,9 +209,12 @@ impl PreviewPacketSource {
                     Ok(PreviewPacketSeek::Complete)
                 }
             }
-            Self::Isolated(source) => {
-                match source.seek(min_ts, target_ts, max_ts, flags, should_cancel) {
+            Self::Isolated { session, .. } => {
+                match session.seek(min_ts, target_ts, max_ts, flags, should_cancel) {
                     Ok(IsolatedDemuxSeek::Complete) => Ok(PreviewPacketSeek::Complete),
+                    Ok(IsolatedDemuxSeek::Unavailable(code)) => {
+                        Ok(PreviewPacketSeek::Unavailable(code))
+                    }
                     Ok(IsolatedDemuxSeek::Canceled) => Ok(PreviewPacketSeek::IsolatedCanceled),
                     Err(reason) => Err(MondrianError::DecodeFailed {
                         asset_id: path.display().to_string(),
@@ -240,7 +260,7 @@ impl PreviewPacketSource {
                 }
                 return Ok(PreviewPacketRead::Packet(packet));
             },
-            Self::Isolated(source) => match source.read_next(should_cancel) {
+            Self::Isolated { session, .. } => match session.read_next(should_cancel) {
                 Ok(IsolatedDemuxRead::Packet(packet)) => Ok(PreviewPacketRead::Packet(packet)),
                 Ok(IsolatedDemuxRead::End) => Ok(PreviewPacketRead::End),
                 Ok(IsolatedDemuxRead::Canceled) => Ok(PreviewPacketRead::IsolatedCanceled),

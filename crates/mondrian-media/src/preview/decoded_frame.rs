@@ -341,6 +341,7 @@ impl RgbaFrame {
         self.diagnostics.seek_index_source = diagnostics.source;
         self.diagnostics.seek_index_used = resolution.used_index;
         self.diagnostics.seek_index_anchor_pts = resolution.anchor_pts;
+        self.diagnostics.origin_restart_seek_error = resolution.origin_restart_seek_error;
         self
     }
 
@@ -530,6 +531,7 @@ impl<T: Clone> HighPrecisionRgbaFrame<T> {
         self.diagnostics.seek_index_source = diagnostics.source;
         self.diagnostics.seek_index_used = resolution.used_index;
         self.diagnostics.seek_index_anchor_pts = resolution.anchor_pts;
+        self.diagnostics.origin_restart_seek_error = resolution.origin_restart_seek_error;
         self
     }
 
@@ -753,6 +755,7 @@ impl CpuYuvFrame {
         self.diagnostics.seek_index_source = diagnostics.source;
         self.diagnostics.seek_index_used = resolution.used_index;
         self.diagnostics.seek_index_anchor_pts = resolution.anchor_pts;
+        self.diagnostics.origin_restart_seek_error = resolution.origin_restart_seek_error;
         self
     }
 

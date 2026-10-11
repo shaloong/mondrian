@@ -887,6 +887,13 @@ path. `DecodedVideoSampling.bit_depth` is also
 derived from FFmpeg component descriptors; explicit native NV12/P010 surface
 contracts remain the fallback authority for opaque hardware formats.
 
+Source cadence and Sequence cadence are independent. An average frame rate is
+not a replacement for decoded PTS and duration. The external compatibility
+probe authors an explicit supported Sequence grid at source speed 1/1 and full
+source raster, samples only independently verified valid coordinates, and uses
+the existing production Preview/GPU owners. Its result is diagnostic evidence;
+it does not relax the existing fixed-cadence performance gate or pad short media.
+
 These contracts are media-layer interfaces. The current in-process adapter can
 share the same CPU RGBA FFmpeg implementation while diagnostics and app
 scheduling distinguish the requested access mode. Future hardware-resident
@@ -4493,6 +4500,33 @@ Those tests explicitly read native pixels as an oracle; they do not establish
 production zero-copy residency or sustained playback qualification by themselves.
 The separate production Viewer comparison uses isolated demux, real Metal imports,
 GOP seeks and the unchanged half-float tolerance.
+
+### Source temporal intervals after field processing
+
+Automatic field processing uses half-picture selection ticks even for an
+observed progressive source. PTS, duration and AVFrame time base are converted
+together: a progressive tail retains its full proven interval at EOF. An
+unknown duration remains unknown, overflow fails closed, and the processor
+never invents a successor beyond the source's final picture.
+
+Decoder contexts receive the stream packet time base before codec open, so
+FFmpeg can preserve decoded picture durations. Field-rate BWDIF owns the
+actual decoded picture intervals: each proven duration divides into two
+half-duration fields, including a one-picture source at EOF. Its temporal
+neighborhood is a decode dependency. An interlaced seek starts from the
+preceding decode root while the requested selection coordinate stays exact;
+the existing forward-work budget remains enforced. Unknown durations are not
+replaced by an average-rate EOF estimate.
+
+A container positioning failure is distinct from an unreadable packet stream.
+The private demux protocol returns the actual FFmpeg seek error code. For a
+revision-verified local source, the decoder can consume the rejected packet
+owner, prove child and pipe closure, and reopen the same physical stream at
+its origin. Forward decode retains the original requested coordinate and work
+budget. `origin_restart_seek_error` records the recovery; it is not an indexed
+seek receipt. Cancellation, changed source identity, protocol/pipe failure,
+decode failure and an exhausted budget still fail closed. Reopening never
+repairs a container or accepts missing pictures.
 
 ### Native decoder output and observed hardware execution
 

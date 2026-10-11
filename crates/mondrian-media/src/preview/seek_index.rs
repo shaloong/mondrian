@@ -23,6 +23,7 @@ pub(super) struct PreviewSeekResolution {
     /// Packet reads used to establish the pristine prefix before seeking.
     /// These consume the same bounded work allowance as forward decode.
     pub(super) probe_work_units: usize,
+    pub(super) origin_restart_seek_error: Option<i32>,
 }
 
 #[derive(Debug, Default)]
