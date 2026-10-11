@@ -1354,6 +1354,9 @@ mod native_configuration_service;
 
 mod native_owner_binding;
 
+#[cfg(target_os = "windows")]
+mod external_vendor;
+
 #[path = "tests/native_host_log.rs"]
 mod native_host_log_tests;
 
