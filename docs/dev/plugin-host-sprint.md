@@ -1453,10 +1453,78 @@ include discovery and lab work, not host processing overhead. This is real
 third-party metadata/default-state regression, not Note processing, PCM,
 nondefault private-state fidelity, realtime, performance or full CLAP support.
 
-Next work is the approved cfg(test)-only same-registration schema-refusal
+The next planned investigation was the cfg(test)-only same-registration schema-refusal
 diagnostic candidate for the preserved Airwindows CLAP RED. It must retain
 original short-circuit behavior, native call count, schema/error semantics and
 all old assertions; Stage B callback instrumentation remains unapproved. Shared
 note event/time/voice and zero-input producer/output contracts remain separate
 prerequisites for instrument execution. No new event model or production
 compatibility exception is authorized by metadata qualification.
+
+## Source33 diagnostic observations and exact source34 restoration
+
+The temporary Stage A parent-libtest candidate was centrally compiled against
+source33/1797, freeze SHA256
+`94D7AA0E979BA6BE2701841016A87D78FACDA9C03F950D0C38682D4CFC632071`.
+Actual Audio17 producer and source receipt, fresh native Lists427/74/353,
+ordinary353/0 and all8 diagnostic controls passed. The exact ignored external
+CLAP selector also passed its original30-second List Job preflight. Independent
+ordinary acceptance SHA256 is
+`EDD0BEE756B1F47749014E8CD36367059A022B314D2A01B28F7DE2B1219E7B7F`.
+These are diagnostic controls, not a new production capability.
+
+Two serial Airwindows CLAP observations retained the original selector,
+expected1PASS oracle,180-second budget, plugin6388ea29...,314-byte state835dfde8...,
+captured List/Probe and32768-byte asymmetric stereo input. The parent was the
+fresh diagnostic Audio17; the normal helper remained separately bound historical
+source32 Product15, with byte-equal release-code projection. Neither original
+compatibility gate passed. Both failed at unchanged external_vendor.rs:709,
+native factory startup validation: `CLAP parameter metadata is invalid or
+ambiguous`. Each completed block-size1 bypass output identical to the admitted
+input, then failed during the block-size17 startup. Neither emitted the resolver
+schema-refusal sidecar. Absence supplies no failed-field, callback, or failure-stage
+diagnosis. The primary logs establish this later startup failure; it is not proof
+that the older resolver-schema RED has the same cause. The publisher's placeholder
+initialization remains a hypothesis about the shipped binary, not a confirmed fix.
+
+Both original tests have0passed/1failed/426filtered. Raw native Job owners have
+exit101, no deadline, errors or outliving descendants, and reaped=true; the outer
+runner correctly returns1 for its Result::Err. The diagnostic wrapper's terminal0
+means both bounded failed observations and cleanup were recorded, not compatibility
+success. Actual plan-r2 receipt SHA256 is
+`25C6149BC6CE32B25AA875735B07B9907324C70EC13774799510BFCDF4463FDF`;
+execution-r2 receipt is
+`26A96E6A330CE0F487CBE9B52F9B22A18A57B3CAE9BAB0F5EFDDF03E0F993783`.
+ObservationComplete=true, DiagnosticCaptureComplete=false.
+Independent actual observation receipt SHA256 is
+`FD5DC5A23EA5042EEC467E43EB486767E37F9505EA007CD0D6B5C19DEB4E89C4`.
+Initial execution-r1
+remains retained: its wrapper incorrectly expected runner101 instead of1 and
+stopped after a valid raw native RED. Its receipt is D60877F3...; corrected r4
+preserves the original tests and separately records runner1/native101. The root
+preflight-r1 missing-workspace-variable refusal also remains retained, before
+native execution; preflight-r2 supplies the actual successful gate.
+
+All1796 source32 bytes were restored, worker40309C8C... restored exactly, and
+only the newly owned diagnostic module was removed. Source34 restoration freeze
+SHA256 is `C7A8791BD395015939C85DB11109F2F1CA847621D29D38543A3EEC013B95104C`.
+Fresh Audio18 rebuild passed; ordinary345/0 passed with the restored419/74/345
+inventories, receipt SHA256
+`6F87E7C5C1B47AD47122B5C4A8836C81A975546962A8DDDBEAF83F65A1EDA973`.
+Audio18 now occupies the parent executable path. Audio17 was held against writes
+through the diagnostic runs and their postchecks, but no separate executable
+archive was retained before rebuilding; historical producer/image hashes and
+the sealed diagnostic source packet remain. Reproduction requires rebuilding
+that packet rather than treating the current executable as Audio17.
+
+Next independent slice: cached factory-slot count admission before descriptor
+iteration in existing List, Probe and Note queries. The same existing4096 host
+capacity applies; it is not a CLAP standard limit. The scratch candidate has6
+prospective ABI-counter controls and a three-guard RED variant; independent
+static review SHA256 is
+`8650225C02E327C1C020631D8C2A471CA53E1C932DC537E50B7053AE33D4D542`.
+It has not yet been integrated, compiled or runtime-qualified. Successful-kill
+kernel wait and permanently unconfirmed child retirement remain disclosed
+ownership limitations. Shared Note/instrument contracts remain separate;
+their scratch proposals do not add executable notes, GUI, realtime safety,
+performance, other-platform or complete-standard qualification.
