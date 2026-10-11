@@ -12,7 +12,7 @@ use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempDir};
 use uuid::Uuid;
 
 pub(super) struct SupervisedAudioWorker {
@@ -35,13 +35,55 @@ enum ProcessState {
     Settled,
 }
 
-struct ProcessOwner {
+pub(super) struct ProcessOwner {
     child: Child,
     state: ProcessState,
+    staging: Option<TempDir>,
+    #[cfg(test)]
+    cleanup_hooks: Option<CleanupHooks>,
 }
 
+#[cfg(test)]
+type CleanupHooks = (
+    fn(&mut Child) -> io::Result<Option<std::process::ExitStatus>>,
+    fn(&mut Child) -> io::Result<()>,
+    fn(&mut Child) -> io::Result<std::process::ExitStatus>,
+);
+
 impl ProcessOwner {
+    pub(super) fn new(child: Child) -> Self {
+        Self {
+            child,
+            state: ProcessState::Running,
+            staging: None,
+            #[cfg(test)]
+            cleanup_hooks: None,
+        }
+    }
+
+    pub(super) fn with_staging(child: Child, staging: TempDir) -> Self {
+        Self {
+            child,
+            state: ProcessState::Running,
+            staging: Some(staging),
+            #[cfg(test)]
+            cleanup_hooks: None,
+        }
+    }
+
+    pub(super) fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+        let observed = self.child.try_wait()?;
+        if observed.is_some() {
+            self.state = ProcessState::Settled;
+        }
+        Ok(observed)
+    }
+
     fn terminate(&mut self) -> Result<(), AudioProcessorHostError> {
+        #[cfg(test)]
+        if let Some((observe, kill, wait)) = self.cleanup_hooks {
+            return self.terminate_with(observe, kill, wait);
+        }
         self.terminate_with(Child::try_wait, Child::kill, Child::wait)
     }
 
@@ -121,7 +163,7 @@ impl ProcessOwner {
     // Only rare cleanup/control failure paths report here. The existing logger
     // may allocate/block; this is not a realtime-safe failure-path guarantee.
     // Preserve the caller's original typed error rather than replacing it.
-    fn terminate_reported(&mut self, context: &'static str) {
+    pub(super) fn terminate_reported(&mut self, context: &'static str) {
         if let Err(error) = self.terminate() {
             tracing::warn!(process_id = self.child.id(), state = ?self.state, context, error = %error,
                 "Audio native child cleanup failed");
@@ -131,7 +173,23 @@ impl ProcessOwner {
 
 impl Drop for ProcessOwner {
     fn drop(&mut self) {
-        self.terminate_reported("audio process Drop");
+        let result = self.terminate();
+        // A permanently live child may still use these files. Take and keep
+        // the directory before any diagnostic that could panic. A kept path
+        // is an explicit residual resource, never evidence of settlement.
+        let retained = if self.state != ProcessState::Settled {
+            self.staging.take().map(TempDir::keep)
+        } else {
+            None
+        };
+        if let Err(error) = result {
+            tracing::warn!(process_id = self.child.id(), state = ?self.state, context = "audio process Drop", error = %error,
+                "Audio native child cleanup failed");
+        }
+        if let Some(path) = retained {
+            tracing::warn!(process_id = self.child.id(), staging = %path.display(),
+                "Native discovery staging retained because termination is unconfirmed");
+        }
     }
 }
 
@@ -177,10 +235,8 @@ impl SupervisedAudioWorker {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let mut process = ProcessOwner {
-            child: command.spawn().map_err(|error| worker_failed("startup", error))?,
-            state: ProcessState::Running,
-        };
+        let mut process =
+            ProcessOwner::new(command.spawn().map_err(|error| worker_failed("startup", error))?);
         let startup_deadline = Instant::now()
             .checked_add(spec.startup_timeout)
             .ok_or_else(|| invalid_contract("Worker startup deadline overflowed"))?;
@@ -1363,7 +1419,7 @@ mod control_timeout_worker_lifecycle {
                 .expect("spawn actual inherited-Job child");
             // Wrap immediately: all later assertion/unwind paths use the same
             // production cleanup, never ignored kill followed by unconditional wait.
-            let mut owner = ProcessOwner { child, state: ProcessState::Running };
+            let mut owner = ProcessOwner::new(child);
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 assert!(Instant::now() < deadline, "child readiness deadline");
@@ -1371,12 +1427,161 @@ mod control_timeout_worker_lifecycle {
                 if let Ok(marker) = std::fs::read_to_string(&ready)
                     && let Ok(pid) = marker.trim().parse::<u32>()
                 {
-                    assert_eq!(pid, owner.child.id(), "marker belongs to exact retained Child");
+                    assert_eq!(
+                        pid,
+                        owner.child.id(),
+                        "marker belongs to exact retained Child"
+                    );
                     break;
                 }
                 thread::sleep(Duration::from_millis(5));
             }
             (owner, directory)
+        }
+
+        thread_local! {
+            static DISCOVERY_WAIT_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+
+        fn refuse_discovery_kill(_: &mut Child) -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected discovery kill refusal",
+            ))
+        }
+
+        fn forbidden_discovery_wait(_: &mut Child) -> io::Result<ExitStatus> {
+            DISCOVERY_WAIT_CALLS.with(|calls| calls.set(calls.get() + 1));
+            Err(io::Error::other("forbidden discovery wait was invoked"))
+        }
+
+        fn refuse_discovery_observation(_: &mut Child) -> io::Result<Option<ExitStatus>> {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected discovery observation refusal",
+            ))
+        }
+
+        #[test]
+        #[ignore = "actual owner Job required for injected discovery retirement"]
+        fn discovery_refused_kill_preserves_primary_error_keeps_staging_and_never_waits() {
+            use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+            use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+            use windows_sys::Win32::System::Threading::{
+                OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+                PROCESS_SYNCHRONIZE,
+            };
+            let (mut owner, directory) = sleeping_owner();
+            let staging = tempfile::tempdir().unwrap();
+            let path = staging.path().to_owned();
+            owner.staging = Some(staging);
+            owner.cleanup_hooks = Some((
+                Child::try_wait,
+                refuse_discovery_kill,
+                forbidden_discovery_wait,
+            ));
+            DISCOVERY_WAIT_CALLS.with(|calls| calls.set(0));
+            let primary =
+                AudioProcessorHostError::WorkerDeadlineExceeded { operation: "CLAP discovery" };
+            let retained = super::super::super::clap_discovery::retire_discovery_failure(
+                &mut owner,
+                primary.clone(),
+            );
+            assert_eq!(retained, primary);
+            assert_eq!(owner.state, ProcessState::Retiring);
+            assert!(path.exists());
+            owner.cleanup_hooks = Some((
+                refuse_discovery_observation,
+                refuse_discovery_kill,
+                forbidden_discovery_wait,
+            ));
+            let primary = AudioProcessorHostError::Unavailable(
+                "CLAP discovery worker wait failed: injected observation refusal".to_owned(),
+            );
+            assert_eq!(
+                super::super::super::clap_discovery::retire_discovery_failure(
+                    &mut owner,
+                    primary.clone()
+                ),
+                primary
+            );
+            assert_eq!(owner.state, ProcessState::Retiring);
+            // Hold only an observation handle across the intentionally refused
+            // owner Drop. It is not another Child owner or another kill path.
+            // SAFETY: The readiness-checked Child remains owned here. OpenProcess
+            // requests only query/synchronize rights and a noninheritable handle;
+            // null is checked below before exactly one OwnedHandle adoption.
+            // PID-to-handle acquisition has a narrow exit/reuse race: this is
+            // not the original Child kernel handle or proof of its identity.
+            // The enclosing Job must still establish descendant settlement.
+            let observation = unsafe {
+                OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                    0,
+                    owner.child.id(),
+                )
+            };
+            assert!(!observation.is_null());
+            // SAFETY: OpenProcess returned one owned nonnull handle. OwnedHandle
+            // closes it once on every assertion/unwind path.
+            let observation = unsafe { OwnedHandle::from_raw_handle(observation) };
+            drop(owner);
+            assert!(
+                path.exists(),
+                "unconfirmed child staging must not be deleted"
+            );
+            DISCOVERY_WAIT_CALLS.with(|calls| assert_eq!(calls.get(), 0));
+            request_natural_exit(&directory);
+            // SAFETY: This nonnull OwnedHandle remains live for the call and
+            // has synchronize rights. Its borrowed handle is neither closed
+            // nor transferred during the existing finite 5,000 ms wait; the
+            // result observes the retained object, without another PID lookup.
+            let observed = unsafe { WaitForSingleObject(observation.as_raw_handle(), 5_000) };
+            assert_eq!(observed, WAIT_OBJECT_0);
+            // Cleanup only the exact retained TempDir path, after real exit.
+            assert!(path.is_absolute() && path.parent() == Some(std::env::temp_dir().as_path()));
+            std::fs::remove_dir_all(path).unwrap();
+        }
+
+        #[test]
+        #[ignore = "actual owner Job required for discovery staging settlement"]
+        fn discovery_confirmed_exit_preserves_status_and_deletes_staging() {
+            let (mut owner, directory) = sleeping_owner();
+            let staging = tempfile::tempdir().unwrap();
+            let path = staging.path().to_owned();
+            owner.staging = Some(staging);
+            request_natural_exit(&directory);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let status = loop {
+                if let Some(status) = owner.try_wait().unwrap() {
+                    break status;
+                }
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(5));
+            };
+            assert_eq!(status.code(), Some(7));
+            assert_eq!(owner.state, ProcessState::Settled);
+            assert!(path.exists(), "hold staging through caller decoding scope");
+            drop(owner);
+            assert!(!path.exists());
+        }
+
+        #[test]
+        #[ignore = "actual owner Job required for post-spawn unwind"]
+        fn discovery_post_spawn_panic_uses_actual_owner_drop_and_releases_settled_staging() {
+            let (mut owner, _directory) = sleeping_owner();
+            let staging = tempfile::tempdir().unwrap();
+            let path = staging.path().to_owned();
+            owner.staging = Some(staging);
+            let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let _owned = owner;
+                panic!("injected post-spawn failure");
+            }));
+            assert!(unwind.is_err());
+            assert!(
+                !path.exists(),
+                "confirmed actual kill/reap releases staging on unwind"
+            );
         }
 
         fn await_exit(child: &mut Child) -> ExitStatus {

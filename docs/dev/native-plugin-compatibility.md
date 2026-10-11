@@ -312,3 +312,56 @@ Independent raw-output acceptance is recorded in the sprint coordination record.
 This finite CPU Filter gate does not qualify GPU interop, HDR/interior rounding,
 temporal access, tile/multires, animation execution, opaque state, GUI,
 Preview/Export/application UI, realtime, other platforms or full OpenFX coverage.
+## CLAP input-note metadata qualification, source32
+
+On 2026-10-11 the current Windows source32 closure contains1,796 inputs, freeze
+SHA256 `EE99CA942A6CB9016960769FA917B9E521B4313334995525D513BEC800E66D3D`.
+The new version1 operation inspects inactive plugin input-note metadata using
+the existing isolated discovery helper. It preserves raw native IDs, name bytes
+and dialect masks, distinguishes absent/empty extensions and refuses malformed
+or changing facts. It exposes no HostNotePorts service or input/output note
+execution. The discovery path now immediately owns both Child and staging,
+retains staging through response decoding and keeps it if termination is not
+confirmed. This does not establish bounded successful-kill kernel waits or
+permanent orphan cleanup.
+
+Actual Audio16/Fixture1 and normal Product15 producers bind this closure;
+Product14's real full-disk link failure remains a failed historical producer.
+Current ordinary Audio reports345 passed/zero failed/74 filtered, and strict
+workspace Clippy all-targets/all-features passes. Source32 App ordinary runtime
+regression is not thereby established; the previously qualified App2778 group
+belongs to source29.
+
+Fourteen process-owner controls and two rounds of the original CLAP ABI fixture
+each report1 passed/zero failed/zero ignored/418 filtered. Raw Windows Job owners
+all exit0 with descendants reaped and no errors or deadline expiry; actual root
+wrapper exits0 after cleanup. Independent acceptance receipt SHA256
+`510550147B5D25C09E3AE58144A73E2F064A26C851CEDB3E723AC74FC2FFC997`
+binds exact producers, current images, all1,796 source inputs and3,744 runtime
+bindings. Source inspection proves the32-input policy before allocation/get;
+the cap fixture's aggregate refusal does not establish its exact failure branch.
+
+Qualification is **Verified within these owned metadata/ownership controls**.
+Third-party note processing, instruments, authored musical events, realtime
+deadline safety, performance, other platforms and full CLAP compatibility remain
+unqualified. Real Ring Out and shared audio regressions have separate current
+records, described below and in the [sprint checkpoint](plugin-host-sprint.md#clap-input-note-metadata-and-discovery-ownership-integration).
+
+After retaining pre-native timestamp/environment preparation failures, corrected
+legacy wrapper r3 actually completes10/10 groups: two rounds of owned CLAP/VST3
+sidechain PCM/state/partition/lifecycle, canonical signal-time and VST3 repeated
+native-object controls. Current Audio16/Product15 and1,796 current sources are
+held; historical fixture DLLs and their unchanged compiled input closure remain
+separately identified. Aggregate SHA256
+`A6AC7C017D1C2612ECF556659C2DCDF8B79DD0E3F417D0BFB0E4EB40FC2BD549`.
+Each exact test reports1/zero failed/zero ignored/418 filtered, with actual
+exit0/reaped/error-free native Jobs and root terminal0 after cleanup.
+
+Corrected Ring wrapper r3 separately completes2/2 unchanged real Ring Out
+metadata/default opaque-load groups at source32. Aggregate SHA256
+`A6CEC32937DE16B3174DC507B56BB844B5CE4BC6CA467B87AA875CB30293EB82`.
+It checks full11 descriptors/editable9/read-only2, canonical author reopen,
+resolver payload, native observed editable values and the unchanged184-byte
+default state. Both raw owners and root wrapper exit0 with successful cleanup
+and source checks. Native plugin version remains Unknown. No PCM, nondefault
+private-state, Note/instrument, realtime or performance qualification follows.

@@ -1,6 +1,7 @@
 # Native audio standard features
 
-Standards and source reviewed on 2026-10-10. This document separates the
+Standards reviewed on 2026-10-10; the input-note metadata source and its limited
+Windows qualification were updated on 2026-10-11. This document separates the
 negotiated product implementation from vendor APIs, unavailable services and
 remaining work. Qualification is tied to exact source and binary receipts in
 [Native plugin compatibility and qualification](native-plugin-compatibility.md).
@@ -43,7 +44,7 @@ canonical execution and authoring boundaries.
   exempt from formatting; formatting and module-import relocations are local
   handwritten-source deltas, not changes to the official headers or raw ABI.
   Enabled extensions include audio-ports, latency, tail, state, params, render,
-  thread-check, log, gui and timer-support. The actual CLAP host declares
+  thread-check, log, gui, timer-support and note-ports. The actual CLAP host declares
   thread-check and log, plus Windows GUI/timer services;
   enabling an SDK Cargo feature does not expose the corresponding host service.
   Root's matching Windows C++/Rust ABI gate passed (r224/r225): 137 record
@@ -73,7 +74,7 @@ method/thread/lifetime obligations become binding when exposed or consumed.
 | Key | Actual source / owner |
 | --- | --- |
 | CW | `crates/mondrian-audio/src/processor_isolation/{clap_worker,clap_parameter_events,clap_output_events,clap_audio_role,clap_main_services,clap_gui_owner,clap_gui_requests}.rs`: host, lifecycle, owned scalar input/output, native processing and Windows main/GUI/timer roles |
-| CD | `crates/mondrian-audio/src/processor_isolation/clap_discovery.rs`: identity/state/mode/ports/parameters probe |
+| CD | `crates/mondrian-audio/src/processor_isolation/{clap_discovery,clap_note_input_metadata}.rs`: identity/state/mode/ports/parameters probe and separate inactive input-note facts |
 | VW | `crates/mondrian-audio/src/processor_isolation/vst3_worker.rs`: native prepare/reset/process/buses |
 | VD | `crates/mondrian-audio/src/processor_isolation/vst3_discovery.rs`: class/state/mode/contract probe |
 | IP | `crates/mondrian-audio/src/processor_isolation/{mod,protocol,worker,supervisor}.rs`: immutable payload, mapping, bounded process transport |
@@ -167,7 +168,7 @@ unless the row explicitly identifies an accepted core/output behavior gap.
 | [gui](https://github.com/free-audio/clap/blob/195b42a004144fab0b3cf95e9c067187d15365b7/include/clap/ext/gui.h) | S: Windows embedded Win32 GUI on the same loaded CLAP object, borrowed real parent HWND, main OS pump, resize/scale and strongest close/destruction acknowledgement | Matching native lifecycle qualification remains pending. Floating GUI, other platform GUI APIs, complete focus/keyboard acceptance and HostParams/state author transactions remain incomplete. |
 | [timer-support](https://github.com/free-audio/clap/blob/195b42a004144fab0b3cf95e9c067187d15365b7/include/clap/ext/timer-support.h) | S: bounded Windows main registration/unregistration and idle plugin timer delivery; timers persist independently of GUI close until actual unregister or plugin teardown | Matching native timer/lifecycle qualification remains pending; non-Windows main services and timer consumers remain incomplete. |
 | [posix-fd-support](https://github.com/free-audio/clap/blob/195b42a004144fab0b3cf95e9c067187d15365b7/include/clap/ext/posix-fd-support.h) | Conditional N on POSIX | FD readiness/lifetime/event-loop integration, unregister/teardown races. |
-| [note-ports](https://github.com/free-audio/clap/blob/195b42a004144fab0b3cf95e9c067187d15365b7/include/clap/ext/note-ports.h) | N | Declared note/MIDI dialects, author input/output port identity/routing and restart metadata. |
+| [note-ports](https://github.com/free-audio/clap/blob/195b42a004144fab0b3cf95e9c067187d15365b7/include/clap/ext/note-ports.h) | P/R: separate version1 inactive input metadata query; absent versus zero inputs, unsigned native IDs, raw names/dialect bits, supplied-state/binary identity and restart refusal. Query policy caps inputs at32 before allocation/get. HostNotePorts is not exposed; host usable dialects remain zero. N: note dispatch/output, instruments and author port routing | Q: two current owned ABI-fixture rounds plus14 process-owner controls; ordinary Audio345 and strict workspace Clippy pass. This is not third-party note processing, per-callback bounded CPU work, RT or instrument qualification. Full event/voice/time/routing contracts remain required; [slice evidence](plugin-host-sprint.md#clap-input-note-metadata-and-discovery-ownership-integration). |
 | [note-name](https://github.com/free-audio/clap/blob/195b42a004144fab0b3cf95e9c067187d15365b7/include/clap/ext/note-name.h) | N | Note/bus/channel name metadata and changed notifications. |
 | [voice-info](https://github.com/free-audio/clap/blob/195b42a004144fab0b3cf95e9c067187d15365b7/include/clap/ext/voice-info.h) | N | Voice limits/overlap/polyphonic lifetime and changed observations. |
 | [event-registry](https://github.com/free-audio/clap/blob/195b42a004144fab0b3cf95e9c067187d15365b7/include/clap/ext/event-registry.h) | N | Custom event-space IDs and typed bounded ownership; unknown bytes not presumed safe. |

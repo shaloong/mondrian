@@ -288,6 +288,12 @@
       "upstream_sha256": "eec403506a0068459dc5941538a538064b62ea809c2db88dcdad8c1c25695fa8",
       "shipped_sha256": "46f4adefb823d163a2ff5fe164abf0a5bb1bccb4815c125da10abbf851599d91",
       "reason": "retain original parameter rescan/clear/info flag bits for bounded typed native-source admission; unknown flags are not silently truncated"
+    },
+    {
+      "path": "extensions/src/note_ports/host.rs",
+      "upstream_sha256": "2d71c1c0eb5ee98f7c44d88c573a295eebddf5dc6f918560f512e499d6cdb011",
+      "shipped_sha256": "644b22be7fa1f375a3fbf92f298a8d61617a0be33dbd57a1ded6e95f8c7cf41b",
+      "reason": "Additive immutable raw NotePort metadata count/get availability and owned zero-initialized POD accessors; typed API unchanged; candidate not compiled/native qualified"
     }
   ],
   "shipped_files": [
@@ -773,8 +779,8 @@
     },
     {
       "path": "extensions/src/note_ports/host.rs",
-      "sha256": "2d71c1c0eb5ee98f7c44d88c573a295eebddf5dc6f918560f512e499d6cdb011",
-      "bytes": 3199
+      "sha256": "644b22be7fa1f375a3fbf92f298a8d61617a0be33dbd57a1ded6e95f8c7cf41b",
+      "bytes": 5172
     },
     {
       "path": "extensions/src/note_ports/plugin.rs",

@@ -1345,6 +1345,7 @@ impl AudioProcessorAudioIo for TestAudioIo {
 
 mod native_performance;
 
+mod native_clap_note_metadata;
 mod native_transport;
 
 mod native_clap_restart;

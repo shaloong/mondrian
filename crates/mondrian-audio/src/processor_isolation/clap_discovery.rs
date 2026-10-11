@@ -164,6 +164,7 @@ struct DiscoveryRequest {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum DiscoveryOperation {
     List,
+    NoteInputMetadata(super::clap_note_input_metadata::NoteInputMetadataRequest),
     Probe {
         plugin_id: String,
         sample_rate: u32,
@@ -326,6 +327,66 @@ fn request_discovery(
     library_path: &Path,
     operation: DiscoveryOperation,
 ) -> Result<(PathBuf, DiscoveryResponse), AudioProcessorHostError> {
+    let (library_path, bytes, _process) =
+        request_discovery_bytes(helper_executable, library_path, operation)?;
+    let response = serde_json::from_slice(&bytes)
+        .map_err(|error| invalid(format!("CLAP discovery response is invalid: {error}")))?;
+    Ok((library_path, response))
+}
+
+/// Inspect actual inactive input-note facts without admitting note processing.
+///
+/// This additive versioned operation requires a current product helper. An old
+/// helper rejects its unknown operation and yields Unavailable, never empty
+/// metadata. It does not probe/relax audio buses, activate, or register NotePorts
+/// host support. No author state or persistent registry is created.
+pub fn probe_clap_note_input_metadata(
+    helper_executable: &Path,
+    library_path: &Path,
+    plugin_id: &str,
+    state: Option<&[u8]>,
+) -> Result<super::clap_note_input_metadata::ClapNoteInputMetadata, AudioProcessorHostError> {
+    use super::clap_note_input_metadata as metadata;
+    metadata::validate_request(plugin_id, state)?;
+    if !helper_executable.is_absolute() || !library_path.is_absolute() {
+        return Err(invalid(
+            "CLAP note metadata requires absolute helper and library paths",
+        ));
+    }
+    let canonical = fs::canonicalize(library_path)
+        .map_err(|error| unavailable(format!("CLAP library is unavailable: {error}")))?;
+    let fingerprint = fingerprint_clap_binary(&canonical)?;
+    let (library_path, bytes, _process) = request_discovery_bytes(
+        helper_executable,
+        &canonical,
+        DiscoveryOperation::NoteInputMetadata(metadata::NoteInputMetadataRequest {
+            schema_version: metadata::SCHEMA_VERSION,
+            plugin_id: plugin_id.to_owned(),
+            state: state.map(ToOwned::to_owned),
+        }),
+    )?;
+    if fingerprint_clap_binary(&library_path)? != fingerprint {
+        return Err(unavailable(
+            "CLAP binary changed during note metadata inspection",
+        ));
+    }
+    let response: metadata::ClapNoteInputMetadata = serde_json::from_slice(&bytes)
+        .map_err(|error| invalid(format!("CLAP note metadata response is invalid: {error}")))?;
+    metadata::validate_response(
+        &response,
+        plugin_id,
+        fingerprint,
+        metadata::state_digest(state),
+    )?;
+    Ok(response)
+}
+
+// Both concrete response decoders share the existing supervisor and bounds.
+fn request_discovery_bytes(
+    helper_executable: &Path,
+    library_path: &Path,
+    operation: DiscoveryOperation,
+) -> Result<(PathBuf, Vec<u8>, super::supervisor::ProcessOwner), AudioProcessorHostError> {
     if !helper_executable.is_absolute() || !library_path.is_absolute() {
         return Err(invalid(
             "CLAP discovery requires absolute helper and library paths",
@@ -348,18 +409,26 @@ fn request_discovery(
     }
     fs::write(&request_path, request)
         .map_err(|error| unavailable(format!("CLAP discovery request write failed: {error}")))?;
-    let mut child = Command::new(helper_executable)
-        .arg(CLAP_DISCOVERY_WORKER_ARGUMENT)
-        .env(REQUEST_ENV, &request_path)
-        .env(RESPONSE_ENV, &response_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| unavailable(format!("CLAP discovery worker failed to start: {error}")))?;
+    // Adopt the child and staging immediately; every post-spawn failure/unwind
+    // uses the same existing OS owner as audio workers, without claiming that
+    // permanent OS refusal or a successful-kill wait is kernel-time bounded.
+    let mut process = super::supervisor::ProcessOwner::with_staging(
+        Command::new(helper_executable)
+            .arg(CLAP_DISCOVERY_WORKER_ARGUMENT)
+            .env(REQUEST_ENV, &request_path)
+            .env(RESPONSE_ENV, &response_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| {
+                unavailable(format!("CLAP discovery worker failed to start: {error}"))
+            })?,
+        temp,
+    );
     let deadline = Instant::now() + DISCOVERY_DEADLINE;
     loop {
-        match child.try_wait() {
+        match process.try_wait() {
             Ok(Some(status)) if status.success() => break,
             Ok(Some(status)) => {
                 return Err(unavailable(format!(
@@ -368,25 +437,31 @@ fn request_discovery(
             }
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(AudioProcessorHostError::WorkerDeadlineExceeded {
-                    operation: "CLAP discovery",
-                });
+                return Err(retire_discovery_failure(
+                    &mut process,
+                    AudioProcessorHostError::WorkerDeadlineExceeded { operation: "CLAP discovery" },
+                ));
             }
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(unavailable(format!(
-                    "CLAP discovery worker wait failed: {error}"
-                )));
+                return Err(retire_discovery_failure(
+                    &mut process,
+                    unavailable(format!("CLAP discovery worker wait failed: {error}")),
+                ));
             }
         }
     }
     let response = read_bounded(&response_path, "response", MAX_RESPONSE_BYTES)?;
-    let response: DiscoveryResponse = serde_json::from_slice(&response)
-        .map_err(|error| invalid(format!("CLAP discovery response is invalid: {error}")))?;
-    Ok((library_path, response))
+    // The caller retains this owner through decoding (and metadata identity
+    // verification), so directory lifetime covers the complete response use.
+    Ok((library_path, response, process))
+}
+
+pub(super) fn retire_discovery_failure(
+    process: &mut super::supervisor::ProcessOwner,
+    primary: AudioProcessorHostError,
+) -> AudioProcessorHostError {
+    process.terminate_reported("CLAP discovery failure");
+    primary
 }
 
 /// Execute the hidden discovery mode before any UI, GPU, or media initialization.
@@ -410,11 +485,43 @@ pub fn run_clap_discovery_worker() -> Result<(), AudioProcessorHostError> {
     if !request.library_path.is_absolute() {
         return Err(invalid("CLAP discovery library path must be absolute"));
     }
+    if let DiscoveryOperation::NoteInputMetadata(query) = &request.operation {
+        if query.schema_version != super::clap_note_input_metadata::SCHEMA_VERSION {
+            return Err(invalid("unsupported CLAP note metadata schema version"));
+        }
+        super::clap_note_input_metadata::validate_request(
+            &query.plugin_id,
+            query.state.as_deref(),
+        )?;
+    }
+    let metadata_fingerprint =
+        if matches!(&request.operation, DiscoveryOperation::NoteInputMetadata(_)) {
+            Some(fingerprint_clap_binary(&request.library_path)?)
+        } else {
+            None
+        };
     let entry = unsafe { PluginEntry::load(request.library_path.as_os_str()) }
         .map_err(|error| unavailable(format!("CLAP library load failed: {error}")))?;
     let response = match request.operation {
-        DiscoveryOperation::List => {
-            DiscoveryResponse { descriptors: list_loaded(&entry)?, probe: None }
+        DiscoveryOperation::List => serde_json::to_vec(&DiscoveryResponse {
+            descriptors: list_loaded(&entry)?,
+            probe: None,
+        }),
+        DiscoveryOperation::NoteInputMetadata(query) => {
+            let fingerprint = metadata_fingerprint
+                .ok_or_else(|| invalid("CLAP note metadata fingerprint is missing"))?;
+            let metadata = super::clap_note_input_metadata::inspect_loaded(
+                &entry,
+                &query.plugin_id,
+                fingerprint,
+                query.state.as_deref(),
+            )?;
+            if fingerprint_clap_binary(&request.library_path)? != fingerprint {
+                return Err(unavailable(
+                    "CLAP binary changed during native note metadata inspection",
+                ));
+            }
+            serde_json::to_vec(&metadata)
         }
         DiscoveryOperation::Probe {
             plugin_id,
@@ -424,7 +531,7 @@ pub fn run_clap_discovery_worker() -> Result<(), AudioProcessorHostError> {
             offline,
             state,
             capture_default_state,
-        } => DiscoveryResponse {
+        } => serde_json::to_vec(&DiscoveryResponse {
             descriptors: Vec::new(),
             probe: Some(probe_loaded(
                 &entry,
@@ -445,10 +552,9 @@ pub fn run_clap_discovery_worker() -> Result<(), AudioProcessorHostError> {
                 state.as_deref(),
                 capture_default_state,
             )?),
-        },
-    };
-    let response = serde_json::to_vec(&response)
-        .map_err(|error| invalid(format!("CLAP discovery response encoding failed: {error}")))?;
+        }),
+    }
+    .map_err(|error| invalid(format!("CLAP discovery response encoding failed: {error}")))?;
     if response.len() as u64 > MAX_RESPONSE_BYTES {
         return Err(invalid(
             "CLAP discovery response exceeds the metadata limit",
@@ -803,16 +909,57 @@ fn read_bounded(path: &Path, name: &str, maximum: u64) -> Result<Vec<u8>, AudioP
     Ok(bytes)
 }
 
-fn invalid(detail: impl Into<String>) -> AudioProcessorHostError {
+pub(super) fn invalid(detail: impl Into<String>) -> AudioProcessorHostError {
     AudioProcessorHostError::InvalidContract(detail.into())
 }
 
-fn unavailable(detail: impl Into<String>) -> AudioProcessorHostError {
+pub(super) fn unavailable(detail: impl Into<String>) -> AudioProcessorHostError {
     AudioProcessorHostError::Unavailable(detail.into())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn note_metadata_legacy_list_request_and_response_bytes_are_unchanged() {
+        assert_eq!(
+            serde_json::to_vec(&super::DiscoveryOperation::List).unwrap(),
+            br#"{"kind":"list"}"#
+        );
+        let response = super::DiscoveryResponse { descriptors: Vec::new(), probe: None };
+        assert_eq!(
+            serde_json::to_vec(&response).unwrap(),
+            br#"{"descriptors":[],"probe":null}"#
+        );
+    }
+
+    #[test]
+    fn note_metadata_legacy_probe_seven_fields_and_additive_operation_are_separate() {
+        let response = super::ProbeResult {
+            plugin_id: "fixture".to_owned(),
+            latency_frames: 0,
+            offline: false,
+            tail: super::ProbeTail::None,
+            parameters: Vec::new(),
+            auxiliary_buses: Vec::new(),
+            captured_state: None,
+        };
+        assert_eq!(serde_json::to_vec(&response).unwrap(), br#"{"plugin_id":"fixture","latency_frames":0,"offline":false,"tail":"None","parameters":[],"auxiliary_buses":[],"captured_state":null}"#);
+        let query = super::DiscoveryOperation::NoteInputMetadata(
+            super::super::clap_note_input_metadata::NoteInputMetadataRequest {
+                schema_version: 1,
+                plugin_id: "fixture".to_owned(),
+                state: None,
+            },
+        );
+        assert_eq!(serde_json::to_vec(&query).unwrap(), br#"{"kind":"note_input_metadata","schema_version":1,"plugin_id":"fixture","state":null}"#);
+        assert!(serde_json::from_str::<super::DiscoveryOperation>(
+            r#"{"kind":"note_input_metadata","plugin_id":"fixture","state":null}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<super::DiscoveryOperation>(r#"{"kind":"note_input_metadata","schema_version":1,"plugin_id":"fixture","state":null,"extra":true}"#).is_err());
+        assert!(serde_json::from_str::<super::DiscoveryOperation>(r#"{"kind":"note_input_metadata","schema_version":1,"plugin_id":"fixture","state":null}"#).is_ok());
+    }
+
     use super::*;
     use clack_plugin::prelude::{
         DefaultPluginFactory, HostMainThreadHandle, HostSharedHandle, Plugin, PluginDescriptor,

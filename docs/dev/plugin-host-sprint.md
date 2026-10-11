@@ -54,6 +54,8 @@ Current round evidence:
 | CLAP read-only metadata / default state load | Verified within Ring Out two-round controls | Source29 Audio336/0, exact native2/2 and independent raw state/author/payload checks; existing core behavior, new verification gate only; no PCM/full-project claim |
 | Periodic App ordinary regression | Verified within source29 default libtest scope | 2,778 passed/zero failed; exact ordinary inventory, current producer, 1,786 source hashes and four native Job retirements independently accepted; 124 ignored cases remain separate |
 | External OpenFX CPU Filter | Verified within source31 BitCrush finite Windows cases | Two actual rounds, each one passed/zero failed; 18 bit-exact Float32 rasters across direct and existing graph execution, parameter changes and instance retirement; GPU/temporal/full OFX remain unqualified |
+| CLAP input-note metadata / discovery staging | Verified within source32 owned metadata and ownership controls | Audio345/0, original11 plus3 new owner controls and two metadata rounds; strict workspace Clippy; no note dispatch/instrument/RT qualification |
+| Source32 shared audio and real CLAP regression | PASS within existing finite workflows | Two rounds of five CLAP/VST3 sidechain/PCM/time/object cases and two real Ring Out metadata/default-load rounds; current host, separately retained historical fixture binaries |
 | New performance/platform qualification | Not run | Historical results below do not transfer to new changes |
 
 Clack's RED reproduced in both source and destination. The GUI wrapper differed
@@ -1318,3 +1320,143 @@ rechecks current source/producer/input lengths and hashes, raw Job outputs,
 all18 rasters and native schema/author/lifecycle evidence. Its verdict permits
 only the generic integration test and two evidence documents; production core
 changes and later source closures require their own gates.
+
+## CLAP input-note metadata and discovery ownership integration
+
+Root integrated the reviewed r3 packet after independently checking all31
+packet artifacts, seven root preimages and all1,787 source31 hashes. The15
+selected files add a versioned inactive input-note metadata query, minimum raw
+Clack accessors, original ABI fixture and focused discovery process ownership.
+The existing owner now adopts Child and staging immediately after spawn, holds
+staging through response decoding, preserves actual exit status and retains
+staging before diagnostics when termination is unconfirmed. Refused kill does
+not call unconditional wait; successful-kill kernel wait and permanent orphan
+cleanup remain limitations, not bounded-cleanup guarantees.
+
+Metadata distinguishes absent extension, present zero inputs, missing functions
+and failed getters. It preserves unsigned IDs, raw name bytes and unknown dialect
+bits, caps this query at32 inputs before allocation, checks binary/state identity
+and restart requests, and never advertises HostNotePorts or event execution.
+The cap is this operation's policy, not a claimed CLAP standard limit. Existing
+List/Probe and author/DSP payload shapes remain unchanged; an older helper
+refuses the new operation rather than fabricating an empty result. No authored
+note timeline, instrument, dispatch, note output or realtime support is added.
+
+Root formats seven Audio/fixture Rust files and generates the fixture's offline
+lock with only two path packages. The installed fixture provenance separately
+binds formatted root-relative source bytes and this lock; historical candidate
+bytes stay immutable. Source32 contains1,796 inputs, freeze SHA256
+`EE99CA942A6CB9016960769FA917B9E521B4313334995525D513BEC800E66D3D`.
+Independent post-format review SHA256
+`C09EB8B1C6EB26FF0EB3F6853145BD4896965EEC0C524A7F3B93A4792CD87D2B`
+verifies1,780 unchanged/source31 inputs, seven changed/nine added/no deletion,
+actual formatter output and all original11 owner test bodies/assertions unchanged.
+The unchanged Clack provenance checker passes252 shipped paths; the inherited
+MONDRIAN.md length metadata debt is still disclosed separately.
+
+Actual source32 Fixture1 builds in2.20s and Audio16 libtest builds in1m21s;
+both hold all1,796 inputs. The original ordinary preparer r1 refuses before
+native launch because its64KB capacity is smaller than the unchanged322,393-byte
+historical Audio budget manifest. That admission RED is retained. New r2 bounds
+only that same data input at1MB; native work remains180s. Actual all/ignored/exact
+ordinary Lists contain419/74/345 unique names, and the actual ordinary group
+passes345/zero failed/zero ignored/74 filtered in26.42s (26,627ms controller).
+All four observed native Job owners exit0 and retire successfully; root wrapper
+session85320 also actually exits0. Execution receipt SHA256 is
+`6B8ECC31BF908D1718652E78AA6E8154DE3564451F40893013131F0172FF05B6`.
+The inherited ordinary wrapper writes its receipt before releasing leases and
+has a final Dispose error-preservation boundary; this successful actual terminal
+exit is evidence, not proof of all future cleanup-failure behavior.
+
+Normal Product14 LAST, new ignored native metadata/staging controls, old owner
+and real CLAP regression, strict Clippy and final independent acceptance remain
+pending at this checkpoint. Owned ABI fixture success will remain distinct from
+third-party compatibility. This slice is not integrated as a completed commit
+until its runtime gates settle.
+
+The next actual Product14 build fails with linker LNK1318 FILE_SYSTEM(3) while
+C: has zero free bytes. Its failed producer/source receipt remains retained and
+is not admitted as a helper. Root copies the exact failed partial PDB to
+`E:/codex-artifact-storage/mondrian-3349-plugin-host-sprint/`, verifies both hashes
+and deletes only that generated C: partial file. Five completed App library
+cache files are compressed with all raw hashes unchanged. This recovers build
+space without deleting source or changing the release FFmpeg guard. Product15
+then actually succeeds in18.29s as the normal LAST helper, SHA256
+`65DBD3464ED4EE7B8CE6D390ED470B9EDFE24FDD91E22043080598DD1D1D7C86`.
+Strict `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+r18 passes in3m53s with all1,796 sources and the three selected native images
+unchanged. These build timings are not host processing benchmarks.
+
+Root's cleanup-first native wrapper r4 actually exits0 (session28403,
+chunkabeef7). Original11 process-owner controls, three new discovery/staging
+controls and two owned CLAP metadata rounds all pass: each exact selected test
+reports1 passed/zero failed/zero ignored/418 filtered. All16 raw Windows Job
+owners exit0, report descendants reaped and no errors/deadlines/outliving
+descendants. Execution receipt SHA256
+`E8FF253234A7376B1370A96961FF1640BDB1CAC9A224F8F62EC5FC703712281F`
+binds3,744 inputs and records completed source postchecks and lease cleanup.
+Independent actual acceptance SHA256
+`510550147B5D25C09E3AE58144A73E2F064A26C851CEDB3E723AC74FC2FFC997`
+rechecks the exact actual producer identities, current source/PE hashes and raw
+outputs. The ordinary345 gate is separately independently accepted, SHA256
+`F660BA714FF84753B353C6A4C8351EF2F9E9FDD5027561340AA65C6A976D7B47`.
+
+Metadata coverage includes high unsigned IDs/unknown dialect bits, fresh zeroed
+ABI getters, supplied-state index reordering with stable IDs, absent versus
+empty inputs, malformed records, and restart/state refusal. Aggregate refusal
+for the cap-exceeding fixture does not attribute its precise child failure;
+cap-before-get is established by source inspection. The existing audio-effect
+probe still refuses this no-audio fixture. No actual old helper binary,
+third-party note processing, PCM, instrument, realtime or performance conclusion
+follows from these tests. Real Ring Out and shared VST3/CLAP legacy gates remain
+separate pending regression evidence at this checkpoint.
+
+Current-source regression admission also retains two actual pre-native tool
+failures. Legacy wrapper r1 exits1 before any controller group because the
+pinned PowerShell JSON reader converts ISO timestamps to DateTime and implicit
+string conversion produces a culture-dependent value. New r2 reads the original
+UTC strings from the same bounded held JSON using JsonDocument, preserving the
+exact command/completed chronology/Product-LAST checks. Ring wrapper r2 exits1
+with zero groups and an observed cleanup failure because environment deletion
+with ordinary `$null` instead supplies an empty string under this PowerShell
+binding/runtime. A root-owned isolated environment-key control actually proves
+old empty-key retention, explicit `[NullString]::Value` deletion and cleanup;
+it does not mutate PATH or run a plugin. Both new r3 wrappers change only the
+deletion value and retain bounded environment snapshot checks, original oracles,
+native budgets and cleanup precedence. Failed directories and raw terminal
+observations remain immutable. These are preparation/environment failures, not
+plugin incompatibility or evidence of native test execution.
+
+The corrected legacy r3 actually finishes all10 native groups and exits0
+(root session69736, chunkcb808f). Each exact test reports1 passed/zero failed/
+zero ignored/418 filtered; raw Job owners exit0 with descendants reaped and no
+errors, deadlines or outliving descendants. Aggregate execution SHA256
+`A6AC7C017D1C2612ECF556659C2DCDF8B79DD0E3F417D0BFB0E4EB40FC2BD549`
+binds1,953 inputs, records all1,796 sources unchanged and completed cleanup.
+The current Audio16/Product15 host is exercised with independently source-bound
+historical sidechain DLLs, not fixture binaries relabelled as newly built. These
+are two rounds of PCM/state/partition/lifecycle, canonical signal-time and VST3
+repeated actual-object controls; they do not qualify musical event transport,
+UI, realtime or performance. The original four180s and one60s budgets per round
+remain unchanged.
+
+Corrected Ring r3 then actually passes both180s native groups and exits0
+(root session68297, chunk15d710). Aggregate SHA256
+`A6CEC32937DE16B3174DC507B56BB844B5CE4BC6CA467B87AA875CB30293EB82`
+binds1,854 inputs and records successful source postchecks, environment
+restoration and lease cleanup. Both raw Job owners exit0 and retire descendants
+without errors. Full11 native descriptors, editable9/read-only2, canonical
+author serialization/reopen, resolver payload and original184-byte default
+state are checked with the unchanged corpus/oracle. Plugin version remains
+Unknown where the native descriptor supplies none. Group times2,035ms/2,131ms
+include discovery and lab work, not host processing overhead. This is real
+third-party metadata/default-state regression, not Note processing, PCM,
+nondefault private-state fidelity, realtime, performance or full CLAP support.
+
+Next work is the approved cfg(test)-only same-registration schema-refusal
+diagnostic candidate for the preserved Airwindows CLAP RED. It must retain
+original short-circuit behavior, native call count, schema/error semantics and
+all old assertions; Stage B callback instrumentation remains unapproved. Shared
+note event/time/voice and zero-input producer/output contracts remain separate
+prerequisites for instrument execution. No new event model or production
+compatibility exception is authorized by metadata qualification.
