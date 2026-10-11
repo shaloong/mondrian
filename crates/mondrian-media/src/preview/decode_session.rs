@@ -1681,7 +1681,9 @@ pub(super) fn preview_create_rgba_scaler(
         // pixel pair, even for 4:4:4 input. Preserve the decoded chroma grid.
         // Truncated conversion maps limited-range white to 253 instead of 255
         // on the ARM path. Preserve code endpoints before the working transform.
-        ffmpeg::software::scaling::flag::Flags::FAST_BILINEAR
+        // FAST_BILINEAR changes chroma coordinates on x86 instead of retaining
+        // the frame-derived sample positions. Use the exact bilinear filter.
+        ffmpeg::software::scaling::flag::Flags::BILINEAR
             | ffmpeg::software::scaling::flag::Flags::FULL_CHR_H_INT
             | ffmpeg::software::scaling::flag::Flags::ACCURATE_RND,
     )
