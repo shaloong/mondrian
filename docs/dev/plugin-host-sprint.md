@@ -52,6 +52,7 @@ Current round evidence:
 | Signed-zero buffer fidelity | Verified within owned buffer controls and limited native VST3 replay | Source27 RED270/1 to source28 GREEN271/0; Audio332/0; Airwindows two rounds pass unchanged strict oracle; no SDK violation/performance claim |
 | External native PCM | VST3 limited PASS; CLAP RED | Airwindows VST3 default-state offline bypass partitions1/17/64 and distinct finite non-bypass output; CLAP schema drift remains unresolved |
 | CLAP read-only metadata / default state load | Verified within Ring Out two-round controls | Source29 Audio336/0, exact native2/2 and independent raw state/author/payload checks; existing core behavior, new verification gate only; no PCM/full-project claim |
+| Periodic App ordinary regression | Verified within source29 default libtest scope | 2,778 passed/zero failed; exact ordinary inventory, current producer, 1,786 source hashes and four native Job retirements independently accepted; 124 ignored cases remain separate |
 | New performance/platform qualification | Not run | Historical results below do not transfer to new changes |
 
 Clack's RED reproduced in both source and destination. The GUI wrapper differed
@@ -1097,3 +1098,126 @@ project archive, actual author gestures/Undo, GUI, realtime, performance,
 Preview/Export, instrument/events, other-platform or full-standard acceptance
 is inferred. Root terminal observations are separately sealed in
 `clap-readonly-root-controller-observations-r1.json`.
+
+## Periodic App regression and next independent slices (in progress)
+
+The source29 CLAP verification slice is committed as `1080db0`; the accepted
+source28 signed-zero change remains `cb48b86`. Central App11 library-test
+compilation actually completed with exit0 in7m25s, holding all1,786 source29
+read leases. Its sole current Cargo libtest artifact has empty features,
+`fresh=false`, and PE SHA256
+`4C840D336FE8175F3C39B99EDB64166D283BAB9A5633126534D880A8AD50A501`.
+Producer `app-native-build-r11.jsonl` SHA256 is
+`DE911BB7681AA13199AC6291882B16E5A71812A8C4EEE93B90E760D311604F80`.
+The old source23 App2778-pass result is historical evidence, not a source29
+regression qualification.
+
+Independent static review rejected the unexecuted generic ordinary-runner r3
+for inherited unbounded tree cleanup, possible substring skips and insufficient
+current producer binding. An App-only runner uses exact current package/lib/src,
+producer/source receipt and full frozen-source leases with the existing bounded
+native Job owner. Its early r3 attempt stopped before output/native launch on a
+PowerShell null-extension filename error. The corrected r4 executed successful
+all/ignored List Jobs (2,902/124), then stopped before the ordinary suite because
+`viewer_gpu_output_budget_smoke` is a substring of the ordinary
+`viewer_gpu_output_budget_smoke_report_serializes_health_report`. Both attempts
+are retained; neither is an ordinary-suite pass or native-plugin failure.
+The next candidate adds `--exact` and a third actual filtered List Job whose
+entire name set must equal the2,778 ordinary names before executing them.
+The installed Rust1.97.1 primary libtest source confirms exact matching also
+applies to skip filters. Current full App regression remains pending.
+
+The accepted r6 runner actually admitted three Lists, including an exact-skip
+name set equal to all-minus-ignored, and then ran the entire ordinary suite.
+Its first full result is retained RED:2,775 passed/3 failed/0 ignored/124 filtered
+in656.94s. All three failures involve unavailable media CLI under the narrow
+five-directory PATH reused from the Ring Lab. The packaging/tracking failures
+explicitly report ffmpeg spawn NotFound; the invalid-media verifier never
+obtained its required real ffprobe cleanup receipt. This is not a passing App
+regression or evidence of a plugin-source fix. Root corrected only the admitted
+environment, adding the existing actual FFmpeg/ffprobe6.1.1 tool directory with
+both executable hashes held; source, assertions, inventory, threads and budget
+remain unchanged. The original three exact failed selectors then all pass in
+`app-media-cli-recovery-r1/execution`, native owner exit0/descendants reaped,
+3.426s controller elapsed. The complete serial r7 outcome is recorded below.
+The CLI version is separate from the product's FFmpeg8/avcodec62 qualification
+guard; no guard, product linkage, license or test assertion changed.
+
+Current App11 libtest is archived in `native-artifact-archive-r15`, raw SHA256
+unchanged after NTFS LZX compression (144,880,640 logical/42,762,240 stored bytes).
+Only its archive copy is compressed, preserving the active executable.
+
+The new independent OFX corpus is **acquired, not compatibility verified**:
+official purzos-ofx v0.2.0 Windowsx64 asset472588157,3,436,652 bytes, publisher
+and local SHA256
+`EC707E12E6474E5512ECC3935ABC233EC4D5F205D42D14DEC5424D0CADC18625`.
+Bounded archive inventory admits131 members/8,641,200 unpacked bytes. The selected
+BitCrush module is130,560 bytes. Actual MIT and static OFX Support BSD3 notices
+match pinned source after newline normalization; the exact SDK build commit and
+complete linked composition remain unknown. Acquisition receipt is
+`ofx-third-party-corpus-acquisition-r1/delivery-receipt.json`, SHA256
+`D403EF40046A53C5037D8F51E12D0EC2FBB28B674E0ECECD71884D20231B0302`.
+No native descriptor, DSP, GUI, GPU, other-platform or performance result is
+claimed. The next finite slice must use the existing isolated CPU Filter path
+and an independently fixed numeric image oracle; the plugin's own normalized
+clamp must not be described as a host precision conversion.
+
+The audio prerequisite audit finds no canonical note producer in AudioProgram
+or process/wire consumer, and production clack dependencies do not currently
+enable note-ports. Existing execution demand already conservatively executes
+active processors on silent PCM and must be preserved. The proposed next
+vertical boundary is authored sample-time notes through the existing Audio DAG
+to a CLAP note-controlled effect; zero-input/multi-output instruments and VST3
+quarter-note project projection require separate contracts. The first candidate
+is opt-in, versioned note-input metadata in the existing discovery worker,
+preserving old List/Probe/payload shapes and advertising no executable note
+dialect. It is a prerequisite proposal, not implemented event or instrument
+support. All production/shared changes remain centrally coordinated; agents
+only own isolated proposals/candidates and root alone runs expensive builds.
+For Surge XT,185292432 identifies the plugins ZIP;185292289 identifies its
+checksum text asset. The incomplete transfer remains acquisition Blocked.
+
+The selected BitCrush module has now been safely extracted and statically read:
+SHA256 `AE266A44A17F4140DCB819DF3AE013B97A9F9E0246EEBD29A95DB7183DA2C3C7`,
+AMD64 PE32+ DLL, standard OFX entry exports. Static imports and local runtime-file
+presence do not certify dynamic loading. Its frozen normalized5x3 image oracle
+uses bits8/mix1, bits4/mix1, mix0 and repeat, probability0, exact Float32 endpoint
+quantization/alpha bits; no tolerance, HDR or temporal claim. The assigned agent
+may implement only a generic external OFX test candidate in its isolated scratch
+directory. No native execution or root-source integration has yet occurred.
+
+Independent review conditionally accepts the metadata-only CLAP R2 candidate:
+checked native count must distinguish absent function from valid zero; raw getters
+must start with initialized scratch, preserve unsigned IDs and unknown dialect
+bits, reject missing/failed functions, and cap counts before allocation. The
+agent owns the isolated candidate including its minimum vendor accessor; root
+owns integration/builds. Broad NoteGate implementation remains unapproved until
+quantization, ordering, occurrence/epoch voice lifetime, atomic window admission
+and NoteEnd matching are fully specified. NoteEnd matches the original input
+note tuple and its timestamp is ignored; current parameter-output time ordering
+must not be blindly reused. A separate inherited discovery risk is also explicit:
+kill failure currently precedes unconditional wait. The5s work deadline therefore
+does not prove bounded fault cleanup. A focused reuse/ownership CCR must address
+it without creating a second process-management authority.
+
+The complete source29 App r7 ordinary regression is now independently accepted:
+2,778 passed/zero failed/zero ignored/124 filtered in648.87s (649,360ms controller).
+All2,902 names,124 ignored names and the exact2,778 ordinary name set agree;
+the ordinary prefix-neighbor test remains included. All four actual native Job
+owners exit0, with no deadline/error/outliving descendants and successful
+retirement. The current fresh App11 producer and PE, all1,786 source hashes and
+1,807 input bindings were rechecked. Execution receipt SHA256 is
+`AA5C26A55CBF47555471574D3515ABB4EB9D00F31566A3414417124409531BEE`;
+independent final receipt is
+`app-ordinary-source29-r7-independent-final-acceptance-r1.json`, SHA256
+`8F0FD2EA36F5D9B31B70822AD31FDF49305A2F12ED50EA4FA78A62E820C8C9A6`.
+The original r6 RED and exact-three recovery remain retained. This is a current
+App default-feature ordinary regression, not full Workspace/all-feature runtime,
+ignored native-plugin, realtime, GPU/UI or performance qualification.
+
+The OFX external lab r1 candidate is statically conditionally accepted, with
+actual API signatures checked. Execution is withheld until a fresh r2 candidate
+adds exact first-description animation/numeric metadata expectations, precise
+fresh product producer/package/source/terminal validation and local FFI safety
+invariants. Existing bit-exact image and primary-failure checks remain required.
+No OFX candidate compilation or actual BitCrush invocation is claimed yet.
