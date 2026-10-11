@@ -731,11 +731,11 @@ enum AppUiWindowRole {
 #[derive(Debug)]
 enum AppUiUserEvent {
     #[cfg(target_os = "macos")]
-    NativeActionAvailable,
-    PreviewWorkAvailable,
-    ViewerGpuCompletionAvailable,
-    ViewerBackendPreparationAvailable,
-    SurfaceAvailable {
+    NativeAction,
+    PreviewWork,
+    ViewerGpuCompletion,
+    ViewerBackendPreparation,
+    Surface {
         surface_generation: u64,
     },
     #[cfg(target_os = "macos")]
@@ -2424,7 +2424,7 @@ fn prepare_initial_window_candidate(
             .ok_or("startup GPU owner missing")?
             .install_native_waker(move || {
                 viewer_gpu_completion_event_proxy
-                    .send_event(AppUiUserEvent::ViewerGpuCompletionAvailable)
+                    .send_event(AppUiUserEvent::ViewerGpuCompletion)
                     .is_ok()
             });
 
@@ -2434,7 +2434,7 @@ fn prepare_initial_window_candidate(
         let worker_event_proxy = preview_work_event_proxy.clone();
         if let Err(failure) = preview_work_watch.install_waker(move || {
             queue_preview_work_event(&worker_event_pending, || {
-                worker_event_proxy.send_event(AppUiUserEvent::PreviewWorkAvailable).is_ok()
+                worker_event_proxy.send_event(AppUiUserEvent::PreviewWork).is_ok()
             });
         }) {
             let (reason, callback) = failure.into_parts();
@@ -2639,9 +2639,7 @@ fn reopen_window_surface_and_device(
         let startup = startup_owner.as_mut().ok_or("candidate GPU startup owner missing")?;
         let completion_proxy = event_proxy.clone();
         startup.install_native_waker(move || {
-            completion_proxy
-                .send_event(AppUiUserEvent::ViewerGpuCompletionAvailable)
-                .is_ok()
+            completion_proxy.send_event(AppUiUserEvent::ViewerGpuCompletion).is_ok()
         });
         let prepared = AppUiPreparedWindowSession::prepare(
             session.role,
@@ -3994,7 +3992,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
         let event_proxy = preview_work_event_proxy.clone();
         mondrian_platform::install_macos_quit_handler(move || {
             pending_actions.push(native_close_request_action());
-            if event_proxy.send_event(AppUiUserEvent::NativeActionAvailable).is_err() {
+            if event_proxy.send_event(AppUiUserEvent::NativeAction).is_err() {
                 tracing::error!("native quit requested after event-loop admission closed");
             }
         })?
@@ -4101,7 +4099,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
                 }
             }
             #[cfg(target_os = "macos")]
-            Event::UserEvent(AppUiUserEvent::NativeActionAvailable) => {
+            Event::UserEvent(AppUiUserEvent::NativeAction) => {
                 // The event only wakes this run's queue. A wake left by a
                 // retired run cannot carry its former action or state authority.
                 if drain_actions_and_sync_window_session(
@@ -4111,7 +4109,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     session.window.request_redraw();
                 }
             }
-            Event::UserEvent(AppUiUserEvent::PreviewWorkAvailable) => {
+            Event::UserEvent(AppUiUserEvent::PreviewWork) => {
                 let drain_target_revision = preview_work_watch.revision();
                 let background_tasks =
                     poll_window_background_tasks(&mut host, session);
@@ -4124,7 +4122,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     preview_work_watch,
                     || {
                         preview_work_event_proxy
-                            .send_event(AppUiUserEvent::PreviewWorkAvailable)
+                            .send_event(AppUiUserEvent::PreviewWork)
                             .is_ok()
                     },
                 );
@@ -4143,18 +4141,18 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     elwt.set_control_flow(ControlFlow::Poll);
                 }
             }
-            Event::UserEvent(AppUiUserEvent::SurfaceAvailable { surface_generation }) => {
+            Event::UserEvent(AppUiUserEvent::Surface { surface_generation }) => {
                 if surface_generation == session.surface_generation_id.get() {
                     session.window.request_redraw();
                 }
             }
-            Event::UserEvent(AppUiUserEvent::ViewerBackendPreparationAvailable) => {
+            Event::UserEvent(AppUiUserEvent::ViewerBackendPreparation) => {
                 // Only a wake hint. The current Renderer cache and canonical
                 // contract authorize readiness on the next recording turn;
                 // a late hint from a retired generation carries no authority.
                 session.window.request_redraw();
             }
-            Event::UserEvent(AppUiUserEvent::ViewerGpuCompletionAvailable) => {
+            Event::UserEvent(AppUiUserEvent::ViewerGpuCompletion) => {
                 if poll_viewer_heterogeneous_completion(device, session, &host)
                     == ViewerHeterogeneousCompletionPoll::TerminalChange
                     && host.has_pending_ui_refresh()
@@ -4314,7 +4312,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
                                 Arc::clone(&session.surface),
                                 device.clone(),
                                 session.config.clone(),
-                                move || proxy.send_event(AppUiUserEvent::SurfaceAvailable {
+                                move || proxy.send_event(AppUiUserEvent::Surface {
                                     surface_generation,
                                 }).is_ok(),
                             ) {
@@ -5814,7 +5812,7 @@ fn app_ui_surface_color_space_matches_intent(
         && surface_color.encoding == app_ui_surface_encoding_for_intent(intent)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 fn app_ui_surface_color_space_matches_display_output(
     surface_color: AppUiSurfaceColorContract,
     output_color_space: ColorSpace,
@@ -7676,8 +7674,8 @@ fn prepare_viewer_gpu_preview(
                         backend_plan.clone(),
                         layers,
                         move || {
-                            let _ = event_proxy
-                                .send_event(AppUiUserEvent::ViewerBackendPreparationAvailable);
+                            let _ =
+                                event_proxy.send_event(AppUiUserEvent::ViewerBackendPreparation);
                         },
                     )
                 }

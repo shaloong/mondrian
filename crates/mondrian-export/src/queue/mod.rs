@@ -13026,20 +13026,32 @@ mod tests {
     #[test]
     #[ignore = "manual Windows qualification; requires DX12, D3D12 Video Process, and D3D12VA HEVC encode"]
     fn production_export_queue_runs_same_device_d3d12_resident_hevc() {
-        run_production_export_queue_resident_video_qualification(
-            ResidentEncodeCodec::Hevc,
+        for mode in [
             ResidentExportQualification::Complete,
-        );
+            ResidentExportQualification::CompleteSilentAudio,
+            ResidentExportQualification::CompletePcmAudio,
+        ] {
+            run_production_export_queue_resident_video_qualification(
+                ResidentEncodeCodec::Hevc,
+                mode,
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "manual NVIDIA qualification; requires Vulkan external memory, CUDA, and NVENC"]
     fn production_export_queue_runs_same_device_cuda_resident_hevc() {
-        run_production_export_queue_resident_video_qualification(
-            ResidentEncodeCodec::Hevc,
+        for mode in [
             ResidentExportQualification::Complete,
-        );
+            ResidentExportQualification::CompleteSilentAudio,
+            ResidentExportQualification::CompletePcmAudio,
+        ] {
+            run_production_export_queue_resident_video_qualification(
+                ResidentEncodeCodec::Hevc,
+                mode,
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]
