@@ -191,13 +191,58 @@ pub(super) struct NativeCommandIngress<'a> {
     completed: &'a FixedSlot<()>,
 }
 
+fn run_native_reader(
+    stream: &mut TcpStream,
+    commands: &FixedSlot<Result<NativeCommand, AudioProcessorHostError>>,
+    completed: &FixedSlot<()>,
+    parameter_lanes: usize,
+    profile: Option<crate::NativeWorkerLaneResourceProfile>,
+) {
+    let mut reader = NativeCommandReader { stream, owner: commands };
+    let result = catch_unwind(AssertUnwindSafe(|| loop {
+        let command = decode(&mut reader, parameter_lanes).and_then(|command| {
+            if let Some(profile) = profile {
+                let empty = crate::NativeHostBufferLayout { bytes: 0, alignment: 1 };
+                profile
+                    .admit_observed_owners(
+                        profile.owning_layouts(),
+                        crate::NativeWorkerControlOverlapLayout {
+                            decoded_input: command.owned_input_layout()?,
+                            reply_storage: empty,
+                            staged_seed: empty,
+                        },
+                    )
+                    .map_err(AudioProcessorHostError::from)?;
+            }
+            Ok(command)
+        });
+        let terminal_shutdown = matches!(
+            &command,
+            Ok(NativeCommand::Plain(command)) if command.kind == super::protocol::CommandKind::Shutdown
+        );
+        let stop = command.is_err();
+        if commands.publish(command).is_err() || stop || completed.take().is_err() {
+            return;
+        }
+        // Shutdown retires this connection. After the sole main owner has
+        // acknowledged its response, no further decode may delay reader join.
+        if terminal_shutdown {
+            return;
+        }
+    }));
+    if result.is_err() {
+        let _ = commands.publish(Err(failed("native reader", "decoder panicked")));
+    }
+}
+
 impl NativeCommandIngress<'_> {
     pub(super) fn receive(&self) -> Result<Option<NativeCommand>, AudioProcessorHostError> {
         self.commands.take_timeout(NATIVE_MAIN_SERVICE_INTERVAL)?.transpose()
     }
 
     /// Acknowledge only after the sole main writer completed the correlated reply.
-    /// The reader then decodes exactly the next command on that same connection.
+    /// The reader decodes the next command on that connection unless Shutdown
+    /// completed; its acknowledgement ends the terminal reader loop.
     pub(super) fn acknowledge(&self) -> Result<(), AudioProcessorHostError> {
         self.completed.publish(())
     }
@@ -244,32 +289,7 @@ pub(super) fn with_native_ingress<T>(
             .name("native-audio-control-reader".to_owned())
             .stack_size(crate::SCOPED_NATIVE_READER_STACK_BYTES)
             .spawn_scoped(scope, || {
-                let mut reader = NativeCommandReader { stream: &mut reader, owner: commands };
-                let result = catch_unwind(AssertUnwindSafe(|| loop {
-                    let command = decode(&mut reader, parameter_lanes).and_then(|command| {
-                        if let Some(profile) = profile {
-                            let empty = crate::NativeHostBufferLayout { bytes: 0, alignment: 1 };
-                            profile
-                                .admit_observed_owners(
-                                    profile.owning_layouts(),
-                                    crate::NativeWorkerControlOverlapLayout {
-                                        decoded_input: command.owned_input_layout()?,
-                                        reply_storage: empty,
-                                        staged_seed: empty,
-                                    },
-                                )
-                                .map_err(AudioProcessorHostError::from)?;
-                        }
-                        Ok(command)
-                    });
-                    let stop = command.is_err();
-                    if commands.publish(command).is_err() || stop || completed.take().is_err() {
-                        return;
-                    }
-                }));
-                if result.is_err() {
-                    let _ = commands.publish(Err(failed("native reader", "decoder panicked")));
-                }
+                run_native_reader(&mut reader, commands, completed, parameter_lanes, profile);
             })
             .map_err(|error| failed("native reader spawn", error))?;
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -372,6 +392,53 @@ mod tests {
             Some(9)
         );
         assert!(slot.take_timeout(Duration::ZERO).expect("drained timeout").is_none());
+    }
+
+    #[test]
+    fn native_reader_shutdown_ack_exits_without_owner_close_or_another_read() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test endpoint");
+        let mut parent = TcpStream::connect(listener.local_addr().expect("test address"))
+            .expect("parent connection");
+        let (mut reader, _) = listener.accept().expect("reader connection");
+        reader.set_read_timeout(Some(NATIVE_READER_CANCEL_INTERVAL)).expect("cancellation poll");
+        let commands = FixedSlot::new();
+        let completed = FixedSlot::new();
+        let (exited, observe_exit) = mpsc::channel();
+        struct Cleanup<'a> {
+            commands: &'a FixedSlot<Result<NativeCommand, AudioProcessorHostError>>,
+            completed: &'a FixedSlot<()>,
+            socket: TcpStream,
+        }
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                self.commands.close();
+                self.completed.close();
+                let _ = self.socket.shutdown(Shutdown::Both);
+            }
+        }
+        let cleanup_socket = parent.try_clone().expect("unwind cleanup handle");
+        std::thread::scope(|scope| {
+            // This guard runs before scoped join on every assertion/panic path.
+            let cleanup = Cleanup { commands: &commands, completed: &completed, socket: cleanup_socket };
+            let task = scope.spawn(|| {
+                run_native_reader(&mut reader, &commands, &completed, 0, None);
+                exited.send(()).expect("reader exit signal");
+            });
+            WorkerCommand { kind: CommandKind::Shutdown, start_sample: 0, frames: 0, event_count: 0 }
+                .write_to(&mut parent).expect("terminal request");
+            let terminal = commands.take_timeout(Duration::from_secs(2))
+                .expect("request slot").expect("decoded request").expect("valid request");
+            assert!(matches!(terminal, NativeCommand::Plain(command) if command.kind == CommandKind::Shutdown));
+            completed.publish(()).expect("owner acknowledges response");
+            // Keep the owner and both socket halves open. A terminal reader
+            // must exit because of the acknowledged command, not cancellation.
+            let exited_before_cancellation = observe_exit.recv_timeout(Duration::from_secs(1)).is_ok();
+            // Settle the scoped thread even when the original behavior fails.
+            drop(cleanup);
+            task.join().expect("reader join");
+            assert!(exited_before_cancellation, "acknowledged Shutdown attempted another read");
+        });
     }
 
     #[test]
