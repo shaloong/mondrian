@@ -227,8 +227,8 @@ be inventoried before execution; external candidates are not silently installed.
 | Coda VST3 shell | Installed independent candidate | Shell classes, discovery and permitted state/GUI execution |
 | Surge XT instrument, VST3 | Independent candidate | Requires musical events and instrument output routing first |
 | Surge XT instrument, CLAP | Independent candidate | Note lifecycle and polyphonic modulation after shared contract |
-| Surge XT Effects, VST3 | Independent candidate | Effect chain, parameters/state and GUI |
-| Surge XT Effects, CLAP | Independent candidate | Adapter comparison, parameters/state and GUI |
+| Surge XT Effects, VST3 | Independent vendor; Windows discovery verified | Two identical native Lists at1.3.4; Probe, processing, state and GUI pending |
+| Surge XT Effects, CLAP | Independent vendor; Windows discovery verified | Two identical native Lists at1.3.4; Probe, processing, state and GUI pending |
 | Chow Tape Model | Independent candidate | Nonlinear PCM, state and automation; inspect actual format build |
 | BYOD | Independent candidate | Complex state and processing graph; VST3/CLAP artifact checks |
 | DPF example effect | Independent framework reference | Second implementation stack; choose actual built descriptor |
@@ -1774,19 +1774,62 @@ preparation defects; original selectors, budgets and native assertions remain.
 
 Surge XT1.3.4 now has four contained local module extractions from the admitted
 archive: instrument/effects CLAP and VST3,61463552B total. Independent CRC, SHA,
-x64 PE and export checks passed. Native discovery, roles, resolved dependencies,
-state, DSP and GUI remain unverified. The two-format Effects List adapter is a
-scratch candidate; independent controls exposed rejection of legal empty Lists
-and inconsistent case-sensitive ID ordering. Its separate correction passed
-finite static and pure-control review; actual generation and execution remain
-pending.
+x64 PE and export checks passed. The two instrument modules remain statically
+inventoried, without native discovery or processing evidence. Actual Effects
+discovery now passed two CLAP Lists and two VST3 Lists under the existing native
+process owner, using normal Product19 and the unchanged1796-input Source40.
+All four native owners exited0, without deadlines, surviving descendants or
+cleanup errors; each format returned identical full metadata across its rounds.
+These are two format modules scanned twice, not four distinct plugin objects.
+
+| Actual Windows Effects descriptor | Native identity | Both List responses SHA256 |
+| --- | --- | --- |
+| CLAP, Surge XT Effects1.3.4, Surge Synth Team | `org.surge-synth-team.surge-xt-fx` | `5E7BAC974FC58CB09B4F6E11005D910D69BFE604DA04E3283C7A81DF4B9F1F17` |
+| VST3, Surge XT Effects1.3.4, Surge Synth Team | `ABCDEF019182FAEB566D624153465854` | `6F899880FDED2BDEFDEF2A4F511015D9A38B34DE03CDFD12B6FDC37D3445DB08` |
+
+The actual receipt is
+`surge-effects-source40-discovery-execution-r2/execution-receipt.json`, SHA256
+`CAE32BC38126440C9595AD8CDD1A6D9E28F9BF6942D3136763181856E0C0F855`.
+Root terminal87cc27 exited0. Independent acceptance
+`surge-effects-source40-four-list-independent-acceptance-r1.json`, SHA256
+`A0DA884319DF941F27178091044BA537E2F7F93B2CADA031783837E9698B73FF`,
+checked1866 unique inputs, all1796 current source hashes, current normal producer
+profiles, raw launches, responses and owner settlements. No Probe, DSP, state,
+role, GUI, SDK-version or complete-compatibility qualification is asserted.
+Outer observations of1846–2032ms include controller and hashing work; they do
+not measure DSP cost or comparative host overhead.
+
+Preparation failures remain recorded. Pure adapter controls first corrected
+legal-empty-List handling and ordinal metadata comparison. The DATA-generation
+call then produced complete admitted data but its enclosing Root post-check
+exited1; this is preserved separately from native execution. The r2 executor
+refused before any native start because it looked for three actual ordinary
+List launch bindings in the original runtime receipt. Those bindings exist in
+the independent post-execution audit. Corrected r3 explicitly admits that audit
+and holds its current inputs; it does not claim the original runtime receipt
+held those launch files. Original receipts, selectors, assertions and time
+budgets were preserved. Only r3 reached the four actual native Lists above.
+
+Source40 native baselines were also copied to the external artifact store:
+Audio24, normal Product19 and its actual Cargo-listed PDB. All three archive
+hashes match the originals, which remain present. Actual retention receipt
+`source40-retained-native-baselines-r1.json`, SHA256
+`AD7B3571FAAC3AF4784AC67862049F1B9BB0EAE78E442F8DE3782D4050737773`,
+and independent acceptance94EE6F24... preserve this recovery checkpoint; archival
+does not add a compatibility or performance result.
 
 OpenFX current-Source IsIdentity remains a scratch candidate. Independent review
 found that recoverable persistent Error could mask native fatal/error status;
 the revised candidate fixes this precedence and adds conjunction/retirement
 controls, with actual RED/GREEN pending. The existing Render/ROI/EndSequence path
 has a separate statically identified version of this risk and is unchanged.
-It needs its own reproduction and fix before the identity feature is integrated.
+Its isolated six-line candidate prioritizes incomplete render failure before
+recoverable persistent Error. The sealed28-artifact candidate and formatted
+19-artifact RED installer passed independent static review. Thirteen native
+groups are planned, including six failure conjunctions, two recoverable positive
+controls and five existing regressions. Installation, compilation and actual
+RED/GREEN remain pending; static approval is not native qualification. This
+existing-path fix must pass before the identity feature is rebased and integrated.
 Note DSP/instruments, GUI, Preview/Export equivalence, other platforms, native GPU
 interoperability and full standard compatibility remain outside these verified
 finite gates.
