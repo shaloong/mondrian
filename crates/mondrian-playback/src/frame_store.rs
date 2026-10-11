@@ -1097,37 +1097,39 @@ impl MediaWorkResourceLease {
 }
 
 /// Deep Module owning Preview Frame Store residency and failure invariants.
-pub struct PreviewFrameStore<MK, M, VK, V, S> {
+pub struct PreviewFrameStore<MK, M, VK, V, S, F> {
     media: WeightedLruCache<MK, M>,
     media_ledger: Arc<Mutex<MediaResourceLedger>>,
     viewer: WeightedLruCache<VK, V>,
-    failures: BoundedLruSet<MK>,
+    failures: BoundedLruMap<MK, F>,
     current_media_overflow: HashMap<MK, CurrentMediaOverflow<M>>,
     current_media_overflow_lru: VecDeque<MK>,
     pinned_viewer: Option<PinnedViewer<S, V>>,
     media_work_reservation_evictions: u64,
 }
 
-impl<MK, M, VK, V, S> Default for PreviewFrameStore<MK, M, VK, V, S>
+impl<MK, M, VK, V, S, F> Default for PreviewFrameStore<MK, M, VK, V, S, F>
 where
     MK: Clone + Eq + Hash,
     M: Clone,
     VK: Clone + Eq + Hash,
     V: Clone,
     S: Eq,
+    F: Clone,
 {
     fn default() -> Self {
         Self::new(PreviewFrameStoreConfig::default())
     }
 }
 
-impl<MK, M, VK, V, S> PreviewFrameStore<MK, M, VK, V, S>
+impl<MK, M, VK, V, S, F> PreviewFrameStore<MK, M, VK, V, S, F>
 where
     MK: Clone + Eq + Hash,
     M: Clone,
     VK: Clone + Eq + Hash,
     V: Clone,
     S: Eq,
+    F: Clone,
 {
     /// Create a store with explicit budgets.
     ///
@@ -1147,7 +1149,7 @@ where
                 config.viewer_byte_budget,
                 usize::MAX,
             ),
-            failures: BoundedLruSet::new(config.failure_entry_capacity),
+            failures: BoundedLruMap::new(config.failure_entry_capacity),
             current_media_overflow: HashMap::new(),
             current_media_overflow_lru: VecDeque::new(),
             pinned_viewer: None,
@@ -1456,8 +1458,8 @@ where
     }
 
     /// Remember one terminal media failure.
-    pub fn remember_failure(&mut self, key: MK) {
-        self.failures.insert(key);
+    pub fn remember_failure(&mut self, key: MK, failure: F) {
+        self.failures.insert(key, failure);
     }
 
     /// Remove failure memory after a successful completion.
@@ -1467,7 +1469,12 @@ where
 
     /// Return whether a key has a remembered failure and touch its recency.
     pub fn contains_failure(&mut self, key: &MK) -> bool {
-        self.failures.contains(key)
+        self.failures.get(key).is_some()
+    }
+
+    /// Return the original terminal failure and touch its bounded recency.
+    pub fn failure(&mut self, key: &MK) -> Option<F> {
+        self.failures.get(key)
     }
 
     /// Replace the non-evictable current/stale Viewer payload and its scope.
@@ -2011,42 +2018,43 @@ fn entry_is_releasable<V>(entry: &WeightedEntry<V>) -> bool {
     entry_is_releasable_for(entry, None)
 }
 
-struct BoundedLruSet<K> {
+struct BoundedLruMap<K, V> {
     capacity: usize,
-    entries: HashSet<K>,
+    entries: HashMap<K, V>,
     lru: VecDeque<K>,
     evictions: u64,
 }
 
-impl<K> BoundedLruSet<K>
+impl<K, V> BoundedLruMap<K, V>
 where
     K: Clone + Eq + Hash,
+    V: Clone,
 {
     fn new(capacity: usize) -> Self {
         Self {
             capacity: capacity.max(1),
-            entries: HashSet::new(),
+            entries: HashMap::new(),
             lru: VecDeque::new(),
             evictions: 0,
         }
     }
 
-    fn contains(&mut self, key: &K) -> bool {
-        let contains = self.entries.contains(key);
-        if contains {
+    fn get(&mut self, key: &K) -> Option<V> {
+        let value = self.entries.get(key).cloned();
+        if value.is_some() {
             self.touch(key);
         }
-        contains
+        value
     }
 
-    fn insert(&mut self, key: K) {
-        self.entries.insert(key.clone());
+    fn insert(&mut self, key: K, value: V) {
+        self.entries.insert(key.clone(), value);
         self.touch(&key);
         while self.entries.len() > self.capacity {
             let Some(oldest) = self.lru.pop_front() else {
                 break;
             };
-            if self.entries.remove(&oldest) {
+            if self.entries.remove(&oldest).is_some() {
                 self.evictions = self.evictions.saturating_add(1);
             }
         }
@@ -2058,7 +2066,7 @@ where
             let Some(oldest) = self.lru.pop_front() else {
                 break;
             };
-            if self.entries.remove(&oldest) {
+            if self.entries.remove(&oldest).is_some() {
                 self.evictions = self.evictions.saturating_add(1);
             }
         }
@@ -2088,7 +2096,7 @@ where
 mod tests {
     use super::*;
 
-    type TestStore = PreviewFrameStore<u64, Vec<u8>, u64, Vec<u8>, (u64, u32, u32)>;
+    type TestStore = PreviewFrameStore<u64, Vec<u8>, u64, Vec<u8>, (u64, u32, u32), String>;
 
     #[test]
     fn same_current_closure_keeps_completed_inputs_during_other_input_admission() {
@@ -2911,14 +2919,14 @@ mod tests {
         let mut store = TestStore::new(config(16));
         store.admit_viewer_frame(1, vec![3; 8], 8);
         store.pin_viewer_frame((7, 1920, 1080), vec![9; 4], 4);
-        store.remember_failure(3);
+        store.remember_failure(3, "original decoder error".to_owned());
         assert_eq!(store.stale_viewer_frame(&(7, 1920, 1080)), Some(vec![9; 4]));
         assert_eq!(store.stale_viewer_frame(&(8, 1920, 1080)), None);
 
         store.clear_media_frames();
         assert_eq!(store.viewer_frame(&1), Some(vec![3; 8]));
         assert_eq!(store.stale_viewer_frame(&(7, 1920, 1080)), Some(vec![9; 4]));
-        assert!(store.contains_failure(&3));
+        assert_eq!(store.failure(&3).as_deref(), Some("original decoder error"));
 
         store.clear_all();
         let cleared = store.diagnostics();

@@ -15038,11 +15038,20 @@ fn failed_current_media_preview_cache_does_not_leave_viewer_loading() {
             false,
         )
         .expect("media preview key");
-    service.frame_store.borrow_mut().remember_failure(key);
+    service.frame_store.borrow_mut().remember_failure(
+        key,
+        PreviewUnavailability::failed(PreviewOutputStage::MediaDecode, "original decoder error"),
+    );
 
     let preview = service.viewer_preview_for_state(&state);
 
-    assert!(matches!(preview, ViewerPreviewState::Unavailable(_)));
+    let ViewerPreviewState::Unavailable(failure) = preview else {
+        panic!("must project terminal failure");
+    };
+    assert_eq!(
+        failure.detail(),
+        format!("media {asset_id}: original decoder error")
+    );
     assert!(
         !service.execution.borrow().is_pending(),
         "a cached decode failure is terminal evidence, not pending work"
@@ -16717,7 +16726,10 @@ fn preview_frame_store_clear_releases_frames_failures_and_reserved_bytes() {
         test_media_frame(1),
         MediaPreviewRequestPriority::Prefetch,
     ));
-    store.remember_failure(key.clone());
+    store.remember_failure(
+        key.clone(),
+        PreviewUnavailability::failed(PreviewOutputStage::MediaDecode, "original decoder error"),
+    );
     store.clear_all();
 
     let diagnostics = store.diagnostics();
@@ -16833,7 +16845,10 @@ fn media_preview_caches_isolate_exact_color_engines() {
         test_media_frame(1),
         MediaPreviewRequestPriority::Prefetch,
     ));
-    store.remember_failure(old_key.clone());
+    store.remember_failure(
+        old_key.clone(),
+        PreviewUnavailability::failed(PreviewOutputStage::MediaDecode, "original decoder error"),
+    );
 
     assert!(store.media_frame(&new_key).is_none());
     assert!(!store.contains_failure(&new_key));
@@ -16848,11 +16863,20 @@ fn media_preview_failure_cache_evicts_least_recently_used_key() {
     let second = test_media_key(2);
     let third = test_media_key(3);
 
-    store.remember_failure(first.clone());
-    store.remember_failure(second.clone());
+    store.remember_failure(
+        first.clone(),
+        PreviewUnavailability::failed(PreviewOutputStage::MediaDecode, "original decoder error"),
+    );
+    store.remember_failure(
+        second.clone(),
+        PreviewUnavailability::failed(PreviewOutputStage::MediaDecode, "original decoder error"),
+    );
     assert!(store.contains_failure(&first));
 
-    store.remember_failure(third.clone());
+    store.remember_failure(
+        third.clone(),
+        PreviewUnavailability::failed(PreviewOutputStage::MediaDecode, "original decoder error"),
+    );
 
     assert_eq!(store.diagnostics().failure_entries, 2);
     assert!(store.contains_failure(&first));
@@ -16865,8 +16889,14 @@ fn media_preview_failure_cache_updates_existing_key_without_growing() {
     let mut store = test_cpu_frame_store(2, 1_024, 2);
     let key = test_media_key(1);
 
-    store.remember_failure(key.clone());
-    store.remember_failure(key.clone());
+    store.remember_failure(
+        key.clone(),
+        PreviewUnavailability::failed(PreviewOutputStage::MediaDecode, "original decoder error"),
+    );
+    store.remember_failure(
+        key.clone(),
+        PreviewUnavailability::failed(PreviewOutputStage::MediaDecode, "original decoder error"),
+    );
 
     assert_eq!(store.diagnostics().failure_entries, 1);
     assert!(store.contains_failure(&key));
@@ -17105,7 +17135,10 @@ fn preview_service_lifecycle_cancel_clears_pending_and_cached_state() {
         test_media_frame(1),
         MediaPreviewRequestPriority::Prefetch,
     ));
-    service.frame_store.borrow_mut().remember_failure(key.clone());
+    service.frame_store.borrow_mut().remember_failure(
+        key.clone(),
+        PreviewUnavailability::failed(PreviewOutputStage::MediaDecode, "original decoder error"),
+    );
 
     service.cancel_all_work_for_lifecycle();
 
@@ -17140,7 +17173,10 @@ fn preview_service_idle_release_preserves_failure_memory() {
         test_media_frame(1),
         MediaPreviewRequestPriority::Prefetch,
     ));
-    service.frame_store.borrow_mut().remember_failure(key);
+    service.frame_store.borrow_mut().remember_failure(
+        key,
+        PreviewUnavailability::failed(PreviewOutputStage::MediaDecode, "original decoder error"),
+    );
 
     assert!(service.try_release_idle_media_residency());
 

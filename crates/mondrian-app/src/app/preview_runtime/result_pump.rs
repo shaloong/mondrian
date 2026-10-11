@@ -447,7 +447,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         self.remember_media_execution_failure(&result.key, generation, reason);
                     }
                     self.record_preview_decode_failure(result.access_mode, result.failure_reason);
-                    if let Some(error) = result.error {
+                    if let Some(error) = result.error.as_ref() {
                         tracing::debug!(
                             asset_id = %result.key.asset_id,
                             path = %result.key.decode.source().path().display(),
@@ -458,7 +458,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         continue;
                     }
                     if completion.should_cache() && terminal_failure {
-                        self.frame_store.borrow_mut().remember_failure(result.key);
+                        let failure = PreviewUnavailability::failed(
+                            PreviewOutputStage::MediaDecode,
+                            result.error.unwrap_or_else(|| {
+                                "Source decoder failed without an explanation".to_owned()
+                            }),
+                        );
+                        self.frame_store.borrow_mut().remember_failure(result.key, failure);
                     }
                     // Publish the current failure once. Adaptive failures may
                     // retry through a changed decode policy; deterministic

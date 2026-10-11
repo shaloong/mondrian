@@ -272,17 +272,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let failure = self
             .media_execution_failure(key)
             .map(media_execution_failure_unavailability)
-            .or_else(|| {
-                self.frame_store.borrow_mut().contains_failure(key).then(|| {
-                    PreviewUnavailability::failed(
-                        PreviewOutputStage::MediaDecode,
-                        format!(
-                            "media {} is in persistent terminal source-decode failure memory",
-                            key.asset_id
-                        ),
-                    )
-                })
-            });
+            .or_else(|| self.frame_store.borrow_mut().failure(key));
         if failure.is_some() {
             bump(&self.metrics.media_failure_hits);
         }

@@ -41,6 +41,7 @@ type PlaybackFrameStore = mondrian_playback::PreviewFrameStore<
     ViewerPreviewCacheKey,
     PreviewRasterFrame,
     ViewerFrameScope,
+    super::preview_unavailability::PreviewUnavailability,
 >;
 
 /// One final raster pinned for exact-scope stale reuse.
@@ -178,11 +179,15 @@ impl PreviewFrameStoreAdapter {
     }
 
     /// Remember one terminal media failure.
-    pub(crate) fn remember_failure(&mut self, key: MediaPreviewKey) {
+    pub(crate) fn remember_failure(
+        &mut self,
+        key: MediaPreviewKey,
+        failure: super::preview_unavailability::PreviewUnavailability,
+    ) {
         if !media_key_authorizes_residency(&key) {
             return;
         }
-        self.store.remember_failure(key);
+        self.store.remember_failure(key, failure);
     }
 
     /// Remove failure memory after a successful completion.
@@ -194,8 +199,20 @@ impl PreviewFrameStoreAdapter {
     }
 
     /// Return whether the key has a remembered terminal failure and touch it.
+    #[cfg(test)]
     pub(crate) fn contains_failure(&mut self, key: &MediaPreviewKey) -> bool {
         media_key_authorizes_residency(key) && self.store.contains_failure(key)
+    }
+
+    /// Project the retained decoder failure without replacing its explanation.
+    pub(crate) fn failure(
+        &mut self,
+        key: &MediaPreviewKey,
+    ) -> Option<super::preview_unavailability::PreviewUnavailability> {
+        if !media_key_authorizes_residency(key) {
+            return None;
+        }
+        self.store.failure(key)
     }
 
     /// Pin the current Preview raster with its exact stale-reuse scope.

@@ -1295,14 +1295,22 @@ impl Widget for ViewerSurface {
                 (canvas.width - 24.0).max(1.0),
                 22.0,
             );
-            let mut muted = colors.muted_foreground;
-            muted.a *= 0.72;
+            ctx.encoder.draw_rect(
+                Rect::new(
+                    message_rect.x - 8.0,
+                    message_rect.y - 8.0,
+                    message_rect.width + 16.0,
+                    message_rect.height + 16.0,
+                ),
+                colors.popover,
+                4.0,
+            );
             ctx.encoder.draw_text_box(
                 message,
                 typography.body.font_size,
                 Point::new(message_rect.x, message_rect.y),
                 message_rect.width,
-                muted,
+                colors.popover_foreground,
             );
         }
         paint::paint_safe_guides(ctx, canvas, self.enabled);
