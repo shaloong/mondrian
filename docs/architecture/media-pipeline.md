@@ -4528,6 +4528,13 @@ seek receipt. Cancellation, changed source identity, protocol/pipe failure,
 decode failure and an exhausted budget still fail closed. Reopening never
 repairs a container or accepts missing pictures.
 
+Successful codec receive is not proof that a picture is intact. The shared
+Preview packet/decoded-picture boundary rejects demux-marked corrupt video
+packets, `AV_FRAME_FLAG_CORRUPT` and nonzero `decode_error_flags` before field
+processing, cache admission or publication. Error-concealed pixels are not
+qualified clean-feed samples. The original error retains PTS and the public
+FFmpeg flags; previously valid pictures remain distinct from damaged requests.
+
 ### Native decoder output and observed hardware execution
 
 `native_decoder_active` proves output through the selected FFmpeg native decoder

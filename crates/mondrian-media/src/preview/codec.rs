@@ -17,6 +17,8 @@ pub(super) enum PreviewCodec {
 pub(super) enum PreviewCodecError {
     #[error(transparent)]
     Ffmpeg(#[from] ffmpeg::Error),
+    #[error("video packet marked corrupt by the demuxer")]
+    CorruptPacket,
     #[cfg(target_os = "macos")]
     #[error(transparent)]
     VideoToolbox(#[from] super::videotoolbox::VideoToolboxError),
@@ -162,6 +164,9 @@ impl PreviewCodec {
     }
 
     pub(super) fn send_packet(&mut self, packet: &ffmpeg::Packet) -> Result<(), PreviewCodecError> {
+        if packet.flags().contains(ffmpeg::codec::packet::Flags::CORRUPT) {
+            return Err(PreviewCodecError::CorruptPacket);
+        }
         match self {
             Self::Ffmpeg(decoder) => Ok(decoder.send_packet(packet)?),
             #[cfg(target_os = "macos")]
@@ -403,6 +408,31 @@ impl PreviewCodec {
             #[cfg(target_os = "macos")]
             Self::VideoToolbox(_) => super::PreviewDecodePath::InProcessVideoToolboxNative,
         }
+    }
+}
+
+#[cfg(test)]
+mod packet_integrity_tests {
+    use super::*;
+
+    #[test]
+    fn corrupt_packet_is_rejected_before_codec_submission() {
+        ffmpeg::init().unwrap();
+        let codec = ffmpeg::decoder::find(ffmpeg::codec::Id::MPEG1VIDEO).unwrap();
+        let decoder = ffmpeg::codec::context::Context::new_with_codec(codec)
+            .decoder()
+            .video()
+            .unwrap();
+        let mut decoder = PreviewCodec::Ffmpeg(decoder);
+        let mut packet = ffmpeg::Packet::copy(&[0, 0, 1, 0]);
+        packet.set_flags(ffmpeg::codec::packet::Flags::KEY | ffmpeg::codec::packet::Flags::CORRUPT);
+        assert!(matches!(
+            decoder.send_packet(&packet),
+            Err(PreviewCodecError::CorruptPacket)
+        ));
+        let mut output = ffmpeg::util::frame::video::Video::empty();
+        assert!(matches!(decoder.receive_frame(&mut output),
+            Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN));
     }
 }
 

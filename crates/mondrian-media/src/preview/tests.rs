@@ -1,4 +1,35 @@
 use super::decode_session::{external_exact_frame_is_publishable, finalize_preview_decode_outcome};
+
+#[test]
+fn decoded_picture_admission_rejects_corruption_and_error_concealment() {
+    let path = Path::new("integrity-contract.mpeg");
+    let mut frame =
+        ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::YUV420P, 16, 16);
+    frame.set_pts(Some(42));
+    super::validate_decoded_picture_integrity(&frame, path).expect("clean picture");
+    for (flags, errors) in [
+        (ffmpeg::ffi::AV_FRAME_FLAG_CORRUPT, 0),
+        (0, 1),
+        (0, 2),
+        (0, 4),
+        (0, 8),
+        (0, 16),
+    ] {
+        // SAFETY: this test exclusively owns the frame.
+        unsafe {
+            (*frame.as_mut_ptr()).flags = flags;
+            (*frame.as_mut_ptr()).decode_error_flags = errors;
+        }
+        let error = super::validate_decoded_picture_integrity(&frame, path).unwrap_err();
+        assert!(error.to_string().contains("corrupt/error-concealed"));
+        assert!(error.to_string().contains("42"));
+    }
+    unsafe {
+        (*frame.as_mut_ptr()).flags = ffmpeg::ffi::AV_FRAME_FLAG_TOP_FIELD_FIRST;
+        (*frame.as_mut_ptr()).decode_error_flags = 0;
+    }
+    super::validate_decoded_picture_integrity(&frame, path).expect("scan flags are not corruption");
+}
 use super::{
     apply_preview_codec_threading_policy, clear_thread_local_preview_decode_session,
     convert_decoded_to_rgba, decode_preview_frame_cancellable,

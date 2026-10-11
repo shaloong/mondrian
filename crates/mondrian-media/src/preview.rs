@@ -2160,6 +2160,29 @@ enum DecodedVideoReceive {
     EndOfStream,
 }
 
+fn validate_decoded_picture_integrity(
+    decoded: &ffmpeg::util::frame::video::Video,
+    path: &Path,
+) -> Result<()> {
+    // SAFETY: decoded owns this live AVFrame throughout these metadata reads.
+    let (flags, decode_error_flags) = unsafe {
+        (
+            (*decoded.as_ptr()).flags,
+            (*decoded.as_ptr()).decode_error_flags,
+        )
+    };
+    if flags & ffmpeg::ffi::AV_FRAME_FLAG_CORRUPT != 0 || decode_error_flags != 0 {
+        return Err(MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: format!(
+                "decoded picture has corrupt/error-concealed samples: pts={:?}, frame_flags={flags:#x}, decode_error_flags={decode_error_flags:#x}",
+                decoded.pts(),
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn receive_decoded_video_frame(
     decoder: &mut codec::PreviewCodec,
     interrupt_state: &PreviewDecodeInterruptState,
@@ -2169,6 +2192,10 @@ fn receive_decoded_video_frame(
     let mut decoded = ffmpeg::util::frame::video::Video::empty();
     match decoder.receive_frame(&mut decoded) {
         Ok(()) => {
+            // Validate once before field processing, caching, color conversion
+            // or GPU publication. A successful receive can contain FFmpeg's
+            // error-concealed samples and does not itself prove picture integrity.
+            validate_decoded_picture_integrity(&decoded, path)?;
             let mut pts = decoded.pts();
             if pts.is_none() {
                 let best_effort = unsafe { (*decoded.as_ptr()).best_effort_timestamp };
