@@ -152,7 +152,15 @@ fn check_owner(
 #[derive(Debug)]
 struct ProcessOwner {
     child: Child,
-    active: bool,
+    state: ProcessState,
+}
+
+/// Admission is revoked before cleanup. Only observed exit establishes settlement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessState {
+    Running,
+    Retiring,
+    Settled,
 }
 impl ProcessOwner {
     fn check(
@@ -165,46 +173,101 @@ impl ProcessOwner {
     }
 
     fn check_liveness(&mut self) -> Result<(), OpenFxHostError> {
-        if !self.active {
+        if self.state != ProcessState::Running {
             return Err(unavailable("native session has been retired"));
         }
         match self.child.try_wait() {
             Ok(None) => Ok(()),
             Ok(Some(status)) => {
-                self.active = false;
+                self.state = ProcessState::Settled;
                 Err(OpenFxHostError::WorkerFailed(format!(
                     "native session exited ({status})"
                 )))
             }
-            Err(error) => Err(unavailable(format!(
-                "native session observation failed: {error}"
-            ))),
+            Err(error) => {
+                self.state = ProcessState::Retiring;
+                Err(unavailable(format!(
+                    "native session observation failed (pid={}, kind={:?}, raw_os={:?}): {error}",
+                    self.child.id(),
+                    error.kind(),
+                    error.raw_os_error()
+                )))
+            }
         }
     }
     fn terminate(&mut self) -> Result<(), OpenFxHostError> {
-        if !self.active {
+        self.terminate_with(Child::try_wait, Child::kill, Child::wait)
+    }
+
+    fn terminate_with(
+        &mut self,
+        mut observe: impl FnMut(&mut Child) -> io::Result<Option<std::process::ExitStatus>>,
+        mut kill: impl FnMut(&mut Child) -> io::Result<()>,
+        mut wait: impl FnMut(&mut Child) -> io::Result<std::process::ExitStatus>,
+    ) -> Result<(), OpenFxHostError> {
+        if self.state == ProcessState::Settled {
             return Ok(());
         }
-        let _ = self.child.kill();
-        self.child
-            .wait()
-            .map_err(|error| unavailable(format!("native session reap failed: {error}")))?;
-        self.active = false;
-        Ok(())
+        self.state = ProcessState::Retiring;
+        let observation_error = match observe(&mut self.child) {
+            Ok(Some(_)) => {
+                self.state = ProcessState::Settled;
+                return Ok(());
+            }
+            Ok(None) => None,
+            Err(error) => Some(format!(
+                "failed (kind={:?}, raw_os={:?}): {error}",
+                error.kind(),
+                error.raw_os_error()
+            )),
+        };
+        if let Err(error) = kill(&mut self.child) {
+            let final_observation = match observe(&mut self.child) {
+                Ok(Some(_)) => {
+                    self.state = ProcessState::Settled;
+                    return Ok(());
+                }
+                Ok(None) => "post-kill try_wait: child still running".to_owned(),
+                Err(error) => format!(
+                    "post-kill try_wait failed (kind={:?}, raw_os={:?}): {error}",
+                    error.kind(),
+                    error.raw_os_error()
+                ),
+            };
+            return Err(unavailable(format!(
+                "native session termination unconfirmed (pid={}): kill failed (kind={:?}, raw_os={:?}): {error}; {final_observation}; initial try_wait={}",
+                self.child.id(), error.kind(), error.raw_os_error(),
+                observation_error.as_deref().unwrap_or("child still running")
+            )));
+        }
+        match wait(&mut self.child) {
+            Ok(_) => {
+                self.state = ProcessState::Settled;
+                Ok(())
+            }
+            Err(error) => Err(unavailable(format!(
+                "native session reap failed (pid={}, kind={:?}, raw_os={:?}): {error}; initial try_wait={}",
+                self.child.id(), error.kind(), error.raw_os_error(),
+                observation_error.as_deref().unwrap_or("child still running")
+            ))),
+        }
     }
 }
 impl Drop for ProcessOwner {
     fn drop(&mut self) {
-        let _ = self.terminate();
+        if let Err(error) = self.terminate() {
+            tracing::warn!(process_id = self.child.id(), state = ?self.state, error = %error,
+                "OpenFX native process cleanup failed");
+        }
     }
 }
 
 /// One exclusive child and immutable pair of shared Float32 frame ranges.
 ///
 /// Calls are serialized through mutable ownership. Only this owner writes input
-/// before a request or reads output after its matching response. Drop retires and
-/// reaps the child before releasing the mapping and its file. Native code never
-/// runs in the application process.
+/// before a request or reads output after its matching response. Drop attempts
+/// cleanup before releasing storage; an unconfirmed OS refusal is diagnosed,
+/// never reported as settlement. Native code never runs in the application process.
 #[derive(Debug)]
 pub struct OpenFxFilterSession {
     process: ProcessOwner,
@@ -269,8 +332,11 @@ impl OpenFxFilterSession {
             .checked_add(DEADLINE)
             .ok_or_else(|| unavailable("native GUI action deadline overflow"))?;
         let result = self.close_gui_inner(deadline);
-        if result.is_err() {
-            let _ = self.process.terminate();
+        if result.is_err()
+            && let Err(error) = self.process.terminate()
+        {
+            tracing::warn!(process_id = self.process.child.id(), state = ?self.process.state,
+                error = %error, "OpenFX GUI failure cleanup failed");
         }
         result
     }
@@ -446,7 +512,7 @@ impl OpenFxFilterSession {
         let request_writer = pump::PacketWriter::acquire()?;
         let mut process = ProcessOwner {
             child: command.spawn().map_err(control_error)?,
-            active: true,
+            state: ProcessState::Running,
         };
         let deadline = Instant::now() + DEADLINE;
         let mut control = loop {
@@ -1201,10 +1267,12 @@ impl OpenFxFilterSession {
     }
 
     /// Retire the native instance gracefully under a short deadline, then verify
-    /// child exit. A failed or stalled shutdown is terminated and reaped.
+    /// child exit. Cleanup failures retain a non-reusable owner for retry.
     pub fn shutdown(&mut self) -> Result<(), OpenFxHostError> {
-        if !self.process.active {
-            return Ok(());
+        match self.process.state {
+            ProcessState::Settled => return Ok(()),
+            ProcessState::Retiring => return self.process.terminate(),
+            ProcessState::Running => {}
         }
         let deadline = Instant::now() + RETIRE;
         let graceful = (|| {
@@ -1239,7 +1307,7 @@ impl OpenFxFilterSession {
             }
             loop {
                 if let Some(status) = self.process.child.try_wait().map_err(control_error)? {
-                    self.process.active = false;
+                    self.process.state = ProcessState::Settled;
                     return if status.success() {
                         Ok(())
                     } else {
@@ -1258,7 +1326,10 @@ impl OpenFxFilterSession {
 }
 impl Drop for OpenFxFilterSession {
     fn drop(&mut self) {
-        let _ = self.shutdown();
+        if let Err(error) = self.shutdown() {
+            tracing::warn!(process_id = self.process.child.id(), state = ?self.process.state,
+                error = %error, "OpenFX session shutdown failed");
+        }
     }
 }
 
@@ -2667,7 +2738,7 @@ mod output_resource_tests {
                 "no shared input or native parameter/render work occurred"
             );
             assert_eq!(session.worker_process_id(), worker);
-            assert!(session.process.active);
+            assert_eq!(session.process.state, ProcessState::Running);
             assert!(session.process.child.try_wait().expect("observe actual worker").is_none());
         }
         let result = session.render_with_output_reservation(
@@ -2816,5 +2887,407 @@ mod ingress_owner_boundary_tests {
             return;
         }
         actual_ingress_stop(true, 4);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod process_retirement_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::process::{Command, ExitStatus, Stdio};
+
+    const READY_ENV: &str = "MONDRIAN_OPENFX_RETIREMENT_FIXTURE_READY";
+    const EXIT_ENV: &str = "MONDRIAN_OPENFX_RETIREMENT_FIXTURE_EXIT";
+    const FIXTURE: &str =
+        "openfx_host::resident::process_retirement_tests::owned_sleeping_child_fixture";
+
+    fn require_actual_job() {
+        let mut inside = 0;
+        // SAFETY: the current-process pseudo handle is valid; a null job asks
+        // about any Job. `inside` is a live writable BOOL for this query only.
+        // No handles are acquired or closed. The outer runner identifies the
+        // actual owner Job; this local guard proves membership, not its identity.
+        let ok = unsafe {
+            windows_sys::Win32::System::JobObjects::IsProcessInJob(
+                windows_sys::Win32::System::Threading::GetCurrentProcess(),
+                std::ptr::null_mut(),
+                &mut inside,
+            )
+        };
+        assert_ne!(ok, 0, "Job query failed: {}", io::Error::last_os_error());
+        assert_ne!(
+            inside, 0,
+            "requires an actual outer owner Job before spawning"
+        );
+    }
+
+    #[test]
+    #[ignore = "direct child fixture; invoke only through a Job-contained retirement test"]
+    fn owned_sleeping_child_fixture() {
+        require_actual_job();
+        let ready = PathBuf::from(std::env::var_os(READY_ENV).expect("exclusive ready path"));
+        let exit = PathBuf::from(std::env::var_os(EXIT_ENV).expect("exclusive exit path"));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(ready)
+            .expect("create-only readiness marker");
+        writeln!(file, "{}", std::process::id()).expect("complete readiness marker");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            if exit.exists() {
+                std::process::exit(7);
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("outer owner failed to settle its sleeping child");
+    }
+
+    fn sleeping_owner() -> (ProcessOwner, tempfile::TempDir) {
+        require_actual_job();
+        let directory = tempfile::tempdir().expect("exclusive child markers");
+        let ready = directory.path().join("ready");
+        let child = Command::new(std::env::current_exe().expect("current libtest executable"))
+            .args([
+                "--exact",
+                FIXTURE,
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(READY_ENV, &ready)
+            .env(EXIT_ENV, directory.path().join("exit"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn actual inherited-Job child");
+        // Wrap immediately: all later assertion/unwind paths use the same
+        // production cleanup, never ignored kill followed by unconditional wait.
+        let mut owner = ProcessOwner { child, state: ProcessState::Running };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "child readiness deadline");
+            assert!(owner.child.try_wait().expect("observe startup").is_none());
+            if let Ok(marker) = std::fs::read_to_string(&ready)
+                && let Ok(pid) = marker.trim().parse::<u32>()
+            {
+                assert_eq!(pid, owner.child.id(), "marker belongs to exact retained Child");
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        (owner, directory)
+    }
+
+    fn await_exit(child: &mut Child) -> ExitStatus {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "actual exit observation deadline"
+            );
+            if let Some(status) = child.try_wait().expect("nonblocking exit observation") {
+                return status;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn request_natural_exit(directory: &tempfile::TempDir) {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(directory.path().join("exit"))
+            .expect("create-only natural exit request");
+    }
+
+    fn refusal_text(result: Result<(), OpenFxHostError>, pid: u32) -> String {
+        let Err(OpenFxHostError::Unavailable(text)) = result else {
+            panic!("expected exact typed unconfirmed cleanup refusal: {result:?}");
+        };
+        assert!(text.contains(&format!("pid={pid}")), "{text}");
+        text
+    }
+
+    fn assert_settled_idempotent(owner: &mut ProcessOwner) {
+        assert_eq!(owner.state, ProcessState::Settled);
+        owner
+            .terminate_with(
+                |_| panic!("settled owner must not observe again"),
+                |_| panic!("settled owner must not kill again"),
+                |_| panic!("settled owner must not wait again"),
+            )
+            .expect("idempotent settlement");
+        assert!(owner.child.try_wait().expect("actual child exit retained").is_some());
+    }
+
+    #[test]
+    #[ignore = "requires actual outer owner Job; spawns one owned native OS child"]
+    fn resident_process_initial_exit_settles_without_kill_or_wait() {
+        let (mut owner, directory) = sleeping_owner();
+        request_natural_exit(&directory);
+        assert_eq!(await_exit(&mut owner.child).code(), Some(7));
+        let trace = RefCell::new(Vec::new());
+        owner
+            .terminate_with(
+                |child| {
+                    trace.borrow_mut().push("observe");
+                    child.try_wait()
+                },
+                |_| panic!("initial exit must not kill"),
+                |_| panic!("initial exit must not wait"),
+            )
+            .expect("actual initially exited child");
+        assert_eq!(trace.into_inner(), ["observe"]);
+        assert_settled_idempotent(&mut owner);
+    }
+
+    #[test]
+    #[ignore = "requires actual outer owner Job; refusal injection with actual live retained child"]
+    fn resident_process_refused_live_kill_retains_child_and_retry_settles() {
+        let (mut owner, _directory) = sleeping_owner();
+        let pid = owner.child.id();
+        let trace = RefCell::new(Vec::new());
+        let result = owner.terminate_with(
+            |child| {
+                trace.borrow_mut().push("observe");
+                child.try_wait()
+            },
+            |_| {
+                trace.borrow_mut().push("kill");
+                Err(io::Error::from_raw_os_error(5))
+            },
+            |_| panic!("unconfirmed failed kill must never wait"),
+        );
+        let text = refusal_text(result, pid);
+        assert!(
+            text.contains("raw_os=Some(5)") && text.contains("child still running"),
+            "{text}"
+        );
+        assert_eq!(trace.into_inner(), ["observe", "kill", "observe"]);
+        assert_eq!(owner.state, ProcessState::Retiring);
+        assert_eq!(owner.child.id(), pid);
+        assert!(owner.child.try_wait().expect("actual refusal retained live child").is_none());
+        assert!(matches!(
+            owner.check_liveness(),
+            Err(OpenFxHostError::Unavailable(_))
+        ));
+        assert_eq!(owner.state, ProcessState::Retiring, "no re-admission");
+        owner.terminate().expect("real kill/reap retry");
+        assert_settled_idempotent(&mut owner);
+    }
+
+    #[test]
+    #[ignore = "requires actual outer owner Job; actual natural exit after controlled kill refusal"]
+    fn resident_process_refused_kill_exit_race_observes_settlement_without_wait() {
+        let (mut owner, directory) = sleeping_owner();
+        let trace = RefCell::new(Vec::new());
+        owner
+            .terminate_with(
+                |child| {
+                    trace.borrow_mut().push("observe");
+                    child.try_wait()
+                },
+                |child| {
+                    trace.borrow_mut().push("kill");
+                    request_natural_exit(&directory);
+                    assert_eq!(await_exit(child).code(), Some(7));
+                    Err(io::Error::from_raw_os_error(5))
+                },
+                |_| panic!("refused kill with confirmed exit must not wait"),
+            )
+            .expect("same actual child exited naturally before post-kill observation");
+        assert_eq!(trace.into_inner(), ["observe", "kill", "observe"]);
+        assert_settled_idempotent(&mut owner);
+    }
+
+    #[test]
+    #[ignore = "requires actual outer owner Job; observation/kill failure injection"]
+    fn resident_process_observation_and_kill_errors_preserve_stages_and_retirement() {
+        let (mut owner, _directory) = sleeping_owner();
+        let trace = RefCell::new(Vec::new());
+        let mut observations = 0;
+        let result = owner.terminate_with(
+            |_| {
+                trace.borrow_mut().push("observe");
+                observations += 1;
+                Err(io::Error::from_raw_os_error(if observations == 1 {
+                    87
+                } else {
+                    6
+                }))
+            },
+            |_| {
+                trace.borrow_mut().push("kill");
+                Err(io::Error::from_raw_os_error(5))
+            },
+            |_| panic!("failed observations/refused kill must not wait"),
+        );
+        let text = refusal_text(result, owner.child.id());
+        for evidence in [
+            "initial try_wait=failed",
+            "post-kill try_wait failed",
+            "raw_os=Some(87)",
+            "raw_os=Some(6)",
+            "raw_os=Some(5)",
+        ] {
+            assert!(text.contains(evidence), "missing {evidence}: {text}");
+        }
+        assert_eq!(trace.into_inner(), ["observe", "kill", "observe"]);
+        assert_eq!(owner.state, ProcessState::Retiring);
+        assert!(owner.child.try_wait().expect("injection retained actual live child").is_none());
+        assert!(matches!(
+            owner.check_liveness(),
+            Err(OpenFxHostError::Unavailable(_))
+        ));
+        owner.terminate().expect("real cleanup after controlled OS errors");
+        assert_settled_idempotent(&mut owner);
+    }
+
+    #[test]
+    #[ignore = "requires actual outer owner Job; real kill with controlled reap failure"]
+    fn resident_process_successful_kill_failed_wait_retains_then_observes_exit() {
+        let (mut owner, _directory) = sleeping_owner();
+        let trace = RefCell::new(Vec::new());
+        let result = owner.terminate_with(
+            |child| {
+                trace.borrow_mut().push("observe");
+                child.try_wait()
+            },
+            |child| {
+                trace.borrow_mut().push("kill");
+                child.kill()
+            },
+            |_| {
+                trace.borrow_mut().push("wait");
+                Err(io::Error::from_raw_os_error(6))
+            },
+        );
+        let text = refusal_text(result, owner.child.id());
+        assert!(
+            text.contains("reap failed") && text.contains("raw_os=Some(6)"),
+            "{text}"
+        );
+        assert_eq!(trace.into_inner(), ["observe", "kill", "wait"]);
+        assert_eq!(owner.state, ProcessState::Retiring);
+        await_exit(&mut owner.child);
+        owner
+            .terminate_with(
+                Child::try_wait,
+                |_| panic!("exit retry must not kill"),
+                |_| panic!("exit retry must not wait"),
+            )
+            .expect("actual exit observation settles failed reap");
+        assert_settled_idempotent(&mut owner);
+    }
+
+    #[test]
+    #[ignore = "requires actual outer owner Job; real kill and real reap"]
+    fn resident_process_successful_kill_and_wait_settles_once() {
+        let (mut owner, _directory) = sleeping_owner();
+        let trace = RefCell::new(Vec::new());
+        owner
+            .terminate_with(
+                |child| {
+                    trace.borrow_mut().push("observe");
+                    child.try_wait()
+                },
+                |child| {
+                    trace.borrow_mut().push("kill");
+                    child.kill()
+                },
+                |child| {
+                    trace.borrow_mut().push("wait");
+                    child.wait()
+                },
+            )
+            .expect("real actual child kill and reap");
+        assert_eq!(trace.into_inner(), ["observe", "kill", "wait"]);
+        assert_settled_idempotent(&mut owner);
+    }
+
+    #[test]
+    #[ignore = "requires actual outer owner Job, pinned product worker and official Basic"]
+    fn resident_retiring_session_refuses_render_and_shutdown_skips_control_packet() {
+        require_actual_job();
+        let helper =
+            PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_TEST_HELPER").expect("pinned product"));
+        let binary = PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_REFERENCE_BINARY").expect("official Basic"),
+        );
+        let inspection = crate::openfx_adapter::inspect_openfx_binary(&helper, &binary)
+            .expect("actual inspection");
+        let format = mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        );
+        let input = EffectFloatFrame::from_pixels(
+            mondrian_effects::EffectFrameExtent::new(1, 1),
+            format,
+            vec![[0.25, 0.5, 0.75, 0.5]],
+        )
+        .expect("authored frame");
+        let mut session = OpenFxFilterSession::prepare(
+            &helper,
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+            1,
+            1,
+            format,
+            &mut || Ok(()),
+        )
+        .expect("actual native session");
+        let pid = session.process.child.id();
+        let native_owner = session.native_owner;
+        let last_invocation = session.last_invocation;
+        session.shared.fill(0xa5);
+        let result = session.process.terminate_with(
+            Child::try_wait,
+            |_| Err(io::Error::from_raw_os_error(5)),
+            |_| panic!("refused live kill must not wait"),
+        );
+        refusal_text(result, pid);
+        assert_eq!(session.process.state, ProcessState::Retiring);
+        assert!(session
+            .process
+            .child
+            .try_wait()
+            .expect("actual retained native child")
+            .is_none());
+        let timing = OpenFxRenderTiming {
+            frame: 0.0,
+            frame_rate: 24.0,
+            first_frame: 0.0,
+            last_frame: 24.0,
+            pixel_aspect_ratio: 1.0,
+        };
+        let parameters = BTreeMap::from([(
+            "scale".to_owned(),
+            OpenFxParameterBinding::constant(OpenFxParameterValue::Double(1.0)),
+        )]);
+        let output = session.render(&timing, &parameters, &input, &mut || Ok(()));
+        assert!(
+            matches!(output, Err(OpenFxHostError::Unavailable(_))),
+            "retired work refused: {output:?}"
+        );
+        assert_eq!(session.sequence, 0);
+        assert_eq!(session.process.child.id(), pid);
+        assert_eq!(session.native_owner, native_owner);
+        assert_eq!(session.last_invocation, last_invocation);
+        assert!(
+            session.shared.iter().all(|byte| *byte == 0xa5),
+            "no native/shared frame mutation"
+        );
+        // Closing this write half makes a mistakenly submitted Shutdown packet
+        // fail. Retiring cleanup must go straight to its retained Child instead.
+        session
+            .control
+            .shutdown(std::net::Shutdown::Write)
+            .expect("close local control writer");
+        session.shutdown().expect("retiring cleanup sends no control packet");
+        assert_settled_idempotent(&mut session.process);
+        session.shutdown().expect("session shutdown is idempotent");
     }
 }
