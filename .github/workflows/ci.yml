@@ -327,6 +327,19 @@ jobs:
           sudo apt-get install -y --no-install-recommends fonts-noto-cjk fontconfig
           bash scripts/validation/verify-linux-title-font.sh
 
+      # Keep strict GPU failures visible even if a later native driver fault
+      # terminates libtest before its captured panic output can be printed.
+      - name: Windows Renderer GPU regression preflight
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $failed = $false
+          cargo test --locked -p mondrian-renderer --lib encoded_unorm16_input_matches_cpu_color_on_real_gpu -- --nocapture
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          cargo test --locked -p mondrian-renderer --lib program_scopes_gpu::tests -- --nocapture
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          if ($failed) { exit 1 }
+
       - name: 编译
         run: cargo build --workspace --exclude mondrian-app
 

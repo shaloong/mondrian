@@ -313,6 +313,14 @@ impl GpuContext {
         };
         let (device, queue) =
             request_device_with_native_video_support(&adapter, &device_descriptor).await?;
+        #[cfg(test)]
+        eprintln!(
+            "wgpu test context: test={:?} adapter={:?} enabled_features={:?} dx12_compiler_policy={:?}",
+            std::thread::current().name(),
+            adapter.get_info(),
+            device.features(),
+            wgpu::Dx12Compiler::from_env().unwrap_or_default(),
+        );
 
         Ok(Arc::new(Self {
             device: Arc::new(device),
