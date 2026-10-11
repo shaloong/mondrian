@@ -16,15 +16,16 @@ pub struct GpuCompletionWake {
 }
 
 /// Platform listener owned by one existing device progress generation.
+#[cfg_attr(not(target_os = "macos"), derive(Default))]
 pub struct GpuCompletionWakeSource {
     #[cfg(target_os = "macos")]
     listener: objc2::rc::Retained<objc2_metal::MTLSharedEventListener>,
 }
 
+#[cfg(target_os = "macos")]
 impl Default for GpuCompletionWakeSource {
     fn default() -> Self {
         Self {
-            #[cfg(target_os = "macos")]
             listener: objc2_metal::MTLSharedEventListener::new(),
         }
     }
