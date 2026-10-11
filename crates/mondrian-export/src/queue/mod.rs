@@ -5296,7 +5296,14 @@ fn try_execute_smart_render(
             return Ok(None);
         }
     };
-    if MediaFileFingerprint::capture(&plan.path) != plan.source_fingerprint {
+    let current_fingerprint = MediaFileFingerprint::capture(&plan.path);
+    if current_fingerprint != plan.source_fingerprint {
+        tracing::debug!(
+            asset_id = %plan.asset_id,
+            expected = ?plan.source_fingerprint,
+            actual = ?current_fingerprint,
+            "Smart Render source revision changed before remux"
+        );
         return Ok(None);
     }
 
@@ -12693,6 +12700,16 @@ mod tests {
 
     #[test]
     fn ffmpeg_executor_smart_renders_full_identity_video_with_packet_proof() {
+        // Keep production rejection events in libtest's captured output. A
+        // successful pixel fallback must not obscure why this packet-proof
+        // regression failed; the subscriber is local to this test thread.
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .without_time()
+            .with_ansi(false)
+            .finish();
+        let _trace = tracing::subscriber::set_default(subscriber);
         if !ffmpeg_is_available_for_test() {
             eprintln!("skipping Smart Render integration test: FFmpeg unavailable");
             return;
